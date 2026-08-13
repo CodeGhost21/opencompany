@@ -600,7 +600,12 @@ fn starts_with_word(lower: &str, phrase: &str) -> bool {
 
 /// Build a task title: strip a leading request frame, drop trailing
 /// punctuation, upper-case the first letter, and bound the length.
-fn to_title(original: &str) -> String {
+///
+/// `pub(crate)` since issue #845: the chat route opens a card for an explicit
+/// `workflow` deliverable even when the triage declined to name one, and it
+/// titles that card through *this* function rather than a second derivation, so
+/// a bypassed card is titled byte-for-byte as a `Track` card would have been.
+pub(crate) fn to_title(original: &str) -> String {
     let mut s = original.trim();
     // Strip stacked leading filler ("ok now …") and request-framing prefixes
     // ("please can you …") for a clean imperative title.

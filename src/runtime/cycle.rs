@@ -32,7 +32,7 @@ use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
 use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
+use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
     CycleRequest, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry, OutboundMessage,
@@ -106,6 +106,36 @@ pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 /// builds its input from this constant so a wording change fails the test rather
 /// than silently un-splitting the message.
 pub(crate) const OPEN_WORK_ANNOTATION: &str = "\n\n[Open work already handed to you";
+
+/// Where the builder-pass briefing begins on a `workflow`-deliverable operator
+/// message (issue #845, written by
+/// [`inject_workflow_builder_awareness`](CycleRunner::inject_workflow_builder_awareness)).
+///
+/// The second machine-appended part of an operator message, on exactly
+/// [`OPEN_WORK_ANNOTATION`]'s terms: in-memory only, never journaled, and
+/// stripped by [`operator_words`](crate::runtime::delegation::operator_words)
+/// before anything reasons about what the operator asked for.
+///
+/// # What it is for
+///
+/// A message sent with "Build me the workflow" opens a card the **builder pass**
+/// owns ([`crate::harness::workflow_build`]): the card does not dispatch to its
+/// assignee, and authoring the graph *is* its In-Progress work. The chat cycle
+/// still runs on the same message, in parallel — and the desk agent answering it
+/// holds no workflow-authoring tool, correctly refuses to pretend otherwise, and
+/// says so.
+///
+/// Both halves were behaving correctly and the operator was told the opposite of
+/// what was happening: on staging, "I can't build the workflow … `weekly-aeo-audit`
+/// does not exist and I cannot make it exist" was delivered while a proposal for
+/// exactly that workflow was landing In Review. This annotation is what tells the
+/// turn who owns the authoring, so it answers the substance instead of denying a
+/// capability that is being exercised on its own message.
+///
+/// It grants nothing. `create_workflow` stays orchestrator-only, the builder
+/// still only *proposes*, and a person still applies the proposal — this only
+/// stops the turn from contradicting that.
+pub(crate) const BUILDER_ANNOTATION: &str = "\n\n[This request is already being built";
 
 /// What settling an approval's verdict produced — the outcome of the fast half
 /// of a resolve, before any model is called (issue #383).
@@ -309,6 +339,12 @@ impl<'a> CycleRunner<'a> {
         if let Some(record) = &record {
             self.inject_handed_task_awareness(record, &mut events).await;
         }
+        // Issue #845: and when the operator asked for a workflow rather than a
+        // one-off, tell the turn that the builder pass owns authoring it — so it
+        // answers the substance instead of denying a capability that is being
+        // exercised on this very message. Same terms as the injection above:
+        // brain-agnostic, in-memory only, never journaled.
+        Self::inject_workflow_builder_awareness(&mut events);
 
         // Issue #390: `cycle_id` is now minted by `run` before the serial lock,
         // so the journal's bracket can cover the wait on that lock. Nothing
@@ -644,6 +680,39 @@ impl<'a> CycleRunner<'a> {
                 "{OPEN_WORK_ANNOTATION} (answer truthfully if asked what you are \
 working on):\n{}\n]",
                 lines.join("\n")
+            ));
+        }
+    }
+
+    /// Folds the builder-pass briefing into any `workflow`-deliverable operator
+    /// message (issue #845). See [`BUILDER_ANNOTATION`] for why.
+    ///
+    /// Deliberately not `async` and touching no store: unlike the handed-work
+    /// briefing, everything this needs is already on the event. Mutates only the
+    /// in-memory events handed to the brain, never the durable event log.
+    ///
+    /// Applies to every `workflow` message, addressed or not. The refusal this
+    /// prevents came from a desk agent in a channel, but an unaddressed message
+    /// reaches the orchestrator — which *does* hold `create_workflow` — and
+    /// telling it that a builder pass already owns this card is what stops it
+    /// authoring a second graph beside the proposal.
+    fn inject_workflow_builder_awareness(events: &mut [CompanyEvent]) {
+        for event in events.iter_mut() {
+            let CompanyEvent::OperatorMessage {
+                text,
+                deliverable: Some(TaskDeliverable::Workflow),
+                ..
+            } = event
+            else {
+                continue;
+            };
+            text.push_str(&format!(
+                "{BUILDER_ANNOTATION}: the operator asked for a reusable workflow, not a \
+one-off, so a card for it has been opened and the workflow builder owns authoring the graph. \
+Do NOT try to create, save or schedule a workflow yourself, and do not report that you cannot \
+— the build is already under way and its proposal goes to the operator for review. Answer the \
+substance of what they asked, and say that the workflow itself is being drafted for their \
+approval.]"
             ));
         }
     }
@@ -2433,6 +2502,134 @@ impl CycleHost for CycleHostImpl<'_> {
 mod test {
     use super::*;
 
+    /// Issue #845: a `workflow` message reaches the brain carrying the builder
+    /// briefing, and nothing else does.
+    ///
+    /// This is the fix for the mode actually observed on staging: the builder
+    /// pass had already produced a proposal for `weekly-aeo-audit` while the
+    /// desk agent answering the same message was telling the operator that it
+    /// "cannot make it exist". The turn was right about its own toolset and
+    /// wrong about the company, because nothing told it.
+    #[test]
+    fn only_a_workflow_message_gets_the_builder_briefing() {
+        let msg = |deliverable| CompanyEvent::OperatorMessage {
+            text: "set up a weekly AEO audit".to_string(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable,
+        };
+        let text_of = |event: &CompanyEvent| match event {
+            CompanyEvent::OperatorMessage { text, .. } => text.clone(),
+            _ => unreachable!("fixture is an operator message"),
+        };
+
+        let mut events = vec![
+            msg(Some(TaskDeliverable::Workflow)),
+            msg(Some(TaskDeliverable::Once)),
+            msg(None),
+            // A non-operator event must be left entirely alone.
+            CompanyEvent::ScheduleFired {
+                cron: "0 6 * * 5".to_string(),
+                prompt: "run the audit".to_string(),
+            },
+        ];
+        CycleRunner::inject_workflow_builder_awareness(&mut events);
+
+        let briefed = text_of(&events[0]);
+        assert!(briefed.contains(BUILDER_ANNOTATION), "{briefed}");
+        assert!(
+            briefed.starts_with("set up a weekly AEO audit"),
+            "the operator's own words come first, untouched: {briefed}"
+        );
+        // The whole point: the turn is told not to deny the capability.
+        assert!(
+            briefed.contains("do not report that you cannot"),
+            "{briefed}"
+        );
+
+        for (i, label) in [(1, "once"), (2, "no choice")] {
+            let text = text_of(&events[i]);
+            assert_eq!(
+                text, "set up a weekly AEO audit",
+                "a `{label}` message must reach the brain exactly as typed"
+            );
+        }
+        assert!(matches!(events[3], CompanyEvent::ScheduleFired { .. }));
+    }
+
+    /// Issue #845, the wiring: the briefing actually reaches the brain.
+    ///
+    /// [`only_a_workflow_message_gets_the_builder_briefing`] pins what the
+    /// injection *does* by calling it; this pins that `run_cycle` calls it. The
+    /// two are separate failures — a correct injection nothing invokes leaves
+    /// the bug exactly where it was — and only this one covers the wiring, so
+    /// deleting the call site has to fail a test.
+    ///
+    /// `EffectBrain` echoes the text it was handed, so the reply is a faithful
+    /// window onto what the brain actually saw.
+    #[tokio::test]
+    async fn the_builder_briefing_reaches_the_brain_through_run_cycle() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let effect = Effect {
+            kind: "noop".into(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("full"))
+                .with_brain(Arc::new(EffectBrain { effect }))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let ask = |deliverable| CompanyEvent::OperatorMessage {
+            text: "set up a weekly AEO audit".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable,
+        };
+
+        let workflow = rt
+            .run_cycle(vec![ask(Some(TaskDeliverable::Workflow))])
+            .await
+            .unwrap();
+        let seen = workflow
+            .responses
+            .iter()
+            .map(|r| r.text.clone())
+            .collect::<String>();
+        assert!(
+            seen.contains(BUILDER_ANNOTATION),
+            "the brain must be told the builder owns this: {seen}"
+        );
+
+        // …and a one-off is handed through byte-for-byte, so the annotation is
+        // not simply always on.
+        let once = rt
+            .run_cycle(vec![ask(Some(TaskDeliverable::Once))])
+            .await
+            .unwrap();
+        let seen_once = once
+            .responses
+            .iter()
+            .map(|r| r.text.clone())
+            .collect::<String>();
+        assert!(!seen_once.contains(BUILDER_ANNOTATION), "{seen_once}");
+        assert!(
+            seen_once.contains("set up a weekly AEO audit"),
+            "{seen_once}"
+        );
+    }
+
     /// Issue #796: a DM's thread becomes a safe, `dm-`-prefixed branch segment
     /// `RepoManager::validate_task_segment` accepts; an empty or all-garbage
     /// thread yields nothing, so `repo_publish` refuses rather than build a
@@ -2677,6 +2874,7 @@ mod test {
             text: "hand it off".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -3102,6 +3300,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3132,7 +3331,8 @@ mod test {
                 parent: None,
                 text: "hi".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }
         );
 
@@ -3210,6 +3410,7 @@ mod test {
                 text: "file it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3270,6 +3471,7 @@ mod test {
                 text: "do it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3334,6 +3536,7 @@ mod test {
                 text: "do it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3599,6 +3802,7 @@ mod test {
                 text: "do it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3769,6 +3973,7 @@ mod test {
                 text: "file it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3848,6 +4053,7 @@ mod test {
                 text: "send that email".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3904,6 +4110,7 @@ mod test {
                     text: "file it".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }])
                 .await
                 .unwrap();
@@ -3964,6 +4171,7 @@ mod test {
                 text: "file it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -4034,6 +4242,7 @@ mod test {
                 text: "file it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -4122,6 +4331,7 @@ mod test {
             text: "how are we doing".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -4405,6 +4615,7 @@ mod test {
                 text: "hello".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }]),
             "operator-message"
         );
@@ -4430,13 +4641,15 @@ mod test {
                 parent: None,
                 text: "a".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }]),
             two.run_cycle(vec![CompanyEvent::OperatorMessage {
                 parent: None,
                 text: "b".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }]),
         );
         assert_eq!(ra.unwrap().responses.len(), 1);
@@ -4487,6 +4700,7 @@ mod test {
             text: "send it".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -5228,6 +5442,7 @@ mod test {
             text: "hi".into(),
             by: None,
             chat: None,
+            deliverable: None,
         };
 
         // A dispatch names the card outright.
@@ -5433,12 +5648,14 @@ mod test {
             text: "pay the invoice".into(),
             by: None,
             chat: Some(chat.to_string()),
+            deliverable: None,
         };
         let unaddressed = || CompanyEvent::OperatorMessage {
             parent: None,
             text: "hi".into(),
             by: None,
             chat: None,
+            deliverable: None,
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -5645,6 +5862,7 @@ mod test {
             text: "pay the invoice".into(),
             by: None,
             chat: Some(chat.to_string()),
+            deliverable: None,
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -6100,6 +6318,7 @@ mod test {
             text: "what are you working on?".into(),
             by: None,
             chat: Some("Engineering".into()),
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -6111,6 +6330,7 @@ mod test {
             text: "status?".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -6170,6 +6390,7 @@ mod test {
             text: "what's up?".into(),
             by: None,
             chat: Some("eng".into()),
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -6248,6 +6469,7 @@ mod test {
                 text: "do it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -6445,6 +6667,7 @@ mod test {
                     text: "do it".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }])
                 .await
                 .unwrap();

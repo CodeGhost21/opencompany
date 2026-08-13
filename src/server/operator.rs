@@ -1200,6 +1200,23 @@ async fn run_chat(
     // the harness stops the turn from acting; this stops the route from acting
     // on its behalf, and it holds in every build because it is here rather than
     // behind the `openhuman` feature.
+    //
+    // Issue #845: an explicit `workflow` deliverable opens a card whatever the
+    // triage said. The operator reached for a control **named** "Build me the
+    // workflow" and pressed it — that is a positive statement of intent about
+    // this message, and it is better evidence than a lexical classifier's guess.
+    // Where the two disagreed, the classifier won and the choice was dropped on
+    // the floor: no card, so no builder pass, so nothing built, and no error
+    // either — the operator got a conversational reply to a request they had
+    // asked to be turned into a workflow.
+    //
+    // Deliberately narrow. It does not change what the card *is* (the title
+    // still comes from the triage, or from the message when the triage declined
+    // to name one), it does not touch `Track`'s existing behaviour, and it stays
+    // inside the `!confined` guard — a copilot thread still opens nothing,
+    // because a message *about* a graph is not a request to build one.
+    let workflow_requested =
+        !confined && message.deliverable == Some(crate::ports::tasks::TaskDeliverable::Workflow);
     if let Some(title) = (!confined)
         .then(|| crate::company::task_intent::triage_message(&message.text))
         .and_then(|triage| match triage {
@@ -1207,6 +1224,10 @@ async fn run_chat(
             crate::company::task_intent::MessageTriage::Answer
             | crate::company::task_intent::MessageTriage::Chatter => None,
         })
+        .or_else(|| {
+            workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
+        })
+        .filter(|title| !title.trim().is_empty())
     {
         // Keep the full message as the note only when the title was shortened
         // from it, so a one-line ask doesn't duplicate itself.
@@ -1280,6 +1301,12 @@ async fn run_chat(
             // …and the message being replied to, so the thread is a fact about
             // the transcript rather than about one browser (issue #364).
             parent,
+            // Issue #845: and the once-vs-workflow choice, so the turn that
+            // answers this message knows whether the builder pass owns the
+            // authoring. Without it the turn ran blind and denied a capability
+            // that was being exercised on the very same message — see the field
+            // docs on `CompanyEvent::OperatorMessage`.
+            deliverable: message.deliverable,
         }])
         .await?;
     Ok((report, feedback_note))
@@ -2336,6 +2363,85 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
+    }
+
+    /// Issue #845: an explicit "Build me the workflow" opens a card even when
+    /// the triage would have opened nothing.
+    ///
+    /// The composer's toggle was consulted *only* on the card-opening branch,
+    /// and that branch is gated on the triage. So a `workflow` request the
+    /// classifier read as a question or as chatter dropped the choice on the
+    /// floor: no card, therefore no builder pass, therefore nothing built — and
+    /// no error either, because a conversational reply came back as though the
+    /// message had been handled.
+    ///
+    /// Both halves are pinned here: the same text opens nothing as a `once`
+    /// message and opens a `workflow` card when the operator asked for one.
+    #[tokio::test]
+    async fn an_explicit_workflow_request_opens_a_card_the_triage_declined() {
+        use crate::ports::tasks::TaskDeliverable;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        // A question by construction — `is_question` fires on the wh-opener, so
+        // the triage answers `Answer` and the card branch declines.
+        let text = "what would a weekly AEO audit of the blog even look like?";
+        assert!(
+            matches!(
+                crate::company::task_intent::triage_message(text),
+                crate::company::task_intent::MessageTriage::Answer
+            ),
+            "fixture must be one the triage declines to card, or this proves nothing"
+        );
+
+        let chat = |deliverable: Option<&str>| {
+            let body = match deliverable {
+                Some(d) => format!(
+                    r#"{{"text":{},"deliverable":"{d}"}}"#,
+                    serde_json::json!(text)
+                ),
+                None => format!(r#"{{"text":{}}}"#, serde_json::json!(text)),
+            };
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        // `once` (and no choice at all): unchanged — the triage still decides.
+        let r = app.clone().oneshot(chat(None)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = app.clone().oneshot(chat(Some("once"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "a `once` question must still open nothing"
+        );
+
+        // `workflow`: the operator's explicit choice outranks the classifier.
+        let r = app.oneshot(chat(Some("workflow"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "the workflow choice must open its card");
+        assert_eq!(
+            tasks[0].deliverable,
+            TaskDeliverable::Workflow,
+            "and it must be the deliverable that routes it to the builder pass"
+        );
+        // Titled through `to_title`, exactly as a `Track` card would have been.
+        assert_eq!(
+            tasks[0].title,
+            crate::company::task_intent::to_title(text),
+            "a bypassed card must be titled byte-for-byte as a tracked one"
+        );
     }
 
     /// Issue #576: **who** asked decides whether the card self-promotes.
@@ -5526,6 +5632,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),

@@ -1813,6 +1813,7 @@ mod test {
                         text: format!("event {i}"),
                         by: None,
                         chat: None,
+                        deliverable: None,
                     },
                 )
                 .await
@@ -2114,6 +2115,7 @@ mod test {
                     text: "a".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -2126,6 +2128,7 @@ mod test {
                     text: "b".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -2155,6 +2158,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -2166,7 +2170,8 @@ mod test {
                 parent: None,
                 text: "hi".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }
         );
     }

@@ -458,6 +458,7 @@ mod test {
                 by: None,
                 chat: None,
                 parent: None,
+                deliverable: None,
             },
             CompanyEvent::AgentReply {
                 chat_id: "desk".into(),

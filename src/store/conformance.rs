@@ -199,6 +199,7 @@ pub async fn assert_isolation_by_company(
                 text: "a".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -348,6 +349,7 @@ pub async fn assert_append_only_event_and_ledger(
                 text: "e0".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -360,6 +362,7 @@ pub async fn assert_append_only_event_and_ledger(
                 text: "e1".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -378,6 +381,7 @@ pub async fn assert_append_only_event_and_ledger(
                 text: "e2".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -412,6 +416,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
                     text: format!("a{expected}"),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -428,6 +433,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
                 text: "b0".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -621,6 +627,7 @@ pub async fn assert_export_totality(
             text: format!("event {i}"),
             by: None,
             chat: None,
+            deliverable: None,
         };
         events.append(&id, ev.clone()).await.unwrap();
         appended.push(ev);
