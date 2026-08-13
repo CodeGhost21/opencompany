@@ -137,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         media: None,
         composio: None,
         chargebee: None,
+        paypal: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
         run_supervisor: opencompany::runtime::RunSupervisor::default(),
         delivery: None,

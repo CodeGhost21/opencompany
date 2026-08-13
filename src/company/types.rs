@@ -170,6 +170,17 @@ pub fn grants_chargebee_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "chargebee" || grant.starts_with("chargebee."))
 }
 
+/// Whether a tool-grant list **explicitly** grants the `paypal` namespace
+/// (issue #789).
+///
+/// Like its siblings, the catch-all `*` does **not** grant it. These tools read
+/// a real business's wallet, so they are opted into by name.
+pub fn grants_paypal_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "paypal" || grant.starts_with("paypal."))
+}
+
 /// Whether a tool-grant list **explicitly** grants the metered `search`
 /// namespace (issue #238).
 ///

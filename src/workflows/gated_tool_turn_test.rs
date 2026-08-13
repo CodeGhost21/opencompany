@@ -233,6 +233,7 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         media: None,
         composio: None,
         chargebee: None,
+        paypal: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: Some(WorkflowDeliveryDeps {

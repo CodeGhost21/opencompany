@@ -455,6 +455,22 @@ pub fn build_agent(
         }
     }
 
+    // Issue #789: PayPal wallet reads. Same fail-closed shape as `chargebee`
+    // above — an explicit `paypal` grant AND a resolved per-company credential.
+    // Both tools are read-only, so nothing here can move money; the grant is
+    // still opt-in by name because a wallet balance is a business's private
+    // figure, not something a `*` wildcard should hand out.
+    #[cfg(feature = "paypal")]
+    if crate::company::grants_paypal_explicit(grants) {
+        match &deps.paypal {
+            Some(config) => tools.extend(crate::harness::paypal::paypal_tools(config)),
+            None => tracing::warn!(
+                "[build] agent explicitly grants `paypal` but no per-company PayPal credentials \
+                 are configured; wallet tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
     // Metered web search (issue #238) — the discovery tool the `web` namespace
     // never had. `web_fetch` / `http_request` / `curl` read a URL the agent
     // already has; nothing could find one, while three shipped skills instruct
@@ -1480,6 +1496,7 @@ mod tests {
             media: None,
             composio: None,
             chargebee: None,
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,

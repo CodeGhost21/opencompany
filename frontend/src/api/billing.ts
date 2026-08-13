@@ -72,3 +72,50 @@ export async function clearBilling(
 ): Promise<BillingStatus> {
   return client.del<BillingStatus>(`${client.scopeFor(company)}/billing/chargebee/key`);
 }
+
+/** The non-secret view of a company's PayPal connection (issue #789). */
+export interface PaypalStatus {
+  /** Whether a client id is stored. Never the id. */
+  clientIdConfigured: boolean;
+  /** Whether a client secret is stored. */
+  clientSecretConfigured: boolean;
+  /** `sandbox` or `live` — which PayPal world the credentials belong to. */
+  environment: string;
+  /** Whether the company's manifest explicitly grants `paypal`. */
+  granted: boolean;
+  /** Whether the `paypal` feature is compiled into the running host. */
+  inBuild: boolean;
+}
+
+/** The write-only PayPal save body. Omitted fields keep their stored value. */
+export interface PaypalConfig {
+  clientId?: string;
+  clientSecret?: string;
+  /** `sandbox` or `live`; anything else is stored as `sandbox`. */
+  environment?: string;
+}
+
+/** Reads the company's PayPal configuration status. */
+export async function getPaypal(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<PaypalStatus> {
+  return client.get<PaypalStatus>(`${client.scopeFor(company)}/billing/paypal`);
+}
+
+/** Saves whatever is supplied, and returns the resulting status. */
+export async function savePaypal(
+  client: OpenCompanyClient,
+  company: string | null,
+  config: PaypalConfig,
+): Promise<PaypalStatus> {
+  return client.put<PaypalStatus>(`${client.scopeFor(company)}/billing/paypal`, config);
+}
+
+/** Clears the stored PayPal credentials and resets the environment. */
+export async function clearPaypal(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<PaypalStatus> {
+  return client.del<PaypalStatus>(`${client.scopeFor(company)}/billing/paypal/key`);
+}

@@ -1958,6 +1958,16 @@ impl RuntimeBuilder {
                             // (fail closed). `HarnessPool::ensure` re-resolves it
                             // each turn, so a key saved in the console's Billing
                             // settings takes effect without a restart.
+                            // Issue #789: the per-company PayPal connection,
+                            // resolved from this company's own secret store for
+                            // the same reason chargebee is.
+                            let paypal_config = if crate::company::grants_paypal_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::paypal::TenantPaypal::resolve(&secrets, &id).await
+                            } else {
+                                None
+                            };
                             let chargebee_config = if crate::company::grants_chargebee_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2139,6 +2149,7 @@ impl RuntimeBuilder {
                                 // never an env/platform key). `None` fails closed.
                                 composio: composio_config,
                                 chargebee: chargebee_config,
+                                paypal: paypal_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's

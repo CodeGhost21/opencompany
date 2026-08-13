@@ -34,6 +34,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::billing::{API_KEY_SECRET, SITE_SECRET, WEBHOOK_SECRET_KEY};
+use crate::company::paypal::{
+    CLIENT_ID_SECRET, CLIENT_SECRET_SECRET, ENVIRONMENT_SECRET, PaypalEnvironment,
+};
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::{CompanyId, SecretValue};
 use crate::server::error::ApiError;
@@ -63,10 +66,124 @@ pub struct BillingStatus {
     pub in_build: bool,
 }
 
+/// The non-secret view of a company's PayPal connection (issue #789).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PaypalStatus {
+    /// Whether a client id is stored. Never the id itself — it is half a
+    /// credential, and there is no reason to render it back.
+    pub client_id_configured: bool,
+    /// Whether a client secret is stored.
+    pub client_secret_configured: bool,
+    /// `sandbox` or `live`. Shown, because "Connected" against the wrong world
+    /// is the confusion this exists to avoid.
+    pub environment: String,
+    /// Whether this company's manifest explicitly grants `paypal`.
+    pub granted: bool,
+    /// Whether the `paypal` feature is compiled into this build.
+    pub in_build: bool,
+}
+
 /// Builds the billing configuration routes.
 pub fn router() -> Router<AppState> {
     scoped("/billing/chargebee", get(get_billing).put(put_billing))
         .merge(scoped("/billing/chargebee/key", delete(delete_billing)))
+        .merge(scoped("/billing/paypal", get(get_paypal).put(put_paypal)))
+        .merge(scoped("/billing/paypal/key", delete(delete_paypal)))
+}
+
+/// Assembles the non-secret PayPal status.
+async fn paypal_status_of(runtime: &CompanyRuntime) -> Result<PaypalStatus, ApiError> {
+    let granted = runtime
+        .store()
+        .load(runtime.id())
+        .await
+        .ok()
+        .flatten()
+        .map(|record| crate::company::grants_paypal_explicit(&record.manifest.tools.allow))
+        .unwrap_or(false);
+    let environment = read(runtime, ENVIRONMENT_SECRET)
+        .await?
+        .map(|raw| PaypalEnvironment::parse(&raw))
+        .unwrap_or_default();
+    Ok(PaypalStatus {
+        client_id_configured: read(runtime, CLIENT_ID_SECRET).await?.is_some(),
+        client_secret_configured: read(runtime, CLIENT_SECRET_SECRET).await?.is_some(),
+        environment: environment.as_str().to_string(),
+        granted,
+        in_build: cfg!(feature = "paypal"),
+    })
+}
+
+/// `GET …/billing/paypal` — non-secret status only.
+async fn get_paypal(company: ScopedCompany) -> Result<Json<PaypalStatus>, ApiError> {
+    Ok(Json(paypal_status_of(&company.runtime).await?))
+}
+
+/// The write-only PayPal config body.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PaypalConfigBody {
+    /// REST app client id (write-only). Omit to leave unchanged.
+    #[serde(default)]
+    client_id: Option<String>,
+    /// REST app secret (write-only). Omit to leave unchanged.
+    #[serde(default)]
+    client_secret: Option<String>,
+    /// `sandbox` or `live`. Anything unrecognised stores `sandbox`.
+    #[serde(default)]
+    environment: Option<String>,
+}
+
+/// `PUT …/billing/paypal` — store any supplied credentials, return status.
+///
+/// Admin-only, like its Chargebee sibling: pointing a company at a different
+/// PayPal account changes whose wallet its agents can read.
+async fn put_paypal(
+    company: AdminScopedCompany,
+    Json(body): Json<PaypalConfigBody>,
+) -> Result<Json<PaypalStatus>, ApiError> {
+    let runtime = &company.runtime;
+    let write = async |key: &str, value: Option<&str>| -> Result<(), ApiError> {
+        if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
+            runtime
+                .secrets()
+                .set(runtime.id(), key, SecretValue(value.to_string()))
+                .await?;
+        }
+        Ok(())
+    };
+    write(CLIENT_ID_SECRET, body.client_id.as_deref()).await?;
+    write(CLIENT_SECRET_SECRET, body.client_secret.as_deref()).await?;
+    if let Some(raw) = body.environment.as_deref() {
+        // Normalised through the same parser the client uses, so an unrecognised
+        // value is stored as `sandbox` rather than kept verbatim and re-parsed
+        // differently somewhere else later.
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                ENVIRONMENT_SECRET,
+                SecretValue(PaypalEnvironment::parse(raw).as_str().to_string()),
+            )
+            .await?;
+    }
+    Ok(Json(paypal_status_of(runtime).await?))
+}
+
+/// `DELETE …/billing/paypal/key` — clear the stored PayPal credentials.
+///
+/// The environment is cleared too, so a re-connect starts from the safe default
+/// rather than silently inheriting `live` from a previous account.
+async fn delete_paypal(company: AdminScopedCompany) -> Result<Json<PaypalStatus>, ApiError> {
+    let runtime = &company.runtime;
+    for key in [CLIENT_ID_SECRET, CLIENT_SECRET_SECRET, ENVIRONMENT_SECRET] {
+        runtime
+            .secrets()
+            .set(runtime.id(), key, SecretValue(String::new()))
+            .await?;
+    }
+    Ok(Json(paypal_status_of(runtime).await?))
 }
 
 /// The webhook URL for `company`, or `None` when this host has no publicly
@@ -259,6 +376,23 @@ mod tests {
         // No field may be named in a way that could carry the secret itself.
         assert!(!json.contains("apiKey\""), "{json}");
         assert!(!json.contains("webhookSecret"), "{json}");
+    }
+
+    #[test]
+    fn a_paypal_status_never_serializes_a_credential() {
+        let status = PaypalStatus {
+            client_id_configured: true,
+            client_secret_configured: true,
+            environment: "sandbox".to_string(),
+            granted: true,
+            in_build: true,
+        };
+        let json = serde_json::to_string(&status).expect("serializes");
+        assert!(json.contains("clientIdConfigured"));
+        assert!(json.contains("sandbox"));
+        // No field may carry either half of the credential itself.
+        assert!(!json.contains("clientId\""), "{json}");
+        assert!(!json.contains("clientSecret\""), "{json}");
     }
 
     #[test]

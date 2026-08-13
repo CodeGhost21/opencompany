@@ -51,9 +51,6 @@ pub mod audit;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
-/// Chargebee billing tools (issue #788), wired per company from its own
-/// SecretStore. Always compiled so the credential resolution and the fail-closed
-/// decision are testable at default features; only the tools are gated.
 pub mod chargebee;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
@@ -83,6 +80,13 @@ pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
 pub mod orchestrator;
+/// Chargebee billing tools (issue #788), wired per company from its own
+/// SecretStore. Always compiled so the credential resolution and the fail-closed
+/// decision are testable at default features; only the tools are gated.
+/// PayPal wallet + transaction tools (issue #789), wired per company from its
+/// own SecretStore. Always compiled so credential resolution and the
+/// fail-closed decision are testable at default features.
+pub mod paypal;
 /// Issue #337: the planning station — one tool-less model call per card entering
 /// `planning`, with the host gathering the evidence and verifying every
 /// prerequisite the model claims. See [`planning`].
@@ -427,6 +431,11 @@ pub struct HarnessDeps {
     /// `HarnessPool::ensure` re-resolves it each turn, so a key set or rotated in
     /// the console takes effect next turn with no restart.
     pub chargebee: Option<chargebee::TenantChargebee>,
+
+    /// The per-company PayPal connection (issue #789). `None` fails closed —
+    /// no wallet tools are wired. Resolved from that company's own secret store
+    /// and re-resolved each turn, like `chargebee`.
+    pub paypal: Option<paypal::TenantPaypal>,
     /// The MANAGED web-search backend (issue #238). `None` (the default at every
     /// construction site but the production runtime builder) **fails closed** —
     /// no `web_search` tool is wired and agents behave exactly as before.
@@ -2781,6 +2790,7 @@ description = "Builds the product."
                 media: None,
                 composio: None,
                 chargebee: None,
+                paypal: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 run_supervisor: crate::runtime::RunSupervisor::default(),
                 delivery: None,
@@ -2856,6 +2866,7 @@ description = "Builds the product."
             media: None,
             composio: None,
             chargebee: None,
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3543,6 +3554,7 @@ description = "Builds the product."
             media: None,
             composio: None,
             chargebee: None,
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3722,6 +3734,7 @@ description = "Builds the product."
             media: None,
             composio: None,
             chargebee: None,
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4241,6 +4254,7 @@ description = "Builds the product."
             media: None,
             composio: None,
             chargebee: None,
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4413,6 +4427,7 @@ description = "Sets direction."
             media: None,
             composio: None,
             chargebee: None,
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4566,6 +4581,7 @@ description = "Sets direction."
             media: None,
             composio: None,
             chargebee: None,
+            paypal: None,
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),

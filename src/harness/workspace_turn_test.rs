@@ -303,6 +303,7 @@ async fn harness(
         media: None,
         composio: None,
         chargebee: None,
+        paypal: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,

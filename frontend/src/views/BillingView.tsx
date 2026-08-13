@@ -4,9 +4,13 @@ import { toast } from "sonner";
 
 import {
   clearBilling,
+  clearPaypal,
   getBilling,
+  getPaypal,
   saveBilling,
+  savePaypal,
   type BillingStatus,
+  type PaypalStatus,
 } from "@/api/billing";
 import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -59,14 +63,24 @@ export function BillingView({ client, company }: Props) {
   const [site, setSite] = useState("");
   const [webhookSecret, setWebhookSecret] = useState("");
 
+  const [paypal, setPaypal] = useState<PaypalStatus | null>(null);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [environment, setEnvironment] = useState("sandbox");
+
   const load = useCallback(async () => {
     try {
-      const next = await getBilling(client, company);
+      const [next, pp] = await Promise.all([
+        getBilling(client, company),
+        getPaypal(client, company),
+      ]);
       setStatus(next);
+      setPaypal(pp);
       setLoadError(null);
       // Seed the site box with what is stored — it is the one non-secret field,
       // and an operator correcting a typo should not have to retype it.
       setSite(next.site ?? "");
+      setEnvironment(pp.environment || "sandbox");
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
     }
@@ -121,6 +135,46 @@ export function BillingView({ client, company }: Props) {
     }
   }
 
+  async function onSavePaypal() {
+    const body: Record<string, string> = {};
+    if (clientId.trim()) body.clientId = clientId.trim();
+    if (clientSecret.trim()) body.clientSecret = clientSecret.trim();
+    if (environment !== (paypal?.environment ?? "sandbox")) body.environment = environment;
+
+    if (Object.keys(body).length === 0) {
+      toast.info("Nothing to save — fill in a field first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const next = await savePaypal(client, company, body);
+      setPaypal(next);
+      setClientId("");
+      setClientSecret("");
+      toast.success("PayPal settings saved.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not save PayPal settings.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onClearPaypal() {
+    setBusy(true);
+    try {
+      const next = await clearPaypal(client, company);
+      setPaypal(next);
+      setClientId("");
+      setClientSecret("");
+      setEnvironment(next.environment || "sandbox");
+      toast.success("PayPal disconnected.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not disconnect PayPal.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (loadError) {
     return (
       <Alert variant="destructive" data-testid="billing-load-error">
@@ -139,6 +193,7 @@ export function BillingView({ client, company }: Props) {
   }
 
   const connected = status.apiKeyConfigured && !!status.site;
+  const paypalConnected = !!paypal?.clientIdConfigured && !!paypal?.clientSecretConfigured;
 
   return (
     <div className="space-y-6" data-testid="billing-view">
@@ -147,8 +202,8 @@ export function BillingView({ client, company }: Props) {
           <CreditCard className="size-5" /> Billing
         </h2>
         <p className="text-sm text-muted-foreground">
-          Connect Chargebee so your teammates can raise invoices and answer questions about who has
-          paid, without leaving this app.
+          Connect Chargebee so your teammates can raise invoices and answer questions about who
+          has paid, and PayPal so they can report the wallet — without leaving this app.
         </p>
       </div>
 
@@ -305,6 +360,118 @@ export function BillingView({ client, company }: Props) {
               <em>Protect webhook URL with basic authentication</em>. Subscribe to{" "}
               <code>payment_succeeded</code> and <code>payment_failed</code>.
             </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* PayPal (issue #789). A form, not a "Connect PayPal" button: these
+          tools read the company's OWN wallet, so there is no third party for an
+          OAuth popup to ask permission of. */}
+      <Card>
+        <CardContent className="space-y-4 pt-6">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">PayPal</p>
+              <p className="text-xs text-muted-foreground">
+                Lets your teammates report the wallet balance and recent transactions. Invoice
+                payments already route through PayPal when you set it as a payment method inside
+                Chargebee — that needs nothing here.
+              </p>
+            </div>
+            {paypalConnected ? (
+              <Badge variant="secondary" data-testid="paypal-connected">
+                <Check className="mr-1 size-3" /> Connected
+              </Badge>
+            ) : null}
+          </div>
+
+          {paypal && !paypal.inBuild ? (
+            <Alert data-testid="paypal-not-in-build">
+              <TriangleAlert className="size-4" />
+              <AlertDescription>
+                This host was built without PayPal support, so these settings will be stored and
+                have no effect.
+              </AlertDescription>
+            </Alert>
+          ) : null}
+
+          {paypal?.inBuild && !paypal.granted ? (
+            <Alert data-testid="paypal-not-granted">
+              <TriangleAlert className="size-4" />
+              <AlertDescription>
+                This company does not grant <code>paypal</code>, so wallet tools will not reach any
+                teammate. Add <code>paypal</code> to <code>[tools].allow</code> in the
+                company&rsquo;s manifest.
+              </AlertDescription>
+            </Alert>
+          ) : null}
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="pp-id">Client ID</Label>
+              <Input
+                id="pp-id"
+                data-testid="paypal-client-id"
+                type="password"
+                autoComplete="off"
+                placeholder={
+                  paypal?.clientIdConfigured
+                    ? "Configured — type to replace"
+                    : "From developer.paypal.com → Apps & Credentials"
+                }
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="pp-secret">Client secret</Label>
+              <Input
+                id="pp-secret"
+                data-testid="paypal-client-secret"
+                type="password"
+                autoComplete="off"
+                placeholder={
+                  paypal?.clientSecretConfigured ? "Configured — type to replace" : "Secret"
+                }
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="pp-env">Environment</Label>
+            <select
+              id="pp-env"
+              data-testid="paypal-environment"
+              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+              value={environment}
+              onChange={(e) => setEnvironment(e.target.value)}
+            >
+              <option value="sandbox">Sandbox — developer.paypal.com test accounts</option>
+              <option value="live">Live — real money</option>
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Sandbox and live credentials are not interchangeable. Picking the wrong one fails
+              with &ldquo;invalid client&rdquo;, which reads like a typo.
+            </p>
+          </div>
+
+          <div className="flex gap-2">
+            <Button onClick={onSavePaypal} disabled={busy} data-testid="paypal-save">
+              {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+              Save
+            </Button>
+            {paypal?.clientIdConfigured || paypal?.clientSecretConfigured ? (
+              <Button
+                variant="ghost"
+                onClick={onClearPaypal}
+                disabled={busy}
+                data-testid="paypal-clear"
+              >
+                Disconnect
+              </Button>
+            ) : null}
           </div>
         </CardContent>
       </Card>
