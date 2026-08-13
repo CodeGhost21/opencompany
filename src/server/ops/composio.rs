@@ -237,6 +237,10 @@ pub fn router() -> Router<AppState> {
             "/composio/connections/{connection_id}",
             delete(disconnect),
         ))
+        .merge(scoped(
+            "/composio/connections/{connection_id}/default",
+            put(set_default).delete(clear_default),
+        ))
 }
 
 /// The company's Composio status as the console renders it. **Never** carries the
@@ -371,6 +375,16 @@ struct ConnectionDto {
     /// one — the concrete reason `connected: bool` alone could not back a
     /// disconnect.
     accounts: Vec<ConnectedAccountDto>,
+    /// The account this company chose for the toolkit, when it has chosen one
+    /// (issue #820) — the id `composio_execute` sends as `connectionId`.
+    ///
+    /// **Omitted, not defaulted.** Absent means the company has expressed no
+    /// intent and Composio resolves the account itself; there is no implicit
+    /// default here to report, and inventing one (the oldest, the first in the
+    /// sort) would be a claim the console makes and the harness does not honour.
+    /// That absence is the honest state and stays the ordinary one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_connection_id: Option<String>,
 }
 
 /// One connected account inside a [`ConnectionDto`] (issue #404).
@@ -396,6 +410,10 @@ struct ConnectedAccountDto {
     /// guessed — see the row type's docs.
     #[serde(skip_serializing_if = "Option::is_none")]
     account: Option<String>,
+    /// Whether this is the account the company chose for the toolkit (issue
+    /// #820). At most one account per toolkit carries it, and none does until
+    /// somebody says so.
+    is_default: bool,
 }
 
 /// Which tier a company's Composio credential comes from.
@@ -650,7 +668,40 @@ async fn connections_impl(runtime: &CompanyRuntime) -> Result<Json<Vec<Connectio
                 message: err.to_string(),
             })
         })?;
-    Ok(Json(group_by_toolkit(rows)))
+    let defaults =
+        crate::company::composio::load_defaults(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+    // Housekeeping on the one path that holds both halves of the answer: a pin
+    // naming a connection Composio no longer lists is dropped here. Such a pin
+    // is not merely stale — it would be sent on the next `composio_execute` and
+    // refused, so an account revoked outside this console (at Composio itself)
+    // would silently break the toolkit for every agent. The console polls this
+    // route, so the repair lands on its own. Deliberately a *removal of a
+    // dangling reference* and nothing else: it cannot pick a different account,
+    // only stop naming one that is gone.
+    let live: std::collections::BTreeSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    let mut defaults = defaults;
+    for (toolkit, id) in defaults
+        .clone()
+        .into_iter()
+        .filter(|(_, id)| !live.contains(id.as_str()))
+    {
+        tracing::info!(
+            company = %runtime.id(),
+            toolkit = %toolkit,
+            connection_id = %id,
+            "[composio] the chosen account no longer exists at Composio; clearing the choice"
+        );
+        defaults = crate::company::composio::clear_default(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            &toolkit,
+        )
+        .await
+        .map_err(ApiError)?;
+    }
+    Ok(Json(group_by_toolkit(rows, &defaults)))
 }
 
 /// Fold per-connection rows into the per-toolkit response shape.
@@ -666,19 +717,23 @@ async fn connections_impl(runtime: &CompanyRuntime) -> Result<Json<Vec<Connectio
 #[cfg(feature = "composio")]
 fn group_by_toolkit(
     rows: Vec<crate::harness::composio::ComposioConnectionRow>,
+    defaults: &crate::company::composio::ComposioDefaults,
 ) -> Vec<ConnectionDto> {
     let mut by_toolkit: std::collections::BTreeMap<String, ConnectionDto> =
         std::collections::BTreeMap::new();
     for row in rows {
+        let chosen = defaults.get(&row.toolkit).map(String::as_str);
         let entry = by_toolkit
             .entry(row.toolkit.clone())
             .or_insert_with(|| ConnectionDto {
                 toolkit: row.toolkit.clone(),
                 connected: false,
                 accounts: Vec::new(),
+                default_connection_id: chosen.map(str::to_string),
             });
         entry.connected = entry.connected || row.connected;
         entry.accounts.push(ConnectedAccountDto {
+            is_default: chosen == Some(row.id.as_str()),
             id: row.id,
             status: row.status,
             connected: row.connected,
@@ -753,6 +808,16 @@ async fn disconnect_impl(
                 })
             }
         })?;
+    // A pin naming the account just revoked would be sent on the next execute
+    // and refused — so disconnecting the account a company *did not* choose
+    // must not be what breaks the one it did (issue #820).
+    crate::company::composio::forget_connection(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        connection_id,
+    )
+    .await
+    .map_err(ApiError)?;
     Ok(Json(DisconnectDto {
         note: "Disconnected at Composio. Agents lose these tools on their next turn.".to_string(),
     }))
@@ -763,6 +828,126 @@ async fn disconnect_impl(
     _runtime: &CompanyRuntime,
     _connection_id: &str,
 ) -> Result<Json<DisconnectDto>, ApiError> {
+    Err(not_in_build())
+}
+
+/// `PUT …/composio/connections/{id}/default` — make that account the one this
+/// company's agents act as for its toolkit (issue #820).
+///
+/// **Admin-only** (issue #403), for the reason `authorize` and `disconnect` are:
+/// "send from billing@, not ops@" is a decision about what the company does, not
+/// a per-operator preference — every agent in the company acts through the one
+/// answer.
+///
+/// The account is named by **connection id**, not by toolkit-plus-id, because
+/// the toolkit is already a property of the connection: asking the caller to
+/// repeat it would invite the two to disagree, and the id alone is what the
+/// console has in hand from `GET …/connections`.
+async fn set_default(
+    company: AdminScopedCompany,
+    Path(ConnectionPath { connection_id }): Path<ConnectionPath>,
+) -> Result<Json<DefaultDto>, ApiError> {
+    let dto = set_default_impl(company.runtime.as_ref(), &connection_id).await?;
+    journal(
+        &company,
+        "provider_default_account_set",
+        Some(dto.0.toolkit.clone()),
+    )
+    .await?;
+    Ok(dto)
+}
+
+/// `DELETE …/composio/connections/{id}/default` — stop naming an account for
+/// that connection's toolkit, returning it to Composio's own resolution.
+///
+/// Unlike [`set_default`] this makes **no upstream call** and validates nothing
+/// against Composio: the whole point of clearing is to be able to undo a pin
+/// when the account is gone or the provider is unreachable, which is exactly
+/// when a validating clear would refuse. It removes any pin naming this id and
+/// says so; a request for an id that was never pinned is a no-op, not an error.
+async fn clear_default(
+    company: AdminScopedCompany,
+    Path(ConnectionPath { connection_id }): Path<ConnectionPath>,
+) -> Result<Json<DefaultDto>, ApiError> {
+    let cleared = crate::company::composio::forget_connection(
+        company.runtime.id(),
+        company.runtime.secrets().as_ref(),
+        &connection_id,
+    )
+    .await
+    .map_err(ApiError)?;
+    if cleared {
+        journal(&company, "provider_default_account_cleared", None).await?;
+    }
+    Ok(Json(DefaultDto {
+        toolkit: String::new(),
+        connection_id: None,
+        note: if cleared {
+            "Cleared. Composio picks the account for this provider again, as it did before."
+                .to_string()
+        } else {
+            "That account was not the default; nothing changed.".to_string()
+        },
+    }))
+}
+
+/// The `…/default` response: what is now pinned, and a sentence saying so.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultDto {
+    /// The toolkit the change applied to. Empty on a clear, where the caller
+    /// named a connection rather than a toolkit and may be clearing a pin for
+    /// an account that no longer exists.
+    toolkit: String,
+    /// The account now acting for that toolkit — `None` after a clear.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection_id: Option<String>,
+    /// Plain-language confirmation, in the same words the console repeats.
+    note: String,
+}
+
+#[cfg(feature = "composio")]
+async fn set_default_impl(
+    runtime: &CompanyRuntime,
+    connection_id: &str,
+) -> Result<Json<DefaultDto>, ApiError> {
+    use crate::harness::composio::DisconnectError;
+
+    let config = resolve_tenant(runtime).await?;
+    let toolkit = crate::harness::composio::set_default_connection(
+        &config,
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        connection_id,
+    )
+    .await
+    // Same split as `disconnect`: an id this company cannot see is a `404`
+    // about a call that never left the host, not a `502` about a provider that
+    // is up.
+    .map_err(|err| match err {
+        DisconnectError::NotFound(message) => {
+            ApiError(crate::error::OpenCompanyError::NotFound(message))
+        }
+        DisconnectError::Upstream(err) => ApiError(crate::error::OpenCompanyError::TinyHumans {
+            code: "composio_set_default".to_string(),
+            message: err.to_string(),
+        }),
+    })?;
+    Ok(Json(DefaultDto {
+        note: format!(
+            "Agents act as this account for {toolkit} from their next turn. Other accounts stay \
+             connected."
+        ),
+        toolkit,
+        connection_id: Some(connection_id.to_string()),
+    }))
+}
+
+#[cfg(not(feature = "composio"))]
+async fn set_default_impl(
+    _runtime: &CompanyRuntime,
+    _connection_id: &str,
+) -> Result<Json<DefaultDto>, ApiError> {
     Err(not_in_build())
 }
 
@@ -1771,11 +1956,14 @@ mod tests {
             }
         };
 
-        let out = super::group_by_toolkit(vec![
-            row("c1", "gmail", false, Some("a@acme.test")),
-            row("c2", "gmail", true, Some("b@acme.test")),
-            row("c3", "slack", false, None),
-        ]);
+        let out = super::group_by_toolkit(
+            vec![
+                row("c1", "gmail", false, Some("a@acme.test")),
+                row("c2", "gmail", true, Some("b@acme.test")),
+                row("c3", "slack", false, None),
+            ],
+            &Default::default(),
+        );
 
         assert_eq!(out.len(), 2, "one entry per toolkit");
         assert_eq!(out[0].toolkit, "gmail");
@@ -1796,5 +1984,178 @@ mod tests {
         assert_eq!(out[1].toolkit, "slack");
         assert!(!out[1].connected, "no active account, so not connected");
         assert_eq!(out[1].accounts.len(), 1);
+
+        // Nothing pinned: nothing is marked, and no default is reported. This
+        // is the shape #819 asks the console to render honestly, and it stays
+        // the shape until somebody chooses.
+        assert!(out.iter().all(|dto| dto.default_connection_id.is_none()));
+        assert!(
+            out.iter()
+                .flat_map(|dto| dto.accounts.iter())
+                .all(|account| !account.is_default),
+            "an unchosen account is never marked as the default"
+        );
+    }
+
+    /// Issue #820: once a company has chosen, the choice is reported on the
+    /// toolkit **and** marked on the one account it names — the console needs
+    /// both to draw a list with one row marked and the rest offering to become
+    /// it.
+    #[cfg(feature = "composio")]
+    #[test]
+    fn grouping_marks_the_chosen_account_and_only_that_one() {
+        use crate::harness::composio::ComposioConnectionRow;
+
+        let row = |id: &str, toolkit: &str| ComposioConnectionRow {
+            id: id.to_string(),
+            toolkit: toolkit.to_string(),
+            status: "ACTIVE".to_string(),
+            connected: true,
+            created_at: None,
+            account: None,
+        };
+        let defaults: crate::company::composio::ComposioDefaults =
+            [("gmail".to_string(), "c2".to_string())]
+                .into_iter()
+                .collect();
+
+        let out = super::group_by_toolkit(
+            vec![row("c1", "gmail"), row("c2", "gmail"), row("c3", "slack")],
+            &defaults,
+        );
+
+        assert_eq!(out[0].default_connection_id.as_deref(), Some("c2"));
+        assert_eq!(
+            out[0]
+                .accounts
+                .iter()
+                .map(|a| (a.id.as_str(), a.is_default))
+                .collect::<Vec<_>>(),
+            vec![("c1", false), ("c2", true)],
+            "exactly one account carries the mark"
+        );
+        assert!(
+            out[1].default_connection_id.is_none(),
+            "a choice made for gmail says nothing about slack: {:?}",
+            out[1].default_connection_id
+        );
+    }
+
+    /// The choice plane is wired on the same terms as the rest of the OAuth
+    /// plane: in the route table whatever the build, and a `409` — never a
+    /// `404` — when there is no usable client, since "no such connection" is a
+    /// claim about this company's accounts that a build without Composio cannot
+    /// make.
+    #[tokio::test]
+    async fn set_default_route_conflicts_without_build_or_token() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+
+        let (status, body, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(body["code"], "conflict", "{body}");
+    }
+
+    /// Clearing is the deliberate exception: it takes no upstream call, so it
+    /// works in a build without Composio and — the case that matters — when the
+    /// provider is unreachable or the account is already gone. A clear that
+    /// needed the network would refuse exactly when it is most needed.
+    #[tokio::test]
+    async fn clearing_a_choice_needs_no_client_and_is_idempotent() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+
+        let (status, body, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            body["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nothing changed"),
+            "clearing what was never chosen says so rather than claiming a change: {body}"
+        );
+
+        // Now with something stored, the same call reports the real change and
+        // leaves nothing behind.
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        crate::company::composio::set_default(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "gmail",
+            "conn-1",
+        )
+        .await
+        .unwrap();
+
+        let (status, body, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            body["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Cleared"),
+            "{body}"
+        );
+        assert!(
+            crate::company::composio::load_defaults(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Choosing the account a company acts as is an admin's decision, like
+    /// connecting and disconnecting one: every agent in the company acts
+    /// through the single answer, so it is not a per-operator preference.
+    #[tokio::test]
+    async fn a_member_cannot_choose_the_account_the_company_acts_as() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+        let member = crate::server::test_support::seed_session(
+            &state,
+            "acme",
+            crate::ports::UserRole::Member,
+        )
+        .await;
+
+        for method in ["PUT", "DELETE"] {
+            let (status, body, raw) = send_as(
+                &state,
+                method,
+                "/api/v1/company/composio/connections/conn-1/default",
+                None,
+                Auth::Cookie(member.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method}: {raw}");
+            assert_eq!(body["code"], "forbidden", "{method}: {body}");
+        }
+
+        // And the refusal is real: nothing was stored by either attempt.
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        assert!(
+            crate::company::composio::load_defaults(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

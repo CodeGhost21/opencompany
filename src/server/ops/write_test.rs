@@ -6661,6 +6661,20 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
             "/api/v1/company/composio/connections/conn-1",
             None,
         ),
+        // And choosing WHICH of two accounts every agent acts as (issue #820) —
+        // the same decision again, one step finer: it does not change what the
+        // company is connected to, only what it sends as, which is precisely
+        // the kind of company-wide answer this plane exists to hold.
+        (
+            "PUT",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        ),
+        (
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        ),
         // The model every agent thinks with, and the key it is billed against.
         (
             "PUT",
