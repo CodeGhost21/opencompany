@@ -416,6 +416,29 @@ export function listWorkflowToolSlugs(
     .then((r) => r.slugs);
 }
 
+/** The `GET …/workflows/wired-channels` answer (issue #813). */
+interface WiredChannelsResponse {
+  channels: string[];
+}
+
+/**
+ * The chat channels this running company can deliver to — the real targets an
+ * output node's `channel` destination may name (issue #813). `operator` is
+ * always present; the rest are the enabled OpenHuman-provider manifest channels.
+ * The console reads this to offer a picker instead of a free-text box that only
+ * fails at delivery with `ChannelNotWired`. A host predating the route 404s; the
+ * caller degrades to an empty list (the picker then falls back to free text)
+ * rather than blocking authoring.
+ */
+export function listWiredChannels(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<string[]> {
+  return client
+    .get<WiredChannelsResponse>(`${client.scopeFor(company)}/workflows/wired-channels`)
+    .then((r) => r.channels);
+}
+
 /**
  * Runs a workflow.
  *
