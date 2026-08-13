@@ -3527,6 +3527,46 @@ to = "done"
         .expect("read_workspace_state needs no args");
     }
 
+    /// A required arg that is PRESENT but blank (a whitespace-only string or an
+    /// empty array/table) counts as missing — presence alone is not enough, since
+    /// a `""` filename would export to nowhere. This is the branch that carries
+    /// the real difference from a plain `contains_key` check.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_a_blank_required_arg_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        let mut args = toml::map::Map::new();
+        // Empty array and a whitespace-only string: both present, both unusable.
+        args.insert("data".to_string(), toml::Value::Array(Vec::new()));
+        args.insert(
+            "filename".to_string(),
+            toml::Value::String("   ".to_string()),
+        );
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args(
+                "wf",
+                "WF",
+                Some("csv_export"),
+                Some(toml::Value::Table(args)),
+            ),
+        )
+        .await
+        .expect_err("blank required args count as missing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("data") && msg.contains("filename"),
+            "both blank args are named: {msg}"
+        );
+    }
+
     // --- issue #661/#682: required config + condition labels on the draft path
 
     /// A minimal draft — trigger → condition `gate` → two outputs — with the
