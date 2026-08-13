@@ -74,7 +74,10 @@ use self::http::GuardedHttpClient;
 use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
 use self::tools::WorkflowToolInvoker;
-pub(crate) use self::tools::{WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, workflow_tool_info};
+pub(crate) use self::tools::{
+    WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, wired_workflow_namespaces, workflow_tool_info,
+    workflow_tool_wiring,
+};
 // `WORKFLOW_TOOL_SLUGS` stays module-private to `tools` since #813: the catalogue
 // (`WORKFLOW_TOOL_CATALOG`) is what callers ground and validate against, and the
 // slug table is now only its in-module pinning cross-check.
@@ -171,6 +174,7 @@ pub async fn build_capabilities(
     // operator's, which is the disagreement `effective_policy` exists to prevent.
     let mode = PolicyMode::parse(&record.effective_policy().mode);
     let grants = record.manifest.tools.allow.clone();
+    let wiring = workflow_tool_wiring(&deps);
 
     // sub_workflow-by-id resolves children from the union of the company's seed
     // `workflows/` directory and the record's runtime-authored bodies — so a
@@ -207,7 +211,7 @@ pub async fn build_capabilities(
             "workflow: building DRY capability bundle — no real effects will run"
         );
         (
-            Arc::new(dry_run::DryRunTools::new(grants)),
+            Arc::new(dry_run::DryRunTools::new(grants, wiring.clone())),
             Arc::new(dry_run::DryRunHttp),
             Arc::new(NoopState),
             Some(Arc::new(dry_run::DryRunAgent)),
@@ -269,6 +273,7 @@ pub async fn build_capabilities(
             &deps.capabilities,
             deps.search.as_ref(),
             search_metering,
+            wiring,
         );
         let http = GuardedHttpClient::new(exec_security, web_allowed_domains);
 
