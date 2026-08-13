@@ -151,12 +151,17 @@ export function MessageTimeline({
           ) : (
             <ApprovalRow
               key={item.key}
-              approval={item.approval}
+              approvals={item.approvals}
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
-              deciding={decidingApprovals?.get(item.approval.id) ?? null}
+              /* Narrowed to this card's own items (#842): a decision in flight
+                 on another turn's batch is not this card's business, which is
+                 the same rule #373 established one level down. */
+              deciding={decidingIn(item.approvals, decidingApprovals)}
               decided={item.decided}
-              onDecide={(verdict, scope) => onDecideApproval?.(item.approval, verdict, scope)}
+              onDecide={(approval, verdict, scope) =>
+                onDecideApproval?.(approval, verdict, scope)
+              }
             />
           ),
         )}
@@ -172,6 +177,31 @@ export function MessageTimeline({
 
 /** Stable identity so a missing `askerNames` cannot churn the card's props. */
 const EMPTY_NAMES: Map<string, string> = new Map();
+
+/** Stable identity, for the same reason as {@link EMPTY_NAMES}. */
+const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+
+/**
+ * The in-flight verdicts belonging to one card's items (#842).
+ *
+ * The shell keeps one map for the whole console, and a batch card must not
+ * spin — or disable its buttons — because a different turn's approval is being
+ * decided. Returns the shared empty map when nothing of this card's is in
+ * flight, so the common case allocates nothing and the props stay identical
+ * between renders.
+ */
+function decidingIn(
+  approvals: ApprovalSummary[],
+  deciding: ReadonlyMap<string, Verdict> | undefined,
+): ReadonlyMap<string, Verdict> {
+  if (!deciding?.size) return EMPTY_DECIDING;
+  const mine = new Map<string, Verdict>();
+  for (const a of approvals) {
+    const verdict = deciding.get(a.id);
+    if (verdict) mine.set(a.id, verdict);
+  }
+  return mine.size ? mine : EMPTY_DECIDING;
+}
 
 function DayDivider({ label }: { label: string }) {
   return (

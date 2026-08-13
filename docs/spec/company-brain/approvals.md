@@ -228,6 +228,53 @@ card can appear live. It is deliberately thin — an id, a dotted kind, a thread
 because the effect's payload is redacted in exactly one place and must not
 acquire a second. A reader re-reads the approvals feed for the rest.
 
+### One turn is asked about once (issue #842)
+
+A research turn that reaches `espn.com`, `bbc.com` and `theguardian.com` parks
+three approvals, and asking three times is the same fact told badly: it is one
+piece of work, and every interruption costs a re-dispatch cycle that can
+dead-end. So the parks a single turn raised are **surfaced as one request**.
+
+The grouping key is not new. Issue #469 already journals the parking cycle, so
+that a turn blocked on four decisions is continued exactly once when the last
+one lands. `ApprovalSummary.batch` projects that same key, which is what makes
+the two agree by construction: the batch an operator is asked about in one card
+is precisely the batch the runtime holds a single continuation for. It is opaque
+— an equality key, never an ordering, a count, or anything to show an operator.
+
+**One record per gated call remains the unit of truth.** There is no batch
+entity on the host, no batch resolve on the wire. Each approval keeps its own
+id, its own verdict and — on approve — its own host-scoped grant, so the
+property that makes today's behaviour correct (a grant never leaks to another
+host, `grants.md`) is untouched. Batching the *asking* is not batching the
+*granting*, and widening the grant to save a click would be the leak this
+design exists to avoid.
+
+Two renderings over that one state, each matched to what its surface is for:
+
+- **In chat, consolidated.** One card per turn, listing what it covers, with a
+  single Approve/Decline and the ordinary scope control. A checkbox per item
+  means an operator can approve two and decline the third — strictly more
+  control than three separate cards offered. An unticked item is **declined**,
+  not skipped: the turn is blocked until every call it parked has an answer, so
+  leaving one undecided would hold the turn open.
+- **On the Approvals page, itemised.** One row per gated call, each decided on
+  its own, matching how `Standing permissions` lists one revocable row per
+  grant. A row says how many others came from the same turn, so an operator
+  arriving from the toast can tell one batch from an unrelated queue.
+
+The two must not drift, and do not, because neither owns any state: both render
+the same feed, and both react to the `approval_resolved` frame. Deciding a row
+on the page settles that item on the chat card without a reload, and the card
+reports a partial state (`1 of 3 decided`) rather than going on claiming three
+things are pending.
+
+An approval with **no** batch — a workflow node, a scheduler tick, a park
+journaled before #469 — is never grouped, not even with another one like it.
+Absent means "the host did not say which turn this came from", and folding two
+unknowns together would invent a batch out of a shared silence. Each is shown
+alone, exactly as before this existed.
+
 ## Delegation levels (standing rules)
 
 Prosumers adjust the fence in plain language, which compiles to policy:
