@@ -378,27 +378,30 @@ export function ConnectionsView({ client, company }: Props) {
   }
 
   /**
-   * The tile's Disconnect: release what this provider is actually connected
-   * through, or open it when that is a question rather than an action.
+   * The tile's Disconnect — the native route, and only ever the native route.
    *
-   * A toolkit with two accounts has two ids and the tile names neither, so
-   * there is nothing here to pick. Guessing — first, newest, all — would revoke
-   * an account the operator did not name from a control that never showed them
-   * the list. Opening the detail view is the honest answer to an ambiguous
-   * click.
+   * Routed rather than assumed. A tile backed by Composio opens instead of
+   * offering this (see `ProviderTile`), so in practice nothing reaches the other
+   * arm; the check is here because the alternative is the defect this whole
+   * change is about. Sending a Composio provider to
+   * `…/connections/{provider}/disconnect` blanks a secret it never had and
+   * answers 200, and that failure is invisible at the call site — it looks like
+   * a working disconnect until the next refresh. A rule that cannot be
+   * mis-called beats a comment asking callers not to.
+   *
+   * Falling back to opening the panel rather than throwing: a toolkit's accounts
+   * are revoked one at a time, by id, and the panel is where they are named.
+   * Picking one here — first, newest, all — would revoke an account the operator
+   * never saw.
    */
   async function disconnect(p: GridProvider) {
     const route = disconnectRouteFor(p);
     if (route === null) return;
-    if (route.kind === "native") {
-      await disconnectNative(p);
-      return;
-    }
-    if (route.accounts.length > 1) {
+    if (route.kind === "composio") {
       setOpened(p.slug);
       return;
     }
-    await disconnectAccount(p, route.accounts[0]);
+    await disconnectNative(p);
   }
 
   // `attested` is a property of the *instance*, not of one provider: it means
