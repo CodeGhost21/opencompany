@@ -1257,7 +1257,7 @@ fn description_evidence_prompt(
          tool's arguments under `config.args`)\n",
     );
     if effective_slugs.is_empty() {
-        out.push_str("- (no tools granted — do not use a tool_call node)\n");
+        out.push_str("- (no callable tools are wired — do not use a tool_call node)\n");
     }
     for slug in effective_slugs {
         // Ground each slug in its honest capability and required args (issue
@@ -1659,10 +1659,11 @@ pub(crate) async fn draft_workflow_from_description(
     };
     let description = cap(description, MAX_DESCRIPTION_CHARS);
     let company = gather_company_evidence(runtime).await?;
-    let wired = runtime.wired_workflow_namespaces();
-    let effective_slugs = crate::company::workflow_effective_tool_slugs(&company.record, wired);
+    let wired = runtime.wired_workflow_namespaces(&company.record).await;
+    let effective_slugs =
+        crate::company::workflow_effective_tool_slugs(&company.record, wired.as_ref());
     let granted_but_unwired_slugs =
-        crate::company::workflow_granted_but_unwired_tool_slugs(&company.record, wired);
+        crate::company::workflow_granted_but_unwired_tool_slugs(&company.record, wired.as_ref());
 
     // A synchronous request mints no attempt row, but its spend is still metered
     // against a fresh id — see the doc. BOTH attempts share this id.

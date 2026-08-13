@@ -899,23 +899,38 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
 }
 
 #[tokio::test]
-async fn the_description_prompt_excludes_granted_but_unwired_tools() {
+async fn the_description_prompt_excludes_capability_filtered_tools() {
     let (_home, runtime) = runtime_with(ScriptedModel::replying(DESC_GRAPH)).await;
     let company = gather_company_evidence(&runtime).await.unwrap();
     let mut record = company.record.clone();
     record.manifest.tools.allow.push("search".to_string());
+    // This is the resolved result a capability plan supplies to the live
+    // wiring resolver: a plan that filters `web` must remove every web slug
+    // from prompt grounding, even when the company grants the namespace.
+    let capability_filter =
+        crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(["web"].into_iter().collect());
     let wired: std::collections::BTreeSet<&'static str> =
-        ["shell", "code", "web"].into_iter().collect();
+        crate::workflows::caps::WORKFLOW_TOOL_NAMESPACES
+            .into_iter()
+            .filter(|namespace| {
+                !matches!(
+                    &capability_filter,
+                    crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(denied)
+                        if denied.contains(namespace)
+                )
+            })
+            .collect();
     let effective = crate::company::workflow_effective_tool_slugs(&record, Some(&wired));
     let unwired = crate::company::workflow_granted_but_unwired_tool_slugs(&record, Some(&wired));
-    assert!(!effective.iter().any(|slug| slug == "web_search"));
-    assert_eq!(unwired, vec!["web_search".to_string()]);
+    assert!(!effective.iter().any(|slug| slug == "web_fetch"));
+    assert!(effective.iter().any(|slug| slug == "web_search"));
+    assert!(unwired.iter().any(|slug| slug == "web_fetch"));
 
     let evidence = CompanyEvidence { record, ..company };
     let prompt = description_evidence_prompt(&evidence, &effective, &unwired, "search the web");
-    assert!(!prompt.contains("web_search —"));
+    assert!(!prompt.contains("web_fetch —"));
     assert!(prompt.contains("granted but not wired"));
-    assert!(prompt.contains("web_search"));
+    assert!(prompt.contains("web_fetch"));
     assert!(prompt.contains("if the task needs one, say so"));
 }
 
@@ -935,7 +950,7 @@ async fn the_description_prompt_names_an_empty_roster_and_toolset() {
     };
     let prompt = description_evidence_prompt(&empty, &[], &[], "do the thing");
     assert!(prompt.contains("no teammates"), "{prompt}");
-    assert!(prompt.contains("no tools granted"), "{prompt}");
+    assert!(prompt.contains("no callable tools are wired"), "{prompt}");
     assert!(prompt.contains("(none yet)"), "{prompt}");
 }
 

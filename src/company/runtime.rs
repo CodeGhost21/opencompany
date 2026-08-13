@@ -317,7 +317,7 @@ pub struct CompanyRuntime {
     #[cfg(feature = "openhuman")]
     pub(crate) builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>>,
     #[cfg(feature = "openhuman")]
-    pub(crate) workflow_wired_namespaces: Option<std::collections::BTreeSet<&'static str>>,
+    pub(crate) workflow_harness_deps: Option<crate::harness::HarnessDeps>,
     /// MCP installs and live connections for this runtime. The wrapper owns a
     /// company-home-scoped OpenHuman config while the live registry remains
     /// shared in-process with harness agents.
@@ -390,7 +390,7 @@ impl CompanyRuntime {
             #[cfg(feature = "openhuman")]
             builder: None,
             #[cfg(feature = "openhuman")]
-            workflow_wired_namespaces: None,
+            workflow_harness_deps: None,
             #[cfg(feature = "mcp")]
             mcp: None,
         }
@@ -482,16 +482,27 @@ impl CompanyRuntime {
     }
 
     #[cfg(feature = "openhuman")]
-    pub fn wired_workflow_namespaces(&self) -> Option<&std::collections::BTreeSet<&'static str>> {
-        self.workflow_wired_namespaces.as_ref()
+    pub async fn wired_workflow_namespaces(
+        &self,
+        company: &crate::ports::CompanyRecord,
+    ) -> Option<std::collections::BTreeSet<&'static str>> {
+        let deps = self.workflow_harness_deps.as_ref()?;
+        let mut resolved = deps.clone();
+        if let Some(plan) = &resolved.plan {
+            resolved.capabilities = crate::harness::capability_budget::resolve_filter(
+                plan,
+                resolved.meter.as_deref(),
+                &company.id,
+                crate::ports::now_millis(),
+            )
+            .await;
+        }
+        Some(crate::workflows::caps::wired_workflow_namespaces(&resolved))
     }
 
     #[cfg(feature = "openhuman")]
-    pub fn set_wired_workflow_namespaces(
-        &mut self,
-        namespaces: std::collections::BTreeSet<&'static str>,
-    ) {
-        self.workflow_wired_namespaces = Some(namespaces);
+    pub fn set_workflow_harness_deps(&mut self, deps: crate::harness::HarnessDeps) {
+        self.workflow_harness_deps = Some(deps);
     }
 
     /// Attaches the embedded MCP runtime used by REST and harness agents.
