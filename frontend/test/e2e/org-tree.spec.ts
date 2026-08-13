@@ -60,6 +60,12 @@ let writes: { method: string; path: string; body?: unknown }[] = [];
 let roster = [...ROSTER];
 let teamWriteAvailable = true;
 
+/**
+ * Makes `POST .../desks/{id}/members` refuse, so the partial failure is
+ * reachable: the teammate is created on the host and then cannot be placed.
+ */
+let deskAddAvailable = true;
+
 /** The host's desks, as this stub holds them. Mutated by the write routes. */
 let desks: Desk[] = [];
 
@@ -67,6 +73,7 @@ function reset() {
   writes = [];
   roster = [...ROSTER];
   teamWriteAvailable = true;
+  deskAddAvailable = true;
   desks = [
     {
       id: "engineering",
@@ -96,7 +103,9 @@ async function mockApi(page: Page) {
   await page.addInitScript(() => {
     const real = Storage.prototype.getItem;
     Storage.prototype.getItem = function getItem(key: string) {
-      return key.startsWith("oc-tour:") ? '{"skipped":true}' : real.call(this, key);
+      return key.startsWith("oc-tour:")
+        ? '{"skipped":true}'
+        : real.call(this, key);
     };
   });
 
@@ -105,9 +114,18 @@ async function mockApi(page: Page) {
     const method = request.method();
     const path = new URL(request.url()).pathname;
     const json = (body: unknown, status = 200) =>
-      route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
+      route.fulfill({
+        status,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
     const noContent = () => route.fulfill({ status: 204, body: "" });
-    const status = { id: COMPANY, name: "Acme", lifecycle: "running", pending_approvals: 0 };
+    const status = {
+      id: COMPANY,
+      name: "Acme",
+      lifecycle: "running",
+      pending_approvals: 0,
+    };
 
     if (path === "/api/v1/companies") return json([status]);
     if (path === `/api/v1/companies/${COMPANY}`) return json(status);
@@ -122,7 +140,8 @@ async function mockApi(page: Page) {
       const body = request.postDataJSON() as { ordered_member_ids?: string[] };
       writes.push({ method, path, body });
       const target = desk(order[1]);
-      if (target && body.ordered_member_ids) target.members = [...body.ordered_member_ids];
+      if (target && body.ordered_member_ids)
+        target.members = [...body.ordered_member_ids];
       return noContent();
     }
 
@@ -133,7 +152,9 @@ async function mockApi(page: Page) {
       const target = desk(member[1]);
       if (target) {
         target.members = target.members.filter((m) => m !== member[2]);
-        target.overlayMembers = (target.overlayMembers ?? []).filter((m) => m !== member[2]);
+        target.overlayMembers = (target.overlayMembers ?? []).filter(
+          (m) => m !== member[2],
+        );
       }
       return noContent();
     }
@@ -143,11 +164,18 @@ async function mockApi(page: Page) {
     if (members && method === "POST") {
       // snake_case on the wire, as above (`AddDeskMember { agent_id }`).
       const body = request.postDataJSON() as { agent_id: string };
+      if (!deskAddAvailable) {
+        writes.push({ method, path, body });
+        return json({ error: "the desk refused the member" }, 409);
+      }
       writes.push({ method, path, body });
       const target = desk(members[1]);
       if (target) {
         target.members = [...target.members, body.agent_id];
-        target.overlayMembers = [...(target.overlayMembers ?? []), body.agent_id];
+        target.overlayMembers = [
+          ...(target.overlayMembers ?? []),
+          body.agent_id,
+        ];
       }
       return noContent();
     }
@@ -183,7 +211,11 @@ async function mockApi(page: Page) {
 
     if (path.endsWith("/team") && method === "POST") {
       if (!teamWriteAvailable) return json({ error: "not supported" }, 404);
-      const body = request.postDataJSON() as { name: string; role: string; description?: string };
+      const body = request.postDataJSON() as {
+        name: string;
+        role: string;
+        description?: string;
+      };
       const created = {
         id: `new-${roster.length}`,
         name: body.name,
@@ -210,18 +242,26 @@ async function mockApi(page: Page) {
       ]);
     }
     if (path.endsWith("/events")) {
-      return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: "",
+      });
     }
-    if (path.endsWith("/me")) return json({ id: "op", email: "op@example.com", role: "admin" });
+    if (path.endsWith("/me"))
+      return json({ id: "op", email: "op@example.com", role: "admin" });
     return json([]);
   });
 }
 
-const chart = (page: Page) => page.getByRole("tree", { name: "Company org chart" });
+const chart = (page: Page) =>
+  page.getByRole("tree", { name: "Company org chart" });
 
 /** A desk node by its heading text; `aria-level` 2 keeps seats from matching. */
 const deskNode = (page: Page, name: string) =>
-  chart(page).locator('[role="treeitem"][aria-level="2"]').filter({ hasText: name });
+  chart(page)
+    .locator('[role="treeitem"][aria-level="2"]')
+    .filter({ hasText: name });
 
 /**
  * Land on the chart from a cold load.
@@ -252,13 +292,16 @@ const memberPane = (page: Page) => page.getByRole("complementary").last();
  */
 async function openMemberPane(page: Page) {
   const toggle = page.getByRole("button", { name: /members$/i });
-  if ((await toggle.getAttribute("aria-pressed")) !== "true") await toggle.click();
+  if ((await toggle.getAttribute("aria-pressed")) !== "true")
+    await toggle.click();
   await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
 }
 
 test.beforeEach(reset);
 
-test("#311 the org chart is reachable, which it was not before", async ({ page }) => {
+test("#311 the org chart is reachable, which it was not before", async ({
+  page,
+}) => {
   await mockApi(page);
 
   // Start somewhere else, so arriving at the chart is a real navigation and not
@@ -297,30 +340,44 @@ test("#311 the chart is three levels and never a fourth", async ({ page }) => {
   await expect(root).toContainText("2 desks · 4 seats");
 
   // Level 2 is the desks, level 3 the seats on them.
-  await expect(chart(page).locator('[role="treeitem"][aria-level="2"]')).toHaveCount(2);
-  await expect(chart(page).locator('[role="treeitem"][aria-level="3"]')).toHaveCount(4);
+  await expect(
+    chart(page).locator('[role="treeitem"][aria-level="2"]'),
+  ).toHaveCount(2);
+  await expect(
+    chart(page).locator('[role="treeitem"][aria-level="3"]'),
+  ).toHaveCount(4);
 
   // And there is no fourth. The cap is structural: no desk can name a parent
   // desk, so nothing here can emit one.
-  await expect(chart(page).locator('[role="treeitem"][aria-level="4"]')).toHaveCount(0);
+  await expect(
+    chart(page).locator('[role="treeitem"][aria-level="4"]'),
+  ).toHaveCount(0);
 });
 
 test("#311 the lead is the desk's first member, badged", async ({ page }) => {
   await mockApi(page);
   await openChart(page);
 
-  const seats = deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]');
+  const seats = deskNode(page, "Engineering").locator(
+    '[role="treeitem"][aria-level="3"]',
+  );
   await expect(seats).toHaveCount(2);
   await expect(seats.first()).toContainText("Grace");
   // Through the role, not the bare attribute: a `getByLabel` match proves the
   // attribute is in the DOM, not that anything would announce it. The crown
   // carries `role="img"` so the accessible name actually resolves.
-  await expect(seats.first().getByRole("img", { name: "Desk lead" })).toBeVisible();
+  await expect(
+    seats.first().getByRole("img", { name: "Desk lead" }),
+  ).toBeVisible();
   await expect(seats.nth(1)).toContainText("Ada");
-  await expect(seats.nth(1).getByRole("img", { name: "Desk lead" })).toHaveCount(0);
+  await expect(
+    seats.nth(1).getByRole("img", { name: "Desk lead" }),
+  ).toHaveCount(0);
 });
 
-test("#311 a desk can be created from the chart and survives a reload", async ({ page }) => {
+test("#311 a desk can be created from the chart and survives a reload", async ({
+  page,
+}) => {
   await mockApi(page);
   await openChart(page);
 
@@ -336,7 +393,9 @@ test("#311 a desk can be created from the chart and survives a reload", async ({
 
   await expect(deskNode(page, "Support")).toBeVisible();
 
-  const created = writes.find((w) => w.method === "POST" && w.path.endsWith("/desks"));
+  const created = writes.find(
+    (w) => w.method === "POST" && w.path.endsWith("/desks"),
+  );
   expect(created?.body).toMatchObject({ name: "Support", members: ["linus"] });
 
   // The proof that this is the host's and not the component's: reload.
@@ -346,7 +405,9 @@ test("#311 a desk can be created from the chart and survives a reload", async ({
   await expect(deskNode(page, "Support")).toContainText("Linus");
 });
 
-test("#311 membership can be edited from the chart and survives a reload", async ({ page }) => {
+test("#311 membership can be edited from the chart and survives a reload", async ({
+  page,
+}) => {
   await mockApi(page);
   await openChart(page);
 
@@ -354,15 +415,22 @@ test("#311 membership can be edited from the chart and survives a reload", async
   // rather than dropping him.
   const unplaced = page.getByRole("heading", { name: "Not on a desk" });
   await expect(unplaced).toBeVisible();
-  await expect(unplaced.locator("xpath=following-sibling::ul[1]")).toContainText("Turing");
+  await expect(
+    unplaced.locator("xpath=following-sibling::ul[1]"),
+  ).toContainText("Turing");
 
   const engineering = deskNode(page, "Engineering");
   await engineering.getByRole("button", { name: "Add teammate" }).click();
   await page.getByRole("menuitem", { name: "Linus" }).click();
 
-  await expect(engineering.locator('[role="treeitem"][aria-level="3"]')).toHaveCount(3);
+  await expect(
+    engineering.locator('[role="treeitem"][aria-level="3"]'),
+  ).toHaveCount(3);
   expect(
-    writes.some((w) => w.method === "POST" && w.path.endsWith("/desks/engineering/members")),
+    writes.some(
+      (w) =>
+        w.method === "POST" && w.path.endsWith("/desks/engineering/members"),
+    ),
   ).toBe(true);
 
   await page.reload();
@@ -373,18 +441,24 @@ test("#311 membership can be edited from the chart and survives a reload", async
   await deskNode(page, "Engineering")
     .getByRole("button", { name: "Remove Linus from Engineering" })
     .click();
-  await expect(deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]')).toHaveCount(2);
+  await expect(
+    deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]'),
+  ).toHaveCount(2);
   await page.reload();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
   await expect(deskNode(page, "Engineering")).not.toContainText("Linus");
 });
 
-test("#839 creates a teammate on a selected desk and persists it", async ({ page }) => {
+test("#839 creates a teammate on a selected desk and persists it", async ({
+  page,
+}) => {
   await mockApi(page);
   await openChart(page);
 
   const growth = deskNode(page, "Growth");
-  await growth.getByRole("button", { name: "Create teammate on Growth" }).click();
+  await growth
+    .getByRole("button", { name: "Create teammate on Growth" })
+    .click();
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Babbage");
   await dialog.getByLabel("Role").fill("Platform Engineer");
@@ -392,8 +466,17 @@ test("#839 creates a teammate on a selected desk and persists it", async ({ page
   await dialog.getByRole("button", { name: "Add member" }).click();
 
   await expect(growth).toContainText("Babbage");
-  expect(writes.find((write) => write.method === "POST" && write.path.endsWith("/team"))).toBeTruthy();
-  expect(writes.find((write) => write.method === "POST" && write.path.endsWith("/desks/growth/members"))).toBeTruthy();
+  expect(
+    writes.find(
+      (write) => write.method === "POST" && write.path.endsWith("/team"),
+    ),
+  ).toBeTruthy();
+  expect(
+    writes.find(
+      (write) =>
+        write.method === "POST" && write.path.endsWith("/desks/growth/members"),
+    ),
+  ).toBeTruthy();
 
   await page.reload();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
@@ -410,12 +493,16 @@ test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
   await dialog.getByLabel("Role").fill("Roaming Engineer");
   await dialog.getByRole("button", { name: "Add member" }).click();
 
-  await expect(page.getByRole("heading", { name: "Not on a desk" })).toContainText("Not on a desk");
+  await expect(
+    page.getByRole("heading", { name: "Not on a desk" }),
+  ).toContainText("Not on a desk");
   await expect(page.getByText("No Desk", { exact: true })).toBeVisible();
   expect(writes.some((write) => write.path.includes("/members"))).toBe(false);
 });
 
-test("#839 refuses a company-page teammate add when the host has no team write plane", async ({ page }) => {
+test("#839 refuses a company-page teammate add when the host has no team write plane", async ({
+  page,
+}) => {
   teamWriteAvailable = false;
   await mockApi(page);
   await openChart(page);
@@ -426,11 +513,15 @@ test("#839 refuses a company-page teammate add when the host has no team write p
   await dialog.getByLabel("Role").fill("Unavailable");
   await dialog.getByRole("button", { name: "Add member" }).click();
 
-  await expect(page.getByRole("alert")).toContainText("does not support creating teammates");
+  await expect(page.getByRole("alert")).toContainText(
+    "does not support creating teammates",
+  );
   await expect(page.locator("text=Not Saved")).toHaveCount(0);
 });
 
-test("#311 the lead can be changed from the chart and survives a reload", async ({ page }) => {
+test("#311 the lead can be changed from the chart and survives a reload", async ({
+  page,
+}) => {
   await mockApi(page);
   await openChart(page);
 
@@ -440,21 +531,73 @@ test("#311 the lead can be changed from the chart and survives a reload", async 
     .getByRole("button", { name: "Move Ada up in Engineering" })
     .click();
 
-  const seats = deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]');
+  const seats = deskNode(page, "Engineering").locator(
+    '[role="treeitem"][aria-level="3"]',
+  );
   await expect(seats.first()).toContainText("Ada");
-  await expect(seats.first().getByRole("img", { name: "Desk lead" })).toBeVisible();
+  await expect(
+    seats.first().getByRole("img", { name: "Desk lead" }),
+  ).toBeVisible();
 
-  const ordered = writes.find((w) => w.method === "PUT" && w.path.endsWith("/order"));
+  const ordered = writes.find(
+    (w) => w.method === "PUT" && w.path.endsWith("/order"),
+  );
   expect(ordered?.body).toEqual({ ordered_member_ids: ["ada", "grace"] });
 
   await page.reload();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
   await expect(
-    deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]').first(),
+    deskNode(page, "Engineering")
+      .locator('[role="treeitem"][aria-level="3"]')
+      .first(),
   ).toContainText("Ada");
 });
 
-test("#839 dragging a seat reorders the desk and persists the new lead", async ({ page }) => {
+test("#839 a teammate created but not placed is still on the chart to place by hand", async ({
+  page,
+}) => {
+  // The half-done case: the host takes the teammate and then refuses the desk.
+  // The message tells the operator to place them themselves, so the chart has
+  // to have re-read — otherwise it points at a dropdown the teammate is not in
+  // yet, and the only way out is an unrelated reload.
+  deskAddAvailable = false;
+  await mockApi(page);
+  await openChart(page);
+
+  const growth = deskNode(page, "Growth");
+  await growth
+    .getByRole("button", { name: "Create teammate on Growth" })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("Hopper");
+  await dialog.getByLabel("Role").fill("Compiler");
+  await dialog.getByRole("button", { name: "Add member" }).click();
+
+  await expect(page.getByRole("alert")).toContainText(
+    "could not be added to the selected desk",
+  );
+  await expect(page.getByRole("alert")).toContainText("Hopper");
+  // Created on the host, so it must be on the chart's unplaced list — the one
+  // place a teammate with no desk belongs, and where the operator picks them
+  // up to place by hand. Asserted against that list rather than the page: the
+  // alert names Hopper too, so a page-wide match would pass whether or not the
+  // chart had re-read at all.
+  const unplaced = page
+    .locator("section", {
+      has: page.getByRole("heading", { name: "Not on a desk" }),
+    })
+    .last();
+  await expect(unplaced).toContainText("Hopper");
+  expect(
+    writes.find(
+      (write) => write.method === "POST" && write.path.endsWith("/team"),
+    ),
+  ).toBeTruthy();
+});
+
+test("#839 dragging a seat reorders the desk and persists the new lead", async ({
+  page,
+}) => {
   await mockApi(page);
   await openChart(page);
 
@@ -463,26 +606,38 @@ test("#839 dragging a seat reorders the desk and persists the new lead", async (
   await seats.nth(1).dragTo(seats.first());
 
   await expect(seats.first()).toContainText("Ada");
-  expect(writes.find((write) => write.method === "PUT" && write.path.endsWith("/order"))?.body).toEqual({
+  expect(
+    writes.find(
+      (write) => write.method === "PUT" && write.path.endsWith("/order"),
+    )?.body,
+  ).toEqual({
     ordered_member_ids: ["ada", "grace"],
   });
 
   await page.reload();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
-  const reloadedSeats = deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]');
+  const reloadedSeats = deskNode(page, "Engineering").locator(
+    '[role="treeitem"][aria-level="3"]',
+  );
   await expect(reloadedSeats.first()).toContainText("Ada");
-  await expect(reloadedSeats.first().getByRole("img", { name: "Desk lead" })).toBeVisible();
+  await expect(
+    reloadedSeats.first().getByRole("img", { name: "Desk lead" }),
+  ).toBeVisible();
   await expect(reloadedSeats.nth(1)).toContainText("Grace");
 });
 
-test("#311 blueprint structure offers no control the host would refuse", async ({ page }) => {
+test("#311 blueprint structure offers no control the host would refuse", async ({
+  page,
+}) => {
   await mockApi(page);
   await openChart(page);
 
   // A manifest desk cannot be deleted at runtime, so no delete is offered.
   await expect(deskNode(page, "Engineering")).toContainText("Blueprint");
   await expect(
-    deskNode(page, "Engineering").getByRole("button", { name: "Delete Engineering" }),
+    deskNode(page, "Engineering").getByRole("button", {
+      name: "Delete Engineering",
+    }),
   ).toHaveCount(0);
   // Nor can its manifest members be removed.
   await expect(
@@ -492,9 +647,15 @@ test("#311 blueprint structure offers no control the host would refuse", async (
   // An operator-created desk can be deleted, and its added member removed —
   // but its founding member is still blueprint to the host.
   const growth = deskNode(page, "Growth");
-  await expect(growth.getByRole("button", { name: "Delete Growth" })).toBeVisible();
-  await expect(growth.getByRole("button", { name: "Remove Hedy from Growth" })).toBeVisible();
-  await expect(growth.getByRole("button", { name: "Remove Linus from Growth" })).toHaveCount(0);
+  await expect(
+    growth.getByRole("button", { name: "Delete Growth" }),
+  ).toBeVisible();
+  await expect(
+    growth.getByRole("button", { name: "Remove Hedy from Growth" }),
+  ).toBeVisible();
+  await expect(
+    growth.getByRole("button", { name: "Remove Linus from Growth" }),
+  ).toHaveCount(0);
 
   await growth.getByRole("button", { name: "Delete Growth" }).click();
   await expect(deskNode(page, "Growth")).toHaveCount(0);
@@ -503,7 +664,9 @@ test("#311 blueprint structure offers no control the host would refuse", async (
   await expect(deskNode(page, "Growth")).toHaveCount(0);
 });
 
-test("#485 #/company/<deskId> lands on that desk, not just on the chart", async ({ page }) => {
+test("#485 #/company/<deskId> lands on that desk, not just on the chart", async ({
+  page,
+}) => {
   await mockApi(page);
 
   // The chat member pane's "Manage on the org chart" writes exactly this
@@ -529,14 +692,18 @@ test("#485 #/company/<deskId> lands on that desk, not just on the chart", async 
   await expect(growth).not.toHaveAttribute("data-desk-focused", "true");
 });
 
-test("#485 a desk id the chart doesn't have is a silent no-op", async ({ page }) => {
+test("#485 a desk id the chart doesn't have is a silent no-op", async ({
+  page,
+}) => {
   await mockApi(page);
 
   // `useHashView` hands the second segment back unvalidated, and a link can
   // outlive the desk it names. A stale bookmark gets the company, not a banner.
   await page.goto("/#/company/deleted-last-week");
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
-  await expect(chart(page).locator('[role="treeitem"][aria-level="2"]')).toHaveCount(2);
+  await expect(
+    chart(page).locator('[role="treeitem"][aria-level="2"]'),
+  ).toHaveCount(2);
   await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(0);
   await expect(page.getByRole("alert")).toHaveCount(0);
   // Not rewritten either: only this view knows which desk ids exist, so the
@@ -547,13 +714,18 @@ test("#485 a desk id the chart doesn't have is a silent no-op", async ({ page })
   // same chart at a desk it *does* have and the marker appears.
   await page.goto("/#/company/engineering");
   await expect
-    .poll(() => deskNode(page, "Engineering").getAttribute("data-desk-focused"), {
-      timeout: 30_000,
-    })
+    .poll(
+      () => deskNode(page, "Engineering").getAttribute("data-desk-focused"),
+      {
+        timeout: 30_000,
+      },
+    )
     .toBe("true");
 });
 
-test("#485 following the same desk link twice still lands on it", async ({ page }) => {
+test("#485 following the same desk link twice still lands on it", async ({
+  page,
+}) => {
   await mockApi(page);
 
   // Every hop here is an in-app hash change, never `page.goto`: a full
@@ -561,7 +733,10 @@ test("#485 following the same desk link twice still lands on it", async ({ page 
   // would pass whether or not the bug exists.
   await page.goto("/#/company/growth");
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
-  await expect(deskNode(page, "Growth")).toHaveAttribute("data-desk-focused", "true");
+  await expect(deskNode(page, "Growth")).toHaveAttribute(
+    "data-desk-focused",
+    "true",
+  );
 
   // Off to the bare chart. The view stays mounted, so whatever it remembers
   // about the last honoured id survives.
@@ -584,12 +759,17 @@ test("#485 following the same desk link twice still lands on it", async ({ page 
   await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(1);
 });
 
-test("#485 a stale id does not leave the previous desk wearing the ring", async ({ page }) => {
+test("#485 a stale id does not leave the previous desk wearing the ring", async ({
+  page,
+}) => {
   await mockApi(page);
 
   await page.goto("/#/company/growth");
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
-  await expect(deskNode(page, "Growth")).toHaveAttribute("data-desk-focused", "true");
+  await expect(deskNode(page, "Growth")).toHaveAttribute(
+    "data-desk-focused",
+    "true",
+  );
 
   // An id the chart does not have is a no-op for *arrival*, but it must still
   // retire the previous target's mark — otherwise the ring claims a desk the
@@ -601,29 +781,41 @@ test("#485 a stale id does not leave the previous desk wearing the ring", async 
   await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(0);
 });
 
-test("#485 a membership edit on the chart is there when you get back to chat", async ({ page }) => {
+test("#485 a membership edit on the chart is there when you get back to chat", async ({
+  page,
+}) => {
   await mockApi(page);
 
   // The round trip #485 is actually for: read the desk in chat, notice it is
   // short a person, fix that where it can be fixed, come back.
   await page.goto("/#/chat/engineering");
-  await expect(page.getByPlaceholder("Message #engineering")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByPlaceholder("Message #engineering")).toBeVisible({
+    timeout: 30_000,
+  });
   await openMemberPane(page);
   await expect(memberPane(page)).toContainText("Grace");
-  await expect(memberPane(page).locator("ul").first()).not.toContainText("Turing");
+  await expect(memberPane(page).locator("ul").first()).not.toContainText(
+    "Turing",
+  );
 
-  await memberPane(page).getByRole("button", { name: "Manage on the org chart" }).click();
+  await memberPane(page)
+    .getByRole("button", { name: "Manage on the org chart" })
+    .click();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 
   const engineering = deskNode(page, "Engineering");
   await engineering.getByRole("button", { name: "Add teammate" }).click();
   await page.getByRole("menuitem", { name: "Turing" }).click();
-  await expect(engineering.locator('[role="treeitem"][aria-level="3"]')).toHaveCount(3);
+  await expect(
+    engineering.locator('[role="treeitem"][aria-level="3"]'),
+  ).toHaveCount(3);
 
   // Back the way we came — a hash navigation, so Back is the operator's own
   // route home and not a reload.
   await page.goBack();
-  await expect(page.getByPlaceholder("Message #engineering")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByPlaceholder("Message #engineering")).toBeVisible({
+    timeout: 30_000,
+  });
   await openMemberPane(page);
   // Chat re-reads the desks when it remounts, so no reload is needed for the
   // edit to show. The two surfaces stay separate reads of one host list —
@@ -632,7 +824,9 @@ test("#485 a membership edit on the chart is there when you get back to chat", a
   await expect(memberPane(page).locator("ul").first()).toContainText("Turing");
 });
 
-test("#311 a seat naming nobody on the roster is shown, not hidden", async ({ page }) => {
+test("#311 a seat naming nobody on the roster is shown, not hidden", async ({
+  page,
+}) => {
   reset();
   desks[0].members = ["grace", "ghost"];
   await mockApi(page);
@@ -641,7 +835,9 @@ test("#311 a seat naming nobody on the roster is shown, not hidden", async ({ pa
   // The chat member pane drops an unresolvable id, which is right for a chat.
   // Here it is a fact about the structure that only the operator can fix, so it
   // stays on screen and says what it is.
-  const seats = deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]');
+  const seats = deskNode(page, "Engineering").locator(
+    '[role="treeitem"][aria-level="3"]',
+  );
   await expect(seats).toHaveCount(2);
   await expect(seats.nth(1)).toContainText("ghost");
   await expect(seats.nth(1)).toContainText("Not on the roster");

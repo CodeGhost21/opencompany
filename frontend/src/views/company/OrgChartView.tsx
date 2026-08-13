@@ -13,8 +13,23 @@
 // `aria-level`, and no code path here can emit `aria-level="4"`, which is what
 // the e2e spec asserts.
 
-import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
-import { ChevronDown, ChevronUp, Crown, Plus, Trash2, UserPlus, Users, X } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type DragEvent,
+} from "react";
+import {
+  ChevronDown,
+  ChevronUp,
+  Crown,
+  Plus,
+  Trash2,
+  UserPlus,
+  Users,
+  X,
+} from "lucide-react";
 
 import { listPeople } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
@@ -41,7 +56,10 @@ import {
 } from "@/lib/org";
 import { cn } from "@/lib/utils";
 import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
-import { AddMemberDialog, type NewMemberFields } from "@/views/chat/AddMemberDialog";
+import {
+  AddMemberDialog,
+  type NewMemberFields,
+} from "@/views/chat/AddMemberDialog";
 
 const SEAT_MIME = "application/x-opencompany-seat";
 
@@ -95,26 +113,33 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
         client.listTeam(company).catch(() => [] as TeamMemberDto[]),
         listPeople(client, company)
           .then((rows) =>
-            rows.map(
-              (p): OrgPerson => ({
-                id: p.id,
-                name: p.displayName?.trim() || p.email.split("@")[0],
-                email: p.email,
-                role: p.role,
-              }),
-            ),
+            rows.map((p): OrgPerson => ({
+              id: p.id,
+              name: p.displayName?.trim() || p.email.split("@")[0],
+              email: p.email,
+              role: p.role,
+            })),
           )
           .catch(() => [] as OrgPerson[]),
         client.status(company).catch(() => null),
       ]);
       if (mine !== gen.current) return;
-      setTree(buildOrgTree(status?.name || company || "This company", desks, roster, people));
+      setTree(
+        buildOrgTree(
+          status?.name || company || "This company",
+          desks,
+          roster,
+          people,
+        ),
+      );
       setLoad("ready");
     } catch (e) {
       if (mine !== gen.current) return;
       // A failed `/desks` is a real error, not an empty company. Inventing an
       // empty chart here would tell the operator their desks are gone.
-      setError(e instanceof Error ? e.message : "Could not load the org chart.");
+      setError(
+        e instanceof Error ? e.message : "Could not load the org chart.",
+      );
       setLoad("error");
     }
   }, [client, company]);
@@ -165,7 +190,8 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
   }, [company, focusDeskId]);
 
   useEffect(() => {
-    if (load !== "ready" || !focusDeskId || focused.current === focusDeskId) return;
+    if (load !== "ready" || !focusDeskId || focused.current === focusDeskId)
+      return;
     const node = chartRef.current?.querySelector<HTMLElement>(
       `[data-desk-id="${CSS.escape(focusDeskId)}"]`,
     );
@@ -211,7 +237,9 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
       await run();
       await boot();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Something went wrong. Try again.");
+      setError(
+        e instanceof Error ? e.message : "Something went wrong. Try again.",
+      );
     } finally {
       setBusy(null);
     }
@@ -227,16 +255,29 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
     const deskId = addMemberDeskId;
     setBusy("add-member");
     setError(null);
+    // Whether the host has the teammate, which decides whether the chart needs
+    // re-reading on the way out. A desk add that fails after the teammate is
+    // created leaves the two disagreeing: the roster has someone the chart has
+    // never heard of, so the message telling the operator to place them by hand
+    // would point at a dropdown that does not list them yet.
+    let createdOnHost = false;
     try {
       let created: TeamMemberDto;
       try {
         created = await client.addTeamMember(
-          { name: fields.name, role: fields.role, description: fields.description || undefined },
+          {
+            name: fields.name,
+            role: fields.role,
+            description: fields.description || undefined,
+          },
           company,
         );
+        createdOnHost = true;
       } catch (e) {
         if (e instanceof ApiError && e.status === 404) {
-          throw new Error("This host does not support creating teammates from the Company page.");
+          throw new Error(
+            "This host does not support creating teammates from the Company page.",
+          );
         }
         throw e;
       }
@@ -254,6 +295,9 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
     } catch (e) {
       setAddMemberOpen(false);
       setError(e instanceof Error ? e.message : "Could not create teammate.");
+      if (createdOnHost) {
+        await boot();
+      }
     } finally {
       setBusy(null);
     }
@@ -266,8 +310,9 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
           <div className="space-y-1">
             <h2 className="text-2xl font-semibold tracking-tight">Company</h2>
             <p className="text-sm text-muted-foreground">
-              How your company is organised: the desks it works from and who staffs each one. Add a
-              desk, move someone between desks, or change who leads.
+              How your company is organised: the desks it works from and who
+              staffs each one. Add a desk, move someone between desks, or change
+              who leads.
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap justify-end gap-2">
@@ -349,10 +394,14 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
                 onDrop={(desk, fromIndex, toIndex) => {
                   const next = reorderedIdsAfterDrop(desk, fromIndex, toIndex);
                   if (!next) return;
-                  void mutate(`drag:${desk.id}`, () => client.setDeskOrder(desk.id, next, company));
+                  void mutate(`drag:${desk.id}`, () =>
+                    client.setDeskOrder(desk.id, next, company),
+                  );
                 }}
                 onDelete={(desk) =>
-                  void mutate(`delete:${desk.id}`, () => client.deleteDesk(desk.id, company))
+                  void mutate(`delete:${desk.id}`, () =>
+                    client.deleteDesk(desk.id, company),
+                  )
                 }
               />
               <Unplaced tree={tree} />
@@ -410,7 +459,12 @@ function Chart({
 }) {
   return (
     <div role="tree" aria-label="Company org chart" className="space-y-3">
-      <div role="treeitem" aria-level={1} aria-expanded="true" aria-selected="false">
+      <div
+        role="treeitem"
+        aria-level={1}
+        aria-expanded="true"
+        aria-selected="false"
+      >
         <div className="rounded-xl border bg-muted/40 px-4 py-3">
           <p className="font-medium">{tree.companyName}</p>
           <p className="text-xs text-muted-foreground">{summarize(tree)}</p>
@@ -438,7 +492,9 @@ function Chart({
                 onCreateMember={() => onCreateMember(desk)}
                 onRemove={(agentId) => onRemove(desk, agentId)}
                 onMove={(index, direction) => onMove(desk, index, direction)}
-                onDrop={(fromIndex, toIndex) => onDrop(desk, fromIndex, toIndex)}
+                onDrop={(fromIndex, toIndex) =>
+                  onDrop(desk, fromIndex, toIndex)
+                }
                 onDelete={() => onDelete(desk)}
               />
             ))}
@@ -509,7 +565,9 @@ function DeskNode({
               )}
             </p>
             {desk.description && (
-              <p className="line-clamp-2 text-xs text-muted-foreground">{desk.description}</p>
+              <p className="line-clamp-2 text-xs text-muted-foreground">
+                {desk.description}
+              </p>
             )}
           </div>
           {/* Only an operator-created desk can be deleted at runtime. A
@@ -524,14 +582,21 @@ function DeskNode({
               disabled={locked}
               onClick={onDelete}
             >
-              <Trash2 className={cn("size-3.5", busy === `delete:${desk.id}` && "opacity-50")} />
+              <Trash2
+                className={cn(
+                  "size-3.5",
+                  busy === `delete:${desk.id}` && "opacity-50",
+                )}
+              />
             </Button>
           )}
         </div>
 
         <div role="group" className="space-y-1 border-t px-3 py-2">
           {desk.seats.length === 0 && (
-            <p className="py-1 text-xs text-muted-foreground">Nobody staffs this desk yet.</p>
+            <p className="py-1 text-xs text-muted-foreground">
+              Nobody staffs this desk yet.
+            </p>
           )}
           {desk.seats.map((seat, index) => (
             <Seat
@@ -568,12 +633,20 @@ function DeskNode({
                 }
               >
                 <Plus className="size-4" />
-                {addable.length === 0 ? "Everyone is on this desk" : "Add teammate"}
+                {addable.length === 0
+                  ? "Everyone is on this desk"
+                  : "Add teammate"}
               </DropdownMenuTrigger>
               {addable.length > 0 && (
-                <DropdownMenuContent align="start" className="max-h-64 overflow-y-auto">
+                <DropdownMenuContent
+                  align="start"
+                  className="max-h-64 overflow-y-auto"
+                >
                   {addable.map((member) => (
-                    <DropdownMenuItem key={member.id} onClick={() => onAdd(member.id)}>
+                    <DropdownMenuItem
+                      key={member.id}
+                      onClick={() => onAdd(member.id)}
+                    >
                       <span className="truncate">{member.name}</span>
                     </DropdownMenuItem>
                   ))}
@@ -636,7 +709,9 @@ function Seat({
 
   function drop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
-    const payload = event.dataTransfer.getData(SEAT_MIME) || event.dataTransfer.getData("text/plain");
+    const payload =
+      event.dataTransfer.getData(SEAT_MIME) ||
+      event.dataTransfer.getData("text/plain");
     const [sourceDeskId, sourceIndex] = payload.split(":");
     const fromIndex = Number(sourceIndex);
     if (sourceDeskId === deskId && Number.isInteger(fromIndex)) onDrop(index);
@@ -659,10 +734,22 @@ function Seat({
     >
       <span className="flex min-w-0 items-center gap-1.5">
         {seat.lead && (
-          <Crown role="img" aria-label="Desk lead" className="size-3.5 shrink-0 text-muted-foreground" />
+          <Crown
+            role="img"
+            aria-label="Desk lead"
+            className="size-3.5 shrink-0 text-muted-foreground"
+          />
         )}
-        <span className={cn("truncate", !seat.known && "text-muted-foreground")}>{seat.name}</span>
-        {seat.role && <span className="truncate text-xs text-muted-foreground">{seat.role}</span>}
+        <span
+          className={cn("truncate", !seat.known && "text-muted-foreground")}
+        >
+          {seat.name}
+        </span>
+        {seat.role && (
+          <span className="truncate text-xs text-muted-foreground">
+            {seat.role}
+          </span>
+        )}
         {/* A seat naming somebody the roster no longer has. Shown, not hidden:
             it is a fact about the structure only the operator can fix. */}
         {!seat.known && (
@@ -734,11 +821,15 @@ function Unplaced({ tree }: { tree: OrgTree }) {
         <section className="space-y-2">
           <h3 className="text-sm font-medium">Not on a desk</h3>
           <p className="text-xs text-muted-foreground">
-            Roster teammates the company has not staffed anywhere. Add them to a desk above.
+            Roster teammates the company has not staffed anywhere. Add them to a
+            desk above.
           </p>
           <ul className="flex flex-wrap gap-1.5">
             {tree.unassigned.map((member) => (
-              <li key={member.id} className="rounded-md border px-2 py-1 text-xs">
+              <li
+                key={member.id}
+                className="rounded-md border px-2 py-1 text-xs"
+              >
                 {member.name}
               </li>
             ))}
@@ -749,14 +840,19 @@ function Unplaced({ tree }: { tree: OrgTree }) {
         <section className="space-y-2">
           <h3 className="text-sm font-medium">People</h3>
           <p className="text-xs text-muted-foreground">
-            The humans who can sign in. Desks staff agents, so the company declares no desk for a
-            person, and this chart does not guess one.
+            The humans who can sign in. Desks staff agents, so the company
+            declares no desk for a person, and this chart does not guess one.
           </p>
           <ul className="flex flex-wrap gap-1.5">
             {tree.people.map((person) => (
-              <li key={person.id} className="rounded-md border px-2 py-1 text-xs">
+              <li
+                key={person.id}
+                className="rounded-md border px-2 py-1 text-xs"
+              >
                 {person.name}
-                <span className="ml-1.5 text-muted-foreground">{person.role}</span>
+                <span className="ml-1.5 text-muted-foreground">
+                  {person.role}
+                </span>
               </li>
             ))}
           </ul>
