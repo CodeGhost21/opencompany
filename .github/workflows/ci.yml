@@ -174,7 +174,7 @@ jobs:
           inlined=$(grep -rnE 'git[[:space:]]+-C[[:space:]]+vendor/[^[:space:]]+[[:space:]]+submodule[[:space:]]+update' \
             .github/workflows/ || true)
           if [ -n "$inlined" ]; then
-            echo "::error title=Inlined vendored submodule init::A workflow initializes the vendored submodules inline, running a \`submodule update\` against a \`vendor/\` checkout. That list lives in exactly one place, scripts/ci/init-vendored-submodules.sh — call the script instead. Copies drift, and a lane missing a submodule then fails on its own while its siblings stay green." >&2
+            echo "::error title=Inlined vendored submodule init::A workflow initializes the vendored submodules inline, running a \`submodule update\` against a \`vendor/\` checkout. That init happens in exactly one place, scripts/ci/init-vendored-submodules.sh, which derives the crate list from the pinned vendor/openhuman/.gitmodules — call the script instead. Copies drift, and a lane missing a submodule then fails on its own while its siblings stay green." >&2
             echo "$inlined" >&2
             failed=1
           fi
@@ -525,7 +525,8 @@ jobs:
       # `openhuman`. A missing checkout fails THIS build too, not just a gated
       # one. `submodules: true` is not recursive, hence the explicit init.
       #
-      # The list lives in the script and only there (issue #592).
+      # The script derives the crate list from the pinned
+      # `vendor/openhuman/.gitmodules` (issue #592) — nothing here holds a copy.
       - name: Init vendored openhuman crate submodules
         run: scripts/ci/init-vendored-submodules.sh
 
@@ -633,11 +634,12 @@ jobs:
       # Identical to the `rust` job's init, and for the same reason: `submodules:
       # true` is not recursive. This lane is the one that actually compiles the
       # nested graph rather than only resolving it, `--features openhuman`
-      # reaching every vendored crate the script names, plus tinycortex's own
+      # reaching every vendored crate the pin declares, plus tinycortex's own
       # `tinyagents`.
       #
-      # The list lives in the script and only there (issue #592), including why
-      # the init is targeted rather than `--recursive`.
+      # The script derives that list from the pinned
+      # `vendor/openhuman/.gitmodules` (issue #592), and documents why the init
+      # is scoped to the `vendor/` prefix rather than `--recursive`.
       - name: Init vendored openhuman crate submodules
         run: scripts/ci/init-vendored-submodules.sh
 
@@ -1267,7 +1269,8 @@ jobs:
       # manifests must resolve here for the same reason they must in `rust` —
       # Cargo reads every path dependency's manifest during resolution.
       #
-      # The list lives in the script and only there (issue #592).
+      # The script derives the crate list from the pinned
+      # `vendor/openhuman/.gitmodules` (issue #592) — nothing here holds a copy.
       - name: Init vendored openhuman crate submodules
         run: scripts/ci/init-vendored-submodules.sh
 
