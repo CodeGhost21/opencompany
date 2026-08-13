@@ -286,12 +286,28 @@ have their own focused page: [pausing-workflows.md](pausing-workflows.md).
 
 `ops::connections` (feature `oauth`) runs OAuth with **this host's own provider
 application** — a client id/secret an operator registered themselves and handed
-to the process as `OPENCOMPANY_OAUTH_<PROVIDER>_ID` / `_SECRET`. That is the
-only way a standalone checkout can complete a handshake, and it is supported for
-exactly that reason. It is a hatch, not a deployment mode — the same framing
-`ops::composio` uses for its BYO token. A hosted tenant is injected no
-`OPENCOMPANY_OAUTH_*` variable at all, so on that host `provider_config`
-resolves nothing and a local Connect can only fail.
+to the process as `OPENCOMPANY_OAUTH_<PROVIDER>_ID` / `_SECRET`. It is a hatch,
+not a deployment mode — the same framing `ops::composio` uses for its BYO token.
+A hosted tenant is injected no `OPENCOMPANY_OAUTH_*` variable at all, so on that
+host `provider_config` resolves nothing and a local Connect can only fail.
+
+**The console no longer offers this route** (issue #822). The routes below are
+live and unchanged; what changed is that nothing invites an operator down them.
+The reason is #396: `oauth_key(provider)` — `"oauth/{provider}"` — is written by
+the callback and read by *no agent tool*, zero occurrences under `src/harness/`.
+So the hatch worked and conferred nothing, and a self-hoster could register a
+provider application, complete a real handshake, see the tile turn green, and
+give their agents no ability whatsoever. `frontend/src/lib/connections.ts`'s
+`connectRoute` therefore answers `composio`, `managed` or `unavailable` and never
+`native`, and `provider-grid.ts` builds the grid from the backend's Composio
+catalog rather than from the console's own provider metadata.
+
+Two things this deliberately does **not** do. It does not remove the routes —
+settling #396 by wiring the credential into the harness makes the offer honest
+again, and reinstating it is one arm in `connectRoute`. And it does not hide a
+credential already stored: a provider `GET …/connections` reports connected keeps
+its tile, its `via: ["native"]` and its Disconnect, whether or not the Composio
+catalog carries it.
 
 The read plane says which it is. `ops::connections_read::connect_route` answers
 one question per provider — *can a Connect click possibly succeed here, and by
@@ -299,9 +315,15 @@ which route?* — as a `credentialSource` tier, stored-wins:
 
 | Tier | When | Console |
 | --- | --- | --- |
-| `static` | a token is already stored for this provider (BYO override), **or** this host registered its own provider app *and* has a state signing secret (the hatch) | Connect button, as today |
+| `static` | a token is already stored for this provider (BYO override), **or** this host registered its own provider app *and* has a state signing secret (the hatch) | no local Connect since #822 — Composio's if it has one, else "not available here" |
 | `attested` | no stored token, and the pod carries a platform-**projected** identity (`TINYHUMANS_TOKEN_FILE` naming a file that exists) | "Managed by the platform", no local Connect |
 | `none` | neither | read-only "not available on this host" |
+
+The tier is still the honest answer to *can a Connect click possibly succeed
+here* — it is what the route itself decides by, and `start` still refuses on
+`none`. What #822 changed is that the console stopped acting on `static`: the
+question it renders is no longer "could this succeed" but "would this confer
+anything", and for the native hatch the answer is no until #396 is settled.
 
 **The hatch also needs `OPENCOMPANY_OAUTH_STATE_SECRET`** (issue #318). The
 `state` nonce binds an in-flight authorization to one company, provider and

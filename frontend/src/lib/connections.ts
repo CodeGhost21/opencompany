@@ -11,9 +11,7 @@
 //
 // What `CONNECTION_PROVIDERS` still owns is what only the console can know:
 // which ids the host's `well_known` table can run a native handshake for, the
-// Composio slug each maps to, and the brand colours. It also supplies the tiles
-// on a host with no Composio at all, where the backend catalog comes back empty
-// and these eleven are the whole page.
+// Composio slug each maps to, and the brand colours.
 //
 // ## Two routes, one tile (issue #599)
 //
@@ -31,6 +29,31 @@
 // 400'd with "provider is not enabled on this host" — a grid of buttons that
 // could never succeed. [`connectRoute`] is now the single place that decides,
 // and it can answer "neither", so a button that cannot work is never rendered.
+//
+// ## …and now one route offered, not two (issue #822)
+//
+// The native arm is gone from that decision. It was the half of #599 that
+// *could* succeed and still bought the operator nothing: `oauth/{provider}` is
+// written by the callback and read by no agent tool — zero occurrences under
+// `src/harness/` (#396) — so a self-hoster could register a provider
+// application, complete a real handshake, watch the tile go green, and have
+// given their agents no ability whatsoever. A Connect that 400s is a bad
+// button; a Connect that succeeds and confers nothing is a false promise, and
+// the page should not be making it while #396 is unsettled.
+//
+// So `connectRoute` answers `composio`, `managed` or `unavailable`, and a host
+// whose only route is the native hatch gets the same honest "not available
+// here" a host with no route at all gets. Two things deliberately survive:
+//
+//  - **A credential already stored stays visible.** Removing the offer must not
+//    hide a token the company has, so a natively connected provider keeps its
+//    tile, its `via: ["native"]` and its Disconnect (`lib/provider-grid.ts`).
+//    Retracting the invitation is this issue; releasing what was accepted under
+//    it is the operator's call.
+//  - **The host route itself.** `POST …/connections/{provider}/start` and the
+//    callback are untouched — this is the console declining to offer a path,
+//    not the path being removed. Fixing #396 makes the offer honest again, and
+//    reinstating it is then one arm in this function.
 
 export type ConnectionCategory =
   | "Communication"
@@ -46,12 +69,13 @@ export interface ConnectionProvider {
    * `[[connection]] provider = "…"` and the key `GET …/connections` reports
    * status under.
    *
-   * It is also the token the native hatch resolves — `startConnection(id)` needs
-   * a matching `well_known(id)` key in `src/server/ops/connections.rs` (today:
-   * `slack`, `github`, `google`, `gmail`). An id outside that set has **no
-   * native route**, which is no longer a dead tile: {@link connectRoute} sends
-   * it down the Composio path instead, and reports `unavailable` when neither
-   * route is open rather than rendering a Connect that 400s.
+   * It is also what `disconnectConnection(id)` is called with, and what the
+   * host's `well_known` table keys the native hatch by
+   * (`src/server/ops/connections.rs`; today `slack`, `github`, `google`,
+   * `gmail`). The console no longer *offers* that hatch (issue #822), so this
+   * is now the id of a connection already held rather than of one on offer —
+   * which is why the ids stay aligned to `well_known` even though nothing here
+   * starts a handshake any more.
    */
   id: string;
   /**
@@ -326,16 +350,18 @@ export function composioCanAuthorize(reach: ComposioReach | null, toolkit: strin
 /**
  * How a tile's Connect should behave.
  *
- * - `native` — this host has its own registered provider application (or the
- *   company already stored a token): the self-hosted hatch, unchanged.
  * - `composio` — authorize `toolkit` through Composio's hosted OAuth.
  * - `managed` — the platform runs connections for this instance and there is no
  *   Composio route either; nothing to do here.
- * - `unavailable` — no route can succeed, so the tile says so instead of
- *   offering a button that fails.
+ * - `unavailable` — no route this console will offer can succeed, so the tile
+ *   says so instead of offering a button.
+ *
+ * There is deliberately no `native` arm (issue #822). It existed, it worked,
+ * and what it bought was a credential no agent reads (#396) — see the note at
+ * the top of this file. A host whose only hatch is that one now lands on
+ * `unavailable`, which is what the tile already renders without an action.
  */
 export type ConnectRoute =
-  | { kind: "native" }
   | { kind: "composio"; toolkit: string }
   | { kind: "managed" }
   | { kind: "unavailable" };
@@ -346,38 +372,45 @@ export type ConnectRoute =
  *
  * Precedence, and why:
  *
- * 1. **`static` → native.** The host registered a provider application for this
- *    provider, or the company stored its own token. Both are deliberate acts by
- *    the operator; preferring Composio here would quietly take away the hatch
- *    they configured. This is the self-hosted route staying supported.
- * 2. **Composio, when it can authorize this toolkit.** The hosted path, and the
- *    only one on a tenant — which is injected no `OPENCOMPANY_OAUTH_*` variable
- *    at all. It is also the route that makes the connection a capability: a
- *    native connection is recorded against the company but no agent tool reads
- *    it (see the catalog advisory in `ConnectionsView`).
- * 3. **`attested` → managed.** A platform-projected identity, so connections are
+ * 1. **Composio, when it can authorize this toolkit.** The hosted path, the only
+ *    one on a tenant — which is injected no `OPENCOMPANY_OAUTH_*` variable at
+ *    all — and now the only one this console offers anywhere. It is also the
+ *    only one that makes a connection a *capability*: `src/harness/composio.rs`
+ *    turns it into tools the agents receive.
+ * 2. **`attested` → managed.** A platform-projected identity, so connections are
  *    the platform's to run and no local Connect could work.
- * 4. **Otherwise unavailable.** Notably this is where an unknown provider lands
- *    on a host with no Composio: `credentialSource` is `undefined` because the
- *    manifest never declared it, and a Connect would 400.
+ * 3. **Otherwise unavailable.** Where an unknown provider lands on a host with
+ *    no Composio — `credentialSource` is `undefined` because the manifest never
+ *    declared it, and a Connect would 400 — and, since #822, where a provider
+ *    lands whose *only* route is the native hatch.
  *
- * Step 4 is the bug #599 reports. The grid renders every catalog tile, but
+ * Step 3 is the bug #599 reports. The grid renders every catalog tile, but
  * `GET …/connections` only answers for providers the manifest declares — so on
  * a tenant that declares none, every tile had `state === undefined`, the
  * `attested` guard never fired (there was no row to read it from), and all
  * eleven fell through to a Connect that 400'd.
  *
- * ## Only two tier names appear here, on purpose
+ * ## `static` is no longer read (issue #822)
  *
- * `static` and `attested` are named because each answers a question about the
- * *local* host: `static` means a native handshake can complete here, `attested`
- * means no local one ever can. Every other tier — including `company` from
- * #586 — is a statement about which credential the host presents to Composio,
- * which this function reads through {@link ComposioReach.hasCredential} rather
- * than by name. So the combination "the company credential is set but the
- * provider is not in `states`" needs no case of its own: `state` is
- * `undefined`, `hasCredential` is true, and the tile gets a working Composio
- * Connect — which is exactly the outcome #599 is about.
+ * It used to take precedence over everything: a host that registered its own
+ * provider application, or a company that stored its own token, got the native
+ * hatch and Composio was not allowed to override the operator's deliberate
+ * configuration. What that reasoning missed is that the hatch confers nothing —
+ * the stored `oauth/{provider}` secret is read by no agent tool (#396) — so the
+ * arm preserved an operator's configuration by handing them a green tile and no
+ * capability. With it gone, such a host takes the Composio route when it has
+ * one and reports `unavailable` when it does not.
+ *
+ * ## One tier name appears here, on purpose
+ *
+ * `attested` is named because it answers a question about the *local* host: no
+ * local handshake can ever complete on it. Every other tier — including
+ * `company` from #586 — is a statement about which credential the host presents
+ * to Composio, which this function reads through
+ * {@link ComposioReach.hasCredential} rather than by name. So the combination
+ * "the company credential is set but the provider is not in `states`" needs no
+ * case of its own: `state` is `undefined`, `hasCredential` is true, and the tile
+ * gets a working Composio Connect — which is exactly the outcome #599 is about.
  */
 export function connectRoute(
   // Only the toolkit slug is read, and the merged grid (issue #582) routes tiles
@@ -388,7 +421,6 @@ export function connectRoute(
   state: { credentialSource?: string } | undefined,
   reach: ComposioReach | null,
 ): ConnectRoute {
-  if (state?.credentialSource === "static") return { kind: "native" };
   if (composioCanAuthorize(reach, provider.toolkit)) {
     return { kind: "composio", toolkit: provider.toolkit };
   }

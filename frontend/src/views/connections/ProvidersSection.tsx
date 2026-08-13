@@ -216,7 +216,26 @@ export function ProvidersSection({
             ))}
           </ul>
 
-          {visible.length === 0 && (
+          {providers.length === 0 && (
+            // The honest empty state (issue #822). This grid used to fall back
+            // to eleven hardcoded tiles whenever the backend offered no catalog,
+            // so a host with Composio switched off looked like a page full of
+            // connectable providers — and every one of those Connects stored a
+            // credential no agent reads (#396). With the fallback gone, a host
+            // with no catalog has nothing to show, and saying why beats a bare
+            // "No provider in All."
+            <p className="py-2 text-xs text-muted-foreground" data-testid="providers-empty">
+              This host has no providers to offer yet. They come from Composio,
+              which runs the sign-in and turns the result into tools your agents
+              actually receive
+              {canManage
+                ? " — set the company's credential above to see its catalog here."
+                : " — ask an admin to set the company's credential."}{" "}
+              Anything this company has already connected still appears here.
+            </p>
+          )}
+
+          {visible.length === 0 && providers.length > 0 && (
             <p className="py-2 text-xs text-muted-foreground">
               {query.trim() !== "" ? (
                 <>
@@ -309,9 +328,10 @@ function ProviderTile({
 }) {
   // `managed` and `unavailable` render no action at all — that is the whole
   // point of routing the tile (issue #599): a button that could only 400 is
-  // never drawn.
-  const connectable =
-    canManage && !row.connected && (row.route.kind === "composio" || row.route.kind === "native");
+  // never drawn. Composio is the only remaining kind that draws one, since the
+  // native hatch stopped being offered (issue #822) — a Connect that succeeds
+  // and confers nothing is no better than one that fails.
+  const connectable = canManage && !row.connected && row.route.kind === "composio";
   const state = row.connected
     ? row.via.length > 0
       ? `connected via ${row.via.join(" + ")}`

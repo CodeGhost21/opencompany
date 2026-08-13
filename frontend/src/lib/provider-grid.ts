@@ -30,15 +30,33 @@
 //  - **What is connected** comes from `GET …/connections` alone. It is the only
 //    route that reconciles the native `oauth/{provider}` catalog with Composio,
 //    and it is the answer an agent's tool belt is built from.
-//  - **What can be connected** comes from the backend's Composio catalog, plus
-//    the local `CONNECTION_PROVIDERS` tiles for the native-only hatch.
+//  - **What can be connected** comes from the backend's Composio catalog.
 //  - **How to connect it** is `connectRoute`, unchanged and still the single
 //    rule the tile renders and the click calls.
 //
 // `CONNECTION_PROVIDERS` is consequently no longer a *list* — the backend
-// catalog is. It is metadata for the native route: which ids the host's
-// `well_known` table can run an OAuth handshake for, and the brand colours for
-// tiles the backend catalog does not cover.
+// catalog is. It is metadata: which ids the host's `well_known` table keys, the
+// Composio slug each maps to, and the brand colours.
+//
+// ## The native catalog stops being offerable (issue #822)
+//
+// It was still half a list here. Every `CONNECTION_PROVIDERS` tile the backend
+// catalog did not cover was appended anyway — five of the eleven against the
+// host's built-in starter list, all eleven against a host that answers no
+// catalog at all — and each of them offered a Connect that #396 says confers
+// nothing: `oauth/{provider}` is written by the callback and read by no agent
+// tool. An operator on a self-hosted instance could register a provider
+// application, complete a real handshake, see the tile go green, and have given
+// their agents nothing. `connectRoute` no longer offers that route, and this
+// file no longer offers the tile: a provider appears because the backend catalog
+// carries it, not because the console has a logo for it.
+//
+// What is appended instead is narrower and load-bearing: **a provider the host
+// reports as connected**, catalog or no catalog. Retracting an offer must not
+// hide a credential the company already holds — the tile, its `via` and its
+// Disconnect are how an operator sees and releases one. So the tail went from
+// "everything we have metadata for" to "everything that is actually connected",
+// which is the same union stated honestly: what can be connected, plus what is.
 
 import type { ComposioToolkitEntry } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
@@ -58,16 +76,22 @@ import {
 /** One tile in the merged grid: what to draw, and what a click does. */
 export interface GridProvider extends ProviderRow {
   /**
-   * The id the *host* knows this provider by — what `startConnection` and
-   * `disconnectConnection` are called with, and what a manifest declares.
+   * The id the *host* knows this provider by — what `disconnectConnection` is
+   * called with, and what a manifest declares.
    *
    * Distinct from {@link ProviderRow.slug}, which is Composio's spelling and
    * what `POST …/composio/authorize` takes. They differ for every hyphenated
    * tile (`google-calendar` / `googlecalendar`) and outright for `x` /
    * `twitter`, so collapsing them into one field would silently send one
-   * namespace's key to the other's route. Falls back to the slug for a provider
-   * the local catalog has no tile for — which is most of them, and is correct:
-   * a provider with no native metadata has no native route to name.
+   * namespace's key to the other's route.
+   *
+   * Resolved local metadata first, then **the host's own spelling from
+   * `GET …/connections`**, then the slug. That middle step is what keeps
+   * Disconnect working for a natively connected provider the console has no
+   * tile for (issue #822): its row is now the only reason it has a tile at all,
+   * and `DELETE …/connections/{provider}` has to name it the way the host does.
+   * The slug fallback remains correct for the rest — a provider nothing local
+   * and nothing connected names has no host id to give.
    */
   providerId: string;
   /** How this tile's button behaves — rendered from and acted on identically. */
@@ -101,6 +125,20 @@ function nativeTileFor(slug: string): ConnectionProvider | undefined {
 }
 
 /**
+ * The local tile a host row names, matched in *either* spelling.
+ *
+ * `GET …/connections` keys a row by whichever namespace produced it, so `x` and
+ * `twitter` are the same tile and only the local metadata knows it. Both the
+ * status fold and the connected tail need that alias, and needed it identically.
+ */
+function tileForHostProvider(provider: string): ConnectionProvider | undefined {
+  const key = toolkitSlug(provider);
+  return CONNECTION_PROVIDERS.find(
+    (p) => toolkitSlug(p.id) === key || toolkitSlug(p.toolkit) === key,
+  );
+}
+
+/**
  * Collapse the host's connection rows into `slug -> connected`.
  *
  * Normalized and OR-ed rather than indexed, because the host can emit two rows
@@ -118,12 +156,29 @@ function connectedBySlug(
     const key = toolkitSlug(state.provider);
     // Fold the alias too, so a `twitter` row also marks the `x` tile connected
     // for a console that keys the tile by its id rather than its slug.
-    const tile = CONNECTION_PROVIDERS.find(
-      (p) => toolkitSlug(p.id) === key || toolkitSlug(p.toolkit) === key,
-    );
+    const tile = tileForHostProvider(state.provider);
     for (const alias of new Set([key, tile ? toolkitSlug(tile.toolkit) : key])) {
       out[alias] = out[alias] === true || state.connected;
     }
+  }
+  return out;
+}
+
+/**
+ * The host's own spelling for each provider it reported, keyed by normalized
+ * slug.
+ *
+ * `GET …/connections` answers under the manifest's spelling (`google-calendar`)
+ * or Composio's (`googlecalendar`) depending on which namespace the row came
+ * from, and `DELETE …/connections/{provider}` only accepts the former. First row
+ * wins; a raw id and its normalized form are the same string in every case where
+ * they differ only in case.
+ */
+function hostIdBySlug(states: Readonly<Record<string, ConnectionState>>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const state of Object.values(states)) {
+    const key = toolkitSlug(state.provider);
+    if (out[key] === undefined) out[key] = state.provider;
   }
   return out;
 }
@@ -158,10 +213,14 @@ function statesFor(
  * `GET …/connections`, the sole authority on connected. `reach` and
  * `platformManaged` feed `connectRoute`.
  *
- * The tail is the point of the union: `CONNECTION_PROVIDERS` tiles whose toolkit
- * the catalog did not offer are appended anyway. A host with Composio switched
- * off returns an empty catalog, and without this the page would render nothing
- * at all rather than the eleven native tiles a self-hoster can genuinely use.
+ * The tail is the point of the union, and since #822 it is a *connected* tail:
+ * a provider the host reports as connected gets a tile whether or not the
+ * catalog offers one. It used to be every `CONNECTION_PROVIDERS` tile the
+ * catalog missed, which is how a host with Composio switched off came to offer
+ * eleven Connects for a route that stores a credential no agent reads (#396).
+ * Dropping the offer must not drop the record: a company that connected Slack
+ * through the hatch keeps its tile, its `via: ["native"]` and its Disconnect,
+ * on a page that no longer invites anyone else to do the same.
  */
 export function buildGridProviders(
   catalog: readonly ComposioToolkitEntry[],
@@ -171,25 +230,35 @@ export function buildGridProviders(
   platformManaged: boolean,
 ): GridProvider[] {
   const offered = new Set(catalog.map((entry) => toolkitSlug(entry.slug)));
-  const nativeOnly: ComposioToolkitEntry[] = CONNECTION_PROVIDERS.filter(
-    (p) => !offered.has(toolkitSlug(p.toolkit)),
-  ).map((p) => ({
-    slug: p.toolkit,
-    name: p.name,
-    description: p.description,
-    logo: null,
-    categories: [],
-  }));
+  const connectedOnly: ComposioToolkitEntry[] = [];
+  for (const state of Object.values(states)) {
+    if (!state.connected) continue;
+    // Local metadata decides the tile's spelling where there is any, so the two
+    // rows a split alias produces (`x` and `twitter`) land on one tile rather
+    // than two — the same fold `connectedBySlug` performs for the status.
+    const tile = tileForHostProvider(state.provider);
+    const slug = tile ? toolkitSlug(tile.toolkit) : toolkitSlug(state.provider);
+    if (!slug || offered.has(slug)) continue;
+    offered.add(slug);
+    connectedOnly.push({
+      slug,
+      name: tile?.name ?? "",
+      description: tile?.description ?? "",
+      logo: null,
+      categories: [],
+    });
+  }
 
   const rows = buildProviderRows(
-    [...catalog, ...nativeOnly],
+    [...catalog, ...connectedOnly],
     extra,
     connectedBySlug(states),
   );
+  const hostIds = hostIdBySlug(states);
 
   return rows.map((row) => {
     const tile = nativeTileFor(row.slug);
-    const providerId = tile?.id ?? row.slug;
+    const providerId = tile?.id ?? hostIds[row.slug] ?? row.slug;
     const matched = statesFor({ slug: row.slug, providerId }, states);
     const state = matched[0];
     // A tile the host said nothing about still inherits the instance-level

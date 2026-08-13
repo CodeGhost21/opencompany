@@ -115,6 +115,16 @@ export function setActiveTourStop(view: string | null): void {
  *
  * A **no-op when no tour is running** — that is what lets a caller arm
  * unconditionally without first asking whether it is inside onboarding.
+ *
+ * **Nothing in the console calls this today** (issue #822). Its one caller was
+ * `ConnectionsView`'s native connect, which set `window.location.href` to the
+ * host's authorize URL; that offer is gone, and the Composio sign-in it left
+ * behind opens a tab rather than handing the document away. The read half stays
+ * wired — `TourController` still honours a marker on mount, and the host still
+ * redirects an in-flight handshake back to `/connections?connected=…`, so a
+ * marker written by an older bundle is still consumed. Kept, rather than deleted
+ * with its caller, because the next surface that navigates the document away
+ * mid-tour needs exactly this and reconstructing it is the harder half.
  */
 export function armTourResume(scope: LocalScope): void {
   if (activeStopView === null) return;
