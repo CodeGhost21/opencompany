@@ -2383,6 +2383,82 @@ mod ops_helper_tests {
         );
     }
 
+    /// Issue #820: an account that is not usable cannot be the one agents act
+    /// as. `c2` is a real gmail connection of this company's, and `INITIATED` —
+    /// pinning it would route every gmail send to an account that cannot send,
+    /// which is worse than the unpinned behaviour it replaces. So the refusal is
+    /// a product decision, not a validation nicety, and it is asserted with the
+    /// store: a refusal that still wrote would be a broken toolkit with a
+    /// reassuring error message.
+    ///
+    /// The two blunter refusals share the test because they share the guard, and
+    /// the assertion that matters for all three is the same one — nothing
+    /// reached [`crate::company::composio::set_default`].
+    #[tokio::test]
+    async fn pinning_an_account_that_cannot_send_is_refused_and_stores_nothing() {
+        use crate::company::composio::load_defaults;
+        use crate::ports::types::CompanyId;
+        use crate::store::FsSecretStore;
+
+        let url = spawn_backend().await;
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-pin-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+        let cfg = config(&url, vec!["gmail".into(), "slack".into()]);
+
+        let err = set_default_connection(&cfg, &company, &secrets, "c2")
+            .await
+            .expect_err("an account that is not connected cannot be pinned");
+        // `NotFound` and not `Upstream`: the backend answered fine, and the
+        // console must render this as the operator's mistake with the fix in it
+        // ("re-authorize it"), not as a provider outage.
+        assert!(
+            matches!(err, DisconnectError::NotFound(_)),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("INITIATED") && err.to_string().contains("not connected"),
+            "the message names the status the operator has to fix: {err}"
+        );
+
+        // An id belonging to nobody, and an id belonging to this company under a
+        // toolkit its manifest does not grant — the same boundary
+        // `delete_connection` draws, so a pin cannot reach what no read shows.
+        for id in ["nope", "c4", "   "] {
+            match set_default_connection(&cfg, &company, &secrets, id).await {
+                Err(DisconnectError::NotFound(_)) => {}
+                other => panic!("`{id}` must be refused as NotFound, got {other:?}"),
+            }
+        }
+
+        assert!(
+            load_defaults(&company, &secrets)
+                .await
+                .expect("defaults read")
+                .is_empty(),
+            "a refused pin must not be stored — the whole point is that the next \
+             agent turn is unchanged"
+        );
+
+        // The control: `c1` is the same toolkit, ACTIVE, and goes through. Without
+        // it a guard that refused everything would pass every assertion above.
+        let toolkit = set_default_connection(&cfg, &company, &secrets, "c1")
+            .await
+            .expect("an active account is pinnable");
+        assert_eq!(toolkit, "gmail", "the pinned toolkit is reported back");
+        assert_eq!(
+            load_defaults(&company, &secrets)
+                .await
+                .expect("defaults read")
+                .get("gmail")
+                .map(String::as_str),
+            Some("c1")
+        );
+    }
+
     /// The console's open-mode source (issue #397): the backend's real catalog,
     /// normalised. Connectable entries only, trimmed + lowercased, de-duplicated,
     /// sorted.
