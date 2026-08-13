@@ -1,9 +1,19 @@
 import { lazy, Suspense } from "react";
-import { Blocks, ChartColumnBig, Plug, type LucideIcon, Settings2, Sparkles, UserCog } from "lucide-react";
+import {
+  Blocks,
+  ChartColumnBig,
+  CreditCard,
+  Plug,
+  type LucideIcon,
+  Settings2,
+  Sparkles,
+  UserCog,
+} from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
+import { BillingView } from "@/views/BillingView";
 import { ConnectionsView } from "@/views/ConnectionsView";
 import { McpServersView } from "@/views/McpServersView";
 import { PeopleView } from "@/views/PeopleView";
@@ -19,6 +29,10 @@ export const SETTINGS_PAGES = [
   { id: "people", label: "People", icon: UserCog, hint: "Who can sign in, and as what" },
   { id: "connections", label: "Connections", icon: Plug, hint: "Third-party accounts" },
   { id: "mcp", label: "MCP Servers", icon: Blocks, hint: "Tool servers and their tools" },
+  // Sits beside Connections rather than inside it: an operator looking for
+  // "where do I put my Chargebee key" searches for billing, not for a
+  // third-party-accounts drawer.
+  { id: "billing", label: "Billing", icon: CreditCard, hint: "Invoicing through Chargebee" },
   // "What this company knows how to do" read as capability the company performs
   // — the implication issue #569 exists to remove, set here *before* the tab
   // gets a chance to correct it. The siblings describe their content; so does
@@ -111,6 +125,7 @@ export function SettingsSection({ client, company, feed, sub, onNavigate, onFlag
         {page === "people" && <PeopleView client={client} company={company} />}
         {page === "connections" && <ConnectionsView client={client} company={company} />}
         {page === "mcp" && <McpServersView client={client} company={company} />}
+        {page === "billing" && <BillingView client={client} company={company} />}
         {page === "skills" && <SkillsView client={client} company={company} />}
         {page === "usage" && (
           <Suspense
