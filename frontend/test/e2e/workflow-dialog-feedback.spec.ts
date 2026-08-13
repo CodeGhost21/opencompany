@@ -273,3 +273,43 @@ test("a valid workflow still saves", async ({ page }) => {
   await dialog.getByRole("button", { name: "Create workflow" }).click();
   await expect(dialog).toBeHidden({ timeout: 30_000 });
 });
+
+test("a new scheduled workflow discloses that it starts paused (#813)", async ({
+  page,
+}) => {
+  // #813 defect 7: the #276 disarm rule creates a scheduled workflow paused,
+  // but the dialog showed a live "next run" preview and said nothing about it,
+  // so an author reasonably believed the cron was armed. This is rendered
+  // output gated on create-mode-and-a-real-schedule, so it is pinned here.
+  const dialog = await openCreateDialog(page);
+  const paused = dialog.getByText(/scheduled workflow is created paused/i);
+
+  // No schedule set yet — there is nothing to disclose.
+  await expect(paused).toHaveCount(0);
+
+  // Pick a preset schedule on the trigger row.
+  await dialog.getByLabel("Schedule").click();
+  await page.getByRole("option", { name: /^Daily/ }).click();
+
+  // Now the notice appears at author time, next to the schedule they just set.
+  await expect(paused).toBeVisible();
+});
+
+test("the collapsed destination shows a label, never the raw __none__ sentinel (#813)", async ({
+  page,
+}) => {
+  // #813 defect 8: base-ui renders the stored value in the collapsed control,
+  // which surfaced the bare "__none__" sentinel. The friendly label only
+  // exists once rendered, so this is a browser fact.
+  const dialog = await openCreateDialog(page);
+  await dialog.getByRole("button", { name: "Add node" }).click();
+  const kind = dialog.getByLabel("Node kind").nth(1);
+  await kind.click();
+  await page.getByRole("option", { name: /^Output(?! parser)/ }).click();
+
+  // No destination chosen yet: the control stores the "__none__" sentinel, and
+  // must still read as a human label collapsed.
+  const destination = dialog.getByLabel("Send report to");
+  await expect(destination).toContainText("Nowhere (run result only)");
+  await expect(destination).not.toContainText("__none__");
+});
