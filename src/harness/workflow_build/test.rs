@@ -958,6 +958,10 @@ fn delivery_signals_are_conservative() {
     assert!(!delivery_signals("send the report to jo@acme.com").is_empty());
     assert!(delivery_signals("we email customers a weekly newsletter").is_empty());
     assert!(delivery_signals("summarize the week's work").is_empty());
+    // A numeric ticket/issue reference is not a #channel (leading-digit guard).
+    assert!(delivery_signals("summarize ticket #4521 each friday").is_empty());
+    // "send used" is not the whole word "send us" (whole-word verb match).
+    assert!(delivery_signals("send used parts to the warehouse").is_empty());
 }
 
 /// (a) The resolver rewrites a role-named agent to its roster id and records a

@@ -369,23 +369,29 @@ pub async fn run_workflow_build_pass(
         }
     };
 
-    let (draft, usage) =
-        match call_model(&builder, system_prompt(), evidence_prompt(&evidence)).await {
-            Ok(outcome) => outcome,
-            Err(failure) => {
-                record_usage(&runtime, &builder, &agent, &run_id, &failure.usage).await;
-                settle_to_todo(
-                    &runtime,
-                    &task_id,
-                    token,
-                    &run_id,
-                    &failure.reason,
-                    failure.usage,
-                )
-                .await;
-                return;
-            }
-        };
+    let (draft, usage) = match call_model(
+        &builder,
+        system_prompt(),
+        evidence_prompt(&evidence),
+        tokio::time::Instant::now() + BUILD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            record_usage(&runtime, &builder, &agent, &run_id, &failure.usage).await;
+            settle_to_todo(
+                &runtime,
+                &task_id,
+                token,
+                &run_id,
+                &failure.reason,
+                failure.usage,
+            )
+            .await;
+            return;
+        }
+    };
     record_usage(&runtime, &builder, &agent, &run_id, &usage).await;
 
     // The model's two answers: a graph, or "this is not automatable".
@@ -933,6 +939,10 @@ async fn call_model(
     builder: &WorkflowBuilder,
     system: String,
     user: String,
+    // One shared deadline bounds the whole draft attempt loop, not each call, so
+    // a retry cannot cost two full BUILD_TIMEOUT waits and outlive an upstream
+    // request timeout (issue #813 review).
+    deadline: tokio::time::Instant,
 ) -> std::result::Result<(BuildDraft, TokenUsage), PassFailure> {
     let request = ModelRequest {
         messages: vec![Message::system(system), Message::user(user)],
@@ -942,8 +952,7 @@ async fn call_model(
         ..ModelRequest::default()
     };
 
-    let response = match tokio::time::timeout(BUILD_TIMEOUT, builder.model.invoke(&(), request))
-        .await
+    let response = match tokio::time::timeout_at(deadline, builder.model.invoke(&(), request)).await
     {
         Ok(Ok(response)) => response,
         Ok(Err(err)) => {
@@ -956,10 +965,9 @@ async fn call_model(
         }
         Err(_elapsed) => {
             return Err(PassFailure {
-                reason: format!(
-                    "building a workflow gave up after {}s waiting for the model, so nothing was proposed",
-                    BUILD_TIMEOUT.as_secs()
-                ),
+                reason:
+                    "building a workflow ran out of time waiting for the model, so nothing was proposed"
+                        .to_string(),
                 usage: TokenUsage::default(),
             });
         }
@@ -1311,9 +1319,11 @@ static EMAIL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\w.+-]+@[\w-]+\.[\w.-]+").unwrap());
 
 /// A `#channel` mention — a delivery target the graph must model as an `output`
-/// node's `channel` destination, not an agent instruction.
+/// node's `channel` destination, not an agent instruction. The name must begin
+/// with a LETTER, so a numeric issue/ticket reference (`#4521`) in the prose is
+/// not misread as a channel (which would over-reject an honest draft).
 static CHANNEL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"#[A-Za-z0-9][A-Za-z0-9._-]{1,}").unwrap());
+    LazyLock::new(|| Regex::new(r"#[A-Za-z][A-Za-z0-9._-]+").unwrap());
 
 /// Normalizes a label for the resolver's exact-match compare (issue #813):
 /// lowercased, with every run of `-` / `_` / whitespace collapsed to one space
@@ -1484,11 +1494,13 @@ fn delivery_signals(description: &str) -> Vec<String> {
     if CHANNEL_RE.is_match(description) {
         signals.push("a #channel to post to".to_string());
     }
-    let lower = description.to_lowercase();
+    let norm = normalize_label(description);
     for verb in ["email", "send", "notify", "dm", "message"] {
         for object in ["me", "us"] {
             let phrase = format!("{verb} {object}");
-            if lower.contains(&phrase) {
+            // Whole-word, so "send used parts to the warehouse" does not read as
+            // "send us" — a bare substring test over-rejected honest drafts.
+            if phrase_in(&norm, &phrase) {
                 signals.push(format!("“{phrase}”"));
             }
         }
@@ -1650,8 +1662,13 @@ pub(crate) async fn draft_workflow_from_description(
     let mut user = base_user.clone();
     let mut last_errors: Vec<String> = Vec::new();
 
+    // One deadline for the whole loop: a corrective retry shares the first
+    // attempt's budget instead of adding a second full BUILD_TIMEOUT, so the
+    // handler cannot outlive an upstream request timeout (issue #813 review).
+    let deadline = tokio::time::Instant::now() + BUILD_TIMEOUT;
+
     for _attempt in 1..=MAX_DRAFT_ATTEMPTS {
-        let (draft, usage) = match call_model(&builder, system.clone(), user).await {
+        let (draft, usage) = match call_model(&builder, system.clone(), user, deadline).await {
             Ok(pair) => pair,
             Err(failure) => {
                 record_usage(runtime, &builder, COPILOT_AGENT, &run_id, &failure.usage).await;
