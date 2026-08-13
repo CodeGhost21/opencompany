@@ -379,7 +379,16 @@ function BatchItem({
   // clicked once for three calls, two were authorised, and a third that merely
   // looks unstarted reads as "still working". Stated plainly, with the way back
   // — the card's own buttons are still live, so a retry is one press.
-  if (failure && !deciding) {
+  //
+  // **A settled verdict outranks it in turn**, which is why `verdict` is tested
+  // first. A failure describes one *attempt*; a verdict describes the approval.
+  // An item that failed here and was then resolved on the Approvals page or in
+  // another tab has both, and showing "not recorded" over an approval the host
+  // has already acted on would be the card contradicting the queue — the exact
+  // drift this work exists to remove. The shell also clears the failure when
+  // that frame arrives; this ordering is what makes the render correct
+  // regardless of which state reaches it first.
+  if (failure && !deciding && !verdict) {
     return (
       <li
         data-approval-item={a.id}

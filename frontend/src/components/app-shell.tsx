@@ -1046,6 +1046,14 @@ export function AppShell({
             prev[event.approvalId] ? prev : { ...prev, [event.approvalId]: { verdict, approval } },
           );
         }
+        // A failed attempt here is superseded the moment the approval resolves
+        // anywhere (#842 review). The retry path clears its own failure, but a
+        // decision made on the Approvals page or in another tab arrives only as
+        // this frame — and a settled approval that still carried "not recorded"
+        // would be the card contradicting the queue, which is the drift the
+        // batching work exists to remove. Cleared unconditionally on the id,
+        // whether or not this console ever held a summary for it.
+        clearFailure(event.approvalId);
       }
       void feed.refresh();
     },

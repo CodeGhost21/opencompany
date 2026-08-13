@@ -242,6 +242,23 @@ describe("the consolidated approval card", () => {
     expect(text).not.toContain("None of the 3");
   });
 
+  it("shows the settled verdict, not a stale failure, once the item resolves elsewhere", async () => {
+    // Failed here, then resolved on the Approvals page or in another tab: the
+    // item carries both a failure and a verdict. A failure describes one
+    // *attempt*; the verdict describes the approval, and the host has already
+    // acted on it. Saying "not recorded" over that would be the card
+    // contradicting the queue — the drift this whole change exists to remove.
+    await render([ESPN, BBC], { a2: "approve" }, { a2: "host is away" });
+
+    const settled = container.querySelector('[data-approval-item="a2"]');
+    expect(settled?.textContent).toContain("Approved");
+    expect(settled?.textContent).not.toContain("Not recorded");
+    expect(container.querySelector('[data-approval-failed="true"]')).toBeNull();
+    // And the card counts only what is still open: a2 is decided, so it is not
+    // one of the failures still waiting on anybody.
+    expect(container.textContent ?? "").not.toContain("weren't recorded");
+  });
+
   it("leaves the buttons live after a failure, because a retry is the way out", async () => {
     await render([ESPN, BBC, GUARDIAN], { a1: "approve", a2: "approve" }, { a3: "host is away" });
 
