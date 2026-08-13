@@ -242,26 +242,33 @@ the two agree by construction: the batch an operator is asked about in one card
 is precisely the batch the runtime holds a single continuation for. It is opaque
 — an equality key, never an ordering, a count, or anything to show an operator.
 
-**One record per gated call remains the unit of truth.** There is no batch
-entity on the host, no batch resolve on the wire. Each approval keeps its own
-id, its own verdict and — on approve — its own host-scoped grant, so the
-property that makes today's behaviour correct (a grant never leaks to another
-host, `grants.md`) is untouched. Batching the *asking* is not batching the
-*granting*, and widening the grant to save a click would be the leak this
-design exists to avoid.
+**The grant model does not change at all.** There is no batch entity on the
+host, no batch resolve on the wire, and nothing new in how a grant is minted,
+stored or revoked. Each approval keeps its own id, its own verdict and — on
+approve — its own host-scoped grant, so approving three fetches still leaves
+three independently revocable rows under `Standing permissions`, one per host,
+each with its own expiry. Batching the *asking* is not batching the *granting*,
+and widening a grant to save a click would be exactly the leak `grants.md`
+exists to prevent.
 
-Two renderings over that one state, each matched to what its surface is for:
+Two renderings over that one state, divided by what each surface is **for**:
 
-- **In chat, consolidated.** One card per turn, listing what it covers, with a
-  single Approve/Decline and the ordinary scope control. A checkbox per item
-  means an operator can approve two and decline the third — strictly more
-  control than three separate cards offered. An unticked item is **declined**,
-  not skipped: the turn is blocked until every call it parked has an answer, so
-  leaving one undecided would hold the turn open.
-- **On the Approvals page, itemised.** One row per gated call, each decided on
-  its own, matching how `Standing permissions` lists one revocable row per
-  grant. A row says how many others came from the same turn, so an operator
-  arriving from the toast can tell one batch from an unrelated queue.
+- **Chat is the fast path: all-or-nothing.** One card per turn, listing the
+  hosts it covers, with a single Approve/Decline and the ordinary scope
+  control. Approve grants every call in the batch; Decline grants none. The
+  operator is mid-conversation and wants one decision, not a form. It answers
+  every item it is still asking about, because the turn stays blocked until each
+  parked call has a verdict — a decision that left one open would hold the turn
+  while looking as though it had resolved the card.
+- **The Approvals page is the granular path: itemised.** One row per gated
+  call, approved or declined on its own, matching how `Standing permissions`
+  lists one revocable row per grant. It is where an operator goes for precision,
+  or to clean up after the fact. A row says how many others came from the same
+  turn, so someone arriving from the toast can tell one batch from an unrelated
+  queue.
+
+Granular control in *both* places would be redundant, and would double the state
+that has to stay in step between two surfaces — so it lives in one.
 
 The two must not drift, and do not, because neither owns any state: both render
 the same feed, and both react to the `approval_resolved` frame. Deciding a row
