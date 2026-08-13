@@ -1378,31 +1378,11 @@ fn render_upstream_input(
         return None;
     }
 
-    let sizes: Vec<usize> = rendered.iter().map(|text| text.chars().count()).collect();
-    let allowances = upstream::allocate_fairly(&sizes, budget);
-    let of = rendered.len();
-    let mut sources = Vec::with_capacity(of);
-    let mut sections = Vec::with_capacity(of);
-    for (index, (text, (&produced, &kept))) in rendered
-        .iter()
-        .zip(sizes.iter().zip(allowances.iter()))
-        .enumerate()
-    {
-        sources.push(upstream::SourceBudget { produced, kept });
-        if kept >= produced {
-            sections.push(text.clone());
-            continue;
-        }
-        // Cut, and say so in the turn itself: an agent that cannot tell it is
-        // holding a fragment will present the fragment as the whole source.
-        let mut section = upstream::truncate_chars(text, kept);
-        section.push_str(&upstream::truncation_marker(index + 1, of, produced, kept));
-        sections.push(section);
-    }
-    Some((
-        sections.join("\n\n---\n\n"),
-        upstream::UpstreamReport { sources, budget },
-    ))
+    // Composition, budgeting and the markers that account for both live together
+    // in `upstream`, so the guarantee — the section is never longer than `budget`,
+    // *including* every marker and separator — is one function's postcondition
+    // rather than a property spread across this loop and that module.
+    Some(upstream::bound_sections(&rendered, budget))
 }
 
 /// Renders one upstream item into the text an agent reads.
@@ -2112,6 +2092,35 @@ mod tests {
         assert!(message.contains("TRUNCATED BY OPENCOMPANY"), "{message}");
         assert!(message.contains("Request for this run:"), "{message}");
         assert!(message.contains("today's sport"), "{message}");
+    }
+
+    /// A thousand-way fan-in — a `split_out` over a large array is all it takes —
+    /// must not smuggle a thousand truncation markers past the budget. This is
+    /// the fold-level twin of `upstream`'s
+    /// `a_thousand_oversized_sources_stay_inside_the_budget`, driven through the
+    /// real envelope shape rather than pre-rendered strings, because that is the
+    /// path a graph actually takes.
+    #[test]
+    fn a_thousand_way_fan_in_cannot_smuggle_its_markers_past_the_budget() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let inputs: Vec<Value> = (0..1_000)
+            .map(|n| source_envelope(&format!("SOURCE_{n}"), 5_000))
+            .collect();
+        let request = json!({ "prompt": "Rank today's stories.", "input": inputs });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        // The section itself is bounded by `budget`; the message adds only the
+        // node's own instruction and the heading, which are not upstream text.
+        assert!(
+            message.chars().count() <= budget + MARKER_SLACK,
+            "5,000,000 characters of upstream input across 1,000 sources produced a {}-character \
+             turn",
+            message.chars().count()
+        );
+        assert_eq!(report.sources.len(), 1_000, "every input is accounted for");
+        let notice = report.notice().expect("the operator is told");
+        assert!(notice.contains("1000 sources"), "{notice}");
     }
 
     /// A source rendered as JSON (a `transform` / structured `tool_call` output,

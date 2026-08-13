@@ -141,14 +141,26 @@ heading `## Input from the previous step`.
 
 That fold is **bounded**
 ([`src/workflows/caps/upstream.rs`](../../../src/workflows/caps/upstream.rs)).
-One agent node's turn carries at most `DEFAULT_UPSTREAM_BUDGET_CHARS` (32,000)
-characters of upstream text, and the budget is divided max-min fairly across the
-predecessors — a short source is served in full and the large ones split what is
-left, so one enormous source cannot crowd its siblings out. A model that
-advertises an input window may lower that budget for its own size; it may never
-raise it, because the advertised figure describes the model rather than the turn
-and says nothing about the system prompt, the tool schemas or the teammate's
-session history sharing the same window.
+The section one agent node's turn carries is never longer than
+`DEFAULT_UPSTREAM_BUDGET_CHARS` (32,000) characters — **including every
+truncation marker and separator**, not merely the source text inside them. The
+budget is divided max-min fairly across the predecessors, so a short source is
+served in full and the large ones split what is left and cannot crowd it out. A
+model that advertises an input window may lower that budget for its own size; it
+may never raise it, because the advertised figure describes the model rather than
+the turn and says nothing about the system prompt, the tool schemas or the
+teammate's session history sharing the same window.
+
+The accounting is paid for three ways, each where it fits: separators and the
+omitted-sources line are deducted up front; each truncation marker is reserved
+out of the allowance of the source it describes; and predecessors past
+`max_rendered_sources` — the point where each one's fair share falls below a
+readable `MIN_SOURCE_SHARE_CHARS` — are aggregated into a single `[OMITTED BY
+OPENCOMPANY — N of M inputs …]` line rather than rendered as unreadable shards.
+That last cap is what makes per-source markers affordable at all: without it a
+thousand-way fan-in (a `split_out` over a large array is enough) adds a thousand
+markers, which is how the first cut of this bound could emit 243,886 characters
+under a 32,000-character budget.
 
 Three properties are contractual:
 
@@ -158,12 +170,14 @@ Three properties are contractual:
   producers — an upstream `agent` reply and a `transform` payload are unbounded
   in exactly the same way. One rule at the join covers a single 500KB
   `web_fetch` and a three-way fan-in alike.
-- **Truncation is never silent.** Each cut source carries a
-  `[TRUNCATED BY OPENCOMPANY — source i of n …]` marker in the turn, so the
+- **Truncation is never silent, and never unbudgeted.** Each cut source carries
+  a `[TRUNCATED BY OPENCOMPANY — source i of n …]` marker in the turn, so the
   agent knows it is holding a fragment, and the run carries an operator notice
   on
   [`WorkflowRun::notices`](../../../src/ports/workflow_runner.rs) naming how much arrived, how much
-  fitted and what to do instead.
+  fitted, how many inputs were dropped entirely, and what to do instead. The
+  markers are inside the budget they report on — a bound whose own reporting can
+  breach it is not a bound.
 - **A bounded turn is not a failed run.** The upstream work is already paid for
   by the time the fold happens, so an oversized input truncates and reports
   rather than failing the node and discarding that work.
