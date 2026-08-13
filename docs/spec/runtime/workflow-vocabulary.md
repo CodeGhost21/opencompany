@@ -130,6 +130,51 @@ Every new field carries `#[serde(default)]`. `CompanyEvent::WorkflowRunFinished`
 is replayed at boot, so a field without one makes every pre-existing journal
 line fail to parse — silent history loss, not a compile error.
 
+## What an `agent` node receives from upstream, and its bound
+
+`translate()` binds `input = "=items"` on every `agent` node, so a node's turn
+carries the resolved output of **every** direct predecessor — that is what makes
+a fan-in (`gather N sources → rank them`) deliver all N rather than the first.
+The fold happens in
+[`src/workflows/caps/mod.rs`](../../../src/workflows/caps/mod.rs), under the
+heading `## Input from the previous step`.
+
+That fold is **bounded**
+([`src/workflows/caps/upstream.rs`](../../../src/workflows/caps/upstream.rs)).
+One agent node's turn carries at most `DEFAULT_UPSTREAM_BUDGET_CHARS` (32,000)
+characters of upstream text, and the budget is divided max-min fairly across the
+predecessors — a short source is served in full and the large ones split what is
+left, so one enormous source cannot crowd its siblings out. A model that
+advertises an input window may lower that budget for its own size; it may never
+raise it, because the advertised figure describes the model rather than the turn
+and says nothing about the system prompt, the tool schemas or the teammate's
+session history sharing the same window.
+
+Three properties are contractual:
+
+- **The bound is at the join, not at the producer.** A cap on a `tool_call`
+  node's own output would bound each fetch separately and still let three
+  bounded fetches sum to an oversized turn, and it would miss the other
+  producers — an upstream `agent` reply and a `transform` payload are unbounded
+  in exactly the same way. One rule at the join covers a single 500KB
+  `web_fetch` and a three-way fan-in alike.
+- **Truncation is never silent.** Each cut source carries a
+  `[TRUNCATED BY OPENCOMPANY — source i of n …]` marker in the turn, so the
+  agent knows it is holding a fragment, and the run carries an operator notice
+  on
+  [`WorkflowRun::notices`](../../../src/ports/workflow_runner.rs) naming how much arrived, how much
+  fitted and what to do instead.
+- **A bounded turn is not a failed run.** The upstream work is already paid for
+  by the time the fold happens, so an oversized input truncates and reports
+  rather than failing the node and discarding that work.
+
+A provider that refuses a turn on its context window anyway — the remaining
+causes are the node's own instruction, its tool schemas, or the teammate's
+accumulated session history — has its error rewritten before it reaches the run,
+because the vendor wording ("the conversation is too long … please start a new
+chat") describes a chat product: a workflow step has no conversation an operator
+owns and no chat for them to start.
+
 ## The engine-only kinds OpenCompany rejects
 
 The engine catalog carries four kinds the parser does **not** accept:

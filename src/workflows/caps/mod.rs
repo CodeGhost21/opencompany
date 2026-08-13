@@ -54,6 +54,9 @@ mod http;
 mod resolver;
 mod state;
 mod tools;
+/// Issue #849: how much upstream output one agent node's turn may carry, and
+/// what to say when a provider refuses the turn on its context window anyway.
+mod upstream;
 
 use std::sync::Arc;
 
@@ -78,6 +81,13 @@ pub(crate) use self::tools::{
     WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, wired_workflow_namespaces, workflow_tool_info,
     workflow_tool_wiring,
 };
+/// Issue #849: the ceiling on what one agent node's turn carries from upstream.
+/// Re-exported so the end-to-end fan-in proof
+/// ([`agent_upstream_input_test`](crate::workflows::agent_upstream_input_test))
+/// asserts against the shipped number rather than a copy of it — which is the
+/// only caller outside this module, hence the `cfg`.
+#[cfg(test)]
+pub(crate) use self::upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
 // `WORKFLOW_TOOL_SLUGS` stays module-private to `tools` since #813: the catalogue
 // (`WORKFLOW_TOOL_CATALOG`) is what callers ground and validate against, and the
 // slug table is now only its in-module pinning cross-check.
@@ -1056,7 +1066,32 @@ impl AgentRunner for HarnessAgentRunner {
         // dropped (a `agent -> agent` pipeline's second teammate saw nothing).
         // The static `prompt` still leads (`message_from_request`); the upstream
         // input is appended under a labelled heading, then the #154 run topic.
-        let instruction = append_upstream_input(&message_from_request(&request), &request);
+        //
+        // Issue #849: bounded on the way in. Nothing used to limit what a fan-in
+        // folded here, so three `web_fetch` payloads were concatenated verbatim
+        // and the turn intermittently died on a provider context-window 400 —
+        // after the fetches were already paid for. The budget is applied before
+        // the request is composed, so the boundary is decided by us rather than
+        // discovered by the provider.
+        let budget = upstream::budget_chars(
+            self.deps
+                .provider
+                .profile()
+                .and_then(|profile| profile.max_input_tokens),
+        );
+        let (instruction, upstream_report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+        if let Some(notice) = upstream_report.notice() {
+            tracing::warn!(
+                company = %self.company,
+                workflow = %self.workflow_id,
+                run_id = %self.run_id,
+                agent = agent_ref,
+                budget,
+                "workflow agent node: upstream input exceeded this step's budget and was truncated"
+            );
+            self.notices.push(notice);
+        }
         let message = compose_turn_message(&instruction, self.run_request.as_deref());
         // Issue #881: which node this is. `translate` writes it in the
         // first-class config layer beside `agent_ref` (config cannot shadow
@@ -1132,8 +1167,17 @@ impl AgentRunner for HarnessAgentRunner {
             (outcome, parked)
         });
         let (outcome, parked) = self.board_claim.scoped(turn).await;
-        let outcome = outcome
-            .map_err(|e| EngineError::Capability(format!("harness agent '{agent_ref}': {e}")))?;
+        // Issue #849: a provider context-window refusal reaches the operator as
+        // the run's error text, and the vendor's own wording ("Please start a
+        // new chat") is unfollowable in a workflow — there is no chat and no
+        // button. Rewrite that one class into what is actually too big and what
+        // to do about it, keeping the provider's words at the end. Every other
+        // failure passes through exactly as before.
+        let outcome = outcome.map_err(|e| {
+            let raw = e.to_string();
+            let reported = upstream::context_overflow_advice(&raw).unwrap_or(raw);
+            EngineError::Capability(format!("harness agent '{agent_ref}': {reported}"))
+        })?;
 
         // ── Issue #881: a node whose deliverable was parked is BLOCKED ───────
         //
@@ -1267,20 +1311,37 @@ const UPSTREAM_INPUT_HEADING: &str = "## Input from the previous step";
 /// A single-agent workflow with no predecessor therefore composes exactly the
 /// message it did before #782, never a dangling empty heading. `message` shape is
 /// then decided by [`compose_turn_message`] alone, as before.
-fn append_upstream_input(instruction: &str, request: &Value) -> String {
-    let Some(section) = request.get("input").and_then(render_upstream_input) else {
-        return instruction.to_string();
+///
+/// # Bounded (issue #849)
+///
+/// `budget` is the most upstream text this turn may carry, and it is enforced
+/// here rather than discovered by the provider. The returned
+/// [`UpstreamReport`](upstream::UpstreamReport) says what the budget did — it is
+/// empty of truncations for nearly every run, and the caller raises an operator
+/// notice only when it is not.
+fn append_upstream_input(
+    instruction: &str,
+    request: &Value,
+    budget: usize,
+) -> (String, upstream::UpstreamReport) {
+    let Some((section, report)) = request
+        .get("input")
+        .and_then(|input| render_upstream_input(input, budget))
+    else {
+        return (instruction.to_string(), upstream::UpstreamReport::default());
     };
     let instruction = instruction.trim_end();
-    if instruction.is_empty() {
+    let folded = if instruction.is_empty() {
         format!("{UPSTREAM_INPUT_HEADING}\n{section}")
     } else {
         format!("{instruction}\n\n{UPSTREAM_INPUT_HEADING}\n{section}")
-    }
+    };
+    (folded, report)
 }
 
 /// Renders the upstream envelope(s) an agent node received (`request["input"]`,
-/// the resolved `=items` set) into the text the agent reads.
+/// the resolved `=items` set) into the text the agent reads, bounded to `budget`
+/// characters in total (issue #849).
 ///
 /// Each predecessor item is a stable `{ json, text, raw }` envelope (see the
 /// tinyflows `envelope` module), so the human-readable `text` (an upstream
@@ -1289,16 +1350,59 @@ fn append_upstream_input(instruction: &str, request: &Value) -> String {
 /// Multiple predecessors — a fan-in (`merge -> agent`) or several edges into one
 /// agent — are all rendered, separated by a rule, so none is lost.
 ///
+/// # Why the bound lives here and not at the `tool_call` node's own output
+///
+/// This is the **join**, and it is the only place the whole set is visible at
+/// once. A cap at a `tool_call` node's output would bound each fetch separately
+/// and still let three bounded fetches sum to an oversized turn, and it would
+/// have to spend its cap blind to how many siblings were about to arrive. It
+/// would also miss every other producer — an upstream *agent* node's reply is
+/// unbounded in exactly the same way, and a `transform` node can manufacture a
+/// large payload from a small one. Bounding at the join covers a single enormous
+/// `web_fetch` and a three-way fan-in with one rule: the same
+/// [`allocate_fairly`](upstream::allocate_fairly) call handles one source and N.
+///
 /// Returns `None` when nothing is renderable — an empty set, all-`null` items, or
 /// empty containers — which is what keeps the no-upstream path byte-identical.
-fn render_upstream_input(input: &Value) -> Option<String> {
+fn render_upstream_input(
+    input: &Value,
+    budget: usize,
+) -> Option<(String, upstream::UpstreamReport)> {
     let items: Vec<&Value> = match input {
         Value::Array(items) => items.iter().collect(),
         Value::Null => return None,
         other => vec![other],
     };
     let rendered: Vec<String> = items.into_iter().filter_map(render_upstream_item).collect();
-    (!rendered.is_empty()).then(|| rendered.join("\n\n---\n\n"))
+    if rendered.is_empty() {
+        return None;
+    }
+
+    let sizes: Vec<usize> = rendered.iter().map(|text| text.chars().count()).collect();
+    let allowances = upstream::allocate_fairly(&sizes, budget);
+    let of = rendered.len();
+    let mut sources = Vec::with_capacity(of);
+    let mut sections = Vec::with_capacity(of);
+    for (index, (text, (&produced, &kept))) in rendered
+        .iter()
+        .zip(sizes.iter().zip(allowances.iter()))
+        .enumerate()
+    {
+        sources.push(upstream::SourceBudget { produced, kept });
+        if kept >= produced {
+            sections.push(text.clone());
+            continue;
+        }
+        // Cut, and say so in the turn itself: an agent that cannot tell it is
+        // holding a fragment will present the fragment as the whole source.
+        let mut section = upstream::truncate_chars(text, kept);
+        section.push_str(&upstream::truncation_marker(index + 1, of, produced, kept));
+        sections.push(section);
+    }
+    Some((
+        sections.join("\n\n---\n\n"),
+        upstream::UpstreamReport { sources, budget },
+    ))
 }
 
 /// Renders one upstream item into the text an agent reads.
@@ -1709,6 +1813,19 @@ mod tests {
 
     // ── Issue #782: the upstream node's output reaches the next agent's turn ──
 
+    /// [`append_upstream_input`] under the shipped budget, keeping the #782
+    /// tests reading about *what reaches the turn* rather than about the #849
+    /// budget they are all far below. The truncation report those calls discard
+    /// has its own tests below.
+    fn folded(request: &Value) -> String {
+        append_upstream_input(
+            &message_from_request(request),
+            request,
+            upstream::DEFAULT_UPSTREAM_BUDGET_CHARS,
+        )
+        .0
+    }
+
     /// The headline. An `agent -> agent` pipeline's second teammate must receive
     /// the first's output. `translate` binds `input = "=items"`, the engine
     /// resolves it to the predecessor envelope, and this proves the runner folds
@@ -1722,7 +1839,7 @@ mod tests {
             "prompt": "Write the launch post.",
             "input": [{ "json": {}, "text": "The analyst found a 20% MoM jump.", "raw": {} }],
         });
-        let message = append_upstream_input(&message_from_request(&request), &request);
+        let message = folded(&request);
         // The node's own instruction still leads.
         assert!(message.starts_with("Write the launch post."), "{message}");
         // …the upstream output is present, under its heading…
@@ -1746,7 +1863,7 @@ mod tests {
                 { "json": {}, "text": "Predecessor B: sentiment is positive.", "raw": {} },
             ],
         });
-        let message = append_upstream_input(&message_from_request(&request), &request);
+        let message = folded(&request);
         assert!(
             message.contains("Predecessor A: market is up."),
             "first predecessor missing: {message}"
@@ -1766,7 +1883,7 @@ mod tests {
             "prompt": "Summarise the fetch.",
             "input": [{ "json": { "rows": 3 }, "text": null, "raw": { "rows": 3 } }],
         });
-        let message = append_upstream_input(&message_from_request(&request), &request);
+        let message = folded(&request);
         assert!(message.contains(UPSTREAM_INPUT_HEADING), "{message}");
         assert!(
             message.contains("\"rows\""),
@@ -1795,13 +1912,13 @@ mod tests {
             }
             let request = Value::Object(request);
             assert_eq!(
-                append_upstream_input(&message_from_request(&request), &request),
+                folded(&request),
                 base,
                 "input {input:?} must not alter the message or add an empty heading"
             );
             // And the whole composition (including the #154 run topic) is
             // unchanged from what `compose_turn_message` alone would produce.
-            let instruction = append_upstream_input(&message_from_request(&request), &request);
+            let instruction = folded(&request);
             assert_eq!(
                 compose_turn_message(&instruction, Some("ship dark mode")),
                 compose_turn_message(base, Some("ship dark mode")),
@@ -1819,13 +1936,207 @@ mod tests {
             "prompt": "Write the post.",
             "input": [{ "json": {}, "text": "ANALYST_SAID_THIS", "raw": {} }],
         });
-        let instruction = append_upstream_input(&message_from_request(&request), &request);
+        let instruction = folded(&request);
         let message = compose_turn_message(&instruction, Some("dark mode launch"));
         assert!(message.starts_with("Write the post."), "{message}");
         assert!(message.contains(UPSTREAM_INPUT_HEADING), "{message}");
         assert!(message.contains("ANALYST_SAID_THIS"), "{message}");
         assert!(message.contains("Request for this run:"), "{message}");
         assert!(message.contains("dark mode launch"), "{message}");
+    }
+
+    // ── Issue #849: nothing may hand an agent node an unbounded payload ──
+    //
+    // Driven by synthetic oversized payloads, never by a live page: the reported
+    // failure is intermittent *because* it depends on how much text a sports
+    // section happened to return that minute, so a test that reproduced it that
+    // way would be a coin flip too.
+
+    /// One predecessor envelope carrying `chars` characters of page-like text —
+    /// the shape a `web_fetch` `tool_call` node emits (its non-JSON output is
+    /// wrapped as `{"text": …}`, which the tinyflows envelope lifts to `text`).
+    fn source_envelope(marker: &str, chars: usize) -> Value {
+        let body = format!("{marker}{}", "x".repeat(chars.saturating_sub(marker.len())));
+        json!({ "json": { "text": body.clone() }, "text": body, "raw": { "text": body } })
+    }
+
+    /// How much slack above the budget the markers, the heading and the section
+    /// rules are allowed to add. They sit **outside** the budget deliberately —
+    /// the budget exists to bound upstream *text*, and letting our own accounting
+    /// compete for room would mean the truncation marker could itself be the
+    /// thing squeezed out (the reasoning `memory_loop`'s skipped-hit marker
+    /// arrived at first).
+    const MARKER_SLACK: usize = 2_000;
+
+    /// The reported shape: three fetched sources fan in to one ranking agent.
+    /// Every source must still be represented, the turn must be bounded, and
+    /// every cut must be visible.
+    #[test]
+    fn a_three_way_fan_in_is_bounded_and_no_source_is_lost() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let request = json!({
+            "prompt": "Rank today's stories.",
+            "input": [
+                source_envelope("SOURCE_ONE", 200_000),
+                source_envelope("SOURCE_TWO", 200_000),
+                source_envelope("SOURCE_THREE", 200_000),
+            ],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(
+            message.chars().count() <= budget + MARKER_SLACK,
+            "600k characters of upstream input must not reach a turn: {} characters",
+            message.chars().count()
+        );
+        // …and every source is still *there*, which is what separates a bound
+        // from "drop everything after the first".
+        for marker in ["SOURCE_ONE", "SOURCE_TWO", "SOURCE_THREE"] {
+            assert!(message.contains(marker), "{marker} was lost entirely");
+        }
+        // Each cut is visible to the agent.
+        assert_eq!(
+            message.matches("TRUNCATED BY OPENCOMPANY").count(),
+            3,
+            "every truncated source carries its own marker: {message}"
+        );
+        assert!(message.contains("source 3 of 3"), "{message}");
+
+        // …and to the operator.
+        assert_eq!(report.sources.len(), 3);
+        assert!(report.truncated_any());
+        let notice = report.notice().expect("the operator is told");
+        assert!(notice.contains("3 sources"), "{notice}");
+        assert!(notice.contains("3 of them were truncated"), "{notice}");
+    }
+
+    /// The "is it only a fan-in?" question, answered: it is not. A **single**
+    /// enormous `web_fetch` into one agent runs the same unbounded path, and the
+    /// bound at the join covers it with no second rule.
+    #[test]
+    fn a_single_enormous_source_is_bounded_too() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let request = json!({
+            "prompt": "Summarise this page.",
+            "input": [source_envelope("ONLY_SOURCE", 500_000)],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(
+            message.chars().count() <= budget + MARKER_SLACK,
+            "a single 500k-character page must not reach a turn whole: {} characters",
+            message.chars().count()
+        );
+        assert!(message.contains("ONLY_SOURCE"), "the source still arrives");
+        assert!(message.contains("source 1 of 1"), "{message}");
+        assert_eq!(report.sources.len(), 1);
+        assert!(report.truncated_any());
+    }
+
+    /// A large sibling must not starve a small one — the fan-in failure mode a
+    /// flat per-source cap would not fix and a running total would make
+    /// order-dependent.
+    #[test]
+    fn a_short_source_survives_whole_beside_an_enormous_one() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let short = "SHORT_SOURCE: the wire service filed three lines today.";
+        let request = json!({
+            "prompt": "Rank today's stories.",
+            "input": [
+                source_envelope("HUGE_SOURCE", 400_000),
+                json!({ "json": {}, "text": short, "raw": {} }),
+            ],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(
+            message.contains(short),
+            "the short source must arrive intact, not be crowded out: {message}"
+        );
+        assert_eq!(
+            message.matches("TRUNCATED BY OPENCOMPANY").count(),
+            1,
+            "only the enormous source is cut: {message}"
+        );
+        assert_eq!(report.sources[1].produced, report.sources[1].kept);
+        assert!(report.sources[0].kept < report.sources[0].produced);
+    }
+
+    /// The overwhelmingly common run: everything fits, so the fold is exactly
+    /// what #782 produced and the operator is told nothing new.
+    #[test]
+    fn an_ordinary_fan_in_is_untouched_and_says_nothing() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let request = json!({
+            "prompt": "Combine the research.",
+            "input": [
+                { "json": {}, "text": "Predecessor A: market is up.", "raw": {} },
+                { "json": {}, "text": "Predecessor B: sentiment is positive.", "raw": {} },
+            ],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(!message.contains("TRUNCATED"), "{message}");
+        assert!(!report.truncated_any());
+        assert_eq!(report.notice(), None);
+        assert!(
+            message.contains("Predecessor A: market is up."),
+            "{message}"
+        );
+        assert!(
+            message.contains("Predecessor B: sentiment is positive."),
+            "{message}"
+        );
+    }
+
+    /// The bound survives composition: the marker is still in the message the
+    /// teammate is actually sent, alongside the node's instruction and the #154
+    /// run topic.
+    #[test]
+    fn the_truncation_marker_survives_into_the_composed_turn() {
+        let request = json!({
+            "prompt": "Rank today's stories.",
+            "input": [source_envelope("BIG_SOURCE", 200_000)],
+        });
+        let (instruction, _) = append_upstream_input(
+            &message_from_request(&request),
+            &request,
+            upstream::DEFAULT_UPSTREAM_BUDGET_CHARS,
+        );
+        let message = compose_turn_message(&instruction, Some("today's sport"));
+        assert!(message.starts_with("Rank today's stories."), "{message}");
+        assert!(message.contains("TRUNCATED BY OPENCOMPANY"), "{message}");
+        assert!(message.contains("Request for this run:"), "{message}");
+        assert!(message.contains("today's sport"), "{message}");
+    }
+
+    /// A source rendered as JSON (a `transform` / structured `tool_call` output,
+    /// which has no prose `text`) is bounded on the same path — the bound is on
+    /// what the turn carries, not on which node kind produced it.
+    #[test]
+    fn a_structured_source_is_bounded_on_the_same_path() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let rows: Vec<Value> = (0..20_000)
+            .map(|n| json!({ "headline": format!("story {n}"), "score": n }))
+            .collect();
+        let request = json!({
+            "prompt": "Rank these.",
+            "input": [{ "json": { "rows": rows }, "text": null, "raw": {} }],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(
+            message.chars().count() <= budget + MARKER_SLACK,
+            "a structured payload is bounded too: {} characters",
+            message.chars().count()
+        );
+        assert!(message.contains("TRUNCATED BY OPENCOMPANY"), "{message}");
+        assert!(report.truncated_any());
     }
 
     #[test]
