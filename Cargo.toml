@@ -389,6 +389,13 @@ telegram = ["dep:reqwest"]
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).
 oauth = ["dep:reqwest"]
+# Issue #788: Chargebee billing integrated as backend service code, surfaced to
+# agents as callable tools. NOT a separate MCP server and NOT a second binary —
+# the integration lives in the tenant workload so the credential can be
+# per-company, held in that company's own SecretStore. The only gated dependency
+# is the shared `reqwest` client the REST calls use; `src/chargebee/` compiles
+# only under this feature, so the default build is unaffected.
+chargebee = ["dep:reqwest"]
 
 [patch.crates-io]
 # opencompany's own vendored tinyagents (2.1.0). Satisfies openhuman's `^2.1`.

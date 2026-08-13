@@ -6,6 +6,10 @@
 
 pub mod app;
 pub mod brain;
+/// Chargebee billing (issue #788): the REST client and the billing operations
+/// the agent's tools call. The toolbelt bridge lives in `harness::chargebee`.
+#[cfg(feature = "chargebee")]
+pub mod chargebee;
 pub mod company;
 /// Local-only runtime host used by the packaged Tauri desktop application.
 /// It embeds the existing operator API and ships the curated company presets;

@@ -216,6 +216,24 @@ pub enum OpenCompanyError {
         message: String,
     },
 
+    /// A Chargebee Billing API failure, or a tool argument this crate rejected
+    /// before making the call (issue #788).
+    ///
+    /// Carries `status` alongside `code` because Chargebee reports business
+    /// outcomes — a customer that does not exist, a currency the site has not
+    /// enabled — as 4xx responses whose JSON body names the real problem. The
+    /// agent needs that body, not the status, so both are preserved; a locally
+    /// rejected argument uses `status: 0` and `code: invalid_arguments`.
+    #[error("chargebee error ({code}): {message}")]
+    Chargebee {
+        /// The HTTP status, or `0` when the failure never reached the network.
+        status: u16,
+        /// Chargebee's `api_error_code`, or a local token.
+        code: String,
+        /// A human-readable description of the failure.
+        message: String,
+    },
+
     /// A spawned background task the caller was waiting on panicked or was
     /// aborted, so its result never arrived (issue #383).
     ///
@@ -296,6 +314,7 @@ impl OpenCompanyError {
             Self::Orchestration { code, .. } => code.clone(),
             Self::Tinyplace { code, .. } => format!("tinyplace_{code}"),
             Self::TinyHumans { code, .. } => format!("tinyhumans_{code}"),
+            Self::Chargebee { code, .. } => format!("chargebee_{code}"),
             Self::BackgroundTask(_) => "background_task".to_string(),
             Self::Unimplemented(_) => "unimplemented".to_string(),
             #[cfg(feature = "openhuman")]
