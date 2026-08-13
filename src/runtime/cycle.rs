@@ -5078,6 +5078,123 @@ mod test {
         );
     }
 
+    /// Issue #842: **every gated call one turn parks carries that turn's key**,
+    /// and a different turn's parks carry a different one.
+    ///
+    /// This is the whole of the batching mechanism, and it is deliberately not
+    /// a new one. #469 already records the parking cycle so a turn blocked on
+    /// four decisions is continued once rather than four times; the operator
+    /// was simply never shown that grouping, so a research turn that reached
+    /// three sites interrupted the conversation three times to ask about one
+    /// piece of work. Projecting the key it already had is what lets the
+    /// conversation ask once.
+    ///
+    /// The second host is the half that matters. A key every park shares would
+    /// consolidate correctly and also fold two unrelated turns into one card —
+    /// an operator approving a batch they never saw raised. Grouping is only
+    /// safe because the key separates turns, so both directions are asserted.
+    ///
+    /// What is *not* changed here, and is asserted to make the point: the parks
+    /// stay two records with two ids. Chat groups them for display; each is
+    /// still decided on its own and still mints its own host-scoped grant
+    /// (#739).
+    #[tokio::test]
+    async fn every_approval_one_turn_parks_carries_that_turns_batch_key() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let sender = Arc::new(RecordingMailSender::new());
+        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
+            .with_mail(CompanyMail {
+                sender: sender.clone(),
+                smtp: test_smtp("ceo@acme.test"),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // One turn, two gated calls — the shape the issue reports, where a
+        // research turn reaches several outside hosts before it yields.
+        let turn = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-research".into(),
+            &rt,
+            None,
+            ApprovalConversation {
+                thread: Some("desk-marketing".to_string()),
+                parent: None,
+            },
+        );
+        turn.park_effect(harness_effect(
+            "seo",
+            "web_fetch",
+            serde_json::json!({ "url": "https://espn.com/nba" }),
+        ))
+        .await
+        .unwrap();
+        turn.park_effect(harness_effect(
+            "seo",
+            "web_fetch",
+            serde_json::json!({ "url": "https://bbc.com/sport" }),
+        ))
+        .await
+        .unwrap();
+
+        // A later, unrelated turn in the same conversation.
+        let other = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-later".into(),
+            &rt,
+            None,
+            ApprovalConversation {
+                thread: Some("desk-marketing".to_string()),
+                parent: None,
+            },
+        );
+        other
+            .park_effect(harness_effect(
+                "seo",
+                "web_fetch",
+                serde_json::json!({ "url": "https://theguardian.com/uk" }),
+            ))
+            .await
+            .unwrap();
+
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 3, "one record per gated call, still");
+        let batches: Vec<Option<String>> = pending.iter().map(|p| p.batch.clone()).collect();
+        assert!(
+            batches.iter().all(Option::is_some),
+            "a park raised by a turn must name it: {batches:?}"
+        );
+
+        let by_url = |url: &str| {
+            pending
+                .iter()
+                .find(|p| p.payload.as_ref().is_some_and(|v| v["url"] == url))
+                .unwrap_or_else(|| panic!("no parked approval for {url}"))
+        };
+        let espn = by_url("https://espn.com/nba");
+        let bbc = by_url("https://bbc.com/sport");
+        let guardian = by_url("https://theguardian.com/uk");
+
+        assert_eq!(
+            espn.batch, bbc.batch,
+            "two calls one turn parked belong to one batch, so the operator is asked once"
+        );
+        assert_ne!(
+            espn.batch, guardian.batch,
+            "a different turn is a different question — consolidating across turns would ask \
+             an operator to approve work they never saw raised"
+        );
+        // Still three decisions underneath. The batch is presentation; the park
+        // is the unit of truth, and each keeps its own id to be resolved by.
+        assert_eq!(
+            std::collections::HashSet::from([&espn.id, &bbc.id, &guardian.id]).len(),
+            3,
+            "grouping must not merge the records it groups"
+        );
+    }
+
     /// The correlation key itself (#333): which card a cycle is working, read
     /// off its own trigger events.
     #[test]

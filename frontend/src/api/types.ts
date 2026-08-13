@@ -365,6 +365,27 @@ export interface ApprovalSummary {
    * alone, exactly as every approval did before this shipped.
    */
   thread?: string | null;
+  /**
+   * Which turn's gated calls this one belongs to (#842) — an opaque key shared
+   * by every approval a single agent turn parked.
+   *
+   * **A display grouping, never a decision.** One research turn that reaches
+   * three sites parks three approvals, and each stays its own record with its
+   * own id, its own approve/decline and — on approve — its own host-scoped
+   * grant (#739). The conversation consolidates them into one card so it
+   * interrupts once instead of three times; the Approvals page deliberately
+   * keeps one row per approval, matching how `Standing permissions` lists one
+   * revocable row per grant. Resolving is per id on both surfaces.
+   *
+   * Never compare it for anything but equality, and never show it: it is a
+   * runtime identifier, which the glossary rule keeps off an operator's screen.
+   *
+   * Absent for an approval no turn raised (a workflow node, a scheduler tick)
+   * and against a host that predates the field. Both are grouped alone, which
+   * is exactly the pre-#842 rendering — so an old host still produces a card
+   * that can be decided.
+   */
+  batch?: string | null;
 }
 
 /**

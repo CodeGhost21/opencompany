@@ -97,6 +97,29 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
   const { approvals, now } = feed;
   const askerNames = useAskerNames(client, company, approvals);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
+  /**
+   * How many rows each turn's batch still has waiting (#842).
+   *
+   * The page stays **itemised** — one row per gated call, each independently
+   * approvable, exactly as `Standing permissions` below lists one revocable row
+   * per grant. This is the one thing it borrows from the conversation's
+   * consolidated card: a row says how many others were asked for alongside it,
+   * so an operator who arrives here from the toast can tell "this is one of
+   * three from one turn" from "these are three unrelated requests" — which is
+   * the difference between deciding the batch and deciding a queue.
+   *
+   * Counted over what is still pending rather than over the whole batch, so the
+   * number shrinks as rows are decided instead of promising a fourth row that
+   * has already been signed off.
+   */
+  const batchTotals = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const a of approvals) {
+      if (!a.batch) continue;
+      counts.set(a.batch, (counts.get(a.batch) ?? 0) + 1);
+    }
+    return counts;
+  }, [approvals]);
 
   const markInFlight = (id: string, verdict: Verdict | null) =>
     setInFlight((prev) => {
@@ -207,6 +230,7 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
                   now={now}
                   askerNames={askerNames}
                   deciding={inFlight.get(a.id) ?? null}
+                  batchTotal={batchTotals.get(a.batch ?? "") ?? 1}
                   onDecide={(verdict, scope) => void decide(a, verdict, scope)}
                 />
               ))}
@@ -477,6 +501,7 @@ function ApprovalCard({
   now,
   askerNames,
   deciding,
+  batchTotal,
   onDecide,
 }: {
   approval: ApprovalSummary;
@@ -484,6 +509,11 @@ function ApprovalCard({
   askerNames: Map<string, string>;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
+  /**
+   * How many rows this turn's batch still has waiting, including this one
+   * (#842). `1` — the default for an approval with no batch — says nothing.
+   */
+  batchTotal: number;
   onDecide: (verdict: Verdict, scope: GrantScope) => void;
 }) {
   // Per-card, like the in-flight verdict and for the same reason: two cards can
@@ -559,7 +589,17 @@ function ApprovalCard({
              approve is not done when the button stops spinning, it is handed
              to the agent. A decline IS terminal, so it only has to record. */
           status={
-            deciding ? (deciding === "approve" ? "Waiting for the agent…" : "Recording…") : undefined
+            deciding
+              ? deciding === "approve"
+                ? "Waiting for the agent…"
+                : "Recording…"
+              : batchTotal > 1
+                ? // Deliberately a count and not a link: the row is decided
+                  // here, on its own, and pointing at the others would imply a
+                  // batch decision this page does not offer. The conversation's
+                  // card is where one Approve covers all of them (#842).
+                  `1 of ${batchTotal} from the same turn`
+                : undefined
           }
         />
       </CardContent>

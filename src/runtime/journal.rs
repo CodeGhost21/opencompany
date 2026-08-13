@@ -390,6 +390,25 @@ pub struct PendingApproval {
     /// whose triggers were ambiguous). Both are the same fact downstream: no
     /// channel owns this approval, so it is shown on the Approvals page only.
     pub thread: Option<String>,
+    /// The turn that parked it (issue #469), carried out to the read side by
+    /// issue #842 so the console can ask about a turn's gated calls **once**.
+    ///
+    /// Not a new fact and deliberately not a new record: `ApprovalParked`
+    /// already journals the parking cycle, because #469 needed to know which
+    /// approvals one turn is blocked on in order to continue it exactly once.
+    /// #842 is the same grouping seen from the operator's side — a turn that
+    /// reached three sites parked three calls, and being asked three times is
+    /// the same fact told badly. Projecting the key it already had is the whole
+    /// of the mechanism; each park stays its own record, its own decision and
+    /// its own host-scoped grant.
+    ///
+    /// `None` for a pre-#469 journal line and for every park raised outside a
+    /// cycle (a workflow node, a scheduler tick): `park_and_journal` in
+    /// `workflows::delivery` passes no turn key, because a run holds no
+    /// continuation for one to belong to. Both read downstream as "belongs to
+    /// no batch", which renders exactly as it did before this field existed:
+    /// one card, decided on its own.
+    pub batch: Option<String>,
 }
 
 /// What an approval *was*, retained for the whole life of the journal — after
@@ -1690,6 +1709,13 @@ impl RuntimeJournal {
                 at_millis: parked.at_millis,
                 task: parked.task.clone(),
                 thread: parked.thread.clone(),
+                // Issue #842: the turn key the entry already carries for #469's
+                // continuation counter, read out rather than recomputed. The
+                // two must name the same set — the batch the operator is asked
+                // about in one card is precisely the batch the runtime holds a
+                // single continuation for — and reading one field is how that
+                // stays true without a rule anyone has to remember.
+                batch: parked.cycle.clone(),
             })
             .collect();
         out.sort_by(|a, b| {

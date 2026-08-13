@@ -351,6 +351,21 @@ export function AppShell({
     () => new Map(),
   );
   const [decidedApprovals, setDecidedApprovals] = useState<Record<string, DecidedApproval>>({});
+  /**
+   * Decisions that did **not** land, per approval id (#842 review).
+   *
+   * A third map, and it earns its keep because of consolidation. Deciding three
+   * cards separately, a failure belongs to the one card just clicked and the
+   * toast is beside it. Deciding one card that covers three, a failure on the
+   * third leaves two effects authorised and one not — and an item that simply
+   * drops back to its pending look reads as "still working", not "this one did
+   * not take". The operator clicked once and got two thirds of what they asked
+   * for, with nothing on screen saying which third.
+   *
+   * Cleared when that item is decided again, so a retry starts from a clean
+   * state rather than showing the previous attempt's error under a live one.
+   */
+  const [failedApprovals, setFailedApprovals] = useState<Record<string, string>>({});
 
   const pending = feed.status.pending_approvals;
 
@@ -442,6 +457,7 @@ export function AppShell({
     // must not survive the switch as a ghost in the new company's channels.
     setDecidedApprovals({});
     setDecidingApprovals(new Map());
+    setFailedApprovals({});
 
     const hydrate = (threadId: string) => {
       client
@@ -893,6 +909,16 @@ export function AppShell({
     });
   }, []);
 
+  /** Drops a recorded failure — a retry is starting, or the item is gone. */
+  const clearFailure = useCallback((id: string) => {
+    setFailedApprovals((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
   /**
    * Decide an approval from inside the conversation it was raised in (#379).
    *
@@ -922,6 +948,9 @@ export function AppShell({
   ) => {
     if (decidingApprovals.has(approval.id)) return;
     markDeciding(approval.id, verdict);
+    // A retry starts clean: the previous attempt's error must not sit under a
+    // live one, or the operator cannot tell which attempt it belongs to.
+    clearFailure(approval.id);
     try {
       await client.resolveApproval(approval.id, verdict, undefined, company, {
         detach: true,
@@ -943,6 +972,12 @@ export function AppShell({
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       toast.error(`Couldn't record your decision — ${msg}`);
       noteInChannel(approval.thread, `Couldn't record your decision — ${msg}`);
+      // On the card as well as in a toast, and keyed to the item that failed.
+      // A toast is the wrong and only home for this once one click covers
+      // several calls: it says a decision failed without saying *which*, and it
+      // is gone by the time the operator looks back at the card. The row that
+      // did not take has to say so itself.
+      setFailedApprovals((prev) => ({ ...prev, [approval.id]: msg }));
     } finally {
       markDeciding(approval.id, null);
       void feed.refresh();
@@ -1011,6 +1046,14 @@ export function AppShell({
             prev[event.approvalId] ? prev : { ...prev, [event.approvalId]: { verdict, approval } },
           );
         }
+        // A failed attempt here is superseded the moment the approval resolves
+        // anywhere (#842 review). The retry path clears its own failure, but a
+        // decision made on the Approvals page or in another tab arrives only as
+        // this frame — and a settled approval that still carried "not recorded"
+        // would be the card contradicting the queue, which is the drift the
+        // batching work exists to remove. Cleared unconditionally on the id,
+        // whether or not this console ever held a summary for it.
+        clearFailure(event.approvalId);
       }
       void feed.refresh();
     },
@@ -1117,6 +1160,7 @@ export function AppShell({
               }
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
+              failedApprovals={failedApprovals}
             />
           )}
           {view === "conversation" && (

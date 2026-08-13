@@ -228,6 +228,68 @@ card can appear live. It is deliberately thin — an id, a dotted kind, a thread
 because the effect's payload is redacted in exactly one place and must not
 acquire a second. A reader re-reads the approvals feed for the rest.
 
+### One turn is asked about once (issue #842)
+
+A research turn that reaches `espn.com`, `bbc.com` and `theguardian.com` parks
+three approvals, and asking three times is the same fact told badly: it is one
+piece of work, and every interruption costs a re-dispatch cycle that can
+dead-end. So the parks a single turn raised are **surfaced as one request**.
+
+The grouping key is not new. Issue #469 already journals the parking cycle, so
+that a turn blocked on four decisions is continued exactly once when the last
+one lands. `ApprovalSummary.batch` projects that same key, which is what makes
+the two agree by construction: the batch an operator is asked about in one card
+is precisely the batch the runtime holds a single continuation for. It is opaque
+— an equality key, never an ordering, a count, or anything to show an operator.
+
+**The grant model does not change at all.** There is no batch entity on the
+host, no batch resolve on the wire, and nothing new in how a grant is minted,
+stored or revoked. Each approval keeps its own id, its own verdict and — on
+approve — its own host-scoped grant, so approving three fetches still leaves
+three independently revocable rows under `Standing permissions`, one per host,
+each with its own expiry. Batching the *asking* is not batching the *granting*,
+and widening a grant to save a click would be exactly the leak `grants.md`
+exists to prevent.
+
+Two renderings over that one state, divided by what each surface is **for**:
+
+- **Chat is the fast path: all-or-nothing.** One card per turn, listing the
+  hosts it covers, with a single Approve/Decline and the ordinary scope
+  control. Approve grants every call in the batch; Decline grants none. The
+  operator is mid-conversation and wants one decision, not a form. It answers
+  every item it is still asking about, because the turn stays blocked until each
+  parked call has a verdict — a decision that left one open would hold the turn
+  while looking as though it had resolved the card.
+- **The Approvals page is the granular path: itemised.** One row per gated
+  call, approved or declined on its own, matching how `Standing permissions`
+  lists one revocable row per grant. It is where an operator goes for precision,
+  or to clean up after the fact. A row says how many others came from the same
+  turn, so someone arriving from the toast can tell one batch from an unrelated
+  queue.
+
+Granular control in *both* places would be redundant, and would double the state
+that has to stay in step between two surfaces — so it lives in one.
+
+**A decision that does not land is named, not swallowed.** One click fans out to
+one resolve per item, so a failure on the third leaves two effects authorised
+and one not. A toast is the wrong home for that — it does not say *which*, and
+it is gone by the time the operator looks back at the card — so the row that
+failed says so itself, the card counts the failures honestly (never "nothing was
+recorded" about a click that authorised two of three), and the buttons stay live,
+because a retry is the way out. A retry re-resolves only what is still pending.
+
+The two must not drift, and do not, because neither owns any state: both render
+the same feed, and both react to the `approval_resolved` frame. Deciding a row
+on the page settles that item on the chat card without a reload, and the card
+reports a partial state (`1 of 3 decided`) rather than going on claiming three
+things are pending.
+
+An approval with **no** batch — a workflow node, a scheduler tick, a park
+journaled before #469 — is never grouped, not even with another one like it.
+Absent means "the host did not say which turn this came from", and folding two
+unknowns together would invent a batch out of a shared silence. Each is shown
+alone, exactly as before this existed.
+
 ## Delegation levels (standing rules)
 
 Prosumers adjust the fence in plain language, which compiles to policy:

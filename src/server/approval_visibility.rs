@@ -160,6 +160,7 @@ mod tests {
             thread: None,
             broadly_grantable: false,
             contents_hidden: false,
+            batch: Some("turn-1".to_string()),
         }
     }
 
@@ -189,6 +190,16 @@ mod tests {
         assert_eq!(out[0].kind, "email.send");
         assert_eq!(out[0].agent.as_deref(), Some("ops"));
         assert_eq!(out[0].at_millis, 1_000);
+        // Issue #842: including which requests arrived together. Which turn
+        // asked is not *contents* — withholding it would split one batch into
+        // unrelated single cards for a member, so the two roles would see the
+        // conversation interrupted a different number of times for the same
+        // turn. Less detail than an admin gets; the same shape of request.
+        assert_eq!(
+            out[0].batch.as_deref(),
+            Some("turn-1"),
+            "role redaction withholds contents, not the grouping"
+        );
     }
 
     /// Issue #618's stated trap: a platform bearer carries no `UserRole`, and

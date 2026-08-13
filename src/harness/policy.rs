@@ -4432,6 +4432,98 @@ mod tests {
         }
     }
 
+    /// **Issue #842's security property, stated as the mixed batch it is
+    /// about.**
+    ///
+    /// A research turn asks about three sites in one card. The operator ticks
+    /// two and leaves the third; the two approvals mint a host-scoped grant
+    /// each and the untouched one mints nothing. What must come out the other
+    /// side is exactly this: the two granted hosts run unattended, and the
+    /// third parks again as if it had never been on the card — because it was
+    /// never approved.
+    ///
+    /// The reason this is worth its own test beside the single-grant one above
+    /// is that batching creates a shape that could not previously exist: two
+    /// live grants for one agent and one tool, differing only in scope. A fix
+    /// that batched the *grant* instead of the *asking* — one permission
+    /// covering "the sites in that request" — would pass every assertion about
+    /// espn and bbc and fail the third one silently, which is precisely the
+    /// leak #739 exists to prevent. The declined host is therefore the
+    /// load-bearing assertion here, not an afterthought.
+    ///
+    /// Both parking tiers, for the reason the test above runs both: an outward
+    /// fetch parks under `auto` too, so the grant is genuinely what decides.
+    #[tokio::test]
+    async fn approving_two_items_of_a_batch_grants_two_hosts_and_leaves_the_third_parking() {
+        for tier in ["supervised", "auto"] {
+            let queue = ApprovalRequestQueue::default();
+            let grants = queue.grants();
+            let p = policy(tier, &[], None)
+                .with_requests(queue)
+                .with_agent("seo");
+
+            // What approving two of the three items mints: one host-scoped
+            // grant per approved item, exactly as a lone approval would.
+            grants.grant_standing(scoped_standing(
+                "seo",
+                crate::policy::consequence::WEB_FETCH,
+                "https://espn.com",
+                far_future(),
+            ));
+            grants.grant_standing(crate::runtime::grants::StandingGrant {
+                id: crate::runtime::grants::GrantId::new("g2"),
+                ..scoped_standing(
+                    "seo",
+                    crate::policy::consequence::WEB_FETCH,
+                    "https://bbc.com",
+                    far_future(),
+                )
+            });
+
+            for url in [
+                "https://espn.com/nba/scores",
+                "https://bbc.com/sport/football",
+            ] {
+                assert!(
+                    matches!(
+                        p.check(&request("web_fetch", serde_json::json!({ "url": url })))
+                            .await,
+                        ToolPolicyDecision::Allow
+                    ),
+                    "an approved item's own host-scoped grant must admit it — `{tier}`: {url}"
+                );
+            }
+
+            // The item the operator left unticked. Same agent, same tool, same
+            // turn, two live grants — and none of them says yes to this host.
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://theguardian.com/uk" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "approving two sites is not consent to the third — `{tier}`"
+            );
+
+            // And a host nobody ever asked about is no more reachable for
+            // having been adjacent to two that were.
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://crates.io/crates/serde" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "a host that was never on the card parks — `{tier}`"
+            );
+        }
+    }
+
     /// Without a grant an outward fetch still parks in both parking tiers — the
     /// status quo #673 must not have widened.
     ///
