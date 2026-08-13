@@ -65,6 +65,11 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
   // Only the latest read may paint: switching company re-issues this call, and
   // a slow earlier response would otherwise show another company's accounts.
   const requestGeneration = useRef(0);
+  // The company these rows describe. A mutation is started against the company
+  // that was on screen and must stay so — but `refresh` closes over that same
+  // company, and running it after the view has moved on would answer company
+  // B's page with company A's accounts.
+  const shownCompany = useRef(company);
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -81,16 +86,29 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
   }, [client, company]);
 
   useEffect(() => {
+    shownCompany.current = company;
     setRows(null);
     void refresh();
-  }, [refresh, generation]);
+  }, [company, refresh, generation]);
+
+  /**
+   * Re-read, unless the operator has moved to another company since the
+   * mutation was sent. The write itself still lands where it was aimed — it
+   * named a connection id that belongs to the company that was on screen — but
+   * the read that follows it must not paint that company's accounts over the
+   * one now being looked at.
+   */
+  async function refreshIfStillShowing(startedFor: string | null) {
+    if (shownCompany.current === startedFor) await refresh();
+  }
 
   async function choose(toolkit: string, account: ComposioConnectedAccount) {
+    const startedFor = company;
     setBusy(account.id);
     try {
       const res = await setComposioDefaultAccount(client, company, account.id);
       toast.success(res.note);
-      await refresh();
+      await refreshIfStillShowing(startedFor);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : `Couldn't set the ${toolkit} account.`);
     } finally {
@@ -99,11 +117,12 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
   }
 
   async function clear(toolkit: string, account: ComposioConnectedAccount) {
+    const startedFor = company;
     setBusy(account.id);
     try {
       const res = await clearComposioDefaultAccount(client, company, account.id);
       toast.success(res.note);
-      await refresh();
+      await refreshIfStillShowing(startedFor);
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : `Couldn't clear the ${toolkit} account.`);
     } finally {
