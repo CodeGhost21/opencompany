@@ -266,11 +266,48 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
  * left alone so no other surface shifts under this change.
  */
 export function approvalAction(a: ApprovalSummary): string {
+  // Issue #846: a paused workflow gate is named by the CALL it is stopping, not
+  // by the mechanism that stopped it. "Continue a paused workflow" is true of
+  // every one of these cards and therefore tells an operator nothing — it is
+  // #372's "Glob" complaint, one surface over: the chat path was fixed by #375
+  // and this path was not, because its label came from `EFFECT_LABELS` (which
+  // keys on the effect kind, and the kind here is always `workflow.approve`)
+  // rather than from the tool.
+  //
+  // The tool is on the wire whenever the host could classify the node's call.
+  // When it could not — an authored gate on a step that calls nothing — the
+  // glossary entry below is still the honest answer, so this promotes and never
+  // hides.
+  const workflowTool = workflowGateTool(a);
+  if (workflowTool) return toolAction(workflowTool);
   return (
     labelFor(EFFECT_LABELS, a.kind) ??
     labelFor(TOOL_LABELS, a.kind) ??
     (a.agent ? "Use one of its tools" : "Do something that needs your sign-off")
   );
+}
+
+/** The effect kind a paused workflow gate parks as — mirrors
+ * `WORKFLOW_APPROVE_KIND` in `src/runtime/workflow_resume.rs`. */
+const WORKFLOW_APPROVE_KIND = "workflow.approve";
+
+/**
+ * The tool a paused workflow gate is stopping, when the host named one
+ * (issue #846) — `null` for every other kind, and for a gate whose node makes
+ * no classifiable call.
+ *
+ * Reads `payload.tool`, which the host writes for a policy-raised gate (#460)
+ * and, since #846, for an authored one too. Absence is meaningful and is
+ * preserved as such: an **older host** omits the key entirely, and this then
+ * returns `null` so the card renders exactly the pre-#846 line rather than an
+ * empty label.
+ */
+function workflowGateTool(a: ApprovalSummary): string | null {
+  if (a.kind !== WORKFLOW_APPROVE_KIND) return null;
+  const payload = a.payload;
+  if (payload == null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const tool = (payload as Record<string, unknown>).tool;
+  return typeof tool === "string" && tool !== "" ? tool : null;
 }
 
 /**
@@ -324,7 +361,10 @@ export function payloadLines(a: ApprovalSummary): PayloadLine[] {
   if (typeof payload !== "object") return [{ label: "value", value: renderValue(payload) }];
   if (Array.isArray(payload)) return [{ label: "items", value: renderValue(payload) }];
 
-  const entries = Object.entries(payload as Record<string, unknown>);
+  const entries =
+    a.kind === WORKFLOW_APPROVE_KIND
+      ? workflowGateEntries(payload as Record<string, unknown>)
+      : Object.entries(payload as Record<string, unknown>);
   if (entries.length === 0) return [];
 
   // Preferred ordering for the kinds whose argument names we know. Unlisted
@@ -339,6 +379,66 @@ export function payloadLines(a: ApprovalSummary): PayloadLine[] {
     .sort(([a1], [b1]) => rank(a1) - rank(b1))
     .map(([label, value]) => ({ label, value: renderValue(value) }));
 }
+
+/**
+ * The payload of a paused workflow gate, as the lines an operator needs
+ * (issue #846).
+ *
+ * A `workflow.approve` payload is not a tool call's arguments — it is the host's
+ * **resume record**, and every other card's rule ("show the payload, it is what
+ * you are consenting to") produces exactly the wrong thing here. What an
+ * operator saw was `input: {"items":[{"json":{}}],"port":null}`: the engine's
+ * seed payload, verbatim, as the sole description of a decision.
+ *
+ * So this promotes the call's own arguments to the top level, where every other
+ * card carries them, and drops the machinery. The dropped keys are dropped for
+ * stated reasons, not for tidiness:
+ *
+ * * `input` — the resume payload. It is engine seed data, it is the thing that
+ *   read as a description and was not one, and it also carries an `approvals`
+ *   list that accumulates down a lineage: an operator seeing
+ *   `{"approvals":["fetch_bbc","fetch_espn"]}` reads it as a card covering all
+ *   of them, which it is not. (Consolidating several gates into one card is
+ *   real and is issue #842 — not something to imply by accident here.)
+ * * `delivered`, `performed` — the #438/#846 ledgers. They say what will NOT
+ *   happen again, which is a property of the mechanism and is already stated in
+ *   prose by `note`.
+ * * `content` — rendered in full by its own block (`WorkflowContentReview`,
+ *   #596); repeating it as one clamped JSON line would be strictly worse.
+ * * `note` — prose, rendered as prose elsewhere on the card, not as a
+ *   `key: value` pair in a monospace block.
+ *
+ * Everything else survives, including any key a **newer host** adds that this
+ * console has never heard of. Dropping unknown keys would make an old console
+ * silently hide new information, which is the failure mode this whole file is
+ * written against; the denylist is closed and the allowlist is not.
+ */
+function workflowGateEntries(payload: Record<string, unknown>): [string, unknown][] {
+  const args = payload.args;
+  const argEntries: [string, unknown][] =
+    args != null && typeof args === "object" && !Array.isArray(args)
+      ? Object.entries(args as Record<string, unknown>)
+      : [];
+  const rest = Object.entries(payload).filter(([key]) => !WORKFLOW_GATE_HIDDEN.has(key));
+  // The call first, then where and what stopped it. An operator decides on the
+  // call; the node id is how they find it afterwards. This order survives
+  // `payloadLines`' sort because no `PAYLOAD_KEY_ORDER` entry exists for this
+  // kind — every rank is equal, and the sort is stable.
+  return [...argEntries, ...rest];
+}
+
+/** Payload keys of a `workflow.approve` card that are machinery, not the
+ * decision — see {@link workflowGateEntries} for why each one is here. */
+const WORKFLOW_GATE_HIDDEN: ReadonlySet<string> = new Set([
+  "input",
+  "delivered",
+  "performed",
+  "content",
+  "note",
+  // Unwrapped one level above, so keeping it would print the same arguments
+  // twice — once readably and once as a JSON blob.
+  "args",
+]);
 
 /** Which arguments lead the preview, per tool. Presentation only. */
 const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {

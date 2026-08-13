@@ -36,6 +36,9 @@ mod gated_tool_call_test;
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
 mod gated_tool_turn_test;
+/// Issue #846: a continuation replays the outward calls its lineage already
+/// made, instead of making them a second time.
+pub mod replay;
 pub mod runner;
 pub mod translate;
 

@@ -16,7 +16,7 @@ import type {
 } from "@/api/workflows";
 
 import { failedNodeOf } from "./graph";
-import { pendingCount, relativeTime, runTone, undeliveredCount } from "./run-health";
+import { awaitingCount, relativeTime, runTone, undeliveredCount } from "./run-health";
 
 /** Badge styling per delivery outcome. A report that did NOT go out must not
  * look like one that did — `denied` and `failed` are the two an operator has to
@@ -82,7 +82,9 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
 export function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
   const tone = runTone(run);
   const undelivered = undeliveredCount(run.deliveries);
-  const pending = pendingCount(run.deliveries);
+  // Issue #846: gates and parked reports together. The chip said "Manual run"
+  // and a green dot for a run whose first node was still waiting on a person.
+  const awaiting = awaitingCount(run);
   return (
     <Badge
       variant="outline"
@@ -111,8 +113,8 @@ export function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
             ? " stopped"
             : undelivered > 0
             ? ` · ${undelivered} not delivered`
-            : pending > 0
-              ? ` · ${pending} awaiting approval`
+            : awaiting > 0
+              ? ` · ${awaiting} awaiting approval`
               : ""}
       <span className="text-muted-foreground">· {relativeTime(run.atMillis)}</span>
     </Badge>
@@ -291,6 +293,36 @@ function RunHistoryRow({
         <p className="text-2xs text-muted-foreground">
           Still running — reports are routed when it finishes.
         </p>
+      ) : run.pendingApprovals.length > 0 ? (
+        <>
+          {/* A paused run can still have routed reports — the output nodes it
+              reached BEFORE the gate. Those rows are shown as they always were,
+              with the waiting line above rather than instead of them: replacing
+              them would trade one silent omission for another. */}
+          {run.deliveries.length > 0 && <DeliveryRows deliveries={run.deliveries} />}
+        // Issue #846. This is the arm that was missing, and its absence is how a
+        // run waiting on a human came to report success: a paused run has no
+        // error, no cancellation, is not `running` (the engine settled it) and
+        // routed nothing, so it fell through every branch to the "Finished" line
+        // below — while its gate sat undecided on the Approvals page.
+        //
+        // "Not finished" is the claim, stated in the operator's terms rather
+        // than the engine's. The run object really is settled; what has not
+        // happened is the work, and the work is what the operator is asking
+        // about. Naming the nodes matters as much as the state: a scheduled run
+        // that silently did nothing is exactly the failure this reads as, and
+        // the fix is a click, so the row says which click.
+        <p
+          className="text-2xs text-[var(--status-blocked-text)]"
+          data-testid="workflow-run-awaiting"
+        >
+          Not finished — waiting for your approval on{" "}
+          {run.pendingApprovals.map((node) => `“${node}”`).join(", ")}. Nothing past{" "}
+          {run.pendingApprovals.length === 1 ? "it" : "them"} has run
+          {run.deliveries.length === 0 ? ", and no reports were routed" : ""}. Approve or decline
+          it in Approvals to carry the run on.
+        </p>
+        </>
       ) : run.deliveries.length > 0 ? (
         // Deliberately the SAME component the live run drawer uses, so a report
         // reads identically whether it's on screen now or a week old.

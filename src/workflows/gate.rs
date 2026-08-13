@@ -169,6 +169,20 @@ pub(crate) struct GatedCall {
     /// on; the full URL is already in the node's own config for anyone who needs
     /// it.
     pub target: Option<String>,
+    /// The call's authored arguments — the `url` a `web_fetch` will fetch, the
+    /// recipient a send will reach (issue #846).
+    ///
+    /// Carried verbatim and **redacted downstream**, at the same projection that
+    /// redacts a chat card's payload, rather than filtered here: one denylist,
+    /// one set of bounds, and no second rule for this surface to drift away from
+    /// (the discipline `crate::runtime::approval_display` records).
+    ///
+    /// Distinct from [`target`](Self::target) rather than derived from it,
+    /// because they answer different questions and are governed differently:
+    /// `target` is a one-line destination written to the journal and kept after
+    /// the decision, which is why it is host-only and never a path or query;
+    /// this is the call itself, shown so the operator can decide.
+    pub args: Value,
 }
 
 /// Marks every `tool_call` node whose call the company's [`ApprovalPolicy`]
@@ -277,6 +291,9 @@ pub(crate) async fn policy_gates(
             continue;
         };
 
+        // Cloned because the card wants the same arguments the policy judged
+        // (issue #846), and `ToolPolicyRequest` takes them by value.
+        let card_args = args.clone();
         let request = ToolPolicyRequest::new(
             &slug,
             args,
@@ -305,6 +322,7 @@ pub(crate) async fn policy_gates(
             slug,
             reason,
             target,
+            args: card_args,
         });
     }
 
@@ -337,7 +355,12 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
                 .get("args")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            Some((slug.to_string(), args, None))
+            // Issue #846: the destination, when the arguments name one. #614
+            // gave `http_request` a target and left `tool_call` without one,
+            // which is why a parked `web_fetch` card named no host — the very
+            // thing the operator is deciding about.
+            let target = tool_target(&args);
+            Some((slug.to_string(), args, target))
         }
         NodeKind::HttpRequest => Some((
             HTTP_REQUEST_TOOL.to_string(),
@@ -412,6 +435,47 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
 /// still never a guess, but the absence is stated rather than implied. A
 /// **missing** `url` key stays `None` — nothing was authored, so there is
 /// nothing to explain.
+/// The host a `tool_call` node's arguments name, when they name one
+/// (issue #846).
+///
+/// **Host only, never the path or query**, on exactly [`http_target`]'s terms
+/// and for exactly its reason: this string is written to the durable journal,
+/// rendered on the Approvals page and kept after the decision, and a URL's query
+/// is a routine place for tokens and signed parameters to sit. The full
+/// arguments travel separately on [`GatedCall::args`], where they are redacted
+/// by the shared projection before they reach a console.
+///
+/// No method, because a `tool_call` has none to state — that is `http_request`'s
+/// vocabulary, and borrowing it would put a `GET` on a card for a call that is
+/// not an HTTP request.
+///
+/// Reads `url` only. Widening this to "any argument that looks like a URL" would
+/// mean guessing which of several is *the* destination, and a card that names
+/// the wrong one is worse than a card that names none — the operator would
+/// authorise against it.
+fn tool_target(args: &Value) -> Option<String> {
+    let url = args.get("url").and_then(Value::as_str)?;
+    host_of(url)
+}
+
+/// The host component of `url`, or `None` when there is not one to read.
+///
+/// Shared by [`tool_target`] and [`http_target`] so the two surfaces cannot
+/// disagree about what a host is — in particular about userinfo, which is
+/// everything before the **last** `@` and which a host cannot contain.
+fn host_of(url: &str) -> Option<String> {
+    url.split_once("://")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .map(|authority| {
+            authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host)
+        })
+        .filter(|host| !host.is_empty())
+        .map(str::to_string)
+}
+
 fn http_target(config: &Value) -> Option<String> {
     let url = config.get("url").and_then(Value::as_str)?;
     let method = config
@@ -419,21 +483,51 @@ fn http_target(config: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .unwrap_or("GET")
         .to_uppercase();
-    let host = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .and_then(|rest| rest.split(['/', '?', '#']).next())
-        // Userinfo is everything before the LAST `@`; a host cannot contain one.
-        .map(|authority| {
-            authority
-                .rsplit_once('@')
-                .map_or(authority, |(_, host)| host)
-        })
-        .filter(|host| !host.is_empty());
-    match host {
+    // Userinfo handling lives in `host_of`, shared with `tool_target`.
+    match host_of(url) {
         Some(host) => Some(format!("{method} {host}")),
         None => Some(format!("{method} (destination resolved at run time)")),
     }
+}
+
+/// What a paused node's card should say about the call it is stopping —
+/// whoever raised the gate (issue #846).
+///
+/// # The hole this closes
+///
+/// [`GatedCall`] is produced by [`policy_gates`], so it exists only for a node
+/// the **company's policy** stopped. A node the **author** stopped with
+/// `requires_approval: true` produced no entry, and its card therefore carried
+/// no tool, no arguments and no destination — just a node id and the engine's
+/// resume payload. On a `full`-tier company, where the policy stops nothing,
+/// that is *every* workflow card: the operator is asked to authorise
+/// `fetch_bbc` and shown `{"items":[{"json":{}}],"port":null}`.
+///
+/// #372 made the same complaint about the chat surface and #375 fixed it there,
+/// by carrying the effect's own arguments onto the card. The information was
+/// already on the host in that case and it is already on the host in this one —
+/// [`call_of`] has read the slug and the args since #460, and only the *reason*
+/// was ever policy-specific. So this asks `call_of` the same question for a node
+/// nobody's policy stopped, and the card gains everything except the sentence no
+/// one wrote.
+///
+/// Returns `None` for a node the graph does not contain, or one whose kind makes
+/// no classifiable call — an authored gate on a `transform` is a genuine "stop
+/// and look at this", with no call to describe, and a card that invented one
+/// would be worse than a card that says so.
+pub(crate) fn describe_call(graph: &WorkflowGraph, node_id: &str) -> Option<GatedCall> {
+    let node = graph.nodes.iter().find(|node| node.id == node_id)?;
+    let (slug, args, target) = call_of(node)?;
+    Some(GatedCall {
+        node_id: node.id.clone(),
+        slug,
+        // Nobody stated one. The console says "the workflow's author asked for a
+        // person here" in its own words rather than the host inventing a
+        // policy-shaped sentence for a decision no policy made.
+        reason: String::new(),
+        target,
+        args,
+    })
 }
 
 /// The synthetic principal a workflow `tool_call` acts as.
@@ -865,5 +959,87 @@ description = "Runs Acme."
                 );
             }
         }
+    }
+
+    // --- issue #846: an authored gate's card names its call too ------------
+
+    /// A node the **author** gated is described, not just identified.
+    ///
+    /// This is the whole of #846's third defect. `policy_gates` only ever
+    /// produced a `GatedCall` for a node the company's policy stopped, so on a
+    /// `full`-tier company — where the policy stops nothing — every workflow
+    /// card carried a node id and the engine's resume payload and named neither
+    /// the tool nor the host. #375 fixed exactly this on the chat surface by
+    /// carrying the call's own arguments; this asks `call_of` the same question
+    /// for a gate nobody's policy raised.
+    #[test]
+    fn an_authored_gate_is_described_from_the_graph() {
+        let g = graph(vec![Node {
+            config: json!({
+                "slug": "web_fetch",
+                "args": { "url": "https://www.bbc.com/sport?token=secret" },
+                "requires_approval": true,
+            }),
+            ..tool_node("fetch_bbc", "web_fetch")
+        }]);
+
+        let described = describe_call(&g, "fetch_bbc").expect("a tool_call node is describable");
+        assert_eq!(described.node_id, "fetch_bbc");
+        assert_eq!(described.slug, "web_fetch");
+        assert_eq!(
+            described.args["url"],
+            "https://www.bbc.com/sport?token=secret"
+        );
+        // Host only. This string is journalled and kept after the decision, so
+        // it must never carry the query — where a token is a routine thing to
+        // find. The full arguments travel on `args`, redacted downstream by the
+        // shared projection.
+        assert_eq!(described.target.as_deref(), Some("www.bbc.com"));
+        // Nobody wrote a reason, and the card must not invent a policy-shaped
+        // one for a decision no policy made.
+        assert!(described.reason.is_empty());
+    }
+
+    /// A gate on a node that calls nothing is described as such.
+    ///
+    /// An authored `requires_approval` on a `transform` is a genuine "stop and
+    /// look at this" with no call behind it, and a card that invented one would
+    /// be worse than a card that says nothing.
+    #[test]
+    fn a_gate_on_a_node_that_calls_nothing_is_not_described() {
+        let g = graph(vec![Node {
+            kind: NodeKind::Transform,
+            ..tool_node("review", "unused")
+        }]);
+        assert!(describe_call(&g, "review").is_none());
+        assert!(describe_call(&g, "no-such-node").is_none());
+    }
+
+    /// A `tool_call` whose URL is still an unresolved template names no host.
+    ///
+    /// Node arguments may still be `=`-expressions when this runs — the module
+    /// docs record that — and a card that printed `=item.json.url` as a
+    /// destination would be worse than one that prints none.
+    #[test]
+    fn an_unresolved_url_yields_no_host() {
+        let g = graph(vec![Node {
+            config: json!({ "slug": "web_fetch", "args": { "url": "=item.json.url" } }),
+            ..tool_node("fetch", "web_fetch")
+        }]);
+        let described = describe_call(&g, "fetch").expect("still describable");
+        assert_eq!(described.slug, "web_fetch");
+        assert!(described.target.is_none(), "{:?}", described.target);
+    }
+
+    /// Userinfo is not mistaken for a host.
+    ///
+    /// `https://user:pw@evil.test/` must name `evil.test`, not `user`. Shared
+    /// with `http_target` through `host_of` so the two surfaces cannot disagree.
+    #[test]
+    fn userinfo_is_not_mistaken_for_the_host() {
+        assert_eq!(
+            tool_target(&json!({ "url": "https://user:pw@evil.test/x?q=1" })).as_deref(),
+            Some("evil.test")
+        );
     }
 }
