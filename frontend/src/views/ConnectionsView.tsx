@@ -572,6 +572,7 @@ export function ConnectionsView({ client, company }: Props) {
           company={company}
           provider={openedProvider}
           canManage={canManage && load !== "unavailable"}
+          noCredential={status?.credentialSource === "none"}
           busy={busy !== null}
           onClose={() => setOpened(null)}
           onConnectAnother={(p) => void connect(p)}

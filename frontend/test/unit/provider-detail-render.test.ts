@@ -69,6 +69,12 @@ function gmail(accounts: ComposioConnectedAccount[], via: ConnectionState["via"]
   return rows.find((p) => p.slug === "gmail")!;
 }
 
+/** The same provider, connected to nothing. */
+function unconnectedGmail() {
+  const rows = buildGridProviders([entry("gmail", "Gmail")], [], {}, OPEN, false);
+  return rows.find((p) => p.slug === "gmail")!;
+}
+
 /** A host that answers the usage route with `byProvider` rows. */
 function clientWith(byProvider: UsageDto["byProvider"]): OpenCompanyClient {
   return {
@@ -79,7 +85,12 @@ function clientWith(byProvider: UsageDto["byProvider"]): OpenCompanyClient {
 let container: HTMLDivElement;
 let root: Root;
 
-async function render(provider: GridProvider, canManage: boolean, client = clientWith([])) {
+async function render(
+  provider: GridProvider,
+  canManage: boolean,
+  client = clientWith([]),
+  noCredential = false,
+) {
   await act(async () => {
     root.render(
       createElement(ProviderDetail, {
@@ -87,6 +98,7 @@ async function render(provider: GridProvider, canManage: boolean, client = clien
         company: null,
         provider,
         canManage,
+        noCredential,
         busy: false,
         onClose: () => {},
         onConnectAnother: () => {},
@@ -192,6 +204,36 @@ describe("the provider detail view", () => {
     expect(text()).not.toContain("Disconnect");
     expect(text()).not.toContain("Connect another account");
     expect(text()).toContain("Only an admin can connect or disconnect");
+  });
+
+  it("opens on a provider that is not connected, and offers the connect", async () => {
+    // "connected **or not**" is the issue's wording, and OpenHuman's modal is a
+    // phase machine that opens on a disconnected toolkit and connects from
+    // inside. Keeping the panel for connected providers only was the earlier
+    // cut here; it answered "what is wired" and not "what is this".
+    await render(unconnectedGmail(), true);
+    expect(text()).toContain("not connected");
+    expect(text()).toContain("Connect an account");
+    expect(text()).toContain("agents have none of its tools");
+  });
+
+  it("shows no usage figure for a provider that was never connected or used", async () => {
+    // A true zero that says nothing, over a catalog of 123 untouched providers.
+    await render(unconnectedGmail(), true);
+    expect(text()).not.toContain("in the last 30 days");
+  });
+
+  it("keeps the usage figure on a disconnected provider that was used", async () => {
+    // The interesting case: the calls happened, then the account went away.
+    await render(unconnectedGmail(), true, clientWith([{ provider: "gmail", calls: 7 }]));
+    expect(text()).toContain("7");
+    expect(text()).toContain("in the last 30 days");
+  });
+
+  it("says why a connect cannot be started when no credential resolves", async () => {
+    // Stated where the button is, not only on the page behind the panel.
+    await render(unconnectedGmail(), true, clientWith([]), true);
+    expect(text()).toContain("no credential for this company to authorize against");
   });
 
   it("names the inert native credential as a caveat, not as a second connection", async () => {

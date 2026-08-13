@@ -290,12 +290,16 @@ function SectionHeading({ count }: { count: number | null }) {
  * it. An 8.5rem tile has no room for a label AND a button, and a tile that looks
  * clickable but is not would be worse than either.
  *
- * A tile connected through Composio opens its detail view instead (issue #404):
- * there is an object behind it — accounts, statuses, dates, a per-account
- * revoke — and a single icon button cannot stand for it. That is also why the
- * inline Disconnect is gone from those tiles rather than kept alongside: a
- * toolkit can hold two accounts, and a control that names neither has nothing
- * to revoke.
+ * A tile Composio can reach opens its detail view instead (issue #404),
+ * connected or not: there is an object behind it — accounts, statuses, dates, a
+ * per-account revoke, and for a disconnected one what it is and how to connect
+ * it — and a single icon button cannot stand for that. It costs the connect
+ * flow a click, which is the trade OpenHuman already makes and this issue asks
+ * us to inherit rather than re-derive.
+ *
+ * It is also why the inline Disconnect is gone from those tiles rather than
+ * kept alongside: a toolkit can hold two accounts, and a control that names
+ * neither has nothing to revoke.
  *
  * The natively-connected tile keeps the old shape — a small Disconnect control
  * in the glyph slot, so the destructive action is never the whole surface an
@@ -330,7 +334,14 @@ function ProviderTile({
   // Openable for everyone who can see the page, not only an admin (issue #403
   // gates the writes inside, not the reading): "which account is Gmail wired
   // to, and since when" is exactly what a member opens this page to learn.
-  const openable = row.connected && row.accounts.length > 0;
+  //
+  // Connected or not — the issue's own wording, and what OpenHuman does. The
+  // one exclusion is a provider Composio reports as connected while the host
+  // answered without `accounts` (it predates #696): the panel would open on a
+  // connection it cannot name, describe, date or release, which is a worse
+  // answer than the tile's badge.
+  const openable =
+    row.route.kind === "composio" && (!row.connected || row.accounts.length > 0);
   const state = row.connected
     ? row.accounts.length > 1
       ? `${row.accounts.length} accounts connected`
@@ -388,6 +399,11 @@ function ProviderTile({
     <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
   ) : connectable ? (
     <LogIn className="size-3.5 shrink-0 text-muted-foreground" />
+  ) : openable ? (
+    // Openable but not connectable: a member, who can read the panel and act on
+    // nothing in it. A sign-in glyph would promise them the one thing #403
+    // takes away.
+    <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
   ) : null;
 
   const body = (
@@ -411,7 +427,9 @@ function ProviderTile({
   );
 
   const title = openable
-    ? `Open ${row.label} — accounts, status, and disconnect.`
+    ? row.connected
+      ? `Open ${row.label} — accounts, status, and disconnect.`
+      : `Open ${row.label} — what it is, and how to connect it.`
     : row.connected && !row.canDisconnect
       ? `${row.label} is connected through Composio; manage or revoke it there.`
       : row.description || undefined;
@@ -434,7 +452,8 @@ function ProviderTile({
           data-testid={`open-provider-${row.slug}`}
           className={cn(
             shell,
-            "transition-colors hover:border-foreground/20 hover:bg-status-done/10",
+            "transition-colors hover:border-foreground/20",
+            row.connected ? "hover:bg-status-done/10" : "hover:bg-accent",
             "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
           )}
         >

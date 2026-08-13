@@ -24,6 +24,12 @@ interface Props {
   provider: GridProvider | null;
   /** Whether this viewer may change what the company connects through (#403). */
   canManage: boolean;
+  /**
+   * Nothing to authorize against — no credential of any tier resolves, so a
+   * Connect could only fail. Stated here rather than only on the page behind
+   * the panel: this is where the button is.
+   */
+  noCredential: boolean;
   /** A connect or disconnect is in flight somewhere on the page. */
   busy: boolean;
   onClose: () => void;
@@ -35,7 +41,15 @@ interface Props {
 const USAGE_RANGE = "30d";
 
 /**
- * A connected provider as an object you can open (issue #404).
+ * A provider as an object you can open (issue #404).
+ *
+ * Opens whether or not it is connected — "connected **or not**" is the issue's
+ * wording, and OpenHuman's `ComposioConnectModal` is a phase machine that opens
+ * on a disconnected toolkit and connects from inside. Keeping the one-click
+ * connect on the tile and the panel for connected providers only would have
+ * been a nicer first click and a worse answer to "what is this provider, and
+ * what is wired to it" — which is the question the issue exists to make
+ * answerable.
  *
  * ## What this is honest about, and why each line is worded the way it is
  *
@@ -73,6 +87,7 @@ export function ProviderDetail({
   company,
   provider,
   canManage,
+  noCredential,
   busy,
   onClose,
   onConnectAnother,
@@ -119,16 +134,15 @@ export function ProviderDetail({
               </SheetTitle>
               <SheetDescription className="flex flex-wrap items-center gap-1.5 text-xs">
                 <Badge variant="outline" className="font-normal">
-                  {/* Which of the three systems backs this connection. The
-                      panel exists for providers Composio holds; the badge is
-                      still stated rather than assumed, because "through which
-                      system" is one of the questions the issue asks it to
-                      answer. */}
+                  {/* Which of the three systems this provider is reached
+                      through — one of the questions the issue asks the view to
+                      answer, and stated rather than left to be inferred from
+                      the fact that a panel opened at all. */}
                   Composio
                 </Badge>
                 <span>
                   {live.length === 0
-                    ? "no active account"
+                    ? "not connected"
                     : live.length === 1
                       ? "1 account connected"
                       : `${live.length} accounts connected`}
@@ -149,7 +163,12 @@ export function ProviderDetail({
                 ))}
                 {accounts.length === 0 && (
                   <p className="text-xs text-muted-foreground">
-                    No Composio account is connected for {provider.label}.
+                    {/* An account and a *usable* account are different states,
+                        and a provider that has never been connected is a third.
+                        The empty case says which of them this is rather than
+                        "not connected", which would cover all three. */}
+                    No Composio account is connected for {provider.label}, so its agents have none of
+                    its tools.
                   </p>
                 )}
               </section>
@@ -177,34 +196,45 @@ export function ProviderDetail({
                 </p>
               )}
 
-              <Separator />
+              {/* Hidden for a provider that is neither connected nor has been
+                  used: "0 calls in the last 30 days" is true there but says
+                  nothing, and in open mode this panel opens over a catalog of
+                  123 providers that have never been touched. A non-zero count
+                  on a disconnected provider is the opposite — it is the
+                  interesting case, so it stays. */}
+              {(provider.connected || (usageLoad === "ready" && (calls ?? 0) > 0)) && (
+                <>
+                  <Separator />
 
-              <section className="space-y-1" aria-label="Usage">
-                <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                  Usage
-                </h4>
-                {usageLoad === "loading" && (
-                  <p className="text-xs text-muted-foreground">Reading usage…</p>
-                )}
-                {usageLoad === "unavailable" && (
-                  <p className="text-xs text-muted-foreground">
-                    This host does not report usage, so what has gone through this connection is not
-                    recorded here.
-                  </p>
-                )}
-                {usageLoad === "ready" && (
-                  <>
-                    <p className="text-sm">
-                      <span className="font-medium">{calls}</span>{" "}
-                      {calls === 1 ? "call" : "calls"} in the last 30 days
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Successful tool calls through {provider.label}, counted per provider rather
-                      than per account — a call through any account above lands on this one total.
-                    </p>
-                  </>
-                )}
-              </section>
+                  <section className="space-y-1" aria-label="Usage">
+                    <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                      Usage
+                    </h4>
+                    {usageLoad === "loading" && (
+                      <p className="text-xs text-muted-foreground">Reading usage…</p>
+                    )}
+                    {usageLoad === "unavailable" && (
+                      <p className="text-xs text-muted-foreground">
+                        This host does not report usage, so what has gone through this connection is
+                        not recorded here.
+                      </p>
+                    )}
+                    {usageLoad === "ready" && (
+                      <>
+                        <p className="text-sm">
+                          <span className="font-medium">{calls}</span>{" "}
+                          {calls === 1 ? "call" : "calls"} in the last 30 days
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Successful tool calls through {provider.label}, counted per provider rather
+                          than per account — a call through any account above lands on this one
+                          total.
+                        </p>
+                      </>
+                    )}
+                  </section>
+                </>
+              )}
 
               {canManage && (
                 <>
@@ -213,23 +243,32 @@ export function ProviderDetail({
                     <Button
                       variant="outline"
                       className="w-full"
-                      disabled={busy}
+                      disabled={busy || noCredential}
                       onClick={() => onConnectAnother(provider)}
                       data-testid="provider-detail-connect-another"
                     >
                       <LogIn className="size-4" />
                       {accounts.length === 0 ? "Connect an account" : "Connect another account"}
                     </Button>
-                    <p className="text-xs text-muted-foreground">
-                      Disconnecting removes the connection at Composio, so agents lose these tools on
-                      their next turn. It does not sign the company out of {provider.label}, and it
-                      does not delete anything there.
-                    </p>
+                    {noCredential && (
+                      <p className="text-xs text-muted-foreground">
+                        There is no credential for this company to authorize against yet, so a
+                        sign-in has nothing to present. Set the company&apos;s TinyHumans credential
+                        on the Connections page first.
+                      </p>
+                    )}
+                    {accounts.length > 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        Disconnecting removes the connection at Composio, so agents lose these tools
+                        on their next turn. It does not sign the company out of {provider.label}, and
+                        it does not delete anything there.
+                      </p>
+                    )}
                   </section>
                 </>
               )}
 
-              {!canManage && accounts.length > 0 && (
+              {!canManage && (
                 <p className="text-xs text-muted-foreground">
                   Only an admin can connect or disconnect an account here.
                 </p>
