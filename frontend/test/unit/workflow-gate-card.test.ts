@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { approvalAction, payloadLines } from "@/lib/language";
 import { awaitingCount, runTone } from "@/views/workflows/run-health";
 import type { ApprovalSummary } from "@/api/types";
-import type { WorkflowRunOutcome } from "@/api/workflows";
+import type { DeliveryReport, WorkflowRunOutcome } from "@/api/workflows";
 
 /**
  * Issue #846, the two console-side halves.
@@ -51,15 +51,18 @@ function run(over: Partial<WorkflowRunOutcome> = {}): WorkflowRunOutcome {
   return {
     seq: 1,
     atMillis: 1_000,
+    workflowId: "daily-sports-news-blog",
     scheduled: false,
-    running: false,
-    cancelled: false,
-    error: null,
     deliveries: [],
     pendingApprovals: [],
     nodes: [],
     ...over,
-  } as WorkflowRunOutcome;
+  };
+}
+
+/** A parked report row, in the shape the host actually sends. */
+function parkedDelivery(): DeliveryReport {
+  return { node: "summary", kind: "owner", status: "pending", detail: "waiting on you" };
 }
 
 describe("a paused workflow gate says what it is approving (#846)", () => {
@@ -142,17 +145,8 @@ describe("a run waiting on a person is not finished (#846)", () => {
   it("counts parked gates and parked reports together", () => {
     const both = run({
       pendingApprovals: ["gate_a", "gate_b"],
-      deliveries: [
-        {
-          node: "summary",
-          kind: "owner",
-          status: "pending",
-          detail: "waiting",
-          target: null,
-          reason: null,
-        },
-      ],
-    } as Partial<WorkflowRunOutcome>);
+      deliveries: [parkedDelivery()],
+    });
     expect(awaitingCount(both)).toBe(3);
   });
 
