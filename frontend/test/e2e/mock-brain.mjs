@@ -113,6 +113,28 @@ const TOOL_CALL_DIRECTIVE = "__MOCK_TOOL_CALL__";
 const SPAWN_DIRECTIVE = "SPAWNONE";
 
 /**
+ * The host's own re-issue instruction, sent to the agent when an operator
+ * approves a parked tool call (`src/harness/brain.rs`):
+ *
+ *   Operator approved your `composio_execute` call. Re-issue it now with
+ *   EXACTLY these arguments: {…}. Do not modify them.
+ *
+ * Honouring it is not a fourth directive — it is the same behaviour a real
+ * model has on that prompt, and without it **no approval-gated tool can ever
+ * run in this lane**. The directive arms fire once per identity, so on the
+ * re-issue turn the original `__MOCK_TOOL_CALL__` is already served and the
+ * mock would answer with prose; the operator's approval would then produce a
+ * cheerful reply and no call, which is exactly the failure #243 was about. Any
+ * spec about an `Execute`-level tool (`composio_execute`, `repo_publish`)
+ * needs this.
+ *
+ * The arguments are re-issued VERBATIM, as the instruction demands: the grant
+ * admits one call matching them exactly, so drift would simply re-park.
+ */
+const REISSUE_PATTERN =
+  /Operator approved your `([^`]+)` call\. Re-issue it now with EXACTLY these arguments: /;
+
+/**
  * Width of every vector `/embeddings` returns. `HostedEmbeddings` compares this
  * against its declared dimensionality and errors on a mismatch rather than
  * truncating, and its default is 1024 (`embedding-v1`'s only allowed size).
@@ -268,6 +290,28 @@ function findDirective(messages) {
 }
 
 /**
+ * The host's re-issue instruction in the last message, or null.
+ *
+ * Only the last message is considered. An instruction further back was already
+ * answered on the turn it arrived, and re-answering it would call the tool
+ * again every turn for the rest of the thread.
+ *
+ * @param {any[]} messages
+ * @returns {{name: string, arguments: any} | null}
+ */
+function findReissue(messages) {
+  const text = textOf(messages[messages.length - 1]);
+  const match = REISSUE_PATTERN.exec(text);
+  if (!match) return null;
+  const args = readJsonObject(text, match.index + match[0].length);
+  if (!args) {
+    process.stderr.write("[mock brain] re-issue instruction found but its arguments did not parse\n");
+    return null;
+  }
+  return { name: match[1], arguments: args };
+}
+
+/**
  * Directive identities already acted on, for the life of this process.
  *
  * The history check below is the honest one and covers the common case, but it
@@ -345,6 +389,34 @@ function alreadyServed(messages, index) {
 function chatCompletion(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const model = typeof body?.model === "string" ? body.model : "mock-brain";
+
+  // Ahead of the directive arms, and only when the instruction is the LAST
+  // thing said: the re-issue prompt is a fresh turn from the host, so anything
+  // older in the transcript — including the directive that produced the parked
+  // call — has already had its say.
+  const reissue = findReissue(messages);
+  if (reissue) {
+    process.stderr.write(`[mock brain] re-issuing approved call: ${reissue.name}\n`);
+    return completion(
+      model,
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: `mock-reissue-${messages.length}`,
+            type: "function",
+            function: {
+              name: reissue.name,
+              arguments: JSON.stringify(reissue.arguments),
+            },
+          },
+        ],
+      },
+      "tool_calls",
+    );
+  }
+
   const directive = findDirective(messages);
 
   if (

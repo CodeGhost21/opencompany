@@ -60,7 +60,7 @@ acp            | partial      | acp                             | server::acp ha
 runner         | partial      | runner                          | runner
 mcp            | partial      | openhuman,mcp,telegram,media    | harness::build::tests app::types
 media          | partial      | openhuman,mcp,telegram,media    | harness::build::tests harness::toolbelt
-composio       | partial      | openhuman,tinycortex,composio   | harness::composio::isolation_tests harness::composio::ops_helper_tests
+composio       | partial      | openhuman,tinycortex,composio   | harness::composio::isolation_tests harness::composio::ops_helper_tests harness::composio::live::live_tests
 export         | partial      | export                          | store::export
 imap           | partial      | imap,smtp                       | server::ops::imap
 sidecar        | partial      | sidecar                         | brain::sidecar
