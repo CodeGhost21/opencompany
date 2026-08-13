@@ -397,6 +397,11 @@ function gatedClient(byProvider: UsageDto["byProvider"]) {
   return { client, gates };
 }
 
+/** The Usage section's own text, so a figure cannot be matched from elsewhere. */
+function usageText(): string {
+  return document.querySelector('[data-testid="connection-detail-usage"]')?.textContent ?? "";
+}
+
 /** A connected Composio provider by slug, with one account. */
 function connected(slug: string, name: string): GridProvider {
   const rows = buildGridProviders(
@@ -459,9 +464,17 @@ describe("the same panel, changed from one subject to another", () => {
     expect(text()).not.toContain("4242");
     expect(text()).toContain("Reading usage…");
 
-    // And Slack's own answer, when it arrives, is Slack's.
+    // The frame under test is behind us, so the effect that render scheduled
+    // can be flushed — deliberately, rather than trusting it to have run by the
+    // scheduler's grace, since `gates[1]` does not exist until it has.
+    await act(async () => {});
+    expect(gates, "the subject change must have issued a usage read of its own").toHaveLength(2);
+
+    // And Slack's own answer, when it arrives, is Slack's. Read from the Usage
+    // section itself: a bare `7` would be satisfied by any digit anywhere on a
+    // panel that also carries account counts and timestamps.
     await act(async () => gates[1]());
-    expect(text()).toContain("7");
+    expect(usageText()).toContain("7 calls in the last 30 days");
     expect(text()).not.toContain("4242");
   });
 });

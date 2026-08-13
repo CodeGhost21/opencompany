@@ -697,6 +697,13 @@ async fn drop_dangling_defaults(
     defaults: crate::company::composio::ComposioDefaults,
 ) -> Result<crate::company::composio::ComposioDefaults, ApiError> {
     let live: std::collections::BTreeSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    // Iterated over a snapshot, one write per stale toolkit, and `defaults` is
+    // reassigned from each write rather than mutated here: `clear_default`
+    // re-reads the stored blob and returns the whole map as it now stands, so
+    // the last iteration's return is the fully reduced map and the answer this
+    // returns cannot drift from what was actually persisted. With nothing stale
+    // the loop does not run and the map passed in is returned untouched — no
+    // write on the ordinary read.
     let mut defaults = defaults;
     for (toolkit, id) in defaults
         .clone()
