@@ -21,6 +21,7 @@ pub mod copilot;
 // How this instance obtains its TinyHumans credential (projected, rotating
 // platform token vs a static key). Always compiled: the answer decides whether a
 // company can think at all, in every build.
+pub mod billing;
 pub mod credentials;
 pub mod dns;
 pub mod inference;

@@ -14,17 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The [`SecretStore`](crate::ports::SecretStore) key holding a company's
-/// Chargebee API key, written by the console's Billing settings (#527).
-pub const API_KEY_SECRET: &str = "chargebee/api_key";
-
-/// The `SecretStore` key holding a company's Chargebee site identifier — the
-/// `acme-test` in `acme-test.chargebee.com`.
-///
-/// Stored beside the key rather than in the manifest because the pair only ever
-/// makes sense together: a site without its key cannot be called, and a key
-/// pointed at the wrong site fails in a way that looks like a bad key.
-pub const SITE_SECRET: &str = "chargebee/site";
+pub use crate::company::billing::{API_KEY_SECRET, SITE_SECRET};
 
 /// Connection settings for one company's Chargebee site.
 ///

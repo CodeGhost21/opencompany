@@ -49,9 +49,7 @@ use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
 use crate::server::ops::resolve;
 
-/// The `SecretStore` key holding the Basic-auth credential Chargebee is
-/// configured to present, stored as the literal `username:password` pair.
-pub const WEBHOOK_SECRET_KEY: &str = "chargebee/webhook_secret";
+pub use crate::company::billing::WEBHOOK_SECRET_KEY;
 
 /// The channel a verified delivery is raised on.
 pub const CHANNEL: &str = "chargebee";
