@@ -599,9 +599,9 @@ mod test {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// The directory name is unpredictable (not the pid) and the two files land
-    /// exclusively at their locked-down modes — the shape that denies a local
-    /// attacker a name to pre-plant (issue #815).
+    /// The directory name is unpredictable (a CSPRNG suffix, distinct per call)
+    /// and the two files land exclusively at their locked-down modes — the shape
+    /// that denies a local attacker a name to pre-plant (issue #815).
     #[cfg(unix)]
     #[test]
     fn the_askpass_files_are_created_exclusively_and_locked_down() {
@@ -612,12 +612,22 @@ mod test {
         let dir = AskpassDir::create(&base).unwrap();
         dir.write_token("SENTINEL").unwrap();
 
+        // Unpredictable: `.askpass-` + 16 CSPRNG bytes as hex. Asserting the pid
+        // is *absent* from the name would be flaky — a random hex string can
+        // contain the pid's decimal digits by chance — so the real property is
+        // pinned instead: a full-width hex suffix, and a second call that lands
+        // on a different name.
         let name = dir.path.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with(".askpass-"), "{name}");
+        let suffix = name
+            .strip_prefix(".askpass-")
+            .unwrap_or_else(|| panic!("askpass prefix missing: {name}"));
+        assert_eq!(suffix.len(), 32, "expected a 16-byte hex suffix: {name}");
         assert!(
-            !name.contains(&std::process::id().to_string()),
-            "the dir name still encodes the pid, so it is predictable: {name}"
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "the suffix is not hex: {name}"
         );
+        let dir2 = AskpassDir::create(&base).unwrap();
+        assert_ne!(dir2.path, dir.path, "two askpass dirs collided on a name");
 
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&dir.path), 0o700, "the dir is not owner-only");
