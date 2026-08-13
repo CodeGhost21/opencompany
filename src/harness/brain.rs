@@ -120,6 +120,12 @@ impl Drop for CheckoutJanitor {
 pub struct HarnessBrain {
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
+    /// The LLM triage escalation, built on first use (issue #678).
+    ///
+    /// Lazy because it needs the company id, and a brain outlives any one
+    /// record read; `OnceLock` because it is immutable once built and the cost
+    /// is a clone of two `Arc`s, not a model call.
+    triage: std::sync::OnceLock<crate::harness::triage::MeteredTriage>,
     /// The company's record, **re-read from the store at the top of every
     /// cycle** (issue #707).
     ///
@@ -175,6 +181,7 @@ impl HarnessBrain {
             record: std::sync::RwLock::new(Arc::new(record)),
             responder,
             runs: None,
+            triage: std::sync::OnceLock::new(),
         }
     }
 
@@ -2369,6 +2376,17 @@ impl HarnessBrain {
         )
         .with_approvals(&self.deps.approval_requests)
         .with_workflow_refs(&self.deps.workflow_refs)
+        .with_triage(self.triage_escalation(&record.id))
+    }
+
+    /// The company's triage escalation, built once (issue #678).
+    fn triage_escalation(
+        &self,
+        company: &crate::ports::types::CompanyId,
+    ) -> &crate::harness::triage::MeteredTriage {
+        self.triage.get_or_init(|| {
+            crate::harness::triage::MeteredTriage::from_deps(&self.deps, company.clone())
+        })
     }
 }
 
@@ -7442,6 +7460,54 @@ members = ["eng1", "eng2"]
     /// the last user message so a test can read the turn's reply. Sharing the
     /// queue handle with [`HarnessDeps::delegations`] is what lets the brain
     /// drain it after the turn.
+    /// Whether this request is a triage escalation rather than an agent turn
+    /// (issue #678).
+    ///
+    /// Keyed on the system prompt's opening sentence, which
+    /// `harness::triage::system_prompt` owns. Coupling a fixture to prose is
+    /// ordinarily a smell; here the alternative is worse, because the only
+    /// other thing distinguishing the two is "carries no tools", and a turn
+    /// whose agent happens to have an empty belt would be misread as a
+    /// classification. Pinned by `a_triage_request_is_recognised_as_one`.
+    fn is_triage_request(request: &ModelRequest) -> bool {
+        request
+            .messages
+            .first()
+            .map(|m| m.text().contains("You classify one message"))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn a_triage_request_is_recognised_as_one() {
+        let triage = ModelRequest {
+            messages: vec![
+                tinyagents::harness::message::Message::system(
+                    crate::harness::triage::system_prompt_for_test(),
+                ),
+                tinyagents::harness::message::Message::user("hello".to_string()),
+            ],
+            ..ModelRequest::default()
+        };
+        assert!(
+            is_triage_request(&triage),
+            "the fixture must recognise the real prompt, or it silently starts \
+             eating scripted turns again"
+        );
+        let turn = ModelRequest {
+            messages: vec![
+                tinyagents::harness::message::Message::system(
+                    "You are the CEO of Acme.".to_string(),
+                ),
+                tinyagents::harness::message::Message::user("ship it".to_string()),
+            ],
+            ..ModelRequest::default()
+        };
+        assert!(
+            !is_triage_request(&turn),
+            "an agent turn is not a classification"
+        );
+    }
+
     struct DelegatingProvider {
         queue: orchestrator::DelegationQueue,
         pushes: StdMutex<VecDeque<Vec<Delegation>>>,
@@ -7491,6 +7557,21 @@ members = ["eng1", "eng2"]
             _state: &(),
             request: ModelRequest,
         ) -> tinyagents::Result<ModelResponse> {
+            // Issue #678: a triage escalation is a classification, not a turn.
+            // It rides the same `HarnessModel` handle the roster runs on, so
+            // without this it would consume a scripted push and shift every
+            // turn's script by one — the delegation the test wrote for turn 1
+            // would be staged by a call that is not turn 1.
+            //
+            // Answering `chatter` rather than declining keeps these fixtures on
+            // the ungated path they were written for: only an `answer` verdict
+            // narrows the claim, so `chatter` leaves the gate exactly where the
+            // abstention left it. A test that wants the narrowing drives it
+            // through `DelegationRunner::with_triage` directly, where the
+            // verdict is scripted.
+            if is_triage_request(&request) {
+                return Ok(ModelResponse::assistant("chatter".to_string()));
+            }
             let invoke = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if self.faults.fail_from.is_some_and(|from| invoke >= from) {
                 return Err(tinyagents::TinyAgentsError::Model(
