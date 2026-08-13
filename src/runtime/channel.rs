@@ -13,10 +13,73 @@ use futures::stream::{self, BoxStream};
 
 use crate::Result;
 use crate::ports::channel::ChannelAdapter;
-use crate::ports::types::{InboundMessage, OutboundMessage};
+use crate::ports::events::EventLog;
+use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, InboundMessage, OutboundMessage};
 
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
+
+/// A desk-backed [`ChannelAdapter`]. Sending appends an agent reply to the
+/// company's durable event log, which is the existing read path for desk chat
+/// history. The adapter is deliberately one-per-desk so channel lookup and
+/// chat-thread ownership use the same canonical desk id.
+#[derive(Clone)]
+pub struct DeskChannel {
+    company: CompanyId,
+    desk_id: String,
+    events: Arc<dyn EventLog>,
+}
+
+impl DeskChannel {
+    /// Creates a channel for an already-resolved desk id.
+    pub fn new(company: CompanyId, desk_id: String, events: Arc<dyn EventLog>) -> Self {
+        Self {
+            company,
+            desk_id,
+            events,
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for DeskChannel {
+    fn channel_id(&self) -> &str {
+        &self.desk_id
+    }
+
+    fn inbound(&self) -> BoxStream<'static, InboundMessage> {
+        Box::pin(stream::empty())
+    }
+
+    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        self.events
+            .append(
+                &self.company,
+                CompanyEvent::AgentReply {
+                    chat_id: self.desk_id.clone(),
+                    agent_id: "workflow".to_string(),
+                    text: msg.text,
+                    steps: msg.steps,
+                    task_id: msg.task_id,
+                    parent: msg
+                        .reply_to
+                        .and_then(|reply| reply.chat_id.parse::<u64>().ok())
+                        .map(EventSeq::new),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for DeskChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeskChannel")
+            .field("company", &self.company)
+            .field("desk_id", &self.desk_id)
+            .finish()
+    }
+}
 
 /// The built-in operator [`ChannelAdapter`], buffering sent messages in memory.
 #[derive(Clone, Default)]
@@ -63,6 +126,61 @@ impl std::fmt::Debug for OperatorChannel {
     }
 }
 
+/// A durable-looking channel that records what it was sent, for tests whose
+/// subject is the runner's delivery bookkeeping rather than any one adapter.
+///
+/// Those tests used [`OperatorChannel`] as their spy, which stopped working
+/// when workflow delivery began refusing `operator` outright: the count they
+/// assert is "how many times did the report reach the channel", and a refusal
+/// answers a different question. This carries an ordinary channel id so it
+/// clears the refusal, and keeps the buffer so the counting still works.
+// Every consumer of this lives behind `openhuman`/`tinycortex`, so a
+// default-feature build compiles it and constructs it nowhere. That is a
+// feature-configuration fact, not dead code: the runner and delivery suites
+// that use it are simply not selected in that lane (issue #770).
+#[cfg(test)]
+#[allow(dead_code)]
+#[derive(Clone, Default)]
+pub(crate) struct RecordingChannel {
+    id: String,
+    sent: Arc<StdMutex<Vec<OutboundMessage>>>,
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+impl RecordingChannel {
+    pub(crate) fn new(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            sent: Arc::default(),
+        }
+    }
+
+    pub(crate) fn sent(&self) -> Vec<OutboundMessage> {
+        self.sent.lock().expect("recording buffer poisoned").clone()
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ChannelAdapter for RecordingChannel {
+    fn channel_id(&self) -> &str {
+        &self.id
+    }
+
+    fn inbound(&self) -> BoxStream<'static, InboundMessage> {
+        Box::pin(stream::empty())
+    }
+
+    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        self.sent
+            .lock()
+            .expect("recording buffer poisoned")
+            .push(msg);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -84,5 +202,60 @@ mod test {
             .unwrap();
         assert_eq!(channel.sent().len(), 1);
         assert_eq!(channel.sent()[0].text, "hello");
+    }
+
+    /// An [`EventLog`] whose `append` always errors, so the desk channel's own
+    /// failure path is reachable.
+    struct FailingEventLog;
+
+    #[async_trait]
+    impl EventLog for FailingEventLog {
+        async fn append(&self, _company: &CompanyId, _event: CompanyEvent) -> Result<EventSeq> {
+            Err(crate::OpenCompanyError::Config(
+                "event journal is unwritable".into(),
+            ))
+        }
+
+        async fn read_from(
+            &self,
+            _company: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> Result<Vec<crate::ports::types::StoredEvent>> {
+            Ok(Vec::new())
+        }
+
+        fn subscribe(
+            &self,
+            _company: &CompanyId,
+        ) -> BoxStream<'static, crate::ports::types::StoredEvent> {
+            Box::pin(stream::empty())
+        }
+    }
+
+    /// A desk send is a durable write, so a journal that refuses it is a failed
+    /// delivery — not a silent one. `send` propagates rather than logging and
+    /// answering `Ok`, and this pins that: swallowing the error would leave
+    /// delivery reporting `Sent` for a report that reached nobody, which is the
+    /// exact defect the desk channel exists to end (issue #835).
+    #[tokio::test]
+    async fn a_desk_send_fails_when_the_journal_refuses_it() {
+        let channel = DeskChannel::new(
+            CompanyId::new("acme"),
+            "engineering".to_string(),
+            Arc::new(FailingEventLog),
+        );
+        assert_eq!(channel.channel_id(), "engineering");
+        let result = channel
+            .send(OutboundMessage {
+                message_id: None,
+                task_id: None,
+                channel: "engineering".into(),
+                text: "the weekly digest".into(),
+                steps: Vec::new(),
+                reply_to: None,
+            })
+            .await;
+        assert!(result.is_err(), "an unwritable journal must fail the send");
     }
 }
