@@ -875,6 +875,20 @@ jobs:
       - name: Test which Composio account an execute acts as
         run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,tinycortex,composio harness::composio::live::live_tests
 
+      # Issue #820 — a fourth narrow filter, and the first outside `harness::`.
+      # The console-plane half of the same decision: the grouping the choice is
+      # reported through, and the cleanup that drops a choice naming an account
+      # Composio no longer lists. Both are gated on `composio`, so before this
+      # step they were compiled by `Check (--all-features)` and run by nothing.
+      #
+      # `…::tests::gated_tests` and not `server::ops::composio`, which would
+      # sweep in `an_admin_is_unaffected` — the one that dials
+      # `api.tinyhumans.ai` for real once the feature is on (#801). The module
+      # exists to be nameable here: a gated ops test added later joins it and is
+      # run, rather than depending on somebody remembering this file.
+      - name: Test the Composio account choice on the console plane
+        run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,tinycortex,composio server::ops::composio::tests::gated_tests
+
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
       # `tinyplace`-gated line and deliberately runs none of them, and no other

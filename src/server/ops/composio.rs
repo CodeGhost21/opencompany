@@ -672,14 +672,30 @@ async fn connections_impl(runtime: &CompanyRuntime) -> Result<Json<Vec<Connectio
         crate::company::composio::load_defaults(runtime.id(), runtime.secrets().as_ref())
             .await
             .map_err(ApiError)?;
-    // Housekeeping on the one path that holds both halves of the answer: a pin
-    // naming a connection Composio no longer lists is dropped here. Such a pin
-    // is not merely stale — it would be sent on the next `composio_execute` and
-    // refused, so an account revoked outside this console (at Composio itself)
-    // would silently break the toolkit for every agent. The console polls this
-    // route, so the repair lands on its own. Deliberately a *removal of a
-    // dangling reference* and nothing else: it cannot pick a different account,
-    // only stop naming one that is gone.
+    let defaults = drop_dangling_defaults(runtime, &rows, defaults).await?;
+    Ok(Json(group_by_toolkit(rows, &defaults)))
+}
+
+/// Drop every stored choice naming a connection `rows` does not contain, and
+/// return what is left (issue #820).
+///
+/// Housekeeping on the one path that holds both halves of the answer. Such a pin
+/// is not merely stale — it would be sent on the next `composio_execute` and
+/// refused, so an account revoked outside this console (at Composio itself)
+/// would silently break the toolkit for every agent. The console polls this
+/// route, so the repair lands on its own. Deliberately a *removal of a dangling
+/// reference* and nothing else: it cannot pick a different account, only stop
+/// naming one that is gone.
+///
+/// Split out from the handler for the same reason [`group_by_toolkit`] is: the
+/// decision is testable without standing up a Composio backend, and the rows a
+/// test has to invent are exactly the ones the handler was handed.
+#[cfg(feature = "composio")]
+async fn drop_dangling_defaults(
+    runtime: &CompanyRuntime,
+    rows: &[crate::harness::composio::ComposioConnectionRow],
+    defaults: crate::company::composio::ComposioDefaults,
+) -> Result<crate::company::composio::ComposioDefaults, ApiError> {
     let live: std::collections::BTreeSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
     let mut defaults = defaults;
     for (toolkit, id) in defaults
@@ -701,7 +717,7 @@ async fn connections_impl(runtime: &CompanyRuntime) -> Result<Json<Vec<Connectio
         .await
         .map_err(ApiError)?;
     }
-    Ok(Json(group_by_toolkit(rows, &defaults)))
+    Ok(defaults)
 }
 
 /// Fold per-connection rows into the per-toolkit response shape.
@@ -1937,108 +1953,199 @@ mod tests {
         assert_eq!(body["code"], "conflict", "{body}");
     }
 
-    /// Issue #404: the per-toolkit shape the tile grid reads is a fold over the
-    /// per-connection rows, and the fold must not lose an account or flip a
-    /// boolean. Pure — no live backend needed.
+    /// The ops tests that are decidable only in a build carrying `composio`.
+    ///
+    /// Gathered under one module so a CI lane can *name* them. A feature-gated
+    /// test's default fate in this repo is "compiled by `Check
+    /// (--all-features)`, executed by nothing" (issue #770), and the composio
+    /// lane has to select by filter rather than run this whole module: with the
+    /// feature on, `an_admin_is_unaffected` dials `api.tinyhumans.ai` for real
+    /// (issue #801). One filter on this module runs every gated test here and
+    /// none of that, and a gated test added later is picked up by joining the
+    /// module rather than by remembering to edit `ci.yml`.
     #[cfg(feature = "composio")]
-    #[test]
-    fn grouping_keeps_every_account_and_ors_their_connected_state() {
-        use crate::harness::composio::ComposioConnectionRow;
+    mod gated_tests {
+        use super::*;
+        use crate::server::ops::composio::{drop_dangling_defaults, group_by_toolkit};
 
-        let row = |id: &str, toolkit: &str, connected: bool, account: Option<&str>| {
-            ComposioConnectionRow {
+        /// Issue #404: the per-toolkit shape the tile grid reads is a fold over the
+        /// per-connection rows, and the fold must not lose an account or flip a
+        /// boolean. Pure — no live backend needed.
+        #[test]
+        fn grouping_keeps_every_account_and_ors_their_connected_state() {
+            use crate::harness::composio::ComposioConnectionRow;
+
+            let row = |id: &str, toolkit: &str, connected: bool, account: Option<&str>| {
+                ComposioConnectionRow {
+                    id: id.to_string(),
+                    toolkit: toolkit.to_string(),
+                    status: if connected { "ACTIVE" } else { "INITIATED" }.to_string(),
+                    connected,
+                    created_at: None,
+                    account: account.map(str::to_string),
+                }
+            };
+
+            let out = group_by_toolkit(
+                vec![
+                    row("c1", "gmail", false, Some("a@acme.test")),
+                    row("c2", "gmail", true, Some("b@acme.test")),
+                    row("c3", "slack", false, None),
+                ],
+                &Default::default(),
+            );
+
+            assert_eq!(out.len(), 2, "one entry per toolkit");
+            assert_eq!(out[0].toolkit, "gmail");
+            assert!(
+                out[0].connected,
+                "a toolkit is connected when ANY of its accounts is — the second row \
+                 here, which a first-row-wins fold would have missed"
+            );
+            assert_eq!(
+                out[0]
+                    .accounts
+                    .iter()
+                    .map(|a| (a.id.as_str(), a.connected))
+                    .collect::<Vec<_>>(),
+                vec![("c1", false), ("c2", true)],
+                "both accounts survive, in the order the rows arrived"
+            );
+            assert_eq!(out[1].toolkit, "slack");
+            assert!(!out[1].connected, "no active account, so not connected");
+            assert_eq!(out[1].accounts.len(), 1);
+
+            // Nothing pinned: nothing is marked, and no default is reported. This
+            // is the shape #819 asks the console to render honestly, and it stays
+            // the shape until somebody chooses.
+            assert!(out.iter().all(|dto| dto.default_connection_id.is_none()));
+            assert!(
+                out.iter()
+                    .flat_map(|dto| dto.accounts.iter())
+                    .all(|account| !account.is_default),
+                "an unchosen account is never marked as the default"
+            );
+        }
+
+        /// Issue #820: once a company has chosen, the choice is reported on the
+        /// toolkit **and** marked on the one account it names — the console needs
+        /// both to draw a list with one row marked and the rest offering to become
+        /// it.
+        #[test]
+        fn grouping_marks_the_chosen_account_and_only_that_one() {
+            use crate::harness::composio::ComposioConnectionRow;
+
+            let row = |id: &str, toolkit: &str| ComposioConnectionRow {
                 id: id.to_string(),
                 toolkit: toolkit.to_string(),
-                status: if connected { "ACTIVE" } else { "INITIATED" }.to_string(),
-                connected,
+                status: "ACTIVE".to_string(),
+                connected: true,
                 created_at: None,
-                account: account.map(str::to_string),
+                account: None,
+            };
+            let defaults: crate::company::composio::ComposioDefaults =
+                [("gmail".to_string(), "c2".to_string())]
+                    .into_iter()
+                    .collect();
+
+            let out = group_by_toolkit(
+                vec![row("c1", "gmail"), row("c2", "gmail"), row("c3", "slack")],
+                &defaults,
+            );
+
+            assert_eq!(out[0].default_connection_id.as_deref(), Some("c2"));
+            assert_eq!(
+                out[0]
+                    .accounts
+                    .iter()
+                    .map(|a| (a.id.as_str(), a.is_default))
+                    .collect::<Vec<_>>(),
+                vec![("c1", false), ("c2", true)],
+                "exactly one account carries the mark"
+            );
+            assert!(
+                out[1].default_connection_id.is_none(),
+                "a choice made for gmail says nothing about slack: {:?}",
+                out[1].default_connection_id
+            );
+        }
+
+        /// Issue #820: an account revoked **at Composio** — not through this console,
+        /// so nothing here saw the disconnect — leaves a choice naming a connection
+        /// that no longer exists. That choice is not merely stale: it is sent on the
+        /// next `composio_execute` and refused, so the toolkit stops working for
+        /// every agent for a reason nothing on screen explains. The read the console
+        /// polls repairs it.
+        ///
+        /// Driven through the handler's own helper rather than the route, because
+        /// the route needs a live Composio backend and the decision under test is
+        /// the one made *after* it answers. What it must not do is as load-bearing
+        /// as what it must: a live choice is untouched, and a toolkit whose chosen
+        /// account is gone falls back to "Composio picks" rather than being
+        /// re-pointed at a sibling account nobody chose.
+        #[tokio::test]
+        async fn the_connections_read_forgets_a_choice_composio_no_longer_lists() {
+            use crate::company::composio::{load_defaults, set_default};
+            use crate::harness::composio::ComposioConnectionRow;
+
+            let home_dir = home();
+            let state = state_with_manifest(home_dir.path(), GRANTED).await;
+            let runtime = runtime_of(&state, "acme");
+            let (id, secrets) = (runtime.id(), runtime.secrets());
+
+            // gmail names an account still live; slack names one revoked since.
+            for (toolkit, connection) in [("gmail", "c1"), ("slack", "c_revoked")] {
+                set_default(id, secrets.as_ref(), toolkit, connection)
+                    .await
+                    .unwrap();
             }
-        };
 
-        let out = super::group_by_toolkit(
-            vec![
-                row("c1", "gmail", false, Some("a@acme.test")),
-                row("c2", "gmail", true, Some("b@acme.test")),
-                row("c3", "slack", false, None),
-            ],
-            &Default::default(),
-        );
+            let row = |id: &str, toolkit: &str| ComposioConnectionRow {
+                id: id.to_string(),
+                toolkit: toolkit.to_string(),
+                status: "ACTIVE".to_string(),
+                connected: true,
+                created_at: None,
+                account: None,
+            };
+            // The company still holds a slack account — just not the chosen one.
+            let rows = vec![row("c1", "gmail"), row("c9", "slack")];
 
-        assert_eq!(out.len(), 2, "one entry per toolkit");
-        assert_eq!(out[0].toolkit, "gmail");
-        assert!(
-            out[0].connected,
-            "a toolkit is connected when ANY of its accounts is — the second row \
-             here, which a first-row-wins fold would have missed"
-        );
-        assert_eq!(
-            out[0]
-                .accounts
-                .iter()
-                .map(|a| (a.id.as_str(), a.connected))
-                .collect::<Vec<_>>(),
-            vec![("c1", false), ("c2", true)],
-            "both accounts survive, in the order the rows arrived"
-        );
-        assert_eq!(out[1].toolkit, "slack");
-        assert!(!out[1].connected, "no active account, so not connected");
-        assert_eq!(out[1].accounts.len(), 1);
+            let left = drop_dangling_defaults(
+                runtime.as_ref(),
+                &rows,
+                load_defaults(id, secrets.as_ref()).await.unwrap(),
+            )
+            .await
+            .expect("the cleanup completes");
 
-        // Nothing pinned: nothing is marked, and no default is reported. This
-        // is the shape #819 asks the console to render honestly, and it stays
-        // the shape until somebody chooses.
-        assert!(out.iter().all(|dto| dto.default_connection_id.is_none()));
-        assert!(
-            out.iter()
-                .flat_map(|dto| dto.accounts.iter())
-                .all(|account| !account.is_default),
-            "an unchosen account is never marked as the default"
-        );
-    }
+            assert_eq!(
+                left.get("gmail").map(String::as_str),
+                Some("c1"),
+                "a choice naming a live account is untouched"
+            );
+            assert!(
+                !left.contains_key("slack"),
+                "the choice naming a revoked account is dropped: {left:?}"
+            );
+            assert_eq!(
+                load_defaults(id, secrets.as_ref()).await.unwrap(),
+                left,
+                "the repair is stored, not merely reflected in this one response — \
+                 otherwise the next agent turn still sends the dead id"
+            );
 
-    /// Issue #820: once a company has chosen, the choice is reported on the
-    /// toolkit **and** marked on the one account it names — the console needs
-    /// both to draw a list with one row marked and the rest offering to become
-    /// it.
-    #[cfg(feature = "composio")]
-    #[test]
-    fn grouping_marks_the_chosen_account_and_only_that_one() {
-        use crate::harness::composio::ComposioConnectionRow;
-
-        let row = |id: &str, toolkit: &str| ComposioConnectionRow {
-            id: id.to_string(),
-            toolkit: toolkit.to_string(),
-            status: "ACTIVE".to_string(),
-            connected: true,
-            created_at: None,
-            account: None,
-        };
-        let defaults: crate::company::composio::ComposioDefaults =
-            [("gmail".to_string(), "c2".to_string())]
-                .into_iter()
-                .collect();
-
-        let out = super::group_by_toolkit(
-            vec![row("c1", "gmail"), row("c2", "gmail"), row("c3", "slack")],
-            &defaults,
-        );
-
-        assert_eq!(out[0].default_connection_id.as_deref(), Some("c2"));
-        assert_eq!(
-            out[0]
-                .accounts
-                .iter()
-                .map(|a| (a.id.as_str(), a.is_default))
-                .collect::<Vec<_>>(),
-            vec![("c1", false), ("c2", true)],
-            "exactly one account carries the mark"
-        );
-        assert!(
-            out[1].default_connection_id.is_none(),
-            "a choice made for gmail says nothing about slack: {:?}",
-            out[1].default_connection_id
-        );
+            let out = group_by_toolkit(rows, &left);
+            assert_eq!(out[1].toolkit, "slack");
+            assert!(
+                out[1].default_connection_id.is_none()
+                    && out[1].accounts.iter().all(|account| !account.is_default),
+                "with its choice gone slack is unchosen again — the surviving account \
+                 is not silently promoted into a decision nobody made: {:?}",
+                out[1]
+            );
+            assert_eq!(out[0].default_connection_id.as_deref(), Some("c1"));
+        }
     }
 
     /// The choice plane is wired on the same terms as the rest of the OAuth
