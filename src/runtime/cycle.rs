@@ -1307,6 +1307,8 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
             .get("head")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        // The card this publish belongs to, so a host-side failure can be reported
+        // on it.
         let task = effect
             .payload
             .get("task")
@@ -1328,8 +1330,28 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                  configured to perform it",
             ));
         };
-        // The push is the irreversible half: its failure fails the effect.
-        repos.push_published(repo, branch, head).await?;
+        // The push is the irreversible half, and it fails the effect — but never
+        // silently (issue #815). A failed push leaves the effect recorded as
+        // executed (the at-most-once guard), so re-approving is a no-op; the
+        // operator has to KNOW it failed and re-run the task, or the publish
+        // vanishes with the change staged in the mirror and nothing on the remote.
+        if let Err(err) = repos.push_published(repo, branch, head).await {
+            // The diagnosis — which can name the remote URL and host paths — stays
+            // in the log; the durable, company-readable note carries a classified
+            // sentence instead (issue #815, the rule #614/#688 set).
+            tracing::warn!(branch, "[repo] could not publish the branch: {err}");
+            note_publish_failure_on_card(
+                rt,
+                task,
+                format!(
+                    "Could not publish `{branch}` to the remote. Nothing reached the remote, and \
+                     this approval will not retry on its own \u{2014} re-run the task to publish \
+                     again."
+                ),
+            )
+            .await;
+            return Err(err);
+        }
 
         // Issue #736: open a pull request for the pushed branch, best-effort. The
         // push has landed, so a PR failure must NOT fail the effect — the branch
@@ -1345,37 +1367,81 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                 "[repo] opened a pull request for the published branch"
             ),
             Err(err) => {
+                // Same division as the push failure: the raw error to the log,
+                // a classified sentence to the durable note (issue #815).
                 tracing::warn!(
                     branch,
                     "[repo] pushed the branch but could not open a pull request: {err}"
                 );
-                if !task.is_empty() {
-                    let note = format!(
+                note_publish_failure_on_card(
+                    rt,
+                    task,
+                    format!(
                         "Published `{branch}` to the remote, but the pull request could not be \
-                         opened: {err}. The branch is on the remote — open a PR from it by hand, \
-                         or approve another publish to retry."
-                    );
-                    if let Err(e) = rt
-                        .events
-                        .append(
-                            &rt.id,
-                            CompanyEvent::TaskDiscussionPosted {
-                                task_id: task.to_string(),
-                                text: note,
-                                by: None,
-                            },
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            "[repo] could not record the pull-request failure on the task: {e}"
-                        );
-                    }
-                }
+                         opened. The branch is on the remote \u{2014} open a PR from it by hand, or \
+                         approve another publish to retry."
+                    ),
+                )
+                .await;
             }
         }
     }
     Ok(())
+}
+
+/// Whether `task` names a real card in `cards` (issue #815).
+///
+/// The guard that keeps a DM's `dm-*` work key — which `repo_publish` stamps as
+/// the effect's `task`, and which no card owns — from filing a publish-failure
+/// note under a phantom card. The empty id, an unknown id, and a work key all
+/// resolve to nothing.
+fn task_names_a_card(cards: &[TaskRecord], task: &str) -> bool {
+    !task.is_empty() && cards.iter().any(|card| card.id == task)
+}
+
+/// Records a host-side `repo_publish` failure where the operator will see it,
+/// but **only when the work unit is a real card** (issue #815).
+///
+/// A DM's `repo_publish` stamps its `dm-*` work key as the effect's `task`, and
+/// no card owns that id — a [`TaskDiscussionPosted`](CompanyEvent::TaskDiscussionPosted)
+/// under it would file the note against a phantom card. When the id does not
+/// resolve to a card the board post is skipped: the failure is already in the
+/// operator log (the `tracing::warn` at the call site), which is where a `git`
+/// error that can name host paths and the remote URL belongs, rather than in a
+/// durable, company-readable record (the rule #614/#688 set). `text` is a fixed,
+/// classified sentence carrying none of the raw error.
+async fn note_publish_failure_on_card(rt: &CompanyRuntime, task: &str, text: String) {
+    if task.is_empty() {
+        return;
+    }
+    // Resolve to a live card; a `dm-*` work key or an unknown id resolves to
+    // nothing, and the note stays in the log rather than misfiling. A store error
+    // is treated the same way — better a logged-only note than one on a card that
+    // may not exist.
+    let is_card = match rt.tasks().list(&rt.id).await {
+        Ok(cards) => task_names_a_card(&cards, task),
+        Err(err) => {
+            tracing::warn!("[repo] could not resolve the task for a publish-failure note: {err}");
+            false
+        }
+    };
+    if !is_card {
+        return;
+    }
+    if let Err(err) = rt
+        .events
+        .append(
+            &rt.id,
+            CompanyEvent::TaskDiscussionPosted {
+                task_id: task.to_string(),
+                text,
+                by: None,
+            },
+        )
+        .await
+    {
+        tracing::warn!("[repo] could not record the publish failure on the task: {err}");
+    }
 }
 
 /// The title of the pull request a `repo_publish` opens (issue #736): the first
@@ -1497,7 +1563,35 @@ fn sanitize_work_segment(thread: &str) -> Option<String> {
     // Bound the body well under `validate_task_segment`'s 128-char cap; the
     // characters are all ASCII, so a byte take is a char take.
     let body: String = cleaned.chars().take(100).collect();
-    Some(format!("dm-{body}"))
+    // Injective, not just safe. Folding every disallowed character to `-` — which
+    // is itself a keep-character — and trimming/truncating are all lossy, so two
+    // distinct threads can reduce to one body: `coder/main` and `coder-main` both
+    // become `coder-main`. Since this value keys checkout retention and the
+    // `oc/<company>/<unit>` publish branch, a collision would let one thread
+    // reclaim another's tree or publish over its branch. When anything was lost,
+    // append a short stable digest of the *raw* thread so distinct threads keep
+    // distinct keys; a thread that was already a safe segment is unchanged, so
+    // its key stays readable.
+    if body == thread {
+        Some(format!("dm-{body}"))
+    } else {
+        Some(format!("dm-{body}-{}", short_thread_digest(thread)))
+    }
+}
+
+/// A short, build-stable digest of a raw thread id (64-bit FNV-1a), used to keep
+/// two threads that sanitise to the same body from sharing a work key.
+///
+/// A `std` `DefaultHasher` is deliberately not used: its output is not
+/// guaranteed stable across toolchain versions, and this digest names a durable
+/// branch and checkout key that must hash the same on every build.
+fn short_thread_digest(thread: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in thread.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// The board task a cycle is working, read off its own trigger events
@@ -2345,19 +2439,71 @@ mod test {
     /// broken ref.
     #[test]
     fn sanitize_work_segment_makes_a_safe_branch_segment() {
+        // An already-safe thread is unchanged and keeps a readable key.
         assert_eq!(sanitize_work_segment("coder"), Some("dm-coder".into()));
-        // Colons, slashes and spaces fold to '-'.
-        assert_eq!(
-            sanitize_work_segment("dm:coder/main x"),
-            Some("dm-dm-coder-main-x".into())
-        );
-        // Leading/trailing separators are trimmed before the prefix.
-        assert_eq!(sanitize_work_segment("--weird--"), Some("dm-weird".into()));
         // Dots and underscores are already valid and survive.
         assert_eq!(sanitize_work_segment("a_b.c"), Some("dm-a_b.c".into()));
         // Nothing usable.
         assert_eq!(sanitize_work_segment(""), None);
         assert_eq!(sanitize_work_segment("///"), None);
+
+        // When folding/trimming loses information, the readable body is kept and
+        // a digest of the raw thread is appended so distinct threads never share
+        // a work key. Colons, slashes and spaces fold to '-'; leading/trailing
+        // separators are trimmed before the prefix.
+        let folded = sanitize_work_segment("dm:coder/main x").unwrap();
+        assert!(folded.starts_with("dm-dm-coder-main-x-"), "{folded}");
+        let trimmed = sanitize_work_segment("--weird--").unwrap();
+        assert!(trimmed.starts_with("dm-weird-"), "{trimmed}");
+
+        // The collision the digest closes: two threads that fold to the same body
+        // get distinct keys — and the digest is deterministic across calls.
+        assert_ne!(
+            sanitize_work_segment("coder/main"),
+            sanitize_work_segment("coder-main"),
+            "distinct threads must not share a work key"
+        );
+        assert_eq!(
+            sanitize_work_segment("coder/main"),
+            sanitize_work_segment("coder/main")
+        );
+    }
+
+    fn card_record(id: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: "t".to_string(),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        }
+    }
+
+    /// A publish-failure note lands only on a real card — never on a DM's `dm-*`
+    /// work key, which no card owns (issue #815).
+    #[test]
+    fn a_publish_note_only_lands_on_a_real_card_not_a_dm_work_key() {
+        let cards = vec![card_record("019ff728-abcd"), card_record("another")];
+        // A real card id resolves.
+        assert!(task_names_a_card(&cards, "019ff728-abcd"));
+        // A DM work key — what `repo_publish` stamps for a DM — owns no card, so
+        // the failure note stays in the log rather than filing under a phantom
+        // card.
+        assert!(!task_names_a_card(&cards, "dm-coder-main"));
+        // An unknown id, the empty id, and an empty board all resolve to nothing.
+        assert!(!task_names_a_card(&cards, "ghost"));
+        assert!(!task_names_a_card(&cards, ""));
+        assert!(!task_names_a_card(&[], "019ff728-abcd"));
     }
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
