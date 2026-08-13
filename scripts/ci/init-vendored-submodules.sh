@@ -2,8 +2,12 @@
 #
 # Initialize the vendored openhuman crate's own submodules. Issue #592.
 #
-# THE ONE PLACE THE LIST LIVES. Adding a submodule under `vendor/openhuman`?
-# Add it here, nowhere else. Do not re-inline these commands into a workflow.
+# THE ONE PLACE THIS RUNS. Do not re-inline these commands into a workflow.
+#
+# The list of crates is no longer written here — it is read from
+# `vendor/openhuman/.gitmodules` at the pinned commit. Adding a submodule under
+# `vendor/openhuman` needs no change to this file. See the derivation below for
+# why a hardcoded copy could not survive a resync.
 #
 # This file exists because the block below was copied into four jobs of
 # `ci.yml` and a fifth in `release.yml`, ~340 lines apart in a file long enough
@@ -33,11 +37,15 @@
 # manifest must resolve too. Harmless for the default build; required for any
 # `--features openhuman` build.
 #
-# WHY TARGETED RATHER THAN `--recursive`
+# WHY SCOPED TO `vendor/` RATHER THAN `--recursive`
 #
-# A plain `--recursive` over `vendor/openhuman` additionally drags in the
-# desktop-only `tauri-cef` tree — a heavy CEF checkout that nothing in these
-# builds compiles.
+# A plain `--recursive` over `vendor/openhuman` takes every submodule openhuman
+# declares, including desktop-only trees nothing in these builds compiles. The
+# one that made this rule was `app/src-tauri/vendor/tauri-cef`, a heavy CEF
+# checkout; openhuman replaced CEF with upstream Wry in `1843706c` and the
+# submodule is gone, but the rule holds for whatever lands outside `vendor/`
+# next. Scoping to the `vendor/` prefix excludes those structurally, without
+# anyone having to name them.
 #
 # WHAT THIS DELIBERATELY DOES NOT DO
 #
@@ -73,9 +81,60 @@ if [ ! -f vendor/openhuman/.gitmodules ]; then
   exit 1
 fi
 
-git -C vendor/openhuman submodule update --init --depth 1 \
-  vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
-  vendor/tinydocs vendor/tinymemory vendor/tinywallet \
-  vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
-git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
-  vendor/tinyagents
+# The list is READ FROM THE PIN, not written here.
+#
+# It used to be hardcoded, and that is the failure this now prevents: the list
+# belongs to openhuman, so every resync of `vendor/openhuman` could invalidate
+# it from the outside. Pin `cbc0b065` dropped `vendor/tinydocs` and
+# `vendor/tinywallet`, and every Rust lane died on
+# `error: pathspec 'vendor/tinydocs' did not match any file(s) known to git`
+# before a single crate compiled. The symmetric failure — upstream ADDS a crate
+# and the hardcoded list silently omits it — is the one that produced the
+# `release.yml` breakage described above, and it is the worse of the two
+# because nothing fails until something needs the missing manifest.
+#
+# The `vendor/` prefix is the whole filter, and it is a STRUCTURAL one: those are
+# the crates Cargo must resolve manifests for. Anything openhuman vendors outside
+# `vendor/` is not a path dependency of the crate we build.
+#
+# It is also what keeps the heavy desktop trees out, which is why this is not a
+# plain `--recursive`. The case that rule was written for lived at
+# `app/src-tauri/vendor/tauri-cef` — outside `vendor/`, so the prefix excluded it
+# by construction. (openhuman has since replaced CEF with upstream Wry and the
+# submodule is gone, but the rule stands for whatever lands there next.)
+#
+# Deliberately NOT filtering by name. A `grep -v cef` here would match by
+# substring, so a future crate whose path merely contains those letters would be
+# dropped without a word — the silent-omission failure this whole derivation
+# exists to prevent, reintroduced by the guard meant to help.
+VENDORED_CRATES=$(
+  git -C vendor/openhuman config -f .gitmodules --get-regexp '^submodule\..*\.path$' |
+    awk '{ print $2 }' |
+    grep '^vendor/' ||
+    true
+)
+
+# An empty list would make the `git submodule update` below init EVERY
+# submodule — including the desktop-only `tauri-cef` tree this script exists to
+# avoid dragging in. Refuse instead: an empty read means the `.gitmodules`
+# shape changed, and guessing is how a lane starts doing something nobody asked
+# for.
+if [ -z "${VENDORED_CRATES}" ]; then
+  echo "init-vendored-submodules: vendor/openhuman/.gitmodules declares no" >&2
+  echo "submodule under vendor/. Either the pin is broken or the layout" >&2
+  echo "changed; this script will not fall back to initializing everything." >&2
+  exit 1
+fi
+
+# Unquoted on purpose — the newline-separated list becomes one argument per
+# path. Submodule paths carry no whitespace.
+# shellcheck disable=SC2086
+git -C vendor/openhuman submodule update --init --depth 1 ${VENDORED_CRATES}
+
+# `tinycortex` declares its own `tinyagents` path dependency, so its manifest
+# must resolve too. Conditional because the pin decides whether tinycortex is
+# vendored at all, and a resync that drops it must not fail this script.
+if [ -f vendor/openhuman/vendor/tinycortex/.gitmodules ]; then
+  git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
+    vendor/tinyagents
+fi
