@@ -365,9 +365,37 @@ Two consequences worth knowing:
   probe is a network call with no injection point, and the removed gate lived on
   the far side of it, which is how it survived unasserted.
 
-No host route releases a Composio connection — `…/connections/{provider}/disconnect`
-blanks this host's own secret — so the console offers Disconnect only for a row
-whose `via` includes `native`.
+### Releasing a connection: two routes, not interchangeable (issue #404)
+
+There are two disconnects and they act on different things:
+
+- `POST …/connections/{provider}/disconnect` blanks this host's own
+  `oauth/{provider}` secret and best-effort revokes it upstream. It has never
+  touched Composio.
+- `DELETE …/composio/connections/{connection_id}` revokes **one connected
+  account** at Composio. Addressed by connection id, because a company can hold
+  two accounts for one toolkit and exactly one of them is being released.
+
+Until the second route existed the console sent every Disconnect to the first,
+so a Composio-connected provider answered `200`, reported success, and was still
+connected on the next refresh. The console now routes by what the provider is
+actually connected through (`disconnectRouteFor` in
+`frontend/src/lib/provider-grid.ts`), preferring the Composio account when a
+provider is connected through both — the native secret is inert until #396
+lands, so blanking it would release nothing an agent can feel.
+
+`GET …/composio/connections` carries the accounts a revoke is addressed to:
+`accounts[]` per toolkit, each with Composio's verbatim `status`, its
+`createdAt` when Composio published one, and the account label when the provider
+did. `toolkit` and `connected` keep their previous meaning, so the callers that
+read only those two are untouched.
+
+**Which account an agent acts as is not decided here.** `composio_execute` posts
+`{tool, arguments}` and no connection id (`src/harness/composio.rs`), so
+Composio resolves it for the entity — nothing in this codebase selects, orders
+or defaults an account, and the console's provider detail view says so rather
+than marking one as the default. Changing that means sending a connection id on
+execute, which is a harness change, not a console one.
 
 ## tiny.place A2A inbound + discovery (`tinyplace` feature)
 

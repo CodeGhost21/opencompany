@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, Loader2, LogIn, Search, Unplug } from "lucide-react";
+import { AlertTriangle, Check, ChevronRight, Loader2, LogIn, Search, Unplug } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -41,6 +41,8 @@ interface Props {
   loading: boolean;
   onConnect: (provider: GridProvider) => void;
   onDisconnect: (provider: GridProvider) => void;
+  /** Open a connected provider's detail view (issue #404). */
+  onOpen: (provider: GridProvider) => void;
   onConnectSlug: (slug: string) => void;
 }
 
@@ -77,6 +79,7 @@ export function ProvidersSection({
   loading,
   onConnect,
   onDisconnect,
+  onOpen,
   onConnectSlug,
 }: Props) {
   const [query, setQuery] = useState("");
@@ -212,6 +215,7 @@ export function ProvidersSection({
                 noCredential={noCredential}
                 onConnect={() => onConnect(row)}
                 onDisconnect={() => onDisconnect(row)}
+                onOpen={() => onOpen(row)}
               />
             ))}
           </ul>
@@ -286,9 +290,18 @@ function SectionHeading({ count }: { count: number | null }) {
  * it. An 8.5rem tile has no room for a label AND a button, and a tile that looks
  * clickable but is not would be worse than either.
  *
- * Connected tiles are the exception: the click target moves to a small
- * Disconnect control in the glyph slot, so the destructive action is never the
- * whole surface an operator brushes past while scanning.
+ * A tile connected through Composio opens its detail view instead (issue #404):
+ * there is an object behind it — accounts, statuses, dates, a per-account
+ * revoke — and a single icon button cannot stand for it. That is also why the
+ * inline Disconnect is gone from those tiles rather than kept alongside: a
+ * toolkit can hold two accounts, and a control that names neither has nothing
+ * to revoke.
+ *
+ * The natively-connected tile keeps the old shape — a small Disconnect control
+ * in the glyph slot, so the destructive action is never the whole surface an
+ * operator brushes past while scanning. It gets no detail view: the native
+ * catalog's credential is read by nothing (#396), and a detail view is the one
+ * place that inertness would look most like health.
  */
 function ProviderTile({
   row,
@@ -298,6 +311,7 @@ function ProviderTile({
   noCredential,
   onConnect,
   onDisconnect,
+  onOpen,
 }: {
   row: GridProvider;
   canManage: boolean;
@@ -306,16 +320,23 @@ function ProviderTile({
   noCredential: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  onOpen: () => void;
 }) {
   // `managed` and `unavailable` render no action at all — that is the whole
   // point of routing the tile (issue #599): a button that could only 400 is
   // never drawn.
   const connectable =
     canManage && !row.connected && (row.route.kind === "composio" || row.route.kind === "native");
+  // Openable for everyone who can see the page, not only an admin (issue #403
+  // gates the writes inside, not the reading): "which account is Gmail wired
+  // to, and since when" is exactly what a member opens this page to learn.
+  const openable = row.connected && row.accounts.length > 0;
   const state = row.connected
-    ? row.via.length > 0
-      ? `connected via ${row.via.join(" + ")}`
-      : "connected"
+    ? row.accounts.length > 1
+      ? `${row.accounts.length} accounts connected`
+      : row.via.length > 0
+        ? `connected via ${row.via.join(" + ")}`
+        : "connected"
     : busy
       ? "signing in"
       : row.unverified
@@ -332,7 +353,11 @@ function ProviderTile({
   );
 
   const glyph = row.connected ? (
-    canManage && row.canDisconnect ? (
+    openable ? (
+      // Non-interactive: the whole tile is the control that opens it, and a
+      // button inside that button is not a thing the DOM allows.
+      <ChevronRight className="size-3.5 shrink-0 text-status-done-text" aria-hidden="true" />
+    ) : canManage && row.canDisconnect ? (
       <button
         type="button"
         disabled={anyBusy}
@@ -351,9 +376,10 @@ function ProviderTile({
     ) : (
       <Check
         className="size-3.5 shrink-0 text-status-done-text"
-        // Composio holds this connection and no host route can release it —
-        // `DELETE …/connections/{provider}` only blanks a local secret this
-        // provider never had. Saying where it lives beats a button that
+        // Connected, with nothing this console can address: either the viewer
+        // cannot manage it, or the host answered the connection list without
+        // `accounts` (it predates #696), so there is no id to revoke and no
+        // object to open. Saying where the connection lives beats a button that
         // reports success and changes nothing.
         aria-hidden="true"
       />
@@ -384,8 +410,9 @@ function ProviderTile({
     </>
   );
 
-  const title =
-    row.connected && !row.canDisconnect
+  const title = openable
+    ? `Open ${row.label} — accounts, status, and disconnect.`
+    : row.connected && !row.canDisconnect
       ? `${row.label} is connected through Composio; manage or revoke it there.`
       : row.description || undefined;
 
@@ -394,7 +421,26 @@ function ProviderTile({
     // other surface in this issue reconciles on — so a spec that names a tile
     // names the same thing the backend does.
     <li className="min-w-0" data-testid={`provider-${row.slug}`}>
-      {connectable ? (
+      {openable ? (
+        <button
+          type="button"
+          onClick={onOpen}
+          title={title}
+          aria-label={`Open ${row.label}. ${state}.`}
+          // Deliberately NOT prefixed `provider-`: `connections-one-list.spec.ts`
+          // counts `[data-testid^='provider-']` nodes to prove a provider
+          // renders exactly one tile, and a nested node sharing that prefix
+          // would make this control look like a second tile.
+          data-testid={`open-provider-${row.slug}`}
+          className={cn(
+            shell,
+            "transition-colors hover:border-foreground/20 hover:bg-status-done/10",
+            "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+          )}
+        >
+          {body}
+        </button>
+      ) : connectable ? (
         <button
           type="button"
           disabled={anyBusy || (row.route.kind === "composio" && noCredential)}

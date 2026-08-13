@@ -5,17 +5,20 @@ import { toast } from "sonner";
 import { me as fetchMe } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import {
+  disconnectComposioConnection,
   getComposioStatus,
   listComposioConnections,
   startComposioAuthorize,
+  type ComposioConnectedAccount,
   type ComposioStatus,
 } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { catalogWarning } from "@/lib/composio-catalog";
-import { type ComposioReach } from "@/lib/connections";
-import { buildGridProviders, type GridProvider } from "@/lib/provider-grid";
+import { toolkitSlug, type ComposioReach } from "@/lib/connections";
+import { buildGridProviders, disconnectRouteFor, type GridProvider } from "@/lib/provider-grid";
+import { ProviderDetail } from "@/views/connections/ProviderDetail";
 import { armTourResume } from "@/tour/state";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
@@ -48,6 +51,15 @@ export function ConnectionsView({ client, company }: Props) {
   const scope = useLocalScope();
   const [load, setLoad] = useState<Load>("loading");
   const [states, setStates] = useState<Record<string, ConnectionState>>({});
+  // The Composio connection objects behind those booleans, keyed by normalized
+  // toolkit slug (issue #404). `states` still decides *whether* a provider is
+  // connected — this decides *what* is connected, which is what a revoke has to
+  // be addressed to and what the detail view opens.
+  const [accounts, setAccounts] = useState<Record<string, ComposioConnectedAccount[]>>({});
+  // The slug of the provider whose detail view is open, or `null`. A slug rather
+  // than the row itself, so the open panel re-derives from `providers` after a
+  // refresh instead of showing a snapshot of the state before the revoke.
+  const [opened, setOpened] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // Bumped when the company credential changes, to remount the sections whose
   // reported tier is downstream of it (issue #586).
@@ -88,14 +100,34 @@ export function ConnectionsView({ client, company }: Props) {
   const pollTimers = useRef<Record<string, number>>({});
 
   const refresh = useCallback(async () => {
-    try {
-      const list = await client.listConnections(company);
-      setStates(Object.fromEntries(list.map((c) => [c.provider, c])));
-      setLoad("ready");
-    } catch {
+    // Both reads, together: the page's status and the accounts behind it are one
+    // answer to the operator, and refreshing them apart is how a tile ends up
+    // connected with nothing to open, or openable after the last account was
+    // revoked. Independently faulted, though — the accounts read is a strict
+    // addition, and a host that cannot answer it must not cost the page its
+    // status.
+    const [list, rows] = await Promise.all([
+      client.listConnections(company).then(
+        (l) => ({ ok: true as const, l }),
+        () => ({ ok: false as const, l: [] as ConnectionState[] }),
+      ),
+      // 409 on a build without Composio, 404 on a host predating #696. Neither
+      // is an error for this page: it means there are no connection objects to
+      // open, which the empty map already says.
+      listComposioConnections(client, company).catch(() => []),
+    ]);
+    setAccounts(
+      Object.fromEntries(
+        rows.filter((r) => r.accounts?.length).map((r) => [toolkitSlug(r.toolkit), r.accounts!]),
+      ),
+    );
+    if (!list.ok) {
       // No connections surface on this host yet — show the catalog read-only.
       setLoad("unavailable");
+      return;
     }
+    setStates(Object.fromEntries(list.l.map((c) => [c.provider, c])));
+    setLoad("ready");
   }, [client, company]);
 
   useEffect(() => {
@@ -191,6 +223,14 @@ export function ConnectionsView({ client, company }: Props) {
    * `busy` is cleared by the poll rather than by the caller — the connect is not
    * finished when the tab opens, and clearing early would offer a second Connect
    * for a sign-in already in flight.
+   *
+   * What the poll waits for is a **new account id**, not `connected` (issue
+   * #404). Adding a second account to a toolkit that is already connected leaves
+   * `connected` true throughout, so the old predicate was satisfied by the state
+   * the operator started from: the first tick — two seconds in, with the
+   * Composio tab still open — would have announced a sign-in that had not
+   * happened. Comparing ids answers both cases with one rule, since the first
+   * connect starts from an empty set.
    */
   async function connectComposio(p: { providerId: string; label: string }, toolkit: string) {
     // A sign-in for this toolkit is already polling (it can have been started
@@ -216,6 +256,12 @@ export function ConnectionsView({ client, company }: Props) {
     // opens the same URL the same way and likewise does not check.
     window.open(connectUrl, "_blank", "noopener,noreferrer");
     toast.message(`Complete ${p.label} sign-in in the new tab.`);
+    // What was already there before the tab opened. Read from the page's own
+    // state rather than re-fetched: it is the same list the operator is looking
+    // at, and a fresh read here could race the sign-in they have already
+    // completed in another tab.
+    const before = new Set((accounts[toolkitSlug(toolkit)] ?? []).map((a) => a.id));
+    const wasConnected = providers.some((row) => row.slug === toolkitSlug(toolkit) && row.connected);
     const deadline = Date.now() + 120_000;
     const poll = async () => {
       delete pollTimers.current[toolkit];
@@ -226,7 +272,12 @@ export function ConnectionsView({ client, company }: Props) {
       }
       try {
         const rows = await listComposioConnections(client, company);
-        if (rows.some((r) => r.toolkit.toLowerCase() === toolkit.toLowerCase() && r.connected)) {
+        const row = rows.find((r) => r.toolkit.toLowerCase() === toolkit.toLowerCase());
+        // An id we had not seen settles it. Falling back to `connected` covers a
+        // host predating the `accounts` field, where the first connect is the
+        // only one this poll can observe at all.
+        const arrived = row?.accounts?.some((a) => a.connected && !before.has(a.id)) === true;
+        if (arrived || (row?.accounts === undefined && row?.connected === true && !wasConnected)) {
           setBusy((b) => (b === p.providerId ? null : b));
           toast.success(`Connected ${p.label}.`);
           // Re-read the host's reconciled view so the tile flips to connected.
@@ -285,15 +336,34 @@ export function ConnectionsView({ client, company }: Props) {
   }
 
   /**
-   * Release a connection this host actually holds.
+   * Revoke one Composio account (issue #404).
    *
-   * Only offered for a tile whose `via` includes `native` (see
-   * `GridProvider.canDisconnect`): this route blanks the host's own
-   * `oauth/{provider}` secret, and no host route can release a Composio
-   * connection. Offering it on a Composio-only tile would report success and
-   * leave the tile connected on the next refresh.
+   * The only route that releases a Composio connection. `disconnectConnection`
+   * — which this page used to call for *every* tile — posts to
+   * `…/connections/{provider}/disconnect` and blanks the host's own
+   * `oauth/{provider}` secret, which a Composio-connected provider never had:
+   * it answered 200, the toast said "Disconnected Gmail", and Gmail was still
+   * connected on the next refresh.
    */
-  async function disconnect(p: GridProvider) {
+  async function disconnectAccount(p: GridProvider, account: ComposioConnectedAccount) {
+    if (busy) return;
+    setBusy(p.providerId);
+    try {
+      const { note } = await disconnectComposioConnection(client, company, account.id);
+      // The host's own words rather than ours: it is the side that knows what a
+      // revoke reached, and restating it here is a second place to drift from
+      // what actually happened.
+      toast.success(`${account.account ?? p.label}: ${note}`);
+      await refresh();
+    } catch {
+      toast.error(`Couldn't disconnect ${account.account ?? p.label}.`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Blank the host's own `oauth/{provider}` secret — the self-hosted route. */
+  async function disconnectNative(p: GridProvider) {
     if (busy) return;
     setBusy(p.providerId);
     try {
@@ -305,6 +375,30 @@ export function ConnectionsView({ client, company }: Props) {
     } finally {
       setBusy(null);
     }
+  }
+
+  /**
+   * The tile's Disconnect: release what this provider is actually connected
+   * through, or open it when that is a question rather than an action.
+   *
+   * A toolkit with two accounts has two ids and the tile names neither, so
+   * there is nothing here to pick. Guessing — first, newest, all — would revoke
+   * an account the operator did not name from a control that never showed them
+   * the list. Opening the detail view is the honest answer to an ambiguous
+   * click.
+   */
+  async function disconnect(p: GridProvider) {
+    const route = disconnectRouteFor(p);
+    if (route === null) return;
+    if (route.kind === "native") {
+      await disconnectNative(p);
+      return;
+    }
+    if (route.accounts.length > 1) {
+      setOpened(p.slug);
+      return;
+    }
+    await disconnectAccount(p, route.accounts[0]);
   }
 
   // `attested` is a property of the *instance*, not of one provider: it means
@@ -347,8 +441,18 @@ export function ConnectionsView({ client, company }: Props) {
         states,
         reach,
         platformManaged,
+        accounts,
       ),
-    [status?.effectiveCatalog, extraToolkits, states, reach, platformManaged],
+    [status?.effectiveCatalog, extraToolkits, states, reach, platformManaged, accounts],
+  );
+
+  // Re-derived from the grid every render, so the open panel reflects the last
+  // refresh rather than the row as it was when it was clicked. A provider that
+  // vanishes from the catalog under an open panel closes it, which is the only
+  // honest thing left to show.
+  const openedProvider = useMemo(
+    () => providers.find((p) => p.slug === opened) ?? null,
+    [providers, opened],
   );
 
   // Counted off the rendered grid, not off the raw host rows. The badge used to
@@ -452,7 +556,23 @@ export function ConnectionsView({ client, company }: Props) {
           loading={load === "loading" || !reachSettled}
           onConnect={(p) => void connect(p)}
           onDisconnect={(p) => void disconnect(p)}
+          onOpen={(p) => setOpened(p.slug)}
           onConnectSlug={(slug) => void connectSlug(slug)}
+        />
+
+        {/* A connection as an object you open rather than a row with a button
+            (issue #404). Composio only: the native catalog is inert — its
+            credential is written and read by nothing (#396) — and a detail view
+            is exactly where that would look healthiest. */}
+        <ProviderDetail
+          client={client}
+          company={company}
+          provider={openedProvider}
+          canManage={canManage && load !== "unavailable"}
+          busy={busy !== null}
+          onClose={() => setOpened(null)}
+          onConnectAnother={(p) => void connect(p)}
+          onDisconnectAccount={(p, account) => void disconnectAccount(p, account)}
         />
       </div>
     </div>
