@@ -162,16 +162,48 @@ describe("connectRoute", () => {
     }
   });
 
-  it("keeps the self-hosted hatch when the host registered its own provider app", () => {
-    // `static` is a deliberate act by the operator — either a registered
-    // provider application or a token this company stored. Preferring Composio
-    // here would quietly take away the hatch they configured.
+  it("no longer offers the self-hosted hatch, whose credential no agent reads", () => {
+    // Issue #822. Both assertions used to read `{ kind: "native" }`, on the
+    // reasoning that `static` is a deliberate act by the operator — a
+    // registered provider application, or a token this company stored — and
+    // that preferring Composio would take away the hatch they configured.
+    //
+    // What that missed is what the hatch confers: nothing. `oauth/{provider}`
+    // is written by the callback and read by no agent tool — zero occurrences
+    // under `src/harness/` (#396) — so the arm preserved the operator's
+    // configuration by handing them a green tile and no capability. A Connect
+    // that 400s is a bad button; one that succeeds and buys nothing is a false
+    // promise, and #599 only fixed the first kind.
+    //
+    // A host that also reaches Composio now takes the route that does confer
+    // something...
     expect(connectRoute(tile("github"), { credentialSource: "static" }, OPEN)).toEqual({
-      kind: "native",
+      kind: "composio",
+      toolkit: "github",
     });
+    // ...and a host whose only route was the hatch says so, which is what the
+    // tile already renders without an action.
     expect(connectRoute(tile("github"), { credentialSource: "static" }, null)).toEqual({
-      kind: "native",
+      kind: "unavailable",
     });
+  });
+
+  it("returns no native route for any tile, under any host shape", () => {
+    // The regression guard for #822 as a whole: the arm is gone, not merely
+    // deprioritised, so no combination of tier and reach can reach it. `static`
+    // is the tier that used to, and it is in the sweep.
+    const tiers = [undefined, "static", "attested", "company", "none"] as const;
+    for (const provider of CONNECTION_PROVIDERS) {
+      for (const tier of tiers) {
+        for (const reach of [OPEN, null]) {
+          const state = tier === undefined ? undefined : { credentialSource: tier };
+          expect(
+            connectRoute(provider, state, reach).kind,
+            `${provider.id} still routes natively for ${tier ?? "no"} state`,
+          ).not.toBe("native");
+        }
+      }
+    }
   });
 
   it("prefers Composio over a platform identity that runs no connection here", () => {

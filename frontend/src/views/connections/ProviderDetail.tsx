@@ -103,12 +103,16 @@ const USAGE_RANGE = "30d";
  * naively:
  *
  *  1. **Which account an agent uses** (Composio). OpenHuman marks the first of
- *     several as the default, and inheriting that was the plan. It is not true
- *     here: `composio_execute` posts `{tool, arguments}` and **no connection
- *     id** (`src/harness/composio.rs`, and `execute_tool` in the shared
- *     client), so nothing on this side selects an account — Composio resolves it
- *     for the entity. A "Default" chip would name a decision this product does
- *     not make. The panel says that instead.
+ *     several as the default, and inheriting that was the plan. It was not true
+ *     when this panel was written: `composio_execute` posted `{tool, arguments}`
+ *     and **no connection id**, so nothing on this side selected an account and
+ *     a "Default" chip would have named a decision the product did not make.
+ *     Issue #820 makes the decision real — `ComposioExecuteTool` sends
+ *     `connectionId` for a toolkit the company has chosen for — so the panel no
+ *     longer says the choice is impossible. It still marks nothing: the choice
+ *     is made in one place (`AccountChoiceSection`), and a second surface
+ *     reading it back is how two surfaces come to disagree. Unchosen stays the
+ *     ordinary state, and Composio resolves it exactly as before.
  *  2. **When it was connected.** Only Composio records it. The native
  *     `oauth/{provider}` store keeps `{token, account}` and journals nothing on
  *     connect, and MCP has no such concept — so for those the date is not
@@ -131,6 +135,12 @@ const USAGE_RANGE = "30d";
  * read by nothing (#396), and a page devoted to how healthy a connection is,
  * is exactly where an inert one would look most alive. A provider that also
  * holds a native credential says so as a caveat, not as a second connection.
+ *
+ * #822 finished the other half of that reasoning: the catalog is no longer
+ * *listed* either, so the case this panel declines to open now mostly cannot
+ * arise from the grid at all. What still reaches the caveat below is a provider
+ * connected natively and offered by Composio — one connection object, one
+ * inert secret beside it.
  */
 export function ProviderDetail({ client, company, subject, canManage, busy, onClose }: Props) {
   // The `byProvider` key this subject's calls land on. `null` for a closed

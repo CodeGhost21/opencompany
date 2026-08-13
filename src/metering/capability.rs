@@ -258,10 +258,20 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
 /// filed under a different kind because it belongs to the company rather than
 /// to a teammate. Excluding it would leave a company able to plan indefinitely
 /// after crossing the tier ceiling that is supposed to have stopped it.
+///
+/// [`SampleKind::TriageCall`] is counted for the identical reason (issue #678),
+/// and the leak it closes is larger: triage escalations are driven by *chat
+/// volume*, so a company left able to classify indefinitely past its ceiling
+/// would keep paying per operator message with nothing to stop it.
 pub fn tokens_in(samples: &[UsageSample]) -> u64 {
     samples
         .iter()
-        .filter(|s| matches!(s.kind, SampleKind::Inference | SampleKind::PlanningCall))
+        .filter(|s| {
+            matches!(
+                s.kind,
+                SampleKind::Inference | SampleKind::PlanningCall | SampleKind::TriageCall
+            )
+        })
         .map(|s| s.input_tokens.saturating_add(s.output_tokens))
         .fold(0u64, |acc, t| acc.saturating_add(t))
 }

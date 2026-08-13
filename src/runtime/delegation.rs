@@ -425,6 +425,11 @@ pub(crate) struct DelegationRunner<'a> {
     /// that read it fall back to exactly the behaviour they had (no origin stamp,
     /// the orchestrator's voice on a note).
     workflow_run: Option<WorkflowRunRef>,
+    /// A second opinion for the messages the lexical classifier abstained on
+    /// (issue #678). `None` — every pre-#678 constructor, and any company whose
+    /// build wires no evaluator — keeps the deterministic answer, which is the
+    /// behaviour this had before.
+    triage: Option<&'a dyn crate::harness::triage::TriageEscalation>,
     /// Workflows the turn authored in-flight with the inline `create_workflow`
     /// tool (issues #112, #339), read so an operator turn can settle the card it
     /// adopted instead of leaving it in To-do (issue #678).
@@ -461,6 +466,7 @@ impl<'a> DelegationRunner<'a> {
             approvals: None,
             workflow_run: None,
             workflow_refs: None,
+            triage: None,
         }
     }
 
@@ -506,6 +512,7 @@ impl<'a> DelegationRunner<'a> {
             approvals: None,
             workflow_run: Some(run),
             workflow_refs: None,
+            triage: None,
         }
     }
 
@@ -534,6 +541,19 @@ impl<'a> DelegationRunner<'a> {
     /// the only drain lives on the dispatched-card path.
     pub(crate) fn with_workflow_refs(mut self, workflow_refs: &'a WorkflowRefQueue) -> Self {
         self.workflow_refs = Some(workflow_refs);
+        self
+    }
+
+    /// Wires the LLM escalation used when the lexical triage abstains
+    /// (issue #678).
+    ///
+    /// Without it an abstention keeps `Chatter`'s no-gate behaviour, which is
+    /// what every turn did before this existed.
+    pub(crate) fn with_triage(
+        mut self,
+        triage: &'a dyn crate::harness::triage::TriageEscalation,
+    ) -> Self {
+        self.triage = Some(triage);
         self
     }
 
@@ -710,7 +730,8 @@ impl<'a> DelegationRunner<'a> {
         // the orchestrator handed off produced the REST card AND the delegation
         // card. One message, one card — so every card-opening path below reads
         // this same answer.
-        let triage = crate::company::task_intent::triage_message(operator_words(message));
+        let triaged = crate::company::task_intent::triage_message_detailed(operator_words(message));
+        let triage = triaged.triage.clone();
         // Issue #267, Layer B: on a question, the model may not WRITE to the
         // board — but it keeps every means of answering, including the one that
         // runs somebody else's turn.
@@ -755,7 +776,33 @@ impl<'a> DelegationRunner<'a> {
         // board-write path to gate there; when #176 copies this drain site
         // through the canonical `delegation_tools` seam, the conditional claim
         // comes with it. Layer A above fronts both brains in the meantime.
-        let answering = triage.is_answer();
+        // Issue #678: the lexical layer answers most messages and abstains on
+        // the rest. Only the residue is worth a model call — escalating every
+        // message would tax each reply with a serial round-trip to improve a
+        // minority of classifications, which is the trade this deliberately
+        // does not make.
+        //
+        // An escalation can only ever *narrow* the claim, never widen what the
+        // turn may do, and it never mints a card: the title a card opens under
+        // is pinned byte-for-byte between the REST handler and
+        // `chat_handler_card` (issue #463), so a model-authored one would
+        // orphan it. `Work` and `Chatter` therefore both leave the gate where
+        // the abstention left it, and only `Answer` moves it.
+        let mut answering = triage.is_answer();
+        if !answering
+            && triaged.abstained()
+            && let Some(escalation) = self.triage
+        {
+            let verdict = escalation.classify(operator_words(message)).await;
+            if verdict.is_answer() {
+                tracing::debug!(
+                    company = %self.company,
+                    "[triage] the lexical layer abstained and the model read this as a question; \
+                     narrowing the claim to answering-only"
+                );
+                answering = true;
+            }
+        }
         // Claim the delegation queue for this turn and its drain (issue #453).
         //
         // The acquire-clear subsumes the bare `clear()` this used to open with —
@@ -3458,6 +3505,148 @@ members = ["designer"]
             "the chat handler's card is the card; this path opens none"
         );
         assert!(turn.spawned_task.is_none());
+    }
+
+    // ── Issue #678: the escalation, and where it may not reach ──────────────
+
+    /// A scripted escalation. Records what it was asked so a test can prove the
+    /// model was *not* consulted on messages the cheap layer already named.
+    struct ScriptedTriage {
+        verdict: crate::harness::triage::TriageVerdict,
+        asked: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedTriage {
+        fn new(verdict: crate::harness::triage::TriageVerdict) -> Self {
+            Self {
+                verdict,
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.lock().expect("asked").clone()
+        }
+    }
+
+    #[async_trait]
+    impl crate::harness::triage::TriageEscalation for ScriptedTriage {
+        async fn classify(&self, message: &str) -> crate::harness::triage::TriageVerdict {
+            self.asked.lock().expect("asked").push(message.to_string());
+            self.verdict
+        }
+    }
+
+    /// The whole point: the model is asked only about the residue. A message the
+    /// lexical layer classified costs nothing and waits for nothing.
+    #[tokio::test]
+    async fn a_message_the_cheap_layer_named_is_never_escalated() {
+        let fx = Fixture::new();
+        let escalation = ScriptedTriage::new(crate::harness::triage::TriageVerdict::Answer);
+        for named in [
+            "what is on the board?",
+            "draft the launch plan for next quarter",
+            "hi",
+        ] {
+            assert!(
+                !crate::company::task_intent::triage_message_detailed(named).abstained(),
+                "fixture must be a message a rule decides: {named:?}"
+            );
+            let turns = ScriptedTurns::new(&fx, vec![Turn::reply("ok")]);
+            fx.runner(&turns)
+                .with_triage(&escalation)
+                .handle_operator_message("chief", named, Some("general"))
+                .await
+                .expect("operator message handled");
+        }
+        assert!(
+            escalation.asked().is_empty(),
+            "escalating a message the cheap layer already named is the cost this \
+             design exists to avoid: {:?}",
+            escalation.asked()
+        );
+    }
+
+    /// An abstention IS escalated, and a verdict of `answer` narrows the claim —
+    /// the same narrowing a lexical `Answer` produces, reached by a second
+    /// opinion instead of a rule.
+    #[tokio::test]
+    async fn an_abstention_the_model_reads_as_a_question_narrows_the_claim() {
+        let residue = "the deck looks good to me";
+        assert!(
+            crate::company::task_intent::triage_message_detailed(residue).abstained(),
+            "fixture must be a message no rule decides"
+        );
+        let fx = Fixture::new();
+        let escalation = ScriptedTriage::new(crate::harness::triage::TriageVerdict::Answer);
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
+        fx.runner(&turns)
+            .with_triage(&escalation)
+            .handle_operator_message("chief", residue, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            escalation.asked(),
+            vec![residue.to_string()],
+            "the residue is exactly what the model should have been asked"
+        );
+        assert_eq!(
+            turns.claim_at_turn(0),
+            orchestrator::DrainClaim::Answering,
+            "an `answer` verdict narrows the claim, so the model's pure board \
+             writes are refused in its own turn"
+        );
+    }
+
+    /// `Work` and `Chatter` leave the gate exactly where the abstention left it.
+    /// A verdict may narrow the claim; it may never widen what a turn can do,
+    /// and it never mints a card — the #463 title contract forbids a
+    /// model-authored one.
+    #[tokio::test]
+    async fn a_non_answer_verdict_changes_nothing() {
+        let residue = "the deck looks good to me";
+        for verdict in [
+            crate::harness::triage::TriageVerdict::Work,
+            crate::harness::triage::TriageVerdict::Chatter,
+            crate::harness::triage::TriageVerdict::Unavailable,
+        ] {
+            let fx = Fixture::new();
+            let escalation = ScriptedTriage::new(verdict);
+            let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
+            fx.runner(&turns)
+                .with_triage(&escalation)
+                .handle_operator_message("chief", residue, Some("general"))
+                .await
+                .expect("operator message handled");
+            assert_eq!(
+                turns.claim_at_turn(0),
+                orchestrator::DrainClaim::Full,
+                "{verdict:?} must leave the ungated claim the abstention had"
+            );
+            assert!(
+                fx.cards().await.is_empty(),
+                "{verdict:?} must not mint a card"
+            );
+        }
+    }
+
+    /// No evaluator wired is the pre-#678 world, and it has to stay reachable:
+    /// a build without one must behave exactly as it did.
+    #[tokio::test]
+    async fn without_an_evaluator_an_abstention_keeps_the_deterministic_answer() {
+        let residue = "the deck looks good to me";
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("noted")]);
+        fx.runner(&turns)
+            .handle_operator_message("chief", residue, Some("general"))
+            .await
+            .expect("operator message handled");
+        assert_eq!(
+            turns.claim_at_turn(0),
+            orchestrator::DrainClaim::Full,
+            "an abstention with nobody to ask stays ungated"
+        );
     }
 
     // ── Issue #678: a workflow authored in-turn settles its card ────────────

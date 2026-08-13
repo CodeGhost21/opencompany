@@ -742,7 +742,11 @@ export interface InboxMessageDto {
  *   does **not** route through the company key today, so this value does not
  *   appear on a native-only provider — see `api/credential.ts`.
  * - `static` — a token this company already stored, or this host's own
- *   registered provider application (the self-hosted hatch). Connect works.
+ *   registered provider application (the self-hosted hatch). The handshake
+ *   works; the console stopped offering it in issue #822, because what it
+ *   stores is read by no agent tool (#396). So this tier now says what the host
+ *   *could* do, and `connectRoute` (`lib/connections.ts`) routes such a
+ *   provider through Composio or reports it unavailable.
  * - `none` — neither, so no Connect can succeed on this host.
  */
 export type ConnectionCredentialSource = "attested" | "company" | "static" | "none";

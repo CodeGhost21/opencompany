@@ -104,17 +104,91 @@ describe("buildGridProviders", () => {
     expect(tile.providerId).toBe("google-calendar");
   });
 
-  it("keeps every local tile when the host offers no Composio catalog", () => {
-    // A self-hoster with Composio switched off gets an empty catalog. Without
-    // the union the page would render nothing at all rather than the tiles they
-    // can genuinely connect natively.
-    const providers = buildGridProviders([], [], {}, null, false);
+  it("offers no tile at all when the host's catalog is empty", () => {
+    // Issue #822, and the assertion this replaces said the opposite: every one
+    // of the eleven local tiles survived an empty catalog, so a self-hoster with
+    // Composio switched off saw a full page of Connect buttons. Each of those
+    // completed a real handshake and stored `oauth/{provider}` — which no agent
+    // tool reads (#396). The honest render of an inert route is no tile.
+    expect(buildGridProviders([], [], {}, null, false)).toEqual([]);
     for (const local of CONNECTION_PROVIDERS) {
       expect(
-        providers.some((p) => p.slug === local.toolkit),
-        `${local.id} lost its tile with no Composio catalog`,
-      ).toBe(true);
+        buildGridProviders([], [], {}, OPEN, false).some((p) => p.slug === local.toolkit),
+        `${local.id} is still offered from local metadata alone`,
+      ).toBe(false);
     }
+  });
+
+  it("keeps a natively connected provider listed, with its Disconnect", () => {
+    // The half that must NOT go with the offer. Retracting an invitation is not
+    // permission to hide a credential the company already stored: this is the
+    // only surface that shows it exists and the only one that releases it.
+    const providers = buildGridProviders(
+      [],
+      [],
+      states({
+        provider: "slack",
+        connected: true,
+        via: ["native"],
+        credentialSource: "static",
+        account: "acme-workspace",
+      }),
+      null,
+      false,
+    );
+    const tile = bySlug(providers, "slack");
+    expect(tile.connected).toBe(true);
+    expect(tile.via).toEqual(["native"]);
+    expect(tile.canDisconnect).toBe(true);
+    expect(tile.account).toBe("acme-workspace");
+    // And the host's own id, which is what `DELETE …/connections/{provider}`
+    // takes — the tile exists because of that row, so it must name it.
+    expect(tile.providerId).toBe("slack");
+  });
+
+  it("lists a connected provider the console has no metadata for", () => {
+    // The tail is now "what is connected", not "what we have a logo for", so a
+    // provider only the manifest ever named still gets a tile — and a Disconnect
+    // addressed the way the host spells it, not the way the slug normalizes.
+    const providers = buildGridProviders(
+      [],
+      [],
+      states({ provider: "zoom-pro", connected: true, via: ["native"] }),
+      null,
+      false,
+    );
+    const tile = bySlug(providers, "zoompro");
+    expect(tile.connected).toBe(true);
+    expect(tile.canDisconnect).toBe(true);
+    expect(tile.providerId).toBe("zoom-pro");
+  });
+
+  it("does not list a provider the host merely answered about", () => {
+    // A disconnected row is the host saying "not connected", which is the same
+    // information as the tile's absence — and listing it would put the offer
+    // back under a different name.
+    expect(
+      buildGridProviders([], [], states({ provider: "slack", connected: false }), null, false),
+    ).toEqual([]);
+  });
+
+  it("folds a connected alias into one tile rather than appending a second", () => {
+    // The `x` / `twitter` split, now that a connected row can create a tile of
+    // its own: both rows describe one provider, and the local metadata is what
+    // says so. Two tiles here would reintroduce the duplicate #582 removed.
+    const providers = buildGridProviders(
+      [],
+      [],
+      states(
+        { provider: "x", connected: false },
+        { provider: "twitter", connected: true, via: ["composio"] },
+      ),
+      null,
+      false,
+    );
+    expect(providers).toHaveLength(1);
+    expect(providers[0].slug).toBe("twitter");
+    expect(providers[0].providerId).toBe("x");
   });
 
   it("does not duplicate a local tile the backend catalog also offers", () => {

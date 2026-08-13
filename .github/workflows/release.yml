@@ -46,7 +46,9 @@ jobs:
       # looked like.
       #
       # Calling the shared script both fixes that and makes the drift
-      # impossible to reintroduce. The list lives there and only there.
+      # impossible to reintroduce. The script derives the crate list from the
+      # pinned `vendor/openhuman/.gitmodules`, so no workflow — and not the
+      # script either — holds a copy that a resync can invalidate.
       - name: Init vendored openhuman crate submodules
         run: scripts/ci/init-vendored-submodules.sh
 
