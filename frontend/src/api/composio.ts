@@ -133,12 +133,60 @@ export interface ComposioAuthorize {
   connectUrl: string;
 }
 
+/**
+ * One connected account inside a {@link ComposioConnection} (issue #404).
+ *
+ * A non-secret projection of the host's `ConnectedAccountDto` — the id is
+ * Composio's connection id, which is safe to hold here because it is the path
+ * segment `DELETE …/composio/connections/{id}` takes and carries no credential.
+ */
+export interface ComposioConnectedAccount {
+  /** Composio's connection id — what a disconnect is addressed to. */
+  id: string;
+  /**
+   * Composio's raw status string (`ACTIVE`, `INITIATED`, `EXPIRED`, …),
+   * forwarded verbatim so the console can tell "never set up" from "set up and
+   * since expired" rather than flattening both to "not connected".
+   */
+  status: string;
+  /** Whether this individual account is usable. */
+  connected: boolean;
+  /**
+   * When Composio recorded the connection. Absent when Composio did not say —
+   * and absent for every other connection system, none of which records one.
+   * Rendered as "not recorded" rather than as a blank that reads like "never".
+   */
+  createdAt?: string;
+  /**
+   * The account label the provider published (`ops@acme.test`). Omitted rather
+   * than guessed: an account the provider did not name has no honest label, and
+   * inventing one from the toolkit is how two Gmail accounts become
+   * indistinguishable at exactly the moment the operator has to pick one.
+   */
+  account?: string;
+}
+
 /** One toolkit's connected state, as returned by `GET …/composio/connections`. */
 export interface ComposioConnection {
   /** Toolkit slug, e.g. `gmail`. */
   toolkit: string;
   /** Whether the company has at least one active connection for this toolkit. */
   connected: boolean;
+  /**
+   * Every connection this company holds for the toolkit, oldest id first
+   * (issue #404).
+   *
+   * Usually one. Composio permits several accounts per toolkit and a company
+   * that connected Gmail twice needs to see which is which before revoking one
+   * — `connected: boolean` alone cannot back a disconnect, because it names
+   * nothing to disconnect.
+   *
+   * Optional on the wire rather than required: the field was added additively
+   * to a route this console already called, and a host predating it answers
+   * without one. Callers treat a missing list as "this host cannot open a
+   * provider", not as "no accounts".
+   */
+  accounts?: ComposioConnectedAccount[];
 }
 
 /** The company's Composio status. */
@@ -190,4 +238,32 @@ export function listComposioConnections(
   company: string | null,
 ): Promise<ComposioConnection[]> {
   return client.get<ComposioConnection[]>(`${client.scopeFor(company)}/composio/connections`);
+}
+
+/** What the host says it revoked, in its own words. */
+export interface ComposioDisconnect {
+  note: string;
+}
+
+/**
+ * Revoke one connected account (issue #404).
+ *
+ * Addressed by Composio's connection id, not by toolkit: a company with two
+ * Gmail accounts has two ids and exactly one of them is being released.
+ *
+ * This is **not** interchangeable with `client.disconnectConnection`, which
+ * posts to `…/connections/{provider}/disconnect` and blanks the host's own
+ * `oauth/{provider}` secret. That route has never touched Composio, so calling
+ * it for a Composio-connected provider reports success and leaves the account
+ * connected on the next refresh. 404 when the id is not this company's; 409
+ * when Composio is not in the build.
+ */
+export function disconnectComposioConnection(
+  client: OpenCompanyClient,
+  company: string | null,
+  connectionId: string,
+): Promise<ComposioDisconnect> {
+  return client.del<ComposioDisconnect>(
+    `${client.scopeFor(company)}/composio/connections/${encodeURIComponent(connectionId)}`,
+  );
 }

@@ -559,6 +559,19 @@ impl CompanyRuntime {
         &self.store
     }
 
+    /// The ids of the chat channels actually wired for this running company —
+    /// exactly what an `output` node's `channel` destination may target
+    /// (issue #813). `operator` is always present; the rest are the enabled
+    /// OpenHuman-provider manifest channels. The console reads this to offer a
+    /// picker of real targets instead of a free-text box that only fails at
+    /// delivery time with `ChannelNotWired`.
+    pub fn wired_channel_ids(&self) -> Vec<String> {
+        self.channels
+            .iter()
+            .map(|channel| channel.channel_id().to_string())
+            .collect()
+    }
+
     /// The workflow ids declared in this company's manifest
     /// (`[workflows].enabled`), read from the persisted record. Empty when the
     /// record hasn't been saved yet.

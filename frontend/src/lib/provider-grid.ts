@@ -58,7 +58,7 @@
 // "everything we have metadata for" to "everything that is actually connected",
 // which is the same union stated honestly: what can be connected, plus what is.
 
-import type { ComposioToolkitEntry } from "@/api/composio";
+import type { ComposioConnectedAccount, ComposioToolkitEntry } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
 import {
   buildProviderRows,
@@ -107,16 +107,56 @@ export interface GridProvider extends ProviderRow {
   /** The connected account label, when the host knows one. Never a credential. */
   account?: string;
   /**
-   * Whether a local Disconnect can actually do anything.
+   * The Composio accounts this company holds for the toolkit (issue #404).
    *
-   * `DELETE …/connections/{provider}` blanks the host's own `oauth/{provider}`
-   * secret and best-effort revokes it upstream. It does **not** touch a Composio
-   * connection, and there is no host route that does. So a tile connected only
-   * through Composio must not offer a Disconnect: it would blank a secret that
-   * was never there, report success, and leave the tile connected on the next
-   * refresh — the same "the page says two things" failure in a different place.
+   * Empty for a provider connected only natively, for a provider connected
+   * through nothing, and on a host that predates the `accounts` field — the
+   * three cases share one rendering, which is that there is no connection
+   * object to open.
+   *
+   * Several entries is an ordinary state, not a misconfiguration: the
+   * connections are the company owner's to grant, and an owner can hold two
+   * Gmail accounts. #316 settled one account per *login*, which is a different
+   * surface (`src/server/users/`) from which Gmail an agent acts through.
+   */
+  accounts: ComposioConnectedAccount[];
+  /**
+   * Whether this tile has something a disconnect can address.
+   *
+   * Two different routes sit behind this one flag, and they are not
+   * interchangeable — see {@link disconnectRouteFor}. `POST
+   * …/connections/{provider}/disconnect` blanks the host's own
+   * `oauth/{provider}` secret; `DELETE …/composio/connections/{id}` revokes one
+   * account at Composio. Sending a Composio-connected provider to the native
+   * route blanks a secret it never had, reports success, and leaves the tile
+   * connected on the next refresh.
+   *
+   * Until #696 the second route did not exist, so this was `via.includes(
+   * "native")` and a Composio tile deliberately offered no Disconnect at all.
    */
   canDisconnect: boolean;
+}
+
+/**
+ * Which route releases this tile, or `null` when nothing here can be released.
+ *
+ * `composio` carries the ids because the host addresses a revoke by connection
+ * id — a toolkit with two accounts has two, and exactly one of them is the
+ * operator's target. The caller decides how to spend that: one account revokes
+ * directly, several is a question only the detail view can ask.
+ */
+export function disconnectRouteFor(
+  row: GridProvider,
+): { kind: "native" } | { kind: "composio"; accounts: ComposioConnectedAccount[] } | null {
+  if (!row.connected) return null;
+  const live = row.accounts.filter((a) => a.connected);
+  // Composio first: a tile connected through both is connected through Composio
+  // *for the agents*, which is the connection an operator means. The native
+  // secret is inert until #396 lands, so blanking it silently would leave the
+  // provider working and the tile still connected.
+  if (live.length > 0) return { kind: "composio", accounts: live };
+  if (row.via.includes("native")) return { kind: "native" };
+  return null;
 }
 
 /** The local tile for a Composio slug, when the console has metadata for one. */
@@ -213,11 +253,19 @@ function statesFor(
  * `GET …/connections`, the sole authority on connected. `reach` and
  * `platformManaged` feed `connectRoute`.
  *
+ * `composioAccounts` is `GET …/composio/connections`, keyed by normalized
+ * toolkit slug — the connection *objects* behind the booleans `states` already
+ * reconciles (issue #404). It stays a separate argument rather than being
+ * folded into `states`: `GET …/connections` is still the sole authority on
+ * whether a provider is connected, and a second source answering that question
+ * is precisely the shape of the bug #582 removed. This one answers a different
+ * question — *which accounts*, so a revoke has something to address.
+ *
  * The tail is the point of the union, and since #822 it is a *connected* tail:
  * a provider the host reports as connected gets a tile whether or not the
  * catalog offers one. It used to be every `CONNECTION_PROVIDERS` tile the
- * catalog missed, which is how a host with Composio switched off came to offer
- * eleven Connects for a route that stores a credential no agent reads (#396).
+ * catalog missed, which is how a host the catalog does not cover came to offer
+ * Connects for a route that stores a credential no agent reads (#396).
  * Dropping the offer must not drop the record: a company that connected Slack
  * through the hatch keeps its tile, its `via: ["native"]` and its Disconnect,
  * on a page that no longer invites anyone else to do the same.
@@ -228,6 +276,7 @@ export function buildGridProviders(
   states: Readonly<Record<string, ConnectionState>>,
   reach: ComposioReach | null,
   platformManaged: boolean,
+  composioAccounts: Readonly<Record<string, ComposioConnectedAccount[]>> = {},
 ): GridProvider[] {
   const offered = new Set(catalog.map((entry) => toolkitSlug(entry.slug)));
   const connectedOnly: ComposioToolkitEntry[] = [];
@@ -268,7 +317,12 @@ export function buildGridProviders(
     // Union across every row that speaks about this tile: the host reconciles
     // within a row, and the alias split means there can be two.
     const via = [...new Set(matched.flatMap((s) => s.via ?? []))];
-    return {
+    // Looked up under both spellings for the same reason `statesFor` is: the
+    // tile's Composio slug and the id the host knows it by diverge for every
+    // hyphenated provider, and `x` / `twitter` outright.
+    const accounts =
+      composioAccounts[toolkitSlug(row.slug)] ?? composioAccounts[toolkitSlug(providerId)] ?? [];
+    const grid: GridProvider = {
       ...row,
       providerId,
       route: connectRoute({ toolkit: row.slug }, effective, reach),
@@ -276,8 +330,16 @@ export function buildGridProviders(
       // Only unknown if nothing already answered yes: a provider we know is
       // connected needs no second opinion.
       unverified: !row.connected && matched.some((s) => s.unverified === true),
-      account: matched.find((s) => s.account)?.account,
-      canDisconnect: row.connected && via.includes("native"),
+      // Prefer the host's reconciled label, then a Composio account's own. A
+      // tile with two accounts shows neither here — one of two labels on a
+      // tile reads as "this is the account", which is the question the detail
+      // view exists to answer properly.
+      account:
+        matched.find((s) => s.account)?.account ??
+        (accounts.length === 1 ? accounts[0].account : undefined),
+      accounts,
+      canDisconnect: false,
     };
+    return { ...grid, canDisconnect: disconnectRouteFor(grid) !== null };
   });
 }

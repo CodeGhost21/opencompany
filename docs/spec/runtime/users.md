@@ -155,6 +155,8 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 | `POST …/auth/request` | Mail a magic link. Always `{"sent": true}` |
 | `POST …/auth/verify` | Redeem a link → session cookie |
 | `POST …/auth/login` | Email + password → session cookie |
+| `GET …/auth/hub` | The ecosystem sign-in buttons this host can offer. `{"providers": []}` when it can offer none |
+| `POST …/auth/hub` | A platform token from the hub → session cookie |
 | `POST …/auth/password` | Set/replace your own password (needs a session) |
 | `GET …/auth/me` | Who this session belongs to |
 | `POST …/auth/logout` | Revoke this session |
@@ -180,6 +182,42 @@ the org chart, and every answer is a phishing target. It is also why
 — response *time* would otherwise answer what the body refuses to.
 
 Clients must not undo this. The console renders one vague message.
+
+## Ecosystem sign-in
+
+A host wired to the TinyHumans hub can also offer Google, GitHub and X. The
+browser goes to the hub's OAuth start pointed back at this console; the hub
+returns a platform token in the URL; `POST …/auth/hub` asks the hub whose it is
+and then applies **this company's own roster** — the same
+`eligibility` → `upsert_from_eligibility` → `mint_session` path a magic link
+takes. The hub says who they are; it never says whether they may in, and the
+session minted is an ordinary human session, never the hosting layer's machine
+credential.
+
+`GET …/auth/hub` answers `{"providers": []}` — not a 404 — whenever this host
+cannot complete the flow, so the console has one code path and falls through to
+the magic-link form. Two things produce an empty list:
+
+- **No hub.** A self-hosted host has no exchange, so it could not check a token
+  that came back. Three buttons that send someone through Google to be turned
+  away on return are worse than none.
+- **A redirect target the hub will refuse.** The return URL is
+  `{OPENCOMPANY_PUBLIC_URL}/?company={company_id}`, and the hub's redirect gate
+  currently accepts RFC 8252 **loopback** origins only. A local console on
+  `http://127.0.0.1:<port>` passes; every hosted `https://<slug>.<domain>`
+  origin is answered `400` before the provider handshake begins.
+
+The second is issue #512 and is a hosted-only gap: sign-in there is by magic
+link until `tinyhumansai/backend#1243` teaches that gate to accept provisioned
+tenant origins. Nothing here needs to change when it does — the origin comes
+from `OPENCOMPANY_PUBLIC_URL` — beyond deleting `hub_accepts_redirect_uri` and
+its one call site.
+
+Note the shape the gate has to accept: **not** a bare origin. The `?company=`
+rides along, and in shared-single-DB mode the id is namespaced `<tenant>--<id>`,
+so it varies per tenant and over time. Only the origin component is stable, and
+a gate matching the whole string against a registry of origins would reproduce
+this failure exactly.
 
 ## Passwords
 

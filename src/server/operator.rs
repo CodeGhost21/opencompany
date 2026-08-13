@@ -222,10 +222,10 @@ struct SetDeskOrder {
 /// (`ops::team::add_member`): load the record, mutate `overlay_desk_members`,
 /// and save. The manifest's `[[group_chat]]` blueprint is never rewritten.
 ///
-/// Validates that the desk exists in the manifest and that `agent_id` resolves
-/// to a roster teammate (a manifest agent or a team-overlay teammate); rejects
-/// with `404`/`400` otherwise. Adding a teammate already on the desk (manifest
-/// or overlay) is a `409`.
+/// Validates that the desk exists and that `agent_id` resolves to a roster
+/// teammate (a manifest agent or a team-overlay teammate); rejects with
+/// `404`/`400` otherwise. Adding a teammate already on the desk (manifest or
+/// overlay) is a `409`.
 async fn add_desk_member(
     scope: ScopedCompany,
     Path(DeskPath { desk_id }): Path<DeskPath>,
@@ -238,9 +238,12 @@ async fn add_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
-    // The desk must be one of the company's blueprint group chats.
-    if !record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
-        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+    // The desk must exist — either a manifest blueprint group chat or an
+    // operator-created overlay desk (#140). A manifest-only check meant a desk
+    // created in the console could be reordered and deleted but never staffed
+    // (#833); `desk_exists` is the same check `effective_desk_members` uses.
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
             "desk {desk_id}"
         ))));
     }
@@ -348,11 +351,13 @@ async fn remove_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
-    // First validate that the desk exists in the manifest — otherwise a caller
-    // supplying an unknown desk_id gets a desk-scoped 404 rather than a confusing
-    // member-scoped one (Greptile feedback).
-    if !record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
-        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+    // First validate that the desk exists at all — otherwise a caller supplying
+    // an unknown desk_id gets a desk-scoped 404 rather than a confusing
+    // member-scoped one (Greptile feedback). Existence spans both blueprint and
+    // operator-created overlay desks (#140); a manifest-only check here stranded
+    // console-created desks with members that could never be removed (#833).
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
             "desk {desk_id}"
         ))));
     }
@@ -373,7 +378,7 @@ async fn remove_desk_member(
         .overlay_desk_members
         .retain(|m| !(m.desk_id == desk_id && m.agent_id == agent_id));
     if record.overlay_desk_members.len() == before {
-        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
             "desk member {agent_id}"
         ))));
     }
@@ -2711,6 +2716,153 @@ mod test {
             .await
             .unwrap();
         assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Creates an overlay desk through the same route `create_desk` serves and
+    /// returns its derived id, so the desk under test exists only in the overlay
+    /// — nothing about it is declared in the manifest.
+    async fn seed_overlay_desk(app: &axum::Router, cookie: &str, body: &str) -> String {
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let bytes = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["id"].as_str().unwrap().to_string()
+    }
+
+    async fn post_desk_member(
+        app: &axum::Router,
+        cookie: &str,
+        desk: &str,
+        body: &str,
+    ) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/company/desks/{desk}/members"))
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn delete_desk_member(
+        app: &axum::Router,
+        cookie: &str,
+        desk: &str,
+        agent: &str,
+    ) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/company/desks/{desk}/members/{agent}"))
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Reads the `error` string out of an api.md error envelope.
+    async fn error_message(response: Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["error"].as_str().unwrap().to_string()
+    }
+
+    /// Returns the effective member list of `desk` from `list_desks`.
+    async fn desk_members(app: &axum::Router, cookie: &str, desk: &str) -> Vec<String> {
+        let desks = get_desks(app, cookie).await;
+        desks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == desk)
+            .unwrap_or_else(|| panic!("desk {desk} present in list"))["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A desk that exists only in the operator overlay can be staffed and
+    /// unstaffed like a manifest desk. Both membership handlers used to test the
+    /// manifest alone, so a console-created desk could be reordered and deleted
+    /// but never gain or lose a member (#833). Every other desk test seeds its
+    /// desk from the manifest, so only an overlay-created desk exercises this.
+    #[tokio::test]
+    async fn desk_member_writes_reach_an_overlay_created_desk() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desk =
+            seed_overlay_desk(&app, &cookie, r#"{"name":"Growth desk","members":["ceo"]}"#).await;
+        assert_eq!(desk, "growth_desk");
+        assert_eq!(desk_members(&app, &cookie, &desk).await, ["ceo"]);
+
+        let added = post_desk_member(&app, &cookie, &desk, r#"{"agent_id":"eng"}"#).await;
+        assert_eq!(added.status(), StatusCode::NO_CONTENT);
+        assert_eq!(desk_members(&app, &cookie, &desk).await, ["ceo", "eng"]);
+
+        let removed = delete_desk_member(&app, &cookie, &desk, "eng").await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+        assert_eq!(desk_members(&app, &cookie, &desk).await, ["ceo"]);
+    }
+
+    /// An unknown desk id is refused as a missing desk, not a missing company.
+    /// The refusal used to be raised as `CompanyNotFound("desk ghost")`, which
+    /// rendered as `company not found: desk ghost` — the wrong resource, and the
+    /// desk id stuffed into a company id slot (#833). The status stays `404`
+    /// because both variants map there.
+    #[tokio::test]
+    async fn unknown_desk_member_writes_refuse_as_a_missing_desk() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let added = post_desk_member(&app, &cookie, "ghost", r#"{"agent_id":"eng"}"#).await;
+        assert_eq!(added.status(), StatusCode::NOT_FOUND);
+        let message = error_message(added).await;
+        assert!(
+            !message.contains("company not found"),
+            "add refusal blames the company: {message:?}"
+        );
+        assert!(message.contains("ghost"), "add refusal drops the desk id");
+
+        let removed = delete_desk_member(&app, &cookie, "ghost", "eng").await;
+        assert_eq!(removed.status(), StatusCode::NOT_FOUND);
+        let message = error_message(removed).await;
+        assert!(
+            !message.contains("company not found"),
+            "remove refusal blames the company: {message:?}"
+        );
+        assert!(
+            message.contains("ghost"),
+            "remove refusal drops the desk id"
+        );
     }
 
     /// Creating a desk persists it as an overlay and surfaces it in `list_desks`
