@@ -1949,6 +1949,23 @@ impl RuntimeBuilder {
                             // (fail closed). `HarnessPool::ensure` re-resolves this
                             // each turn so a console token change takes effect
                             // without restart.
+                            // Issue #788: the per-company Chargebee connection,
+                            // resolved from THIS company's secret store — never
+                            // the environment, because two companies on one host
+                            // bill two different sites. Only companies that
+                            // explicitly grant `chargebee` resolve at all; with
+                            // either half of the pair missing it stays `None`
+                            // (fail closed). `HarnessPool::ensure` re-resolves it
+                            // each turn, so a key saved in the console's Billing
+                            // settings takes effect without a restart.
+                            let chargebee_config = if crate::company::grants_chargebee_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::chargebee::TenantChargebee::resolve(&secrets, &id)
+                                    .await
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2121,6 +2138,7 @@ impl RuntimeBuilder {
                                 // resolved above (token from the secret store,
                                 // never an env/platform key). `None` fails closed.
                                 composio: composio_config,
+                                chargebee: chargebee_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's

@@ -2604,6 +2604,7 @@ mod test {
             plan: None,
             media: None,
             composio: None,
+            chargebee: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,

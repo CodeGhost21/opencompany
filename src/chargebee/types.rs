@@ -27,12 +27,30 @@ pub const API_KEY_SECRET: &str = "chargebee/api_key";
 pub const SITE_SECRET: &str = "chargebee/site";
 
 /// Connection settings for one company's Chargebee site.
-#[derive(Clone, Debug)]
+///
+/// `Debug` is hand-written to redact the key — see the impl below.
+#[derive(Clone)]
 pub struct ChargebeeConfig {
     /// The Chargebee site slug, i.e. the `acme` in `acme.chargebee.com`.
     pub site: String,
     /// The site's API key, sent as the HTTP Basic username.
     pub api_key: String,
+}
+
+/// Prints the site and **redacts the key**.
+///
+/// Not a nicety. This struct is reachable from `HarnessDeps`, which is a large
+/// aggregate that debugging code prints wholesale; a derived `Debug` puts a live
+/// Chargebee API key into any log line that ever formats one. Caught by a test
+/// that asserted the key could not reach a `Debug` rendering — and, before this
+/// impl, it could.
+impl std::fmt::Debug for ChargebeeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChargebeeConfig")
+            .field("site", &self.site)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ChargebeeConfig {

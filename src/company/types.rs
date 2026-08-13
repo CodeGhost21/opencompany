@@ -155,6 +155,21 @@ pub fn grants_composio_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "composio" || grant.starts_with("composio."))
 }
 
+/// Whether a tool-grant list **explicitly** grants the `chargebee` billing
+/// namespace (issue #788).
+///
+/// Like [`grants_composio_explicit`], the catch-all `*` does **not** grant it:
+/// these tools send invoices to real customers of a real business, so they are
+/// opted into by name rather than ridden in on a wildcard a company set for its
+/// file and shell tools. Lives here (always compiled) so the feature-gated
+/// harness wiring and the always-compiled console capability route key off one
+/// source of truth.
+pub fn grants_chargebee_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "chargebee" || grant.starts_with("chargebee."))
+}
+
 /// Whether a tool-grant list **explicitly** grants the metered `search`
 /// namespace (issue #238).
 ///

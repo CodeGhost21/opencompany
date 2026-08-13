@@ -51,6 +51,10 @@ pub mod audit;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
+/// Chargebee billing tools (issue #788), wired per company from its own
+/// SecretStore. Always compiled so the credential resolution and the fail-closed
+/// decision are testable at default features; only the tools are gated.
+pub mod chargebee;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
 /// agent, and why every cut it makes describes itself. Pure and un-gated (the
@@ -415,6 +419,14 @@ pub struct HarnessDeps {
     /// else this instance's platform identity. With neither, no tools are wired —
     /// never a borrowed identity.
     pub composio: Option<composio::TenantComposio>,
+
+    /// The per-company Chargebee connection (issue #788). `None` (the default at
+    /// every construction site) fails closed — no billing tools are wired.
+    /// Resolved from that company's own secret store, never from the
+    /// environment: two companies on one host bill two different sites.
+    /// `HarnessPool::ensure` re-resolves it each turn, so a key set or rotated in
+    /// the console takes effect next turn with no restart.
+    pub chargebee: Option<chargebee::TenantChargebee>,
     /// The MANAGED web-search backend (issue #238). `None` (the default at every
     /// construction site but the production runtime builder) **fails closed** —
     /// no `web_search` tool is wired and agents behave exactly as before.
@@ -2768,6 +2780,7 @@ description = "Builds the product."
                 plan: None,
                 media: None,
                 composio: None,
+                chargebee: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 run_supervisor: crate::runtime::RunSupervisor::default(),
                 delivery: None,
@@ -2842,6 +2855,7 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            chargebee: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3528,6 +3542,7 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            chargebee: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3706,6 +3721,7 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            chargebee: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4224,6 +4240,7 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            chargebee: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4395,6 +4412,7 @@ description = "Sets direction."
             plan: Some(plan),
             media: None,
             composio: None,
+            chargebee: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4547,6 +4565,7 @@ description = "Sets direction."
             plan,
             media: None,
             composio: None,
+            chargebee: None,
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),

@@ -136,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         plan: None,
         media: None,
         composio: None,
+        chargebee: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
         run_supervisor: opencompany::runtime::RunSupervisor::default(),
         delivery: None,

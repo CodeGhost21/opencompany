@@ -430,6 +430,31 @@ pub fn build_agent(
         }
     }
 
+    // Issue #788: Chargebee billing. Same fail-closed shape as `composio`
+    // above, and for a sharper reason — these tools send invoices to a real
+    // business's real customers. Two conditions, both required:
+    //
+    //  1. an **EXPLICIT** `chargebee` grant. The catch-all `*` does NOT confer
+    //     it, following the media/composio/search precedent.
+    //  2. a resolved per-company connection on the deps (`deps.chargebee`),
+    //     read from THAT company's secret store by the runtime builder.
+    //
+    // A grant with no credential wires nothing and warns: an agent told it can
+    // bill, that silently cannot, is better than one billing through somebody
+    // else's Chargebee site.
+    #[cfg(feature = "chargebee")]
+    if crate::company::grants_chargebee_explicit(grants) {
+        match &deps.chargebee {
+            Some(config) => {
+                tools.extend(crate::harness::chargebee::chargebee_tools(config));
+            }
+            None => tracing::warn!(
+                "[build] agent explicitly grants `chargebee` but no per-company Chargebee \
+                 credentials are configured; billing tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
     // Metered web search (issue #238) — the discovery tool the `web` namespace
     // never had. `web_fetch` / `http_request` / `curl` read a URL the agent
     // already has; nothing could find one, while three shipped skills instruct
@@ -1454,6 +1479,7 @@ mod tests {
             plan: None,
             media: None,
             composio: None,
+            chargebee: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,

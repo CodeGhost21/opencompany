@@ -75,6 +75,15 @@ struct CapabilityStatusDto {
     composio_granted: bool,
     /// Whether the `composio` feature is compiled into this build at all.
     composio_in_build: bool,
+    /// Chargebee billing (issue #788): whether this company **explicitly** grants
+    /// the `chargebee` namespace (a `*` wildcard does NOT count). What the
+    /// Settings UI reads to say whether billing tools would reach an agent even
+    /// once credentials are saved.
+    chargebee_granted: bool,
+    /// Whether the `chargebee` feature is compiled into this build at all. The
+    /// grant and the credentials can both be in place and still wire no tools if
+    /// the running binary was not built with it.
+    chargebee_in_build: bool,
     /// Whether a non-empty per-tenant Composio token is stored — never the token
     /// itself. Unlike media's env credential, this is a tenant secret.
     composio_token_configured: bool,
@@ -156,6 +165,7 @@ struct TotalDto {
 /// composio), independent of whether a `[plan]` is configured.
 struct OptInFlags {
     media_granted: bool,
+    chargebee_granted: bool,
     composio_granted: bool,
     composio_token_configured: bool,
     search_granted: bool,
@@ -168,6 +178,7 @@ impl OptInFlags {
     fn none() -> Self {
         Self {
             media_granted: false,
+            chargebee_granted: false,
             composio_granted: false,
             composio_token_configured: false,
             search_granted: false,
@@ -193,6 +204,8 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         media_credential_configured: media_credential_configured(),
         composio_granted: flags.composio_granted,
         composio_in_build: cfg!(feature = "composio"),
+        chargebee_granted: flags.chargebee_granted,
+        chargebee_in_build: cfg!(feature = "chargebee"),
         composio_token_configured: flags.composio_token_configured,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
@@ -245,6 +258,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
     // and live on the manifest regardless of whether a `[plan]` is configured.
     let flags = OptInFlags {
         media_granted: crate::company::grants_media_explicit(&record.manifest.tools.allow),
+        chargebee_granted: crate::company::grants_chargebee_explicit(&record.manifest.tools.allow),
         composio_granted: crate::company::grants_composio_explicit(&record.manifest.tools.allow),
         // Degrade to "unconfigured" on a transient secret-store error rather
         // than failing the whole /capabilities response (budget/tier data is
@@ -320,6 +334,8 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         media_credential_configured: media_credential_configured(),
         composio_granted: flags.composio_granted,
         composio_in_build: cfg!(feature = "composio"),
+        chargebee_granted: flags.chargebee_granted,
+        chargebee_in_build: cfg!(feature = "chargebee"),
         composio_token_configured: flags.composio_token_configured,
         search_granted: flags.search_granted,
         search_in_build: cfg!(feature = "openhuman"),
