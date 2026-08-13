@@ -848,6 +848,39 @@ mod test {
         assert!(set.peek(&ApprovalId::new("nope")).is_none());
     }
 
+    /// Issue #796: the window between a park and the operator's decision. A
+    /// parked approval mints no grant, so `any_for_task` would read `false`
+    /// without the pending mark — and an unrelated turn's checkout sweep would
+    /// then delete the parked step's tree. The mark keeps the task live until the
+    /// approval settles, and two approvals on one task clear independently.
+    #[test]
+    fn a_still_parked_approval_keeps_its_task_alive() {
+        let set = GrantSet::default();
+        assert!(!set.any_for_task("t-1"), "nothing names the task yet");
+
+        // A parked approval: no grant, but the task is marked pending.
+        set.mark_pending(&ApprovalId::new("a1"), "t-1".to_string());
+        assert!(
+            set.any_for_task("t-1"),
+            "a pending approval must keep the task live"
+        );
+
+        // A second approval parks on the same task.
+        set.mark_pending(&ApprovalId::new("a2"), "t-1".to_string());
+        // Settling the first still leaves the second holding the task.
+        set.clear_pending(&ApprovalId::new("a1"));
+        assert!(
+            set.any_for_task("t-1"),
+            "the second pending approval still names the task"
+        );
+        // Settling the last (denied or expired, so no grant follows) drops it.
+        set.clear_pending(&ApprovalId::new("a2"));
+        assert!(
+            !set.any_for_task("t-1"),
+            "no pending approval and no grant leaves nothing to keep the task alive"
+        );
+    }
+
     #[test]
     fn sweep_expires_only_grants_past_the_ttl() {
         let set = GrantSet::default();
