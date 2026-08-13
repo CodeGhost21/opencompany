@@ -91,7 +91,10 @@ async function executes(page: Page): Promise<{ tool: string; connectionId?: stri
   return seen.json();
 }
 
-/** Forget what the fixture saw, so one test cannot read another's calls. */
+/**
+ * Forget what the fixture saw, so one test cannot read another's calls — and
+ * restore its connection list, so one cannot remove another's accounts either.
+ */
 async function resetFixture(page: Page): Promise<void> {
   await page.request.post(`${COMPOSIO_FIXTURE_URL}/__reset`);
 }
@@ -185,7 +188,12 @@ test("an operator names the account, and the page says so", async ({ page }) => 
     defaultConnectionId?: string;
   }[];
   expect(body.find((r) => r.toolkit === "gmail")?.defaultConnectionId).toBe("ca_billing");
-  expect(body.find((r) => r.toolkit === "slack")?.defaultConnectionId).toBeUndefined();
+  // Asserted through the row, not through `find(...)?.` — an absent slack row
+  // would satisfy `toBeUndefined()` just as an unchosen one does, and then the
+  // isolation claim would hold vacuously.
+  const slack = body.find((r) => r.toolkit === "slack");
+  expect(slack, "the fixture serves a slack toolkit; without it this proves nothing").toBeDefined();
+  expect(slack?.defaultConnectionId).toBeUndefined();
 });
 
 test.describe("the agent acts as the chosen account", () => {

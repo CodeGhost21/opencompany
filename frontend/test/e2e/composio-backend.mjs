@@ -26,7 +26,7 @@
 //
 //   GET  /healthz     → readiness, for `playwright.config.ts`'s webServer wait
 //   GET  /__executes  → every execute body seen, oldest first
-//   POST /__reset     → forget them
+//   POST /__reset     → forget them, and restore the seed connection list
 //
 // # What it deliberately does not do
 //
@@ -44,8 +44,13 @@ const bindArg = process.argv.indexOf("--bind");
 const bind = bindArg > -1 ? process.argv[bindArg + 1] : "127.0.0.1:8097";
 const [host, port] = bind.split(":");
 
-/** The connections this company holds. Two Gmail accounts is the whole point. */
-const connections = [
+/**
+ * The connections this company starts each spec with. Two Gmail accounts is the
+ * whole point, so a spec that disconnects one has to be able to put it back —
+ * `DELETE …/connections/{id}` mutates the live list, and one process serves
+ * every spec in the file.
+ */
+const seedConnections = () => [
   {
     id: "ca_ops",
     toolkit: "gmail",
@@ -68,6 +73,9 @@ const connections = [
     workspace: "Acme Workspace",
   },
 ];
+
+/** The connections this company holds right now. */
+let connections = seedConnections();
 
 /** Every `POST …/execute` body this process has seen, oldest first. */
 const executes = [];
@@ -105,6 +113,11 @@ const server = createServer(async (req, res) => {
 
   if (path === "/__reset" && req.method === "POST") {
     executes.length = 0;
+    // The connection list is state this server changes too. Resetting only the
+    // execute log would leave a spec that disconnected an account deciding what
+    // every later spec in the process sees — a failure that surfaces in a spec
+    // that did not cause it, and only in the order the file happens to run.
+    connections = seedConnections();
     return ok(res, { reset: true });
   }
 
