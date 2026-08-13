@@ -214,6 +214,31 @@ export function reorderedIds(
   return ids;
 }
 
+/**
+ * The full desk order produced by dropping one seat at another position.
+ * Returning the host's complete list keeps drag-and-drop and the keyboard
+ * controls on the same write contract: position zero remains the lead.
+ */
+export function reorderedIdsAfterDrop(
+  desk: OrgDesk,
+  fromIndex: number,
+  toIndex: number,
+): string[] | null {
+  if (
+    fromIndex < 0 ||
+    fromIndex >= desk.seats.length ||
+    toIndex < 0 ||
+    toIndex >= desk.seats.length ||
+    fromIndex === toIndex
+  ) {
+    return null;
+  }
+  const ids = desk.seats.map((seat) => seat.id);
+  const [moved] = ids.splice(fromIndex, 1);
+  ids.splice(toIndex, 0, moved);
+  return ids;
+}
+
 /** A one-line summary of the chart, for the company node. */
 export function summarize(tree: OrgTree): string {
   const seats = tree.desks.reduce((n, d) => n + d.seats.length, 0);

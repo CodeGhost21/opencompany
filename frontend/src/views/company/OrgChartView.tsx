@@ -13,12 +13,12 @@
 // `aria-level`, and no code path here can emit `aria-level="4"`, which is what
 // the e2e spec asserts.
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Crown, Plus, Trash2, Users, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import { ChevronDown, ChevronUp, Crown, Plus, Trash2, UserPlus, Users, X } from "lucide-react";
 
 import { listPeople } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import type { DeskDto, TeamMemberDto } from "@/api/types";
+import { ApiError, type DeskDto, type TeamMemberDto } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,6 +32,7 @@ import {
   addableTo,
   buildOrgTree,
   reorderedIds,
+  reorderedIdsAfterDrop,
   summarize,
   type OrgDesk,
   type OrgPerson,
@@ -40,6 +41,9 @@ import {
 } from "@/lib/org";
 import { cn } from "@/lib/utils";
 import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
+import { AddMemberDialog, type NewMemberFields } from "@/views/chat/AddMemberDialog";
+
+const SEAT_MIME = "application/x-opencompany-seat";
 
 interface Props {
   client: OpenCompanyClient;
@@ -68,6 +72,8 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [addMemberOpen, setAddMemberOpen] = useState(false);
+  const [addMemberDeskId, setAddMemberDeskId] = useState<string | null>(null);
   // A generation token so a response for a company we have navigated away from
   // cannot overwrite the one on screen. Same guard `SkillsView` uses.
   const gen = useRef(0);
@@ -211,6 +217,48 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
     }
   }
 
+  /**
+   * Company creation is durable structure, so a host without the team write
+   * plane must explain the refusal rather than borrow ChatView's local-only
+   * fallback. A local row could not be placed on a desk and would vanish on
+   * the next chart read.
+   */
+  async function addMember(fields: NewMemberFields) {
+    const deskId = addMemberDeskId;
+    setBusy("add-member");
+    setError(null);
+    try {
+      let created: TeamMemberDto;
+      try {
+        created = await client.addTeamMember(
+          { name: fields.name, role: fields.role, description: fields.description || undefined },
+          company,
+        );
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) {
+          throw new Error("This host does not support creating teammates from the Company page.");
+        }
+        throw e;
+      }
+      if (deskId) {
+        try {
+          await client.addDeskMember(deskId, created.id, company);
+        } catch (e) {
+          throw new Error(
+            `Teammate ${fields.name} was created, but could not be added to the selected desk: ${e instanceof Error ? e.message : "unknown error"}`,
+          );
+        }
+      }
+      await boot();
+      setAddMemberOpen(false);
+    } catch (e) {
+      setAddMemberOpen(false);
+      setError(e instanceof Error ? e.message : "Could not create teammate.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <div ref={chartRef} className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6">
@@ -222,16 +270,29 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
               desk, move someone between desks, or change who leads.
             </p>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            className="shrink-0"
-            disabled={load === "loading"}
-            onClick={() => setCreateOpen(true)}
-          >
-            <Plus className="mr-1.5 size-4" />
-            New desk
-          </Button>
+          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={load === "loading"}
+              onClick={() => setCreateOpen(true)}
+            >
+              <Plus className="mr-1.5 size-4" />
+              New desk
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={load === "loading"}
+              onClick={() => {
+                setAddMemberDeskId(null);
+                setAddMemberOpen(true);
+              }}
+            >
+              <UserPlus className="mr-1.5 size-4" />
+              New teammate
+            </Button>
+          </div>
         </div>
 
         {error && (
@@ -264,6 +325,10 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
                 busy={busy}
                 focusMark={focusMark}
                 onCreate={() => setCreateOpen(true)}
+                onCreateMember={(desk) => {
+                  setAddMemberDeskId(desk.id);
+                  setAddMemberOpen(true);
+                }}
                 onAdd={(desk, agentId) =>
                   void mutate(`${desk.id}:${agentId}`, () =>
                     client.addDeskMember(desk.id, agentId, company),
@@ -280,6 +345,11 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
                   void mutate(`${desk.id}:${desk.seats[index].id}`, () =>
                     client.setDeskOrder(desk.id, next, company),
                   );
+                }}
+                onDrop={(desk, fromIndex, toIndex) => {
+                  const next = reorderedIdsAfterDrop(desk, fromIndex, toIndex);
+                  if (!next) return;
+                  void mutate(`drag:${desk.id}`, () => client.setDeskOrder(desk.id, next, company));
                 }}
                 onDelete={(desk) =>
                   void mutate(`delete:${desk.id}`, () => client.deleteDesk(desk.id, company))
@@ -298,6 +368,11 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
         onOpenChange={setCreateOpen}
         onCreated={() => void boot()}
       />
+      <AddMemberDialog
+        open={addMemberOpen}
+        onOpenChange={setAddMemberOpen}
+        onAdd={(fields) => void addMember(fields)}
+      />
     </div>
   );
 }
@@ -314,9 +389,11 @@ function Chart({
   busy,
   focusMark,
   onCreate,
+  onCreateMember,
   onAdd,
   onRemove,
   onMove,
+  onDrop,
   onDelete,
 }: {
   tree: OrgTree;
@@ -324,9 +401,11 @@ function Chart({
   /** The desk a `#/company/<deskId>` link landed on, ringed until first input. */
   focusMark: string | null;
   onCreate: () => void;
+  onCreateMember: (desk: OrgDesk) => void;
   onAdd: (desk: OrgDesk, agentId: string) => void;
   onRemove: (desk: OrgDesk, agentId: string) => void;
   onMove: (desk: OrgDesk, index: number, direction: "up" | "down") => void;
+  onDrop: (desk: OrgDesk, fromIndex: number, toIndex: number) => void;
   onDelete: (desk: OrgDesk) => void;
 }) {
   return (
@@ -356,8 +435,10 @@ function Chart({
                 busy={busy}
                 focused={focusMark === desk.id}
                 onAdd={(agentId) => onAdd(desk, agentId)}
+                onCreateMember={() => onCreateMember(desk)}
                 onRemove={(agentId) => onRemove(desk, agentId)}
                 onMove={(index, direction) => onMove(desk, index, direction)}
+                onDrop={(fromIndex, toIndex) => onDrop(desk, fromIndex, toIndex)}
                 onDelete={() => onDelete(desk)}
               />
             ))}
@@ -374,9 +455,11 @@ function DeskNode({
   addable,
   busy,
   focused,
+  onCreateMember,
   onAdd,
   onRemove,
   onMove,
+  onDrop,
   onDelete,
 }: {
   desk: OrgDesk;
@@ -384,12 +467,15 @@ function DeskNode({
   busy: string | null;
   /** This desk is the one a `#/company/<deskId>` link asked for. */
   focused: boolean;
+  onCreateMember: () => void;
   onAdd: (agentId: string) => void;
   onRemove: (agentId: string) => void;
   onMove: (index: number, direction: "up" | "down") => void;
+  onDrop: (fromIndex: number, toIndex: number) => void;
   onDelete: () => void;
 }) {
   const locked = busy !== null;
+  const [draggingIndex, setDraggingIndex] = useState<number | null>(null);
   return (
     <div
       role="treeitem"
@@ -451,6 +537,8 @@ function DeskNode({
             <Seat
               key={seat.id}
               seat={seat}
+              index={index}
+              deskId={desk.id}
               deskName={desk.name}
               first={index === 0}
               last={index === desk.seats.length - 1}
@@ -459,17 +547,22 @@ function DeskNode({
               onUp={() => onMove(index, "up")}
               onDown={() => onMove(index, "down")}
               onRemove={() => onRemove(seat.id)}
+              onDragStart={() => setDraggingIndex(index)}
+              onDrop={(toIndex) => {
+                if (draggingIndex !== null) onDrop(draggingIndex, toIndex);
+                setDraggingIndex(null);
+              }}
             />
           ))}
 
-          <div className="pt-1">
+          <div className="flex items-center gap-1 pt-1">
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
                   <Button
                     variant="outline"
                     size="sm"
-                    className="w-full"
+                    className="min-w-0 flex-1"
                     disabled={addable.length === 0 || locked}
                   />
                 }
@@ -487,6 +580,16 @@ function DeskNode({
                 </DropdownMenuContent>
               )}
             </DropdownMenu>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 shrink-0"
+              aria-label={`Create teammate on ${desk.name}`}
+              disabled={locked}
+              onClick={onCreateMember}
+            >
+              <UserPlus className="size-4" />
+            </Button>
           </div>
         </div>
       </div>
@@ -497,6 +600,8 @@ function DeskNode({
 /** One seat — level 3, the deepest a path here can go. */
 function Seat({
   seat,
+  index,
+  deskId,
   deskName,
   first,
   last,
@@ -505,8 +610,12 @@ function Seat({
   onUp,
   onDown,
   onRemove,
+  onDragStart,
+  onDrop,
 }: {
   seat: OrgSeat;
+  index: number;
+  deskId: string;
   deskName: string;
   first: boolean;
   last: boolean;
@@ -515,14 +624,36 @@ function Seat({
   onUp: () => void;
   onDown: () => void;
   onRemove: () => void;
+  onDragStart: () => void;
+  onDrop: (toIndex: number) => void;
 }) {
+  function startDrag(event: DragEvent<HTMLDivElement>) {
+    onDragStart();
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData(SEAT_MIME, `${deskId}:${index}`);
+    event.dataTransfer.setData("text/plain", `${deskId}:${index}`);
+  }
+
+  function drop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const payload = event.dataTransfer.getData(SEAT_MIME) || event.dataTransfer.getData("text/plain");
+    const [sourceDeskId, sourceIndex] = payload.split(":");
+    const fromIndex = Number(sourceIndex);
+    if (sourceDeskId === deskId && Number.isInteger(fromIndex)) onDrop(index);
+  }
+
   return (
     <div
       role="treeitem"
       aria-level={3}
       aria-selected="false"
+      draggable={!locked}
+      data-seat-id={seat.id}
+      onDragStart={startDrag}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={drop}
       className={cn(
-        "flex items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-sm",
+        "flex cursor-grab items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-sm active:cursor-grabbing",
         busy && "opacity-50",
       )}
     >

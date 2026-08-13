@@ -57,12 +57,16 @@ const ROSTER = [
 
 /** Every write the console made, so the request shape can be asserted on. */
 let writes: { method: string; path: string; body?: unknown }[] = [];
+let roster = [...ROSTER];
+let teamWriteAvailable = true;
 
 /** The host's desks, as this stub holds them. Mutated by the write routes. */
 let desks: Desk[] = [];
 
 function reset() {
   writes = [];
+  roster = [...ROSTER];
+  teamWriteAvailable = true;
   desks = [
     {
       id: "engineering",
@@ -177,7 +181,20 @@ async function mockApi(page: Page) {
       return json(desks);
     }
 
-    if (path.endsWith("/team")) return json(ROSTER);
+    if (path.endsWith("/team") && method === "POST") {
+      if (!teamWriteAvailable) return json({ error: "not supported" }, 404);
+      const body = request.postDataJSON() as { name: string; role: string; description?: string };
+      const created = {
+        id: `new-${roster.length}`,
+        name: body.name,
+        role: body.role,
+        description: body.description,
+      };
+      roster = [...roster, created];
+      writes.push({ method, path, body });
+      return json(created, 201);
+    }
+    if (path.endsWith("/team")) return json(roster);
     if (path.endsWith("/users")) {
       return json([
         {
@@ -362,6 +379,57 @@ test("#311 membership can be edited from the chart and survives a reload", async
   await expect(deskNode(page, "Engineering")).not.toContainText("Linus");
 });
 
+test("#839 creates a teammate on a selected desk and persists it", async ({ page }) => {
+  await mockApi(page);
+  await openChart(page);
+
+  const growth = deskNode(page, "Growth");
+  await growth.getByRole("button", { name: "Create teammate on Growth" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("Babbage");
+  await dialog.getByLabel("Role").fill("Platform Engineer");
+  await dialog.getByLabel("What they do").fill("Builds the platform");
+  await dialog.getByRole("button", { name: "Add member" }).click();
+
+  await expect(growth).toContainText("Babbage");
+  expect(writes.find((write) => write.method === "POST" && write.path.endsWith("/team"))).toBeTruthy();
+  expect(writes.find((write) => write.method === "POST" && write.path.endsWith("/desks/growth/members"))).toBeTruthy();
+
+  await page.reload();
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+  await expect(deskNode(page, "Growth")).toContainText("Babbage");
+});
+
+test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
+  await mockApi(page);
+  await openChart(page);
+
+  await page.getByRole("button", { name: "New teammate" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("No Desk");
+  await dialog.getByLabel("Role").fill("Roaming Engineer");
+  await dialog.getByRole("button", { name: "Add member" }).click();
+
+  await expect(page.getByRole("heading", { name: "Not on a desk" })).toContainText("Not on a desk");
+  await expect(page.getByText("No Desk", { exact: true })).toBeVisible();
+  expect(writes.some((write) => write.path.includes("/members"))).toBe(false);
+});
+
+test("#839 refuses a company-page teammate add when the host has no team write plane", async ({ page }) => {
+  teamWriteAvailable = false;
+  await mockApi(page);
+  await openChart(page);
+
+  await page.getByRole("button", { name: "New teammate" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("Not Saved");
+  await dialog.getByLabel("Role").fill("Unavailable");
+  await dialog.getByRole("button", { name: "Add member" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("does not support creating teammates");
+  await expect(page.locator("text=Not Saved")).toHaveCount(0);
+});
+
 test("#311 the lead can be changed from the chart and survives a reload", async ({ page }) => {
   await mockApi(page);
   await openChart(page);
@@ -384,6 +452,27 @@ test("#311 the lead can be changed from the chart and survives a reload", async 
   await expect(
     deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]').first(),
   ).toContainText("Ada");
+});
+
+test("#839 dragging a seat reorders the desk and persists the new lead", async ({ page }) => {
+  await mockApi(page);
+  await openChart(page);
+
+  const engineering = deskNode(page, "Engineering");
+  const seats = engineering.locator('[role="treeitem"][aria-level="3"]');
+  await seats.nth(1).dragTo(seats.first());
+
+  await expect(seats.first()).toContainText("Ada");
+  expect(writes.find((write) => write.method === "PUT" && write.path.endsWith("/order"))?.body).toEqual({
+    ordered_member_ids: ["ada", "grace"],
+  });
+
+  await page.reload();
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+  const reloadedSeats = deskNode(page, "Engineering").locator('[role="treeitem"][aria-level="3"]');
+  await expect(reloadedSeats.first()).toContainText("Ada");
+  await expect(reloadedSeats.first().getByRole("img", { name: "Desk lead" })).toBeVisible();
+  await expect(reloadedSeats.nth(1)).toContainText("Grace");
 });
 
 test("#311 blueprint structure offers no control the host would refuse", async ({ page }) => {
