@@ -27,6 +27,7 @@ pub mod dns;
 pub mod inference;
 mod manifest;
 pub mod mcp;
+pub mod paypal;
 // Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the
 // per-tenant browser sign-in flow. Needs the vendored `oh::mcp::config_servers` discovery
 // primitive + `uuid`/`base64`/`url`, so it links only under the `mcp` feature.

@@ -28,6 +28,9 @@ pub mod harness;
 /// (usage samples, ledger, `[budget]`). No I/O; WS2 wraps these in GraphQL.
 pub mod metering;
 pub mod openhuman;
+/// PayPal wallet + transaction visibility (issue #789).
+#[cfg(feature = "paypal")]
+pub mod paypal;
 pub mod policy;
 pub mod ports;
 /// The `x-sdk-name: opencompany` identity attached to this crate's own

@@ -396,6 +396,9 @@ oauth = ["dep:reqwest"]
 # is the shared `reqwest` client the REST calls use; `src/chargebee/` compiles
 # only under this feature, so the default build is unaffected.
 chargebee = ["dep:reqwest"]
+# Issue #789: PayPal wallet + transaction reads, same shape as `chargebee`
+# above — backend service code, per-company credentials, only `reqwest` gated.
+paypal = ["dep:reqwest"]
 
 [patch.crates-io]
 # opencompany's own vendored tinyagents (2.1.0). Satisfies openhuman's `^2.1`.

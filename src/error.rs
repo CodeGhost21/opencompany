@@ -234,6 +234,18 @@ pub enum OpenCompanyError {
         message: String,
     },
 
+    /// A PayPal REST API failure, or an argument rejected before the call
+    /// (issue #789).
+    #[error("paypal error ({code}): {message}")]
+    Paypal {
+        /// The HTTP status, or `0` when the failure never reached the network.
+        status: u16,
+        /// PayPal's `name`/`error` token, or a local one.
+        code: String,
+        /// A human-readable description of the failure.
+        message: String,
+    },
+
     /// A spawned background task the caller was waiting on panicked or was
     /// aborted, so its result never arrived (issue #383).
     ///
@@ -315,6 +327,7 @@ impl OpenCompanyError {
             Self::Tinyplace { code, .. } => format!("tinyplace_{code}"),
             Self::TinyHumans { code, .. } => format!("tinyhumans_{code}"),
             Self::Chargebee { code, .. } => format!("chargebee_{code}"),
+            Self::Paypal { code, .. } => format!("paypal_{code}"),
             Self::BackgroundTask(_) => "background_task".to_string(),
             Self::Unimplemented(_) => "unimplemented".to_string(),
             #[cfg(feature = "openhuman")]

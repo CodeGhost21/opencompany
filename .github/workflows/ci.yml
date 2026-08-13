@@ -410,6 +410,15 @@ jobs:
       - name: Test the mail surface
         run: scripts/ci/run-scoped-suite.sh "mail (imap)" imap,smtp server::ops::imap
 
+      # `paypal` (issue #789): the wallet/transaction REST layer. Rides this
+      # lane rather than the gated one because — unlike chargebee, whose toolbelt
+      # bridge lives under src/harness/ — nothing here needs `openhuman` yet. The
+      # filter selects both `company::paypal` and `paypal::`. Offline: the token
+      # cache and error tests drive a stub on an ephemeral port, and the argument
+      # tests never build a request.
+      - name: Test the PayPal integration
+        run: scripts/ci/run-scoped-suite.sh "paypal" paypal paypal
+
       # `sidecar`: the whole of `src/brain/sidecar/`, which the feature gates at
       # the `mod` declaration — the idiom that hid these fourteen tests from
       # every lane and from a casual grep alike. Through the wrapper like its
