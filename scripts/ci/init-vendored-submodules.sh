@@ -37,11 +37,15 @@
 # manifest must resolve too. Harmless for the default build; required for any
 # `--features openhuman` build.
 #
-# WHY TARGETED RATHER THAN `--recursive`
+# WHY SCOPED TO `vendor/` RATHER THAN `--recursive`
 #
-# A plain `--recursive` over `vendor/openhuman` additionally drags in the
-# desktop-only `tauri-cef` tree — a heavy CEF checkout that nothing in these
-# builds compiles.
+# A plain `--recursive` over `vendor/openhuman` takes every submodule openhuman
+# declares, including desktop-only trees nothing in these builds compiles. The
+# one that made this rule was `app/src-tauri/vendor/tauri-cef`, a heavy CEF
+# checkout; openhuman replaced CEF with upstream Wry in `1843706c` and the
+# submodule is gone, but the rule holds for whatever lands outside `vendor/`
+# next. Scoping to the `vendor/` prefix excludes those structurally, without
+# anyone having to name them.
 #
 # WHAT THIS DELIBERATELY DOES NOT DO
 #
@@ -89,14 +93,24 @@ fi
 # `release.yml` breakage described above, and it is the worse of the two
 # because nothing fails until something needs the missing manifest.
 #
-# `vendor/` prefix, because these are the crates Cargo must resolve manifests
-# for. Anything openhuman vendors outside `vendor/` is not a path dependency of
-# the crate we build.
+# The `vendor/` prefix is the whole filter, and it is a STRUCTURAL one: those are
+# the crates Cargo must resolve manifests for. Anything openhuman vendors outside
+# `vendor/` is not a path dependency of the crate we build.
+#
+# It is also what keeps the heavy desktop trees out, which is why this is not a
+# plain `--recursive`. The case that rule was written for lived at
+# `app/src-tauri/vendor/tauri-cef` — outside `vendor/`, so the prefix excluded it
+# by construction. (openhuman has since replaced CEF with upstream Wry and the
+# submodule is gone, but the rule stands for whatever lands there next.)
+#
+# Deliberately NOT filtering by name. A `grep -v cef` here would match by
+# substring, so a future crate whose path merely contains those letters would be
+# dropped without a word — the silent-omission failure this whole derivation
+# exists to prevent, reintroduced by the guard meant to help.
 VENDORED_CRATES=$(
   git -C vendor/openhuman config -f .gitmodules --get-regexp '^submodule\..*\.path$' |
     awk '{ print $2 }' |
-    grep '^vendor/' |
-    grep -v 'cef' ||
+    grep '^vendor/' ||
     true
 )
 
