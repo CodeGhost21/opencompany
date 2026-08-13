@@ -43,6 +43,7 @@ import {
   configFromDraft,
   hasConfigForm,
 } from "@/lib/workflow-node-config";
+import { draftBanners } from "@/lib/workflow-draft";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
@@ -415,6 +416,10 @@ export function WorkflowCreateDialog({
   const [draftError, setDraftError] = useState<string | null>(null);
   const [draftSummary, setDraftSummary] = useState<string | null>(null);
   const [draftReason, setDraftReason] = useState<string | null>(null);
+  // Host corrections the copilot made to the draft (issue #813) — e.g. a
+  // name/role→id rewrite — shown under the summary so the author sees WHY the
+  // hydrated graph differs from a literal reading of their request.
+  const [draftNotes, setDraftNotes] = useState<string[]>([]);
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
   const formId = useId();
 
@@ -452,6 +457,7 @@ export function WorkflowCreateDialog({
     setDraftError(null);
     setDraftSummary(null);
     setDraftReason(null);
+    setDraftNotes([]);
     let live = true;
     (async () => {
       try {
@@ -790,8 +796,10 @@ export function WorkflowCreateDialog({
     setDraftError(null);
     setDraftSummary(null);
     setDraftReason(null);
+    setDraftNotes([]);
     try {
       const drafted = await draftWorkflowFromDescription(client, company, description);
+      const banners = draftBanners(drafted);
       if (drafted.automatable && drafted.workflow) {
         const graph = drafted.workflow;
         // Hydrate via the same helpers edit mode uses, so a drafted graph and a
@@ -805,16 +813,13 @@ export function WorkflowCreateDialog({
         // errors — they belonged to whatever was on screen before.
         setError(null);
         setFieldErrors({});
-        setDraftSummary(
-          drafted.summary
-            ? `Drafted: ${drafted.summary} — review below, then Create.`
-            : "Drafted — review below, then Create.",
-        );
+        setDraftSummary(banners.summary);
+        // Any host corrections (issue #813) — e.g. a role→id rewrite — so the
+        // author sees WHY the drafted graph differs from a literal reading.
+        setDraftNotes(banners.notes);
       } else {
         // Not automatable: the form is left untouched, with the model's reason.
-        setDraftReason(
-          drafted.reason ?? "This is better done once than built into a workflow.",
-        );
+        setDraftReason(banners.reason);
       }
     } catch (e) {
       // A capability gap (404/409) or a network failure — surface it inline; the
@@ -974,6 +979,17 @@ export function WorkflowCreateDialog({
             {draftSummary && (
               <Alert>
                 <AlertDescription>{draftSummary}</AlertDescription>
+              </Alert>
+            )}
+            {draftNotes.length > 0 && (
+              <Alert data-testid="workflow-copilot-notes">
+                <AlertDescription>
+                  <ul className="list-disc space-y-1 pl-4">
+                    {draftNotes.map((note, i) => (
+                      <li key={i}>{note}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
               </Alert>
             )}
             {draftReason && (

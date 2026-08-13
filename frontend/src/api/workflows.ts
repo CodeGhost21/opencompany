@@ -597,6 +597,12 @@ export interface WorkflowDraftFromDescription {
   workflow?: WorkflowGraph;
   /** Why the work is better done once. Present when not `automatable`. */
   reason?: string;
+  /**
+   * Host corrections the operator should see (issue #813) — e.g. the copilot
+   * matched a teammate named by role to their roster id. Present (and non-empty)
+   * only when the draft was corrected; older hosts omit the field entirely.
+   */
+  notes?: string[];
 }
 
 /**

@@ -76,6 +76,13 @@ pub(crate) const WORKFLOW_TOOL_NAMESPACES: [&str; 4] = ["shell", "code", "web", 
 /// `media` / `composio` / `repo` slugs are deliberately absent — they map to a
 /// namespace but are agent-turn families the workflow invoker never wires (the
 /// same reason they are excluded from [`WORKFLOW_TOOL_NAMESPACES`]).
+/// Since #813 this table is a **test-only** pin: [`WORKFLOW_TOOL_CATALOG`] is the
+/// one source callers ground and validate against, and
+/// [`the_catalog_agrees_with_the_slug_table_and_namespace_of`] asserts the
+/// catalogue names exactly these slugs — so a tool added to the belt (and its
+/// `namespace_of` arm) without a catalogue row still fails a test rather than
+/// silently narrowing what the copilot can propose.
+#[cfg(test)]
 pub(crate) const WORKFLOW_TOOL_SLUGS: &[(&str, &str)] = &[
     ("shell", "shell"),
     ("read_workspace_state", "shell"),
@@ -88,6 +95,115 @@ pub(crate) const WORKFLOW_TOOL_SLUGS: &[(&str, &str)] = &[
     ("image_info", "web"),
     ("web_search", "search"),
 ];
+
+/// One row of the create-time copilot's tool catalogue (issue #813): a wired
+/// `tool_call` slug, the grant namespace it maps to, an **honest** one-line
+/// capability, and the args a proposed node must carry.
+///
+/// The capability line states what the tool can AND plainly cannot do, so the
+/// model is grounded in the real shape of the tool rather than its name alone —
+/// the `read_workspace_state` "overview only, cannot read a file" gap is the case
+/// that motivated this. `required_args` names the keys the engine reads from a
+/// node's `config.args` (tinyflows resolves a `tool_call`'s arguments from
+/// `config.args`, not from the node config root — see
+/// `vendor/openhuman/vendor/tinyflows/src/nodes/integration/tool_call.rs`), so a
+/// slug that runs but does nothing useful with empty args is caught at author
+/// time by [`validate_tool_call_node`](crate::company::workflow_create).
+pub(crate) struct WorkflowToolInfo {
+    /// The runtime tool name (== a `tool_call` node's `config.slug`).
+    pub(crate) slug: &'static str,
+    /// The grant namespace [`toolbelt::namespace_of`] maps `slug` to.
+    pub(crate) namespace: &'static str,
+    /// One honest sentence: what the tool does, and what it cannot.
+    pub(crate) capability: &'static str,
+    /// The `config.args` keys a proposed node must set for the tool to do
+    /// anything — empty when the tool has no required arg.
+    pub(crate) required_args: &'static [&'static str],
+}
+
+/// The wired workflow tools, each with the honest capability line and required
+/// args the create-time copilot grounds the model in (issue #813).
+///
+/// A **strict** companion of [`WORKFLOW_TOOL_SLUGS`]: it names the exact same
+/// slugs (asserted both directions by
+/// [`the_catalog_agrees_with_the_slug_table_and_namespace_of`]) and each row's
+/// namespace is what [`toolbelt::namespace_of`] returns, so the catalogue cannot
+/// drift from what the invoker actually wires or from what a proposed `tool_call`
+/// clears at courtesy validation. The capability lines and `required_args` are
+/// pinned to the vendored tool schemas: `required_args` is each tool's schema
+/// `required` list, and the "cannot" halves state a real limit of the tool
+/// (`read_workspace_state` reads no file; `web_fetch` searches for nothing).
+pub(crate) const WORKFLOW_TOOL_CATALOG: &[WorkflowToolInfo] = &[
+    WorkflowToolInfo {
+        slug: "shell",
+        namespace: "shell",
+        capability: "runs a shell command in the company workspace (create/edit/run files); the \
+                     workspace starts empty each run",
+        required_args: &["command"],
+    },
+    WorkflowToolInfo {
+        slug: "read_workspace_state",
+        namespace: "shell",
+        capability: "an overview ONLY — git status, recent commits and the top-level file tree; it \
+                     CANNOT read a file's contents or run a command",
+        required_args: &[],
+    },
+    WorkflowToolInfo {
+        slug: "apply_patch",
+        namespace: "code",
+        capability: "applies exact-string edits to files already in the workspace",
+        required_args: &["edits"],
+    },
+    WorkflowToolInfo {
+        slug: "git_operations",
+        namespace: "code",
+        capability: "structured git actions (status/diff/log/branch/commit/add/checkout/stash) in \
+                     the workspace",
+        required_args: &["operation"],
+    },
+    WorkflowToolInfo {
+        slug: "csv_export",
+        namespace: "code",
+        capability: "writes a JSON array of objects to a CSV file in the workspace",
+        required_args: &["data", "filename"],
+    },
+    WorkflowToolInfo {
+        slug: "web_fetch",
+        namespace: "web",
+        capability: "GETs a URL you already have and returns its page text (truncated); it cannot \
+                     search for a URL",
+        required_args: &["url"],
+    },
+    WorkflowToolInfo {
+        slug: "http_request",
+        namespace: "web",
+        capability: "makes an HTTP request (GET/POST/…) to an allowlisted API URL you already have",
+        required_args: &["url"],
+    },
+    WorkflowToolInfo {
+        slug: "curl",
+        namespace: "web",
+        capability: "downloads a file from an http(s) URL into the workspace",
+        required_args: &["url"],
+    },
+    WorkflowToolInfo {
+        slug: "image_info",
+        namespace: "web",
+        capability: "reads image metadata (format, dimensions, size) from a workspace file",
+        required_args: &["path"],
+    },
+    WorkflowToolInfo {
+        slug: "web_search",
+        namespace: "search",
+        capability: "runs a metered web search for a query and returns result links and snippets",
+        required_args: &["query"],
+    },
+];
+
+/// The catalogue row for `slug`, if it is a wired workflow tool (issue #813).
+pub(crate) fn workflow_tool_info(slug: &str) -> Option<&'static WorkflowToolInfo> {
+    WORKFLOW_TOOL_CATALOG.iter().find(|info| info.slug == slug)
+}
 
 /// A [`ToolInvoker`] over the Cell A toolbelt (plus the metered `search` family),
 /// scoped to a per-company workflow workspace and gated by the company's
@@ -267,6 +383,50 @@ mod tests {
             assert!(
                 WORKFLOW_TOOL_NAMESPACES.contains(namespace),
                 "slug `{slug}`'s namespace `{namespace}` is not a wired workflow namespace"
+            );
+        }
+    }
+
+    /// [`WORKFLOW_TOOL_CATALOG`] is a strict companion of
+    /// [`WORKFLOW_TOOL_SLUGS`], not a second source of truth: it names the exact
+    /// same slugs (both directions), every row's namespace is what
+    /// [`toolbelt::namespace_of`] returns and is a wired workflow namespace, and
+    /// no capability line or required-arg name is blank. A tool added to (or
+    /// dropped from) the slug table without a matching catalogue edit fails here
+    /// rather than silently narrowing — or mis-describing — what the create-time
+    /// copilot (issue #813) grounds the model in.
+    #[test]
+    fn the_catalog_agrees_with_the_slug_table_and_namespace_of() {
+        use std::collections::HashSet;
+        let catalog: HashSet<&str> = WORKFLOW_TOOL_CATALOG.iter().map(|info| info.slug).collect();
+        let table: HashSet<&str> = WORKFLOW_TOOL_SLUGS.iter().map(|(slug, _)| *slug).collect();
+        assert_eq!(
+            catalog, table,
+            "the tool catalogue and the slug table must name the same slugs"
+        );
+        for info in WORKFLOW_TOOL_CATALOG {
+            assert_eq!(
+                toolbelt::namespace_of(info.slug),
+                Some(info.namespace),
+                "catalogue slug `{}` is listed under `{}` but namespace_of disagrees",
+                info.slug,
+                info.namespace
+            );
+            assert!(
+                WORKFLOW_TOOL_NAMESPACES.contains(&info.namespace),
+                "catalogue slug `{}`'s namespace `{}` is not a wired workflow namespace",
+                info.slug,
+                info.namespace
+            );
+            assert!(
+                !info.capability.trim().is_empty(),
+                "catalogue slug `{}` has an empty capability line",
+                info.slug
+            );
+            assert!(
+                info.required_args.iter().all(|arg| !arg.trim().is_empty()),
+                "catalogue slug `{}` has an empty required-arg name",
+                info.slug
             );
         }
     }
