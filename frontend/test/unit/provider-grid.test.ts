@@ -9,9 +9,9 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { ComposioToolkitEntry } from "@/api/composio";
+import type { ComposioConnectedAccount, ComposioToolkitEntry } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
-import { buildGridProviders } from "@/lib/provider-grid";
+import { buildGridProviders, disconnectRouteFor } from "@/lib/provider-grid";
 import { CONNECTION_PROVIDERS, type ComposioReach } from "@/lib/connections";
 
 /** A host where Composio is live and everything is reachable (open mode). */
@@ -213,5 +213,137 @@ describe("buildGridProviders", () => {
       kind: "composio",
       toolkit: "slack",
     });
+  });
+});
+
+// The connection as an object rather than a boolean (issue #404).
+//
+// The bug these pin is one wire: every Disconnect on this page went to
+// `POST …/connections/{provider}/disconnect`, which blanks the host's own
+// `oauth/{provider}` secret. A Composio-connected provider never had one, so the
+// call answered 200, the toast said "Disconnected Gmail", and Gmail was still
+// connected on the next refresh. `DELETE …/composio/connections/{id}` (PR #696)
+// is the route that releases it, and it is addressed by account id.
+describe("disconnect routing", () => {
+  function account(over: Partial<ComposioConnectedAccount> = {}): ComposioConnectedAccount {
+    return { id: "conn-1", status: "ACTIVE", connected: true, ...over };
+  }
+
+  it("routes a Composio-connected provider to its account, not to the native blank", () => {
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+      { gmail: [account({ id: "conn-gmail-1", account: "ops@acme.test" })] },
+    );
+    const tile = bySlug(providers, "gmail");
+    expect(tile.canDisconnect).toBe(true);
+    expect(disconnectRouteFor(tile)).toEqual({
+      kind: "composio",
+      accounts: [account({ id: "conn-gmail-1", account: "ops@acme.test" })],
+    });
+  });
+
+  it("keeps the native route for a provider only the host itself holds", () => {
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["native"] }),
+      OPEN,
+      false,
+    );
+    expect(disconnectRouteFor(bySlug(providers, "gmail"))).toEqual({ kind: "native" });
+  });
+
+  it("prefers the Composio account when a provider is connected through both", () => {
+    // The native secret is inert until #396 lands, so blanking it would leave
+    // the provider working, the agents' tools intact, and the tile connected —
+    // a disconnect that reports success and releases nothing.
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["native", "composio"] }),
+      OPEN,
+      false,
+      { gmail: [account()] },
+    );
+    expect(disconnectRouteFor(bySlug(providers, "gmail"))?.kind).toBe("composio");
+  });
+
+  it("offers nothing for a provider connected through Composio on a host predating #696", () => {
+    // No `accounts` on the wire means no id, so there is nothing a revoke can
+    // be addressed to. Drawing a Disconnect anyway is the exact defect above.
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+    );
+    const tile = bySlug(providers, "gmail");
+    expect(tile.accounts).toEqual([]);
+    expect(tile.canDisconnect).toBe(false);
+    expect(disconnectRouteFor(tile)).toBeNull();
+  });
+
+  it("ignores an account Composio no longer reports as connected", () => {
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+      { gmail: [account({ status: "EXPIRED", connected: false })] },
+    );
+    const tile = bySlug(providers, "gmail");
+    // Still listed — the detail view shows it, and "set up and since expired"
+    // is a state an operator has to be able to see and clear.
+    expect(tile.accounts).toHaveLength(1);
+    expect(disconnectRouteFor(tile)).toBeNull();
+  });
+
+  it("has nothing to release for a provider that is not connected", () => {
+    const providers = buildGridProviders([entry("gmail")], [], {}, OPEN, false);
+    expect(disconnectRouteFor(bySlug(providers, "gmail"))).toBeNull();
+  });
+
+  it("finds the accounts of a provider whose host id differs from its slug", () => {
+    // `google-calendar` (host) vs `googlecalendar` (Composio). Keying the
+    // account map by one spelling and looking it up by the other is how a
+    // connected provider ends up with no object to open.
+    const providers = buildGridProviders(
+      [entry("googlecalendar")],
+      [],
+      states({ provider: "google-calendar", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+      { googlecalendar: [account({ id: "conn-cal-1" })] },
+    );
+    expect(bySlug(providers, "googlecalendar").accounts).toHaveLength(1);
+  });
+
+  it("shows no account label on a tile holding two of them", () => {
+    // One of two labels on a tile reads as "this is the account it acts as",
+    // which is precisely the claim nothing here can back: `composio_execute`
+    // sends no connection id, so which one Composio resolves is not ours to
+    // report. The count is true; a name would not be.
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+      {
+        gmail: [
+          account({ id: "conn-gmail-1", account: "ops@acme.test" }),
+          account({ id: "conn-gmail-2", account: "billing@acme.test" }),
+        ],
+      },
+    );
+    const tile = bySlug(providers, "gmail");
+    expect(tile.account).toBeUndefined();
+    expect(tile.accounts).toHaveLength(2);
   });
 });

@@ -132,6 +132,15 @@ pub fn router() -> Router<AppState> {
         // registered here with the others and BEFORE the dynamic
         // `/workflows/{wid}` below — `tool-slugs` is a syntactically valid `wid`.
         .merge(scoped("/workflows/tool-slugs", get(workflow_tool_slugs)))
+        // Issue #813: the chat channels actually wired for this running company,
+        // so the output-node destination editor can offer a picker of real
+        // targets instead of a free-text box that only fails at delivery time
+        // with `ChannelNotWired`. A static prefix registered here BEFORE the
+        // dynamic `/workflows/{wid}` — `wired-channels` is a valid `wid`.
+        .merge(scoped(
+            "/workflows/wired-channels",
+            get(workflow_wired_channels),
+        ))
         // Issue #383: stop a run that is still walking its graph. Registered
         // here, with the other static `/workflows/...` prefixes and BEFORE the
         // dynamic `/workflows/{wid}` below, for the reason the comment above
@@ -1728,6 +1737,26 @@ async fn workflow_tool_slugs(
 ) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
     let _ = &company;
     Ok(Json(WorkflowToolSlugsResponse { slugs: Vec::new() }))
+}
+
+/// The `GET …/workflows/wired-channels` answer (issue #813): the chat channel
+/// ids this running company can deliver to, so the output-node destination
+/// editor offers a picker of real targets. `operator` is always present. Not
+/// feature-gated — the wired-channel set exists on every build.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WiredChannelsResponse {
+    /// The channel ids an `output` node's `channel` destination may target;
+    /// anything else fails at delivery with `ChannelNotWired`.
+    channels: Vec<String>,
+}
+
+/// `GET …/workflows/wired-channels` (both scope forms). Reads the running
+/// company's wired channels directly — infallible, no record load needed.
+async fn workflow_wired_channels(company: ScopedCompany) -> Json<WiredChannelsResponse> {
+    Json(WiredChannelsResponse {
+        channels: company.runtime.wired_channel_ids(),
+    })
 }
 
 // ---------------------------------------------------------------------------

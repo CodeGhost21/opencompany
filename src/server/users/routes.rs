@@ -670,7 +670,8 @@ fn console_redirect_uri(state: &AppState, company: &CompanyId) -> String {
 ///
 /// Answers `{"providers": []}` rather than a 404 on a host with no hub, so the
 /// console has one code path: ask, render what comes back, and fall through to
-/// the magic-link form when nothing does.
+/// the magic-link form when nothing does. A host that cannot complete a
+/// sign-in — for either of the two reasons below — takes that same path.
 async fn hub_providers(
     company: PublicCompany,
     State(state): State<AppState>,
@@ -685,6 +686,22 @@ async fn hub_providers(
         });
     }
     let redirect_uri = console_redirect_uri(&state, company.runtime.id());
+    // The same judgement one step earlier in the flow. A hosted console's
+    // `https` origin is refused by the hub's redirect gate with a `400` raised
+    // before the provider handshake begins (issue #512), so the button is not
+    // merely likely to fail — it cannot succeed, on any tenant, on either hub.
+    // Showing it spends a click to reach an error page that names nothing the
+    // person can act on; the magic-link form below it works today.
+    //
+    // Temporary, and paired with one thing to delete: when
+    // `tinyhumansai/backend#1243` lands, drop this guard together with
+    // `hub_accepts_redirect_uri` and hosted consoles offer the buttons again
+    // with no other change.
+    if !crate::server::hub_identity::hub_accepts_redirect_uri(&redirect_uri) {
+        return Json(HubProvidersResult {
+            providers: Vec::new(),
+        });
+    }
     let api_url = &state.config().api_url;
     Json(HubProvidersResult {
         providers: crate::server::hub_identity::HUB_PROVIDERS

@@ -1,0 +1,385 @@
+// @vitest-environment jsdom
+
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import type { OpenCompanyClient } from "@/api/client";
+import type { ComposioConnectedAccount, ComposioToolkitEntry } from "@/api/composio";
+import type { ConnectionState, McpHealth, McpServer, UsageDto } from "@/api/types";
+import type { ComposioReach } from "@/lib/connections";
+import { buildGridProviders, type GridProvider } from "@/lib/provider-grid";
+import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
+
+/**
+ * The connection detail view's claims (issues #404, #821).
+ *
+ * This suite is normally for pure functions — see `vitest.config.ts`. The
+ * exception is earned the same way `select-popup-width` earns it: the thing
+ * under test *is* what reaches the operator's eye. The issue is not asking for
+ * fields on a panel, it is asking that every sentence on the panel be one the
+ * system can back, and four of them cannot be checked anywhere but here:
+ *
+ *  1. no account is marked as the one agents use, because none is;
+ *  2. a missing connection date says so rather than showing a blank;
+ *  3. a member is not offered a disconnect the host will refuse (#403);
+ *  4. an MCP server's usage is read under `mcp:<server>` and never as the
+ *     same-named Composio toolkit's (#698, #821).
+ */
+
+const OPEN: ComposioReach = {
+  inBuild: true,
+  granted: true,
+  hasCredential: true,
+  openMode: true,
+  effectiveToolkits: [],
+};
+
+const EMPTY_USAGE: UsageDto = {
+  totals: {
+    inputTokens: 0,
+    outputTokens: 0,
+    tokens: 0,
+    costUsd: 0,
+    oauthCalls: 0,
+    connections: 0,
+    searchCalls: 0,
+  },
+  series: [],
+  byAgent: [],
+  byProvider: [],
+};
+
+function entry(slug: string, name: string): ComposioToolkitEntry {
+  return { slug, name, description: "", logo: null, categories: [] };
+}
+
+function account(over: Partial<ComposioConnectedAccount> = {}): ComposioConnectedAccount {
+  return { id: "conn-1", status: "ACTIVE", connected: true, ...over };
+}
+
+/** A real grid row, built the way the page builds it. */
+function gmail(accounts: ComposioConnectedAccount[], via: ConnectionState["via"] = ["composio"]) {
+  const rows = buildGridProviders(
+    [entry("gmail", "Gmail")],
+    [],
+    { gmail: { provider: "gmail", connected: true, via } },
+    OPEN,
+    false,
+    { gmail: accounts },
+  );
+  return rows.find((p) => p.slug === "gmail")!;
+}
+
+/** The same provider, connected to nothing. */
+function unconnectedGmail() {
+  const rows = buildGridProviders([entry("gmail", "Gmail")], [], {}, OPEN, false);
+  return rows.find((p) => p.slug === "gmail")!;
+}
+
+/** A host that answers the usage route with `byProvider` rows. */
+function clientWith(byProvider: UsageDto["byProvider"]): OpenCompanyClient {
+  return {
+    usage: async () => ({ ...EMPTY_USAGE, byProvider }),
+  } as unknown as OpenCompanyClient;
+}
+
+let container: HTMLDivElement;
+let root: Root;
+
+async function render(
+  provider: GridProvider,
+  canManage: boolean,
+  client = clientWith([]),
+  noCredential = false,
+) {
+  await open(
+    {
+      kind: "composio",
+      provider,
+      noCredential,
+      onConnectAnother: () => {},
+      onDisconnectAccount: () => {},
+    },
+    canManage,
+    client,
+  );
+}
+
+/** Open the panel on any subject — the shared half of `render` and `openMcp`. */
+async function open(subject: ConnectionSubject, canManage: boolean, client = clientWith([])) {
+  await act(async () => {
+    root.render(
+      createElement(ProviderDetail, {
+        client,
+        company: null,
+        subject,
+        canManage,
+        busy: false,
+        onClose: () => {},
+      }),
+    );
+  });
+}
+
+/** The panel renders through a portal, so it is on `document`, not `container`. */
+function text(): string {
+  return document.body.textContent ?? "";
+}
+
+beforeEach(() => {
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+});
+
+describe("the provider detail view", () => {
+  it("lists every account with the status Composio reported", async () => {
+    await render(
+      gmail([
+        account({ id: "conn-gmail-1", account: "ops@acme.test" }),
+        account({ id: "conn-gmail-2", account: "billing@acme.test", status: "EXPIRED", connected: false }),
+      ]),
+      true,
+    );
+    expect(text()).toContain("ops@acme.test");
+    expect(text()).toContain("billing@acme.test");
+    // Verbatim, not re-spelled: "set up and since expired" and "never finished
+    // setting up" are different sentences that both flatten to "not connected".
+    expect(text()).toContain("EXPIRED");
+  });
+
+  it("marks no account itself, and points at where the choice is made", async () => {
+    // OpenHuman marks the first of several as the default and inheriting that
+    // was the plan. #819 refused, correctly for its own moment: `composio_execute`
+    // posted `{tool, arguments}` and no connection id, so a "Default" chip would
+    // have named a decision the product did not make.
+    //
+    // #820 makes the decision real, which is what this assertion had to change
+    // for. The panel still marks nothing — the choice is one control on one
+    // surface, and a second place to read it back is how two surfaces come to
+    // disagree — but it no longer tells the operator the choice does not exist,
+    // because on this page it now does.
+    await render(
+      gmail([
+        account({ id: "conn-gmail-1", account: "ops@acme.test" }),
+        account({ id: "conn-gmail-2", account: "billing@acme.test" }),
+      ]),
+      true,
+    );
+    expect(text()).not.toContain("Default");
+    expect(text()).toContain("Which account agents act as");
+    // And specifically not the claim it replaced: an operator reading this
+    // panel must not be told to disconnect an account to control which one acts.
+    expect(text()).not.toContain("sends no connection id");
+  });
+
+  it("says a connection date is not recorded rather than leaving it blank", async () => {
+    await render(gmail([account({ account: "ops@acme.test" })]), true);
+    expect(text()).toContain("connection date not recorded");
+  });
+
+  it("states usage is counted per provider, not per account", async () => {
+    await render(
+      gmail([
+        account({ id: "conn-gmail-1", account: "ops@acme.test" }),
+        account({ id: "conn-gmail-2", account: "billing@acme.test" }),
+      ]),
+      true,
+      clientWith([{ provider: "gmail", calls: 12 }]),
+    );
+    expect(text()).toContain("12");
+    expect(text()).toContain("per provider rather than per account");
+  });
+
+  it("does not report a zero when the host records no usage at all", async () => {
+    // A failed usage read is not a company that made no calls. Rendering "0"
+    // here is precisely the plausible-looking zero the issue forbids.
+    const broken = {
+      usage: async () => {
+        throw new Error("no usage route on this host");
+      },
+    } as unknown as OpenCompanyClient;
+    await render(gmail([account()]), true, broken);
+    expect(text()).toContain("does not report usage");
+    expect(text()).not.toContain("0 calls");
+  });
+
+  it("says what a disconnect will and will not revoke", async () => {
+    await render(gmail([account({ account: "ops@acme.test" })]), true);
+    expect(text()).toContain("removes the connection at Composio");
+    expect(text()).toContain("does not sign the company out");
+  });
+
+  it("offers a member no control the host would refuse", async () => {
+    // Issue #403. Courtesy, not enforcement — the host answers 403 whatever
+    // this renders — but a Disconnect that can only fail is a poor thing to
+    // put in front of someone reading the page to find out what is wired.
+    await render(gmail([account({ account: "ops@acme.test" })]), false);
+    expect(text()).toContain("ops@acme.test");
+    expect(text()).not.toContain("Disconnect");
+    expect(text()).not.toContain("Connect another account");
+    expect(text()).toContain("Only an admin can connect or disconnect");
+  });
+
+  it("opens on a provider that is not connected, and offers the connect", async () => {
+    // "connected **or not**" is the issue's wording, and OpenHuman's modal is a
+    // phase machine that opens on a disconnected toolkit and connects from
+    // inside. Keeping the panel for connected providers only was the earlier
+    // cut here; it answered "what is wired" and not "what is this".
+    await render(unconnectedGmail(), true);
+    expect(text()).toContain("not connected");
+    expect(text()).toContain("Connect an account");
+    expect(text()).toContain("agents have none of its tools");
+  });
+
+  it("shows no usage figure for a provider that was never connected or used", async () => {
+    // A true zero that says nothing, over a catalog of 123 untouched providers.
+    await render(unconnectedGmail(), true);
+    expect(text()).not.toContain("in the last 30 days");
+  });
+
+  it("keeps the usage figure on a disconnected provider that was used", async () => {
+    // The interesting case: the calls happened, then the account went away.
+    await render(unconnectedGmail(), true, clientWith([{ provider: "gmail", calls: 7 }]));
+    expect(text()).toContain("7");
+    expect(text()).toContain("in the last 30 days");
+  });
+
+  it("says why a connect cannot be started when no credential resolves", async () => {
+    // Stated where the button is, not only on the page behind the panel.
+    await render(unconnectedGmail(), true, clientWith([]), true);
+    expect(text()).toContain("no credential for this company to authorize against");
+  });
+
+  it("names the inert native credential as a caveat, not as a second connection", async () => {
+    // #396: the native `oauth/{provider}` entry is written and read by nothing.
+    // A detail view is where that would look healthiest, so it is stated.
+    await render(gmail([account()], ["composio", "native"]), true);
+    expect(text()).toContain("No agent reads it");
+  });
+});
+
+/** A server as `.../mcp/servers` returns it. */
+function mcpServer(over: Partial<McpServer> = {}): McpServer {
+  return {
+    name: "linear",
+    endpoint: "https://mcp.linear.app/mcp",
+    source: "runtime",
+    enabled: true,
+    allowedTools: [],
+    disallowedTools: [],
+    timeoutSecs: 30,
+    authConfigured: true,
+    ...over,
+  };
+}
+
+async function openMcp(
+  server: McpServer,
+  health: McpHealth | undefined = undefined,
+  canManage = true,
+  client = clientWith([]),
+) {
+  await open({ kind: "mcp", server, health }, canManage, client);
+}
+
+describe("the same panel, opened on a remote MCP server (#821)", () => {
+  it("says which of the three systems this is, and what it is calling as", async () => {
+    await openMcp(mcpServer());
+    expect(text()).toContain("MCP");
+    expect(text()).toContain("on, calling with a stored credential");
+    // What an operator opened it to see: the URL their agents actually call.
+    expect(text()).toContain("https://mcp.linear.app/mcp");
+  });
+
+  it("does not report a probe that was never run as a health verdict", async () => {
+    // The case with no honest single-badge rendering. A server nobody has
+    // pressed Test on is neither reachable nor broken, and the list's badge
+    // renders nothing at all for it — which on a detail view reads as "fine".
+    await openMcp(mcpServer(), undefined);
+    expect(text()).toContain("has not been probed from here");
+    expect(text()).not.toContain("reachable —");
+    expect(text()).not.toContain("last probed");
+  });
+
+  it("keeps 'turned off' apart from 'unreachable'", async () => {
+    // Two independent facts one badge would collapse: a disabled server whose
+    // endpoint answers perfectly still contributes nothing, and that is the
+    // fact the panel was opened to learn.
+    await openMcp(
+      mcpServer({ enabled: false }),
+      { status: "ok", message: "", toolCount: 9, checkedAtMillis: 1_760_000_000_000 },
+    );
+    expect(text()).toContain("turned off");
+    expect(text()).toContain("reachable — 9 tools on the last probe");
+    expect(text()).toContain("no teammate receives its tools");
+  });
+
+  it("reads usage under mcp:<server>, never as the same-named toolkit's", async () => {
+    // The collision `mcp:` was named to prevent (#698). A company with a
+    // Composio `linear` and an MCP server called `linear` has two connections,
+    // and one row's total is not the other's.
+    await openMcp(mcpServer({ name: "linear" }), undefined, true, clientWith([
+      { provider: "mcp:linear", calls: 31 },
+      { provider: "linear", calls: 4 },
+    ]));
+    expect(text()).toContain("31");
+    expect(text()).toContain("in the last 30 days");
+    expect(text()).toContain("mcp:linear");
+    expect(text()).not.toContain("4 calls");
+  });
+
+  it("does not report a zero when the host records no usage at all", async () => {
+    const broken = {
+      usage: async () => {
+        throw new Error("no usage route on this host");
+      },
+    } as unknown as OpenCompanyClient;
+    await openMcp(mcpServer(), undefined, true, broken);
+    expect(text()).toContain("does not report usage");
+    expect(text()).not.toContain("0 calls");
+  });
+
+  it("says a connection date is not recorded, and why there is none to record", async () => {
+    // The same answer the native path gets, for the same reason — MCP has no
+    // connect step at all. A blank here would read as "never connected".
+    await openMcp(mcpServer());
+    expect(text()).toContain("connection date not recorded");
+    expect(text()).toContain("no connect step to record one");
+  });
+
+  it("states what removing a runtime server reaches, and what it does not", async () => {
+    await openMcp(mcpServer({ source: "runtime" }));
+    expect(text()).toContain("drops it from every agent's tool belt on the next turn");
+    expect(text()).toContain("Nothing is revoked at the server's own end");
+  });
+
+  it("does not offer to remove a server the manifest owns", async () => {
+    // A manifest server can be disabled but not deleted, and it returns on the
+    // next boot — a "removing it deletes it" sentence would be false there.
+    await openMcp(mcpServer({ source: "manifest" }));
+    expect(text()).toContain("cannot be removed from the console");
+    expect(text()).toContain("returns on the next boot");
+  });
+
+  it("tells a member the controls are an admin's rather than offering them", async () => {
+    await openMcp(mcpServer(), undefined, false);
+    expect(text()).toContain("Only an admin can turn a tool server off");
+  });
+
+  it("flags an enabled server no agent's grants cover", async () => {
+    // #568, restated where the panel can afford the sentence the row could not:
+    // usage above it is history, not evidence that it is reachable now.
+    await openMcp(mcpServer({ reachableBy: [] }));
+    expect(text()).toContain("No agent can reach this server");
+    await openMcp(mcpServer({ reachableBy: ["ceo", "engineer"] }));
+    expect(text()).toContain("ceo, engineer");
+  });
+});

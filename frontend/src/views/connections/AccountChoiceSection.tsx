@@ -7,7 +7,7 @@ import {
   clearComposioDefaultAccount,
   listComposioConnections,
   setComposioDefaultAccount,
-  type ComposioAccount,
+  type ComposioConnectedAccount,
   type ComposioConnection,
 } from "@/api/composio";
 import { ApiError } from "@/api/types";
@@ -85,7 +85,7 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
     void refresh();
   }, [refresh, generation]);
 
-  async function choose(toolkit: string, account: ComposioAccount) {
+  async function choose(toolkit: string, account: ComposioConnectedAccount) {
     setBusy(account.id);
     try {
       const res = await setComposioDefaultAccount(client, company, account.id);
@@ -98,7 +98,7 @@ export function AccountChoiceSection({ client, company, canManage, generation = 
     }
   }
 
-  async function clear(toolkit: string, account: ComposioAccount) {
+  async function clear(toolkit: string, account: ComposioConnectedAccount) {
     setBusy(account.id);
     try {
       const res = await clearComposioDefaultAccount(client, company, account.id);

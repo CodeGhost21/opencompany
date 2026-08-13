@@ -47,6 +47,16 @@ async fn state_with(
     home: &std::path::Path,
     exchange: Option<Arc<MockHubIdentityExchange>>,
 ) -> AppState {
+    state_with_public_url(home, exchange, None).await
+}
+
+/// The same host, with `public_url` set as the platform sets it on a tenant —
+/// which is the only difference between a local console and a hosted one.
+async fn state_with_public_url(
+    home: &std::path::Path,
+    exchange: Option<Arc<MockHubIdentityExchange>>,
+    public_url: Option<&str>,
+) -> AppState {
     let store = crate::store::FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
@@ -75,6 +85,7 @@ async fn state_with(
     let mut state = AppState::new(AppConfig {
         bind: "127.0.0.1:8080".to_string(),
         api_url: "https://hub.example.com".to_string(),
+        public_url: public_url.map(str::to_string),
         ..AppConfig::default()
     })
     .with_home(home.to_path_buf());
@@ -187,6 +198,29 @@ async fn the_start_url_points_at_the_hub_and_returns_to_this_console() {
     // Encoded as one value: unescaped, the console's own `?company=` would be
     // read by the hub as one of its own query parameters.
     assert!(!start.contains("redirectUri=http://"));
+}
+
+#[tokio::test]
+async fn a_hosted_console_offers_no_providers_while_the_hub_refuses_its_origin() {
+    let home = home();
+    let state = state_with_public_url(
+        home.path(),
+        Some(Arc::new(MockHubIdentityExchange::new())),
+        Some("https://smoke1.example.com"),
+    )
+    .await;
+
+    let body = providers(&state).await;
+
+    // Issue #512: the hub's redirect gate accepts loopback origins only, so
+    // every one of these buttons answers 400 before Google is ever reached.
+    // Empty is the same "no honest button to offer" the no-exchange case takes,
+    // and it leaves the magic-link form — which does work hosted — standing
+    // alone rather than under three that cannot.
+    //
+    // Fails when `tinyhumansai/backend#1243` lands and the guard comes out,
+    // which is the point: this test is the reminder to delete it.
+    assert_eq!(body["providers"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
