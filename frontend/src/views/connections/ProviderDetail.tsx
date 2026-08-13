@@ -153,33 +153,47 @@ export function ProviderDetail({ client, company, subject, canManage, busy, onCl
       : subject.kind === "composio"
         ? toolkitSlug(subject.provider.slug)
         : mcpProviderSlug(subject.server.name);
-  const [calls, setCalls] = useState<number | null>(null);
-  const [usageLoad, setUsageLoad] = useState<"loading" | "ready" | "unavailable">("loading");
+  // The read carries the key it was made for. The sheet changes subject without
+  // unmounting, and state set in an effect lands one render *after* the subject
+  // does — so a figure kept as a bare number would paint against the new
+  // provider for that frame, which is one provider's call count under another
+  // provider's name. Nothing is read back unless the key still matches.
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    load: "ready" | "unavailable";
+    calls: number | null;
+  } | null>(null);
 
   useEffect(() => {
     if (usageKey === null) return;
     let alive = true;
-    setUsageLoad("loading");
-    setCalls(null);
     client
       .usage(USAGE_RANGE, company)
       .then((usage) => {
         if (!alive) return;
-        setCalls(callsForProvider(usage.byProvider, usageKey));
-        setUsageLoad("ready");
+        setLoaded({
+          key: usageKey,
+          load: "ready",
+          calls: callsForProvider(usage.byProvider, usageKey),
+        });
       })
       // A host without the usage route (older build) 404s. "Not recorded here"
       // is the honest render — not a zero, which claims the calls were counted
       // and there were none.
       .catch(() => {
-        if (alive) setUsageLoad("unavailable");
+        if (alive) setLoaded({ key: usageKey, load: "unavailable", calls: null });
       });
     return () => {
       alive = false;
     };
   }, [client, company, usageKey]);
 
-  const usage = { load: usageLoad, calls, key: usageKey };
+  const current = loaded !== null && loaded.key === usageKey ? loaded : null;
+  const usage = {
+    load: current?.load ?? ("loading" as const),
+    calls: current?.calls ?? null,
+    key: usageKey,
+  };
 
   return (
     <Sheet open={subject !== null} onOpenChange={(next) => !next && onClose()}>

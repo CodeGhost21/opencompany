@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, createElement } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -381,5 +382,86 @@ describe("the same panel, opened on a remote MCP server (#821)", () => {
     expect(text()).toContain("No agent can reach this server");
     await openMcp(mcpServer({ reachableBy: ["ceo", "engineer"] }));
     expect(text()).toContain("ceo, engineer");
+  });
+});
+
+/** A host whose usage answer is released by the test, one call at a time. */
+function gatedClient(byProvider: UsageDto["byProvider"]) {
+  const gates: Array<() => void> = [];
+  const client = {
+    usage: () =>
+      new Promise<UsageDto>((resolve) => {
+        gates.push(() => resolve({ ...EMPTY_USAGE, byProvider }));
+      }),
+  } as unknown as OpenCompanyClient;
+  return { client, gates };
+}
+
+/** A connected Composio provider by slug, with one account. */
+function connected(slug: string, name: string): GridProvider {
+  const rows = buildGridProviders(
+    [entry(slug, name)],
+    [],
+    { [slug]: { provider: slug, connected: true, via: ["composio"] } },
+    OPEN,
+    false,
+    { [slug]: [account()] },
+  );
+  return rows.find((p) => p.slug === slug)!;
+}
+
+describe("the same panel, changed from one subject to another", () => {
+  it("never shows one provider's call count under another provider's name", async () => {
+    // The sheet stays mounted and changes subject, so the usage figure is state
+    // that outlives the thing it describes. State reset in an effect lands one
+    // render *after* the new subject does — long enough for the browser to
+    // paint 4,242 Gmail calls against Slack's name, which is not a slow render
+    // but a wrong claim.
+    const { client, gates } = gatedClient([
+      { provider: "gmail", calls: 4242 },
+      { provider: "slack", calls: 7 },
+    ]);
+
+    await render(connected("gmail", "Gmail"), true, client);
+    await act(async () => gates[0]());
+    expect(text()).toContain("4242");
+
+    // Change subject and read the DOM *before* effects run — the frame the
+    // operator sees. The second usage read is deliberately left in flight, so
+    // nothing can have answered for Slack yet.
+    //
+    // Deliberately outside `act`, which flushes effects before it returns and
+    // would hide the very frame under test. The environment flag is dropped for
+    // the duration only so React does not warn about the render it is being
+    // asked to do.
+    const env = globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean };
+    env.IS_REACT_ACT_ENVIRONMENT = false;
+    flushSync(() => {
+      root.render(
+        createElement(ProviderDetail, {
+          client,
+          company: null,
+          subject: {
+            kind: "composio",
+            provider: connected("slack", "Slack"),
+            noCredential: false,
+            onConnectAnother: () => {},
+            onDisconnectAccount: () => {},
+          },
+          canManage: true,
+          busy: false,
+          onClose: () => {},
+        }),
+      );
+    });
+    env.IS_REACT_ACT_ENVIRONMENT = true;
+    expect(text()).toContain("Slack");
+    expect(text()).not.toContain("4242");
+    expect(text()).toContain("Reading usage…");
+
+    // And Slack's own answer, when it arrives, is Slack's.
+    await act(async () => gates[1]());
+    expect(text()).toContain("7");
+    expect(text()).not.toContain("4242");
   });
 });
