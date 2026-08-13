@@ -77,6 +77,55 @@ test("Settings MCP lists the company's servers instead of crashing on open", asy
   expect(pageErrors, `the page threw: ${pageErrors.join(" | ")}`).toEqual([]);
 });
 
+test("a server opens into the panel a Composio provider opens into", async ({ page }) => {
+  // Issue #821. #819 gave a Composio provider a detail view and left MCP as a
+  // list — the uneven half of #404, and the wrong half to leave for a company
+  // routing its real work through MCP servers. What is asserted here is not
+  // "a sheet opened" but the four claims the sheet exists to make, because each
+  // has a plausible-looking wrong answer the list surface would have given.
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+
+  await openMcpSettings(page);
+
+  const row = page.getByTestId("mcp-server-row").filter({ hasText: "deepwiki" });
+  await expect(row).toBeVisible();
+  await row.getByTestId("mcp-server-open").click();
+
+  const panel = page.getByRole("dialog");
+  await expect(panel).toBeVisible();
+
+  // Which of the three connection systems this is, said rather than left to be
+  // inferred from the fact that a panel opened at all.
+  await expect(panel).toContainText("MCP");
+  await expect(panel).toContainText("https://mcp.deepwiki.com/mcp");
+
+  // The manifest server the harness declares has never been probed on this
+  // host: `Test` needs the `openhuman` feature and reports `not_wired` here. So
+  // this is the case with no honest single-badge rendering — not reachable, not
+  // broken — and the panel has to say which.
+  await expect(panel.getByTestId("mcp-detail-probe")).toContainText("has not been probed");
+
+  // MCP records no connect, the same answer the native path gets and for the
+  // same reason. A blank here reads as "never connected".
+  await expect(panel.getByTestId("mcp-detail-connected-on")).toContainText(
+    "connection date not recorded",
+  );
+
+  // What a disconnect reaches — and, for a manifest server, that the console
+  // cannot remove it at all.
+  const scope = panel.getByTestId("mcp-detail-disconnect-scope");
+  await expect(scope).toContainText("cannot be removed from the console");
+  await expect(scope).toContainText("Nothing is revoked at the server's own end");
+
+  // Usage, read under `mcp:deepwiki`. The harness host serves the usage route
+  // and no agent has called this server, so a real zero is the right answer —
+  // the case that must NOT be confused with the unavailable one below it.
+  await expect(panel.getByTestId("connection-detail-usage")).toContainText("in the last 30 days");
+
+  expect(pageErrors, `the page threw: ${pageErrors.join(" | ")}`).toEqual([]);
+});
+
 test("an admin adds and removes a runtime MCP server", async ({ page }) => {
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));

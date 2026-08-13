@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
   ChevronDown,
+  ChevronRight,
   Info,
   Loader2,
   LogIn,
@@ -34,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { ProviderDetail } from "@/views/connections/ProviderDetail";
 
 type McpLoad = "loading" | "ready" | "unavailable" | "error";
 type ToolsState =
@@ -90,6 +92,10 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
   // click can't spawn a second overlapping poll. Cleared on unmount so stale
   // callbacks don't fire against a gone component.
   const pollTimers = useRef<Record<string, number>>({});
+  // The name of the server whose detail panel is open, or `null` (issue #821).
+  // A name rather than the row itself, so an open panel re-derives from
+  // `servers` after a refresh instead of showing the row as it was when clicked.
+  const [opened, setOpened] = useState<string | null>(null);
   // Set by the unmount cleanup below. A sign-in poll that is mid-`await` when
   // this component goes away has already removed its own timer entry, so the
   // cleanup has nothing left to cancel — it checks this instead of re-arming.
@@ -353,6 +359,14 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
     }
   }
 
+  // Re-derived from the list every render rather than captured on click, so the
+  // open panel reflects the last refresh — a toggle, a completed sign-in or a
+  // removal all reach it without a second copy of the row to keep in step.
+  const openedServer = useMemo(
+    () => servers.find((s) => s.name === opened) ?? null,
+    [servers, opened],
+  );
+
   if (load === "unavailable") {
     if (chrome === "inline") return null;
     return (
@@ -427,7 +441,28 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                       className="space-y-2 py-3 first:pt-0 last:pb-0"
                     >
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium">{server.name}</span>
+                        {/* The row's handle on its own detail view (issue #821).
+                            A button on the name rather than a trailing "Open":
+                            the row's right edge is already five controls deep,
+                            and the name is what an operator points at when they
+                            want to know what a server is.
+
+                            The chevron is not decoration. Hover styling alone
+                            makes a name that opens something indistinguishable
+                            from one that does not until the pointer is already
+                            on it — which on a touch screen is never, and for
+                            anyone scanning the page is a control that does not
+                            exist. */}
+                        <button
+                          type="button"
+                          data-testid="mcp-server-open"
+                          className="inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                          onClick={() => setOpened(server.name)}
+                          aria-label={`Open ${server.name}`}
+                        >
+                          {server.name}
+                          <ChevronRight className="size-3.5 text-muted-foreground" />
+                        </button>
                         <Badge variant={server.source === "manifest" ? "secondary" : "outline"}>
                           {server.source}
                         </Badge>
@@ -631,6 +666,36 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
           </CardContent>
         </Card>
       )}
+
+      {/* A server as an object you open, in the same panel a Composio provider
+          opens into (issue #821). Rendered from here rather than from the page
+          above, because the live health an operator just pressed Test for lives
+          in this component's state — and because this section is also the whole
+          of Settings, MCP Servers, which gets the detail view for free.
+
+          `openedServer` is re-derived from `servers` every render, so a removed
+          server closes its own panel rather than leaving a page describing
+          something that is gone. */}
+      <ProviderDetail
+        client={client}
+        company={company}
+        subject={
+          openedServer === null
+            ? null
+            : {
+                kind: "mcp",
+                server: openedServer,
+                // The live Test result when there has been one this session,
+                // else the server's own persisted probe — the same precedence
+                // the row's badge uses, so the panel and the row it opened from
+                // cannot report different health.
+                health: tested[openedServer.name] ?? openedServer.health,
+              }
+        }
+        canManage={canManage}
+        busy={busy !== null}
+        onClose={() => setOpened(null)}
+      />
     </section>
   );
 }
