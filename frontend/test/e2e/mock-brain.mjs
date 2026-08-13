@@ -43,16 +43,26 @@
 // `/embeddings` is served here too rather than left to 404 in the middle of a
 // memory write.
 //
-// # The three arms
+// # The arms, in the order they are tried
 //
-// Everything this server does is decided by scanning the request's messages:
+// Everything this server does is decided by scanning the request's messages.
+// The order is load-bearing, not incidental: each of the first two arms exists
+// because a later arm would otherwise consume a directive that was not meant
+// for it.
 //
-//   1. a message carrying `__MOCK_TOOL_CALL__ {"name":…,"arguments":{…}}` —
+//   1. a **triage classification** (issue #678) — answer `chatter` and touch
+//      nothing else. It is handed the operator's raw message, so it carries any
+//      directive that message carried, and serving one here burns it.
+//   2. the host's **re-issue instruction** as the last message (issue #820) —
+//      emit the named call with the arguments the instruction dictates. The
+//      directive that produced the parked call has already been served, so
+//      without this arm no approval-gated tool can run in this lane at all.
+//   3. a message carrying `__MOCK_TOOL_CALL__ {"name":…,"arguments":{…}}` —
 //      emit exactly that tool call, once. `mcp.spec.ts` uses it to make an
 //      agent call a named MCP tool without a model that might decide not to.
-//   2. a message carrying `SPAWNONE` — call `spawn_task` once, which is what
+//   4. a message carrying `SPAWNONE` — call `spawn_task` once, which is what
 //      `chat-to-card.spec.ts` needs an orchestrator to do.
-//   3. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
+//   5. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
 //
 // # Why the plain reply quotes nothing
 //
@@ -122,6 +132,28 @@ const TOOL_CALL_DIRECTIVE = "__MOCK_TOOL_CALL__";
 
 /** The cue that makes the orchestrator open exactly one board card. */
 const SPAWN_DIRECTIVE = "SPAWNONE";
+
+/**
+ * The host's own re-issue instruction, sent to the agent when an operator
+ * approves a parked tool call (`src/harness/brain.rs`):
+ *
+ *   Operator approved your `composio_execute` call. Re-issue it now with
+ *   EXACTLY these arguments: {…}. Do not modify them.
+ *
+ * Honouring it is not a fourth directive — it is the same behaviour a real
+ * model has on that prompt, and without it **no approval-gated tool can ever
+ * run in this lane**. The directive arms fire once per identity, so on the
+ * re-issue turn the original `__MOCK_TOOL_CALL__` is already served and the
+ * mock would answer with prose; the operator's approval would then produce a
+ * cheerful reply and no call, which is exactly the failure #243 was about. Any
+ * spec about an `Execute`-level tool (`composio_execute`, `repo_publish`)
+ * needs this.
+ *
+ * The arguments are re-issued VERBATIM, as the instruction demands: the grant
+ * admits one call matching them exactly, so drift would simply re-park.
+ */
+const REISSUE_PATTERN =
+  /Operator approved your `([^`]+)` call\. Re-issue it now with EXACTLY these arguments: /;
 
 /**
  * Width of every vector `/embeddings` returns. `HostedEmbeddings` compares this
@@ -279,6 +311,28 @@ function findDirective(messages) {
 }
 
 /**
+ * The host's re-issue instruction in the last message, or null.
+ *
+ * Only the last message is considered. An instruction further back was already
+ * answered on the turn it arrived, and re-answering it would call the tool
+ * again every turn for the rest of the thread.
+ *
+ * @param {any[]} messages
+ * @returns {{name: string, arguments: any} | null}
+ */
+function findReissue(messages) {
+  const text = textOf(messages[messages.length - 1]);
+  const match = REISSUE_PATTERN.exec(text);
+  if (!match) return null;
+  const args = readJsonObject(text, match.index + match[0].length);
+  if (!args) {
+    process.stderr.write("[mock brain] re-issue instruction found but its arguments did not parse\n");
+    return null;
+  }
+  return { name: match[1], arguments: args };
+}
+
+/**
  * Directive identities already acted on, for the life of this process.
  *
  * The history check below is the honest one and covers the common case, but it
@@ -385,9 +439,43 @@ function chatCompletion(body) {
   // Answered `chatter` rather than refused, so the suite stays on the ungated
   // path it was written for: only an `answer` verdict narrows the delegation
   // claim.
+  //
+  // **First arm tried**, ahead of the re-issue arm below as well as the
+  // directive arms: everything after this point assumes an agent turn, and a
+  // classification is not one. It cannot currently reach the re-issue arm —
+  // `findReissue` requires the host's instruction to be the LAST message and a
+  // classification's last message is the operator's — but that is a property of
+  // one prompt, not a rule worth relying on.
   if (isTriageRequest(messages)) {
     process.stderr.write("[mock brain] triage classification (no directive consumed)\n");
     return completion(model, { role: "assistant", content: "chatter" }, "stop");
+  }
+
+  // Ahead of the directive arms, and only when the instruction is the LAST
+  // thing said: the re-issue prompt is a fresh turn from the host, so anything
+  // older in the transcript — including the directive that produced the parked
+  // call — has already had its say.
+  const reissue = findReissue(messages);
+  if (reissue) {
+    process.stderr.write(`[mock brain] re-issuing approved call: ${reissue.name}\n`);
+    return completion(
+      model,
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: `mock-reissue-${messages.length}`,
+            type: "function",
+            function: {
+              name: reissue.name,
+              arguments: JSON.stringify(reissue.arguments),
+            },
+          },
+        ],
+      },
+      "tool_calls",
+    );
   }
 
   const directive = findDirective(messages);

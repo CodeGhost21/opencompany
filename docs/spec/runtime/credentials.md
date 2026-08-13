@@ -136,6 +136,53 @@ that made `PUT …/composio/token` admin-only in issue #403. Both a set and a
 clear are journaled as `ToolAccessChanged`, told apart from each other, and
 attributed to whoever made the change.
 
+## Which connected account (issue #820)
+
+The credential decides **whose** accounts a call can reach. It does not decide
+**which** of them, and for a company holding two accounts for one toolkit —
+`ops@` and `billing@` Gmail — those are different questions.
+
+Until #820 the second had no answer at all. `composio_execute` built its body as
+`{tool, arguments}` and carried no connection id, so the account was resolved by
+Composio for the entity, outside this codebase entirely. Two consequences worth
+naming: "send from the billing account, not ops" was not sayable, and *which
+Gmail did the agent send from* was unanswerable even after the fact. The only
+lever was to disconnect the account you did not want.
+
+The choice is now a per-company, per-toolkit preference:
+
+- **Stored** as one JSON blob under `composio/defaults`
+  (`{"gmail": "ca_billing"}`), beside the credential it qualifies and read the
+  same way `inference/config` is. Not a secret — the ids are the same ones
+  `GET …/composio/connections` already hands the console, and are useless
+  without the bearer that scopes them — but company state, so it moves, backs up
+  and is deleted with the rest of the company's Composio state.
+- **Resolved** into `TenantComposio` by the same `resolve` the credential goes
+  through, and folded into the roster fingerprint, so a change reaches the
+  agents on their next turn with no restart — exactly like a rotated token.
+- **Sent** as `connectionId` on the execute body, which the platform backend
+  forwards to Composio as `connectedAccountId`.
+- **Set** through `PUT …/composio/connections/{id}/default` (admin-only), which
+  validates the id against this company's own filtered connection list first and
+  refuses an account that is not usable. Cleared through the matching `DELETE`,
+  which deliberately makes **no** upstream call: clearing has to work when the
+  account is gone or the provider is unreachable, which is when a validating
+  clear would refuse.
+
+**Absent is the ordinary state, and it is not a degraded one.** A company that
+has chosen nothing sends no connection id and gets Composio's own resolution,
+byte-for-byte the behaviour that existed before — which is what keeps this
+change invisible to every single-account company. Nothing invents a default from
+the connection list: `list_connections_detailed`'s `(toolkit, id)` sort is a
+stable render order for a read, never a choice, and a default the console
+claimed but the harness did not honour would read as a guarantee. The console
+says "Composio picks" rather than pointing at a row.
+
+Two pins are dropped automatically, because a pin to a connection that no longer
+exists would be sent on the next execute and refused — turning the disconnect of
+one account into a broken toolkit: when the console revokes an account, and when
+`GET …/composio/connections` finds a chosen id that Composio no longer lists.
+
 ## Not the inference key
 
 `inference/key` is a different thing and must stay a different slot. It holds

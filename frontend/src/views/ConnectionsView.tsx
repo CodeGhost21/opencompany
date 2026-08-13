@@ -21,6 +21,7 @@ import { buildGridProviders, disconnectRouteFor, type GridProvider } from "@/lib
 import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
+import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
@@ -95,6 +96,11 @@ export function ConnectionsView({ client, company }: Props) {
   // switch or unmount cannot leave one running.
   const pollTimers = useRef<Record<string, number>>({});
 
+  // Bumped on every reconciled re-read, so the account-choice section re-reads
+  // with it: connecting a second Gmail is exactly when that section appears,
+  // and releasing one is exactly when it stops being a choice (issue #820).
+  const [connectionsGeneration, setConnectionsGeneration] = useState(0);
+
   const refresh = useCallback(async () => {
     // Both reads, together: the page's status and the accounts behind it are one
     // answer to the operator, and refreshing them apart is how a tile ends up
@@ -117,6 +123,13 @@ export function ConnectionsView({ client, company }: Props) {
         rows.filter((r) => r.accounts?.length).map((r) => [toolkitSlug(r.toolkit), r.accounts!]),
       ),
     );
+    // Bumped here rather than on the success path: the account-choice section
+    // is downstream of the accounts read, which just landed, and it is a strict
+    // addition to a page whose status read is allowed to fail independently
+    // (issue #820). This used to be a `finally` on a `try`; #819 replaced the
+    // try/catch with the fault-isolated `Promise.all` above, and the bump has
+    // to survive the early return below.
+    setConnectionsGeneration((n) => n + 1);
     if (!list.ok) {
       // No connections surface on this host yet — show the catalog read-only.
       setLoad("unavailable");
@@ -563,6 +576,16 @@ export function ConnectionsView({ client, company }: Props) {
           onDisconnect={(p) => void disconnect(p)}
           onOpen={(p) => setOpened(p.slug)}
           onConnectSlug={(slug) => void connectSlug(slug)}
+        />
+
+        {/* Only renders for a provider this company holds two or more accounts
+            for — the one case where "which account do agents act as" is a
+            question the product can answer (issue #820). */}
+        <AccountChoiceSection
+          client={client}
+          company={company}
+          canManage={canManage}
+          generation={connectionsGeneration + credentialGeneration}
         />
 
         {/* A connection as an object you open rather than a row with a button

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, createElement } from "react";
+import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -155,12 +156,17 @@ describe("the provider detail view", () => {
     expect(text()).toContain("EXPIRED");
   });
 
-  it("marks no account as the one agents use, because nothing chooses one", async () => {
+  it("marks no account itself, and points at where the choice is made", async () => {
     // OpenHuman marks the first of several as the default and inheriting that
-    // was the plan. It is not true here: `composio_execute` posts
-    // `{tool, arguments}` and no connection id, so Composio resolves which
-    // account acts. A "Default" chip would name a decision this product does
-    // not make — the exact shape of invention the issue rules out.
+    // was the plan. #819 refused, correctly for its own moment: `composio_execute`
+    // posted `{tool, arguments}` and no connection id, so a "Default" chip would
+    // have named a decision the product did not make.
+    //
+    // #820 makes the decision real, which is what this assertion had to change
+    // for. The panel still marks nothing — the choice is one control on one
+    // surface, and a second place to read it back is how two surfaces come to
+    // disagree — but it no longer tells the operator the choice does not exist,
+    // because on this page it now does.
     await render(
       gmail([
         account({ id: "conn-gmail-1", account: "ops@acme.test" }),
@@ -169,7 +175,10 @@ describe("the provider detail view", () => {
       true,
     );
     expect(text()).not.toContain("Default");
-    expect(text()).toContain("composio_execute");
+    expect(text()).toContain("Which account agents act as");
+    // And specifically not the claim it replaced: an operator reading this
+    // panel must not be told to disconnect an account to control which one acts.
+    expect(text()).not.toContain("sends no connection id");
   });
 
   it("says a connection date is not recorded rather than leaving it blank", async () => {
@@ -373,5 +382,99 @@ describe("the same panel, opened on a remote MCP server (#821)", () => {
     expect(text()).toContain("No agent can reach this server");
     await openMcp(mcpServer({ reachableBy: ["ceo", "engineer"] }));
     expect(text()).toContain("ceo, engineer");
+  });
+});
+
+/** A host whose usage answer is released by the test, one call at a time. */
+function gatedClient(byProvider: UsageDto["byProvider"]) {
+  const gates: Array<() => void> = [];
+  const client = {
+    usage: () =>
+      new Promise<UsageDto>((resolve) => {
+        gates.push(() => resolve({ ...EMPTY_USAGE, byProvider }));
+      }),
+  } as unknown as OpenCompanyClient;
+  return { client, gates };
+}
+
+/** The Usage section's own text, so a figure cannot be matched from elsewhere. */
+function usageText(): string {
+  return document.querySelector('[data-testid="connection-detail-usage"]')?.textContent ?? "";
+}
+
+/** A connected Composio provider by slug, with one account. */
+function connected(slug: string, name: string): GridProvider {
+  const rows = buildGridProviders(
+    [entry(slug, name)],
+    [],
+    { [slug]: { provider: slug, connected: true, via: ["composio"] } },
+    OPEN,
+    false,
+    { [slug]: [account()] },
+  );
+  return rows.find((p) => p.slug === slug)!;
+}
+
+describe("the same panel, changed from one subject to another", () => {
+  it("never shows one provider's call count under another provider's name", async () => {
+    // The sheet stays mounted and changes subject, so the usage figure is state
+    // that outlives the thing it describes. State reset in an effect lands one
+    // render *after* the new subject does — long enough for the browser to
+    // paint 4,242 Gmail calls against Slack's name, which is not a slow render
+    // but a wrong claim.
+    const { client, gates } = gatedClient([
+      { provider: "gmail", calls: 4242 },
+      { provider: "slack", calls: 7 },
+    ]);
+
+    await render(connected("gmail", "Gmail"), true, client);
+    await act(async () => gates[0]());
+    expect(text()).toContain("4242");
+
+    // Change subject and read the DOM *before* effects run — the frame the
+    // operator sees. The second usage read is deliberately left in flight, so
+    // nothing can have answered for Slack yet.
+    //
+    // Deliberately outside `act`, which flushes effects before it returns and
+    // would hide the very frame under test. The environment flag is dropped for
+    // the duration only so React does not warn about the render it is being
+    // asked to do.
+    const env = globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean };
+    env.IS_REACT_ACT_ENVIRONMENT = false;
+    flushSync(() => {
+      root.render(
+        createElement(ProviderDetail, {
+          client,
+          company: null,
+          subject: {
+            kind: "composio",
+            provider: connected("slack", "Slack"),
+            noCredential: false,
+            onConnectAnother: () => {},
+            onDisconnectAccount: () => {},
+          },
+          canManage: true,
+          busy: false,
+          onClose: () => {},
+        }),
+      );
+    });
+    env.IS_REACT_ACT_ENVIRONMENT = true;
+    expect(text()).toContain("Slack");
+    expect(text()).not.toContain("4242");
+    expect(text()).toContain("Reading usage…");
+
+    // The frame under test is behind us, so the effect that render scheduled
+    // can be flushed — deliberately, rather than trusting it to have run by the
+    // scheduler's grace, since `gates[1]` does not exist until it has.
+    await act(async () => {});
+    expect(gates, "the subject change must have issued a usage read of its own").toHaveLength(2);
+
+    // And Slack's own answer, when it arrives, is Slack's. Read from the Usage
+    // section itself: a bare `7` would be satisfied by any digit anywhere on a
+    // panel that also carries account counts and timestamps.
+    await act(async () => gates[1]());
+    expect(usageText()).toContain("7 calls in the last 30 days");
+    expect(text()).not.toContain("4242");
   });
 });

@@ -103,12 +103,16 @@ const USAGE_RANGE = "30d";
  * naively:
  *
  *  1. **Which account an agent uses** (Composio). OpenHuman marks the first of
- *     several as the default, and inheriting that was the plan. It is not true
- *     here: `composio_execute` posts `{tool, arguments}` and **no connection
- *     id** (`src/harness/composio.rs`, and `execute_tool` in the shared
- *     client), so nothing on this side selects an account — Composio resolves it
- *     for the entity. A "Default" chip would name a decision this product does
- *     not make. The panel says that instead.
+ *     several as the default, and inheriting that was the plan. It was not true
+ *     when this panel was written: `composio_execute` posted `{tool, arguments}`
+ *     and **no connection id**, so nothing on this side selected an account and
+ *     a "Default" chip would have named a decision the product did not make.
+ *     Issue #820 makes the decision real — `ComposioExecuteTool` sends
+ *     `connectionId` for a toolkit the company has chosen for — so the panel no
+ *     longer says the choice is impossible. It still marks nothing: the choice
+ *     is made in one place (`AccountChoiceSection`), and a second surface
+ *     reading it back is how two surfaces come to disagree. Unchosen stays the
+ *     ordinary state, and Composio resolves it exactly as before.
  *  2. **When it was connected.** Only Composio records it. The native
  *     `oauth/{provider}` store keeps `{token, account}` and journals nothing on
  *     connect, and MCP has no such concept — so for those the date is not
@@ -149,33 +153,47 @@ export function ProviderDetail({ client, company, subject, canManage, busy, onCl
       : subject.kind === "composio"
         ? toolkitSlug(subject.provider.slug)
         : mcpProviderSlug(subject.server.name);
-  const [calls, setCalls] = useState<number | null>(null);
-  const [usageLoad, setUsageLoad] = useState<"loading" | "ready" | "unavailable">("loading");
+  // The read carries the key it was made for. The sheet changes subject without
+  // unmounting, and state set in an effect lands one render *after* the subject
+  // does — so a figure kept as a bare number would paint against the new
+  // provider for that frame, which is one provider's call count under another
+  // provider's name. Nothing is read back unless the key still matches.
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    load: "ready" | "unavailable";
+    calls: number | null;
+  } | null>(null);
 
   useEffect(() => {
     if (usageKey === null) return;
     let alive = true;
-    setUsageLoad("loading");
-    setCalls(null);
     client
       .usage(USAGE_RANGE, company)
       .then((usage) => {
         if (!alive) return;
-        setCalls(callsForProvider(usage.byProvider, usageKey));
-        setUsageLoad("ready");
+        setLoaded({
+          key: usageKey,
+          load: "ready",
+          calls: callsForProvider(usage.byProvider, usageKey),
+        });
       })
       // A host without the usage route (older build) 404s. "Not recorded here"
       // is the honest render — not a zero, which claims the calls were counted
       // and there were none.
       .catch(() => {
-        if (alive) setUsageLoad("unavailable");
+        if (alive) setLoaded({ key: usageKey, load: "unavailable", calls: null });
       });
     return () => {
       alive = false;
     };
   }, [client, company, usageKey]);
 
-  const usage = { load: usageLoad, calls, key: usageKey };
+  const current = loaded !== null && loaded.key === usageKey ? loaded : null;
+  const usage = {
+    load: current?.load ?? ("loading" as const),
+    calls: current?.calls ?? null,
+    key: usageKey,
+  };
 
   return (
     <Sheet open={subject !== null} onOpenChange={(next) => !next && onClose()}>
@@ -301,13 +319,18 @@ function ComposioBody({
         </section>
 
         {live.length > 1 && (
+          // #819 wrote this paragraph to say the choice did not exist —
+          // "`composio_execute` sends no connection id, so Composio resolves
+          // it. Disconnect the one you do not want an agent to use." #820 is
+          // what makes that false, so the two branches meeting is what forces
+          // this edit: the panel must not deny a control the same page offers.
           <p className="flex items-start gap-2 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             <span>
               Holding several accounts is fine — they are the company&apos;s, and every member works
-              through them. Which one an agent acts as is not set here:{" "}
-              <span className="font-mono">composio_execute</span> sends no connection id, so Composio
-              resolves it. Disconnect the one you do not want an agent to use.
+              through them. Which one an agent acts as is set under{" "}
+              <span className="font-medium">Which account agents act as</span> on the Connections
+              page; until one is chosen, Composio resolves it for the company as it always has.
             </span>
           </p>
         )}

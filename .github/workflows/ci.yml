@@ -864,6 +864,31 @@ jobs:
       - name: Test the Composio ops helpers
         run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,tinycortex,composio harness::composio::ops_helper_tests
 
+      # Issue #820 — which connected account an agent acts as. A third narrow
+      # filter for the same reason the two above are narrow, and the same reason
+      # they exist at all: these assert on the `composio_execute` REQUEST BODY —
+      # that an unpinned toolkit still carries no connection id, and a pinned one
+      # carries the operator's. Both are decidable only under `composio`, so
+      # without a lane they would be twenty-four's worth of silence again, and
+      # the negative half is the one protecting every existing single-account
+      # company from having its account resolution changed.
+      - name: Test which Composio account an execute acts as
+        run: scripts/ci/run-scoped-suite.sh "composio account choice" openhuman,tinycortex,composio harness::composio::live::live_tests
+
+      # Issue #820 — a fourth narrow filter, and the first outside `harness::`.
+      # The console-plane half of the same decision: the grouping the choice is
+      # reported through, and the cleanup that drops a choice naming an account
+      # Composio no longer lists. Both are gated on `composio`, so before this
+      # step they were compiled by `Check (--all-features)` and run by nothing.
+      #
+      # `…::tests::gated_tests` and not `server::ops::composio`, which would
+      # sweep in `an_admin_is_unaffected` — the one that dials
+      # `api.tinyhumans.ai` for real once the feature is on (#801). The module
+      # exists to be nameable here: a gated ops test added later joins it and is
+      # run, rather than depending on somebody remembering this file.
+      - name: Test the Composio account choice on the console plane
+        run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,tinycortex,composio server::ops::composio::tests::gated_tests
+
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
       # `tinyplace`-gated line and deliberately runs none of them, and no other
@@ -935,10 +960,18 @@ jobs:
       # `openhuman_core/mcp` enabled, so what recompiles here is this crate plus
       # its bin, not the vendored tree.
       #
+      # `composio` on the same grounds as `mcp`, and for one spec:
+      # `composio-account-choice.spec.ts` asserts WHICH connected account an
+      # agent acts as (issue #820), and `composio_execute` exists on a belt only
+      # under this feature. Without it the spec would skip — which is how the
+      # four specs #467 rescued came to sit unrun for months. Cheap for the same
+      # reason: `composio` adds no `openhuman_core/*` subfeature, so the
+      # vendored tree does not rebuild.
+      #
       # `--bin`, not `--all-targets`: the lane needs a binary, and the tests and
       # examples under this feature set are already covered above.
       - name: Build the gated host binary for the live-brain e2e lane
-        run: cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
+        run: cargo build --locked --features openhuman,tinycortex,mcp,composio --bin opencompany
 
       - name: Upload the gated host binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1229,9 +1262,17 @@ jobs:
       # what makes `playwright.config.ts` start the two fixtures and hand the
       # host their addresses. See `frontend/test/e2e/capabilities.ts` for why
       # this cannot be detected from the host instead.
+      # `PW_COMPOSIO=1` is the same kind of declaration as `PW_LIVE_BRAIN`: the
+      # binary downloaded above carries `--features composio`, so this run can
+      # stand up `test/e2e/composio-backend.mjs` and point the host at it
+      # (issue #820). Set here rather than in `e2e:live` so a developer running
+      # that script against a host without the feature still skips cleanly
+      # instead of failing on routes that answer `409 not in this build`.
       - name: Run the end-to-end suite against a live brain
         run: npm run e2e:live
         working-directory: frontend
+        env:
+          PW_COMPOSIO: "1"
 
       - name: Upload failure artifacts
         if: failure()

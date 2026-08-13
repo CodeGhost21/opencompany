@@ -123,6 +123,143 @@ pub async fn token_configured(company: &CompanyId, secrets: &dyn SecretStore) ->
         .unwrap_or(false))
 }
 
+/// The [`SecretStore`] key holding this company's per-toolkit default
+/// connections — a JSON object `{"gmail": "ca_123"}` written by the console
+/// (issue #820).
+///
+/// Stored the way `inference/config` is: one small JSON blob per company,
+/// alongside the credential it qualifies, rather than a new port. It is a
+/// *preference*, not a secret — the ids in it are already handed to the console
+/// by `GET …/composio/connections`, and are useless without the bearer that
+/// scopes them. It lives in the secret store because that is the one per-company
+/// key/value plane this repo has, and because keeping it beside [`TOKEN_KEY`]
+/// means a company's Composio state moves, backs up and is deleted as one thing.
+pub const DEFAULTS_KEY: &str = "composio/defaults";
+
+/// This company's chosen connection per toolkit: `gmail` → a Composio connection
+/// id (issue #820).
+///
+/// Absent for a toolkit means **no company has expressed an intent**, and the
+/// execute path then sends no connection id at all, leaving the resolution to
+/// Composio exactly as before. That absence is the ordinary case and is not a
+/// degraded one — one account per toolkit needs no choice — so nothing here
+/// invents a default from the connection list. A default that the product does
+/// not actually make would be a claim the harness could not honour, which is the
+/// failure #820 was filed about.
+pub type ComposioDefaults = std::collections::BTreeMap<String, String>;
+
+/// This company's stored per-toolkit defaults, or an empty map.
+///
+/// A blob that will not parse is treated as *no defaults* rather than an error:
+/// the only writer is [`set_default`] / [`clear_default`], so unparseable means
+/// hand-edited or from a future shape, and the honest response on the agent path
+/// is to fall back to Composio's own resolution rather than to withhold the
+/// tools. It is logged, not swallowed silently.
+pub async fn load_defaults(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+) -> Result<ComposioDefaults> {
+    let Some(SecretValue(raw)) = secrets.get(company, DEFAULTS_KEY).await? else {
+        return Ok(ComposioDefaults::new());
+    };
+    if raw.trim().is_empty() {
+        return Ok(ComposioDefaults::new());
+    }
+    match serde_json::from_str::<ComposioDefaults>(&raw) {
+        Ok(defaults) => Ok(defaults
+            .into_iter()
+            .map(|(toolkit, id)| (toolkit.trim().to_ascii_lowercase(), id.trim().to_string()))
+            .filter(|(toolkit, id)| !toolkit.is_empty() && !id.is_empty())
+            .collect()),
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                error = %err,
+                "[composio] stored connection defaults did not parse; treating this company as \
+                 having expressed no preference"
+            );
+            Ok(ComposioDefaults::new())
+        }
+    }
+}
+
+/// Pin `toolkit` to `connection_id`, replacing whatever it named before, and
+/// return the resulting map.
+///
+/// The caller is responsible for checking that the id names a connection this
+/// company actually holds — see
+/// [`set_default_connection`](crate::harness::composio::set_default_connection),
+/// which is the only path the console reaches this through. Storing an id blind
+/// would let a typo silently redirect every send for a toolkit to nothing.
+pub async fn set_default(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    toolkit: &str,
+    connection_id: &str,
+) -> Result<ComposioDefaults> {
+    let mut defaults = load_defaults(company, secrets).await?;
+    defaults.insert(
+        toolkit.trim().to_ascii_lowercase(),
+        connection_id.trim().to_string(),
+    );
+    save_defaults(company, secrets, &defaults).await?;
+    Ok(defaults)
+}
+
+/// Drop `toolkit`'s pin — back to letting Composio resolve the account — and
+/// return the resulting map.
+pub async fn clear_default(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    toolkit: &str,
+) -> Result<ComposioDefaults> {
+    let mut defaults = load_defaults(company, secrets).await?;
+    defaults.remove(&toolkit.trim().to_ascii_lowercase());
+    save_defaults(company, secrets, &defaults).await?;
+    Ok(defaults)
+}
+
+/// Drop every pin naming `connection_id`, and report whether anything went.
+///
+/// Called when an account is revoked: a pin to a connection that no longer
+/// exists would be sent on the next execute and refused by Composio, turning a
+/// disconnect of the *other* account into a broken toolkit.
+pub async fn forget_connection(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    connection_id: &str,
+) -> Result<bool> {
+    let connection_id = connection_id.trim();
+    let mut defaults = load_defaults(company, secrets).await?;
+    let before = defaults.len();
+    defaults.retain(|_, id| id != connection_id);
+    if defaults.len() == before {
+        return Ok(false);
+    }
+    save_defaults(company, secrets, &defaults).await?;
+    Ok(true)
+}
+
+async fn save_defaults(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    defaults: &ComposioDefaults,
+) -> Result<()> {
+    // An empty map is stored as an empty string rather than `{}`, matching how
+    // every other value here is cleared: `SecretStore` has no delete, and the
+    // loader already reads empty as "nothing pinned".
+    let raw = if defaults.is_empty() {
+        String::new()
+    } else {
+        serde_json::to_string(defaults).map_err(|err| {
+            crate::error::OpenCompanyError::Store(format!(
+                "could not serialize composio defaults: {err}"
+            ))
+        })?
+    };
+    secrets.set(company, DEFAULTS_KEY, SecretValue(raw)).await
+}
+
 /// One provider in the catalog the console renders, carrying the backend's own
 /// display metadata rather than a bare slug (issue #600).
 ///
@@ -230,6 +367,146 @@ mod tests {
         assert_eq!(
             backend_url_or_default(None, Some("  https://staging-api.tinyhumans.ai  ".into())),
             "https://staging-api.tinyhumans.ai"
+        );
+    }
+
+    #[derive(Default)]
+    struct MemSecrets {
+        map: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for MemSecrets {
+        async fn get(&self, _c: &CompanyId, key: &str) -> Result<Option<SecretValue>> {
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|v| SecretValue(v.clone())))
+        }
+        async fn set(&self, _c: &CompanyId, key: &str, value: SecretValue) -> Result<()> {
+            self.map.lock().unwrap().insert(key.to_string(), value.0);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_company_with_no_stored_preference_pins_nothing() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        assert!(load_defaults(&company, &secrets).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pin_round_trips_and_is_replaced_rather_than_appended() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+
+        let after = set_default(&company, &secrets, "gmail", "ca_ops")
+            .await
+            .unwrap();
+        assert_eq!(after.get("gmail").map(String::as_str), Some("ca_ops"));
+        assert_eq!(
+            load_defaults(&company, &secrets).await.unwrap(),
+            after,
+            "the stored blob is what the setter reported"
+        );
+
+        // A second toolkit is additive; naming gmail again replaces it.
+        set_default(&company, &secrets, "slack", "ca_workspace")
+            .await
+            .unwrap();
+        let after = set_default(&company, &secrets, "gmail", "ca_billing")
+            .await
+            .unwrap();
+        assert_eq!(after.get("gmail").map(String::as_str), Some("ca_billing"));
+        assert_eq!(
+            after.get("slack").map(String::as_str),
+            Some("ca_workspace"),
+            "pinning one toolkit must not disturb another"
+        );
+    }
+
+    #[tokio::test]
+    async fn toolkits_are_normalized_so_a_pin_is_found_by_the_slug_prefix() {
+        // `slug_toolkit` lowercases (`GMAIL_SEND_EMAIL` → `gmail`), so a pin
+        // stored under `GMail` would be invisible to the execute path.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        set_default(&company, &secrets, " GMail ", " ca_ops ")
+            .await
+            .unwrap();
+        assert_eq!(
+            load_defaults(&company, &secrets)
+                .await
+                .unwrap()
+                .get("gmail")
+                .map(String::as_str),
+            Some("ca_ops")
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_a_pin_returns_the_toolkit_to_composios_own_resolution() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        set_default(&company, &secrets, "gmail", "ca_ops")
+            .await
+            .unwrap();
+        let after = clear_default(&company, &secrets, "gmail").await.unwrap();
+        assert!(after.is_empty());
+        assert!(load_defaults(&company, &secrets).await.unwrap().is_empty());
+        // Clearing what was never pinned is not an error.
+        assert!(
+            clear_default(&company, &secrets, "gmail")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_the_pinned_account_drops_the_pin() {
+        // Otherwise the next execute sends an id Composio no longer knows, and
+        // disconnecting the *other* account breaks the toolkit.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        set_default(&company, &secrets, "gmail", "ca_ops")
+            .await
+            .unwrap();
+        set_default(&company, &secrets, "slack", "ca_workspace")
+            .await
+            .unwrap();
+
+        assert!(
+            !forget_connection(&company, &secrets, "ca_unrelated")
+                .await
+                .unwrap(),
+            "revoking an unpinned account changes nothing"
+        );
+        assert!(
+            forget_connection(&company, &secrets, "ca_ops")
+                .await
+                .unwrap()
+        );
+
+        let left = load_defaults(&company, &secrets).await.unwrap();
+        assert_eq!(left.get("slack").map(String::as_str), Some("ca_workspace"));
+        assert!(!left.contains_key("gmail"));
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_blob_reads_as_no_preference() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        secrets
+            .set(&company, DEFAULTS_KEY, SecretValue("not json".into()))
+            .await
+            .unwrap();
+        assert!(
+            load_defaults(&company, &secrets).await.unwrap().is_empty(),
+            "a hand-edited blob must fall back to Composio's resolution, not withhold the tools"
         );
     }
 }
