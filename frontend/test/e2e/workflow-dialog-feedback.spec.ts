@@ -313,3 +313,36 @@ test("the collapsed destination shows a label, never the raw __none__ sentinel (
   await expect(destination).toContainText("Nowhere (run result only)");
   await expect(destination).not.toContainText("__none__");
 });
+
+test("the channel destination is a picker of wired channels, not free text (#813)", async ({
+  page,
+}) => {
+  // #813 defect 4: typing a channel id that isn't wired only failed at delivery.
+  // The target is now a picker whose options are the company's wired channels
+  // (`operator` is always wired), so an unwired id can't be entered at all.
+  const dialog = await openCreateDialog(page);
+  await dialog.getByRole("button", { name: "Add node" }).click();
+  const kind = dialog.getByLabel("Node kind").nth(1);
+  await kind.click();
+  await page.getByRole("option", { name: /^Output(?! parser)/ }).click();
+  await dialog.getByLabel("Send report to").click();
+  await page.getByRole("option", { name: /^Channel/ }).click();
+
+  // The channel target is a combobox offering the wired `operator` channel.
+  await dialog.getByLabel("Channel id").click();
+  await expect(page.getByRole("option", { name: "operator" })).toBeVisible();
+});
+
+test("submitting with an empty id surfaces the validation message on-screen (#813)", async ({
+  page,
+}) => {
+  // #813 defect 6: the banner sat below the fold, so Create looked dead. On a
+  // failed submit it must be brought into view (and focused).
+  const dialog = await openCreateDialog(page);
+  await dialog.getByLabel("Id", { exact: true }).fill("");
+  await dialog.getByRole("button", { name: "Create workflow" }).click();
+
+  const banner = dialog.getByText("Give the workflow an id.");
+  await expect(banner).toBeVisible();
+  await expect(banner).toBeInViewport();
+});
