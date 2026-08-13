@@ -69,6 +69,21 @@ pub enum SampleKind {
     /// company plan indefinitely after its tier budget was exhausted, which is
     /// exactly the leak the tier exists to close.
     PlanningCall,
+    /// One completed triage escalation — the tool-less model call an operator
+    /// message makes when the lexical classifier abstained (issue #678).
+    ///
+    /// Its own kind for the same reason [`Self::PlanningCall`] is: it belongs to
+    /// no teammate, so it is charged to the whole-company bucket with no
+    /// `run_id`, and an operator asking "what is triage costing us?" should not
+    /// have to read that answer out of a teammate's column. Distinct from
+    /// `PlanningCall` too — conflating them would make the planning line item
+    /// move whenever chat volume moved, and the two are tuned independently.
+    ///
+    /// Counts toward the capability-tier token budget, exactly as a planning
+    /// pass does — see [`tokens_in`](crate::metering::tokens_in). It is
+    /// company-driven model spend, and excluding it would let chat keep paying
+    /// for classification after the tier budget was exhausted.
+    TriageCall,
 }
 
 /// One metered usage event.
