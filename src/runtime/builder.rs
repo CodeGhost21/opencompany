@@ -51,7 +51,7 @@ use crate::ports::ScheduleFireStore;
 // Separate line (#596) for the same reason.
 use crate::ports::WorkflowRunOutputStore;
 use crate::runtime::board_events::BoardAnnouncer;
-use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
+use crate::runtime::channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
 use crate::runtime::journal::RuntimeJournal;
 use crate::runtime::tools::{StubToolProvider, grant_matches};
@@ -1140,7 +1140,7 @@ impl RuntimeBuilder {
 
         // Channels: always the operator surface, plus any `openhuman` channel
         // the manifest enables when the daemon is reachable.
-        let channels = match self.channels {
+        let mut channels = match self.channels {
             Some(channels) => channels,
             None => {
                 let mut channels: Vec<Arc<dyn ChannelAdapter>> =
@@ -1600,6 +1600,53 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_desks.clone())
             .unwrap_or_default();
+
+        // Desks are delivery destinations as well as inbound conversation
+        // threads. Resolve both manifest and operator-created candidates
+        // through CompanyRecord so this wiring cannot drift from the desk
+        // existence rules used by the server and the harness.
+        let desk_record = existing.clone().unwrap_or_else(|| CompanyRecord {
+            id: id.clone(),
+            manifest: self.manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: lifecycle.clone(),
+            overlay_agents: overlay_agents.clone(),
+            overlay_desk_members: overlay_desk_members.clone(),
+            overlay_desk_order: overlay_desk_order.clone(),
+            overlay_desks: overlay_desks.clone(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        });
+        let mut desk_ids = Vec::new();
+        let candidates = desk_record
+            .manifest
+            .group_chats
+            .iter()
+            .map(|desk| desk.id.as_str())
+            .chain(
+                desk_record
+                    .overlay_desks
+                    .iter()
+                    .map(|desk| desk.id.as_str()),
+            );
+        for candidate in candidates {
+            if let Some(desk_id) = desk_record.resolve_desk_id(candidate)
+                && desk_record.desk_exists(&desk_id)
+                && !desk_ids.contains(&desk_id)
+            {
+                desk_ids.push(desk_id);
+            }
+        }
+        for desk_id in desk_ids {
+            channels.push(Arc::new(DeskChannel::new(
+                id.clone(),
+                desk_id,
+                events.clone(),
+            )));
+        }
         // Issue #168: the runtime-authored workflow graph bodies. A rebuild that
         // dropped these would delete every workflow the console created on a
         // hosted tenant — they have no on-disk copy to fall back to.
@@ -2076,7 +2123,16 @@ impl RuntimeBuilder {
                                     // before their first sign-in mints a user
                                     // record. `None` off the hosted serve path.
                                     bootstrap_admin: self.bootstrap_admin.clone(),
-                                    channels: channels.clone(),
+                                    // The operator adapter is an interactive
+                                    // response surface, not a workflow delivery
+                                    // destination: its buffer has no durable
+                                    // reader. Desk and provider adapters are the
+                                    // accepted workflow write paths.
+                                    channels: channels
+                                        .iter()
+                                        .filter(|channel| channel.channel_id() != OPERATOR_CHANNEL)
+                                        .cloned()
+                                        .collect(),
                                     // Issue #227: the same gate and journal the
                                     // runtime gets below — one approvals queue,
                                     // so a report parked by a workflow lands in
@@ -4392,6 +4448,61 @@ mod test {
         assert!(!granted.ok);
         // Only the boot-time `health()` probe touched the transport.
         assert_eq!(rpc.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn wires_manifest_and_overlay_desks_as_delivery_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            [[group_chat]]
+            id = "engineering"
+            name = "Engineering"
+            members = ["ceo"]
+            "#,
+        );
+        let id = CompanyId::new("acme");
+        FsCompanyStore::new(dir.path())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: vec![crate::ports::types::OverlayDesk {
+                    id: "research".to_string(),
+                    name: "Research".to_string(),
+                    description: None,
+                    members: vec!["ceo".to_string()],
+                }],
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(dir.path(), manifest)
+            .with_id(id)
+            .build()
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = runtime
+            .channels
+            .iter()
+            .map(|channel| channel.channel_id())
+            .collect();
+        assert!(ids.contains(&"engineering"));
+        assert!(ids.contains(&"research"));
     }
 
     #[cfg(feature = "tinyplace")]

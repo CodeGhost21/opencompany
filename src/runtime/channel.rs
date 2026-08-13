@@ -13,10 +13,73 @@ use futures::stream::{self, BoxStream};
 
 use crate::Result;
 use crate::ports::channel::ChannelAdapter;
-use crate::ports::types::{InboundMessage, OutboundMessage};
+use crate::ports::events::EventLog;
+use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, InboundMessage, OutboundMessage};
 
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
+
+/// A desk-backed [`ChannelAdapter`]. Sending appends an agent reply to the
+/// company's durable event log, which is the existing read path for desk chat
+/// history. The adapter is deliberately one-per-desk so channel lookup and
+/// chat-thread ownership use the same canonical desk id.
+#[derive(Clone)]
+pub struct DeskChannel {
+    company: CompanyId,
+    desk_id: String,
+    events: Arc<dyn EventLog>,
+}
+
+impl DeskChannel {
+    /// Creates a channel for an already-resolved desk id.
+    pub fn new(company: CompanyId, desk_id: String, events: Arc<dyn EventLog>) -> Self {
+        Self {
+            company,
+            desk_id,
+            events,
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for DeskChannel {
+    fn channel_id(&self) -> &str {
+        &self.desk_id
+    }
+
+    fn inbound(&self) -> BoxStream<'static, InboundMessage> {
+        Box::pin(stream::empty())
+    }
+
+    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        self.events
+            .append(
+                &self.company,
+                CompanyEvent::AgentReply {
+                    chat_id: self.desk_id.clone(),
+                    agent_id: "workflow".to_string(),
+                    text: msg.text,
+                    steps: msg.steps,
+                    task_id: msg.task_id,
+                    parent: msg
+                        .reply_to
+                        .and_then(|reply| reply.chat_id.parse::<u64>().ok())
+                        .map(EventSeq::new),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for DeskChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeskChannel")
+            .field("company", &self.company)
+            .field("desk_id", &self.desk_id)
+            .finish()
+    }
+}
 
 /// The built-in operator [`ChannelAdapter`], buffering sent messages in memory.
 #[derive(Clone, Default)]

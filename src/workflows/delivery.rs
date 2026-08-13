@@ -32,8 +32,8 @@
 //!   [`UserStore`](crate::ports::UserStore) (active `Admin` users). The graph
 //!   names no address, so an author cannot point it at an outsider. Constrained
 //!   by construction; no grant needed. With no admin address (or no mailbox) it
-//!   falls back to the always-present `operator` channel rather than becoming a
-//!   silent no-op.
+//!   reports a failed delivery when neither a mailbox nor a durable channel is
+//!   available; the interactive operator buffer is not a workflow destination.
 //! * **`email`** — the graph names an arbitrary address, so it is the dangerous
 //!   one and carries **two independent gates**, both fail-closed:
 //!   1. the company's `[tools].allow` must cover the `email` namespace (the same
@@ -175,8 +175,8 @@ const TRUNCATION_MARKER: &str = "\n\n… (report truncated)";
 #[derive(Clone)]
 pub struct WorkflowDeliveryDeps {
     /// The company's own outbound-mail handle (sender + its SMTP credentials).
-    /// `None` when the company has no mailbox: `owner` then falls back to the
-    /// operator channel, and `email` is reported `skipped`.
+    /// `None` when the company has no mailbox: `owner` then reports a failed
+    /// delivery, and `email` is reported `skipped`.
     pub mail: Option<CompanyMail>,
     /// The company's inboxes — both the established-thread check and the
     /// outbound audit record go through this port.
@@ -200,7 +200,8 @@ pub struct WorkflowDeliveryDeps {
     /// The `Debug` impl prints its presence only, never the address, the same
     /// stance the mail handle takes.
     pub bootstrap_admin: Option<String>,
-    /// Every wired channel adapter, including the always-present `operator`.
+    /// Wired delivery adapters. The interactive `operator` adapter may be
+    /// present for cycle responses but is rejected for workflow delivery.
     pub channels: Vec<Arc<dyn ChannelAdapter>>,
     /// What a cold `email` recipient is parked on (issue #227). `None` fails
     /// closed to the pre-#227 behaviour: the report is `skipped`, never a
@@ -588,9 +589,10 @@ async fn deliver_one(
                         });
                     }
                 }
-                // No mailbox, or no admin has an address: fall back to the
-                // always-present operator channel so the owner still hears about
-                // it. Never a silent no-op.
+                // No mailbox, or no admin has an address: try the operator
+                // adapter only to produce the explicit failure row. Its buffer
+                // is not a workflow delivery surface, so this cannot report a
+                // successful discard.
                 _ => {
                     let (why, why_reason) = if delivery.mail.is_none() {
                         (
@@ -1195,6 +1197,29 @@ async fn post_to_channel(
     subject: &str,
     text: &str,
 ) -> Result<(), (DeliveryReason, String)> {
+    // The built-in operator adapter is an in-memory response spy, not a
+    // durable delivery surface. Interactive chat journals its own replies
+    // after the cycle; workflow delivery has no such reader, so naming
+    // `operator` must fail rather than report a successful discard.
+    if channel_id == crate::runtime::channel::OPERATOR_CHANNEL {
+        let wired: Vec<&str> = delivery
+            .channels
+            .iter()
+            .filter(|channel| channel.channel_id() != crate::runtime::channel::OPERATOR_CHANNEL)
+            .map(|channel| channel.channel_id())
+            .collect();
+        return Err((
+            DeliveryReason::ChannelNotWired,
+            format!(
+                "`{channel_id}` is not a workflow delivery channel — this runtime has: {}",
+                if wired.is_empty() {
+                    "no durable channels".to_string()
+                } else {
+                    wired.join(", ")
+                }
+            ),
+        ));
+    }
     let Some(adapter) = delivery
         .channels
         .iter()
@@ -1324,7 +1349,7 @@ mod tests {
     use crate::policy::ManifestApprovalGate;
     use crate::ports::UserRecord;
     use crate::ports::types::CompanyId;
-    use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
+    use crate::runtime::channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
     use crate::server::ops::mailer::{MailSender, RecordingMailSender};
     use crate::server::ops::smtp::{SmtpCredentials, SmtpSecurity};
     use crate::store::{FsInboxStore, FsOps};
@@ -1835,8 +1860,8 @@ admins = [{list}]
         assert_eq!(h.mail.sent()[0].1.to, "ada@acme.test");
     }
 
-    /// With no mailbox wired, `owner` falls back to the always-present operator
-    /// channel rather than becoming a silent no-op.
+    /// With no mailbox wired, `owner` cannot use the operator's in-memory
+    /// response surface as workflow delivery and reports the failure loudly.
     #[tokio::test]
     async fn owner_falls_back_to_the_operator_channel_without_mail() {
         let dir = tempfile::tempdir().unwrap();
@@ -1854,16 +1879,15 @@ admins = [{list}]
         .await;
 
         assert_eq!(reports.len(), 1, "{reports:?}");
-        assert_eq!(reports[0].status, DeliveryStatus::Sent);
+        assert_eq!(reports[0].status, DeliveryStatus::Failed);
         assert_eq!(reports[0].target.as_deref(), Some(OPERATOR_CHANNEL));
         assert!(reports[0].detail.contains("no mailbox"), "{reports:?}");
-        let sent = h.channel.sent();
-        assert_eq!(sent.len(), 1);
-        assert!(sent[0].text.contains("Q3 is up 12%."), "{}", sent[0].text);
+        assert_eq!(reports[0].reason, DeliveryReason::OwnerFallbackFailed);
+        assert!(h.channel.sent().is_empty());
     }
 
-    /// A company with a mailbox but no admin address also falls back — the owner
-    /// still hears about it.
+    /// A company with a mailbox but no admin address also fails rather than
+    /// claiming that the operator buffer delivered the report.
     #[tokio::test]
     async fn owner_falls_back_when_no_admin_has_an_address() {
         let dir = tempfile::tempdir().unwrap();
@@ -1880,10 +1904,10 @@ admins = [{list}]
         .await;
 
         assert_eq!(reports.len(), 1, "{reports:?}");
-        assert_eq!(reports[0].status, DeliveryStatus::Sent);
+        assert_eq!(reports[0].status, DeliveryStatus::Failed);
         assert!(reports[0].detail.contains("no active admin"), "{reports:?}");
         assert!(h.mail.sent().is_empty(), "nothing should have been emailed");
-        assert_eq!(h.channel.sent().len(), 1);
+        assert!(h.channel.sent().is_empty());
     }
 
     /// Both fallbacks unavailable: no mail, no operator channel. Still a row —
@@ -2021,11 +2045,8 @@ admins = [{list}]
         .await;
 
         assert_eq!(reports.len(), 1, "{reports:?}");
-        assert_eq!(reports[0].status, DeliveryStatus::Sent, "{reports:?}");
-        assert_eq!(
-            reports[0].reason,
-            DeliveryReason::OwnerFellBackNoAdminAddress
-        );
+        assert_eq!(reports[0].status, DeliveryStatus::Failed, "{reports:?}");
+        assert_eq!(reports[0].reason, DeliveryReason::OwnerFallbackFailed);
         assert!(
             reports[0].detail.contains("standing admin invite"),
             "the fallback wording must name standing invites now: {reports:?}"
@@ -2034,7 +2055,10 @@ admins = [{list}]
             h.mail.sent().is_empty(),
             "a suspended admin must not be mailed, invite or not"
         );
-        assert_eq!(h.channel.sent().len(), 1, "the report went to the operator");
+        assert!(
+            h.channel.sent().is_empty(),
+            "the operator buffer is not delivery"
+        );
     }
 
     /// **Dedupe.** An address named both as an active admin and as the bootstrap
@@ -2737,12 +2761,17 @@ mode = "full"
     #[tokio::test]
     async fn channel_posts_to_the_wired_adapter() {
         let dir = tempfile::tempdir().unwrap();
-        let h = Harness::new(dir.path(), true, true);
+        let mut h = Harness::new(dir.path(), true, true);
+        h.deps.channels = vec![Arc::new(DeskChannel::new(
+            h.company.clone(),
+            "engineering".to_string(),
+            h.events.clone(),
+        ))];
 
         let reports = deliver_outputs(
             Some(&h.deps),
             &record(&[]),
-            &graph("channel", Some(OPERATOR_CHANNEL)),
+            &graph("channel", Some("engineering")),
             "run-1",
             &reached_output(),
             &[],
@@ -2751,10 +2780,16 @@ mode = "full"
 
         assert_eq!(reports.len(), 1, "{reports:?}");
         assert_eq!(reports[0].status, DeliveryStatus::Sent);
-        let sent = h.channel.sent();
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].channel, OPERATOR_CHANNEL);
-        assert!(sent[0].text.contains("Q3 is up 12%."));
+        let events = h
+            .events
+            .read_from(&h.company, crate::ports::types::EventSeq::new(0), 20)
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            CompanyEvent::AgentReply { chat_id, text, .. }
+                if chat_id == "engineering" && text.contains("Q3 is up 12%.")
+        )));
     }
 
     /// A channel the deployment never wired cannot be conjured by a graph. The
@@ -3084,12 +3119,17 @@ to = "done"
     #[tokio::test]
     async fn a_sent_delivery_journals_one_record() {
         let dir = tempfile::tempdir().unwrap();
-        let h = Harness::new(dir.path(), false, true);
+        let mut h = Harness::new(dir.path(), false, true);
+        h.deps.channels = vec![Arc::new(DeskChannel::new(
+            h.company.clone(),
+            "engineering".to_string(),
+            h.events.clone(),
+        ))];
 
         let reports = deliver_outputs(
             Some(&h.deps),
             &record(&[]),
-            &graph("channel", Some("operator")),
+            &graph("channel", Some("engineering")),
             "run-1",
             &reached_output(),
             &[],
@@ -3117,7 +3157,17 @@ to = "done"
         assert_eq!(run_id, "run-1");
         assert_eq!(node, "done");
         assert_eq!(kind, "channel");
-        assert_eq!(target.as_deref(), Some("operator"));
+        assert_eq!(target.as_deref(), Some("engineering"));
+        let events = h
+            .events
+            .read_from(&h.company, crate::ports::types::EventSeq::new(0), 20)
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            CompanyEvent::AgentReply { chat_id, text, .. }
+                if chat_id == "engineering" && text.contains("Q3 is up 12%.")
+        )));
     }
 
     /// A `Pending` park journals a record too: the card is durable and approving
@@ -3225,13 +3275,8 @@ to = "done"
         .await;
 
         assert_eq!(reports.len(), 1, "{reports:?}");
-        assert_eq!(
-            reports[0].status,
-            DeliveryStatus::Sent,
-            "an unwritable journal must not fail a send that succeeded: {reports:?}"
-        );
-        // And the report really did reach the transport.
-        assert_eq!(h.channel.sent().len(), 1);
+        assert_eq!(reports[0].status, DeliveryStatus::Failed, "{reports:?}");
+        assert!(h.channel.sent().is_empty());
     }
 
     /// Issue #542: the dry router runs the routing half only. A reached output
