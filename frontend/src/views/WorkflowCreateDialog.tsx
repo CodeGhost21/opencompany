@@ -13,7 +13,7 @@
 // rather than two because an edit is the same form with the same rules — a
 // second one would drift the moment either side grew a field.
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { History, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
@@ -22,6 +22,7 @@ import {
   destinationLabel,
   createWorkflow,
   draftWorkflowFromDescription,
+  listWiredChannels,
   listWorkflowRevisions,
   listWorkflows,
   restoreWorkflowRevision,
@@ -182,6 +183,7 @@ function scheduleProblem(schedule: string): string | null {
 function destinationTargetProblem(
   kind: DraftNode["destinationKind"],
   target: string,
+  wiredChannels: string[],
 ): string | null {
   const value = target.trim();
   if (kind === "email" && !value.includes("@")) {
@@ -189,6 +191,18 @@ function destinationTargetProblem(
   }
   if (kind === "channel" && !value) {
     return "A channel destination needs a channel id — name the channel to post the report to.";
+  }
+  // #813: when the host told us which channels are wired, a target that is not
+  // one of them would only fail at delivery (`ChannelNotWired`) — catch it at
+  // author time instead. Skipped when the list is empty (host offered none), so
+  // a degraded free-text box is never wrongly rejected.
+  if (
+    kind === "channel" &&
+    value &&
+    wiredChannels.length > 0 &&
+    !wiredChannels.includes(value)
+  ) {
+    return `\`${value}\` is not a wired channel — this deployment has: ${wiredChannels.join(", ")}.`;
   }
   return null;
 }
@@ -383,12 +397,19 @@ export function WorkflowCreateDialog({
   const [nodes, setNodes] = useState<DraftNode[]>(starterNodes());
   const [edges, setEdges] = useState<DraftEdge[]>([]);
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
+  /** The chat channels this company can actually deliver to (#813): the picker
+   * options for an output node's `channel` destination. Degrades to a free-text
+   * box when the host offers no list, so authoring is never blocked. */
+  const [wiredChannels, setWiredChannels] = useState<string[]>([]);
   /** The company's workflows, for the `sub_workflow` config picker (#541). The
    * graph's own id is dropped at render time — a sub-workflow can't call
    * itself. Degrades to a free-text id field when the host offers no list. */
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The submit-time error banner, so a failed submit can scroll it into view
+   * and focus it rather than leave the message off-screen (#813 defect 6). */
+  const errorRef = useRef<HTMLDivElement>(null);
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -478,6 +499,17 @@ export function WorkflowCreateDialog({
         if (live) setWorkflows(list);
       } catch {
         if (live) setWorkflows([]);
+      }
+    })();
+    // Issue #813: the wired-channel picker's options. Same degrade-on-failure
+    // shape — a host that can't list channels leaves the channel target a
+    // free-text box rather than blocking authoring.
+    (async () => {
+      try {
+        const channels = await listWiredChannels(client, company);
+        if (live) setWiredChannels(channels);
+      } catch {
+        if (live) setWiredChannels([]);
       }
     })();
     return () => {
@@ -589,7 +621,7 @@ export function WorkflowCreateDialog({
     if (field === "schedule") {
       problem = scheduleProblem(value);
     } else if (field === "destinationTarget") {
-      problem = destinationTargetProblem(node.destinationKind, value);
+      problem = destinationTargetProblem(node.destinationKind, value, wiredChannels);
     } else if (field.startsWith("config:")) {
       const key = field.slice("config:".length);
       const spec = configFieldSpecs(node.kind).find((s) => s.key === key);
@@ -660,6 +692,7 @@ export function WorkflowCreateDialog({
       const destinationProblem = destinationTargetProblem(
         n.destinationKind,
         n.destinationTarget,
+        wiredChannels,
       );
       if (destinationProblem) return `Node \`${nodeLabel(n)}\`: ${destinationProblem}`;
       // Kind-specific config (issue #541): required keys, malformed JSON, the
@@ -834,6 +867,14 @@ export function WorkflowCreateDialog({
     const problem = validate();
     if (problem) {
       setError(problem);
+      // Issue #813: the banner sits inline in a scrollable dialog and the Create
+      // button is below it, so on a long graph the message can land off-screen —
+      // the button then looks dead. Bring it into view and focus it (announced,
+      // deterministic — no timer) the frame after it renders.
+      requestAnimationFrame(() => {
+        errorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+        errorRef.current?.focus();
+      });
       return;
     }
     setSubmitting(true);
@@ -1064,6 +1105,7 @@ export function WorkflowCreateDialog({
                 client={client}
                 company={company}
                 roster={roster}
+                wiredChannels={wiredChannels}
                 workflows={workflows}
                 createMode={!editing}
                 errors={{
@@ -1122,9 +1164,13 @@ export function WorkflowCreateDialog({
         </div>
 
         {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
+          // Wrapper carries the ref/focus target so it works regardless of
+          // whether `Alert` forwards a ref (#813 defect 6).
+          <div ref={errorRef} tabIndex={-1} className="outline-none">
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          </div>
         )}
 
         {/* Issue #274: the edit-history panel. Edit mode only — a workflow being
@@ -1232,6 +1278,7 @@ function NodeRow({
   client,
   company,
   roster,
+  wiredChannels,
   workflows,
   createMode,
   errors,
@@ -1247,6 +1294,9 @@ function NodeRow({
   client: OpenCompanyClient;
   company: string | null;
   roster: TeamMemberDto[];
+  /** The company's wired chat channels (#813): the output-node channel-destination
+   * picker's options. Empty → the channel target degrades to a free-text box. */
+  wiredChannels: string[];
   /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
   workflows: WorkflowSummary[];
   /** True while creating a new workflow (not editing an existing one), so the
@@ -1377,7 +1427,33 @@ function NodeRow({
                 ))}
               </SelectContent>
             </Select>
-            {(node.destinationKind === "email" || node.destinationKind === "channel") && (
+            {node.destinationKind === "channel" && wiredChannels.length > 0 && (
+              <>
+                {/* #813: pick from the channels actually wired for this company,
+                    instead of a free-text box that only fails at delivery time. */}
+                <Select
+                  value={node.destinationTarget || ""}
+                  onValueChange={(v) => {
+                    onChange({ destinationTarget: v ?? "" });
+                    onValidateField("destinationTarget", v ?? "");
+                  }}
+                >
+                  <SelectTrigger className="h-8" aria-label="Channel id">
+                    <SelectValue placeholder="pick a wired channel" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {wiredChannels.map((channelId) => (
+                      <SelectItem key={channelId} value={channelId}>
+                        {channelId}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FieldError id={targetErrorId} message={errors.destinationTarget} />
+              </>
+            )}
+            {(node.destinationKind === "email" ||
+              (node.destinationKind === "channel" && wiredChannels.length === 0)) && (
               <>
                 <Input
                   value={node.destinationTarget}
