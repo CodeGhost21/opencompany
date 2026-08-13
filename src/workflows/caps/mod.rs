@@ -74,7 +74,10 @@ use self::http::GuardedHttpClient;
 use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
 use self::tools::WorkflowToolInvoker;
-pub(crate) use self::tools::{WORKFLOW_TOOL_NAMESPACES, WORKFLOW_TOOL_SLUGS};
+pub(crate) use self::tools::{WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, workflow_tool_info};
+// `WORKFLOW_TOOL_SLUGS` stays module-private to `tools` since #813: the catalogue
+// (`WORKFLOW_TOOL_CATALOG`) is what callers ground and validate against, and the
+// slug table is now only its in-module pinning cross-check.
 
 /// The four effectful capability slots [`build_capabilities`] chooses by mode:
 /// `tool_call`, `http_request`, `state`, and the optional `agent` runner. The

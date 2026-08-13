@@ -19,6 +19,7 @@ import { History, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import {
   CREATABLE_NODE_KINDS,
   DESTINATION_KINDS,
+  destinationLabel,
   createWorkflow,
   draftWorkflowFromDescription,
   listWorkflowRevisions,
@@ -42,6 +43,7 @@ import {
   configFromDraft,
   hasConfigForm,
 } from "@/lib/workflow-node-config";
+import { draftBanners } from "@/lib/workflow-draft";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
@@ -414,6 +416,10 @@ export function WorkflowCreateDialog({
   const [draftError, setDraftError] = useState<string | null>(null);
   const [draftSummary, setDraftSummary] = useState<string | null>(null);
   const [draftReason, setDraftReason] = useState<string | null>(null);
+  // Host corrections the copilot made to the draft (issue #813) — e.g. a
+  // name/role→id rewrite — shown under the summary so the author sees WHY the
+  // hydrated graph differs from a literal reading of their request.
+  const [draftNotes, setDraftNotes] = useState<string[]>([]);
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
   const formId = useId();
 
@@ -451,6 +457,7 @@ export function WorkflowCreateDialog({
     setDraftError(null);
     setDraftSummary(null);
     setDraftReason(null);
+    setDraftNotes([]);
     let live = true;
     (async () => {
       try {
@@ -789,8 +796,10 @@ export function WorkflowCreateDialog({
     setDraftError(null);
     setDraftSummary(null);
     setDraftReason(null);
+    setDraftNotes([]);
     try {
       const drafted = await draftWorkflowFromDescription(client, company, description);
+      const banners = draftBanners(drafted);
       if (drafted.automatable && drafted.workflow) {
         const graph = drafted.workflow;
         // Hydrate via the same helpers edit mode uses, so a drafted graph and a
@@ -804,16 +813,13 @@ export function WorkflowCreateDialog({
         // errors — they belonged to whatever was on screen before.
         setError(null);
         setFieldErrors({});
-        setDraftSummary(
-          drafted.summary
-            ? `Drafted: ${drafted.summary} — review below, then Create.`
-            : "Drafted — review below, then Create.",
-        );
+        setDraftSummary(banners.summary);
+        // Any host corrections (issue #813) — e.g. a role→id rewrite — so the
+        // author sees WHY the drafted graph differs from a literal reading.
+        setDraftNotes(banners.notes);
       } else {
         // Not automatable: the form is left untouched, with the model's reason.
-        setDraftReason(
-          drafted.reason ?? "This is better done once than built into a workflow.",
-        );
+        setDraftReason(banners.reason);
       }
     } catch (e) {
       // A capability gap (404/409) or a network failure — surface it inline; the
@@ -975,6 +981,17 @@ export function WorkflowCreateDialog({
                 <AlertDescription>{draftSummary}</AlertDescription>
               </Alert>
             )}
+            {draftNotes.length > 0 && (
+              <Alert data-testid="workflow-copilot-notes">
+                <AlertDescription>
+                  <ul className="list-disc space-y-1 pl-4">
+                    {draftNotes.map((note, i) => (
+                      <li key={i}>{note}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
             {draftReason && (
               <Alert>
                 <AlertDescription>{draftReason}</AlertDescription>
@@ -1048,6 +1065,7 @@ export function WorkflowCreateDialog({
                 company={company}
                 roster={roster}
                 workflows={workflows}
+                createMode={!editing}
                 errors={{
                   schedule: fieldErrors[errorKey(n.key, "schedule")],
                   destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
@@ -1215,6 +1233,7 @@ function NodeRow({
   company,
   roster,
   workflows,
+  createMode,
   errors,
   configErrors,
   onValidateField,
@@ -1230,6 +1249,9 @@ function NodeRow({
   roster: TeamMemberDto[];
   /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
   workflows: WorkflowSummary[];
+  /** True while creating a new workflow (not editing an existing one), so the
+   * trigger row can disclose that a scheduled workflow is created paused (#813). */
+  createMode: boolean;
   /** Blur-time problems for this row's validated fields, if any. */
   errors: Partial<Record<ValidatedField, string>>;
   /** Blur-time problems for this row's config fields, keyed by engine key. */
@@ -1308,6 +1330,7 @@ function NodeRow({
           <ScheduleField
             client={client}
             company={company}
+            createMode={createMode}
             schedule={node.schedule}
             error={errors.schedule}
             onChange={(schedule) => onChange({ schedule })}
@@ -1336,7 +1359,12 @@ function NodeRow({
               }
             >
               <SelectTrigger className="h-8" aria-label="Send report to">
-                <SelectValue />
+                {/* base-ui renders the raw stored value in the collapsed
+                    control unless given text, which surfaced the bare
+                    `__none__` sentinel; map every value to its label. #813 */}
+                <SelectValue>
+                  {destinationLabel(node.destinationKind || NO_DESTINATION)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_DESTINATION}>
@@ -1412,6 +1440,7 @@ function NodeRow({
 function ScheduleField({
   client,
   company,
+  createMode,
   schedule,
   error,
   onChange,
@@ -1419,6 +1448,8 @@ function ScheduleField({
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /** True on a new workflow, to disclose the created-paused default (#813). */
+  createMode: boolean;
   schedule: string;
   /** The blur-time cron problem for this field, when there is one. */
   error?: string;
@@ -1488,6 +1519,17 @@ function ScheduleField({
           schedule={schedule}
           suppressError={Boolean(error)}
         />
+      )}
+      {/* A scheduled workflow is disarmed on create (#276 disarm rule,
+          src/company/workflow_create.rs); nothing else in the dialog says so,
+          so an author who sets a cron here would think it is armed. Disclose it
+          at author time — create mode only, and only once a real schedule is
+          set. #813 */}
+      {createMode && looksLikeCron(schedule) && (
+        <p className="text-3xs text-muted-foreground">
+          Heads up: a scheduled workflow is created paused. Resume it from the
+          list to arm the schedule.
+        </p>
       )}
     </div>
   );

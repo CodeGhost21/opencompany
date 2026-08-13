@@ -1676,6 +1676,28 @@ export function WorkflowsView({
         ) : !selectedId ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
             <p>This company has no saved workflows yet.</p>
+            {/* Issue #813: a first-time author has no on-ramp otherwise. One
+                compact prose block — what a workflow is, a worked example
+                (mirroring the copilot placeholder), and the create-time copilot
+                as the easiest path. Deliberately no template gallery. */}
+            <div className="max-w-md space-y-2 text-2xs leading-relaxed">
+              <p>
+                A workflow runs a sequence of steps on a schedule or on demand: a{" "}
+                <span className="font-medium text-foreground">trigger</span> starts it,{" "}
+                <span className="font-medium text-foreground">agents</span> and{" "}
+                <span className="font-medium text-foreground">tools</span> do the work,
+                and an <span className="font-medium text-foreground">output</span> step
+                reports the result somewhere.
+              </p>
+              <p className="italic">
+                e.g. “Every Monday morning, have the writer draft the weekly digest
+                and email it to the team.”
+              </p>
+              <p>
+                Describe it in plain words when you create one — the copilot drafts
+                the graph for you to review and edit.
+              </p>
+            </div>
             {/* Issue #341: opens the same dialog as the toolbar button, and
                 therefore must NOT carry the same name. "Create a workflow"
                 rather than "Create the first workflow" because this state is

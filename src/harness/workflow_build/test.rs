@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
+use serde_json::json;
 use tinyagents::harness::model::{ChatModel, ModelResponse};
 use tinyagents::{Result as TaResult, TinyAgentsError};
 
@@ -26,11 +27,20 @@ use crate::ports::types::CompanyId;
 // A scripted model
 // ---------------------------------------------------------------------------
 
-/// A model that answers with a canned string (or fails), counts its calls, and —
+/// A model that answers with a canned script (or fails), counts its calls, and —
 /// optionally — mutates the board mid-call to simulate an operator moving the
 /// card out from under the pass.
+///
+/// The script is a sequence: the Nth call returns the Nth reply, and once the
+/// script is exhausted it repeats the last reply. A single-reply model therefore
+/// answers every call the same (the card-builder shape), while a multi-reply
+/// script drives the create-time copilot's draft→correct loop (issue #813): a
+/// `bad → good` script proves the retry recovers, a single `bad` proves a second
+/// failure folds to not-automatable.
 struct ScriptedModel {
-    reply: Option<String>,
+    replies: Vec<String>,
+    /// When true the model errors instead of answering — the brain being down.
+    fail: bool,
     calls: AtomicUsize,
     /// When set, the model moves the card to To-do on invoke, before answering —
     /// the operator's drag landing while the pass is waiting on the model.
@@ -39,8 +49,19 @@ struct ScriptedModel {
 
 impl ScriptedModel {
     fn replying(reply: impl Into<String>) -> Arc<Self> {
+        Self::scripting(vec![reply.into()])
+    }
+
+    /// A model that answers each call with the next reply in `replies`, repeating
+    /// the last once the script runs out.
+    fn scripting(replies: Vec<String>) -> Arc<Self> {
+        assert!(
+            !replies.is_empty(),
+            "a scripted model needs at least one reply"
+        );
         Arc::new(Self {
-            reply: Some(reply.into()),
+            replies,
+            fail: false,
             calls: AtomicUsize::new(0),
             move_card: StdMutex::new(None),
         })
@@ -48,7 +69,8 @@ impl ScriptedModel {
 
     fn failing() -> Arc<Self> {
         Arc::new(Self {
-            reply: None,
+            replies: Vec::new(),
+            fail: true,
             calls: AtomicUsize::new(0),
             move_card: StdMutex::new(None),
         })
@@ -62,7 +84,7 @@ impl ScriptedModel {
 #[async_trait]
 impl ChatModel<()> for ScriptedModel {
     async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let index = self.calls.fetch_add(1, Ordering::SeqCst);
         assert!(
             request.tools.is_empty(),
             "a builder pass must expose NO tools — a tool here is a loop, and a loop is a dispatch"
@@ -84,10 +106,11 @@ impl ChatModel<()> for ScriptedModel {
             card.updated_at_millis += 1;
             runtime.tasks().upsert(runtime.id(), &card).await.unwrap();
         }
-        match &self.reply {
-            Some(reply) => Ok(ModelResponse::assistant(reply.clone())),
-            None => Err(TinyAgentsError::Model("the brain is down".to_string())),
+        if self.fail {
+            return Err(TinyAgentsError::Model("the brain is down".to_string()));
         }
+        let reply = self.replies[index.min(self.replies.len() - 1)].clone();
+        Ok(ModelResponse::assistant(reply))
     }
 }
 
@@ -710,7 +733,7 @@ async fn a_description_drafts_a_graph_under_host_authority() {
         .await
         .expect("the drafter runs");
     let (summary, spec) = match outcome {
-        DescriptionDraftOutcome::Graph { summary, spec } => (summary, spec),
+        DescriptionDraftOutcome::Graph { summary, spec, .. } => (summary, spec),
         DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
     };
     assert!(summary.contains("digest"));
@@ -786,7 +809,8 @@ async fn a_description_kind_outside_the_vocabulary_is_refused_by_name() {
 async fn a_granted_tool_call_drafts_and_an_ungranted_one_is_refused() {
     let granted = r#"{"automatable":true,"summary":"fetch a page","workflow":{"name":"Fetcher",
         "nodes":[{"id":"start","kind":"trigger","name":"Start"},
-                 {"id":"fetch","kind":"tool_call","name":"Fetch","config":{"slug":"web_fetch"}}],
+                 {"id":"fetch","kind":"tool_call","name":"Fetch",
+                  "config":{"slug":"web_fetch","args":{"url":"https://example.com"}}}],
         "edges":[{"from":"start","to":"fetch"}]}}"#;
     let (_h1, runtime) = runtime_with(ScriptedModel::replying(granted)).await;
     let outcome = draft_workflow_from_description(&runtime, "fetch a page")
@@ -843,9 +867,34 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
         prompt.contains("`web_fetch`"),
         "granted tool slugs are rendered: {prompt}"
     );
+    // Issue #813: the tool line carries the honest capability + required args, not
+    // a bare slug — so the model does not reach for a tool that cannot do the job.
     assert!(
-        description_system_prompt().contains("config.slug"),
+        prompt.contains("cannot search for a URL"),
+        "the web_fetch capability line is rendered: {prompt}"
+    );
+    assert!(
+        prompt.contains("(args: url)"),
+        "web_fetch's required arg is rendered: {prompt}"
+    );
+    let system = description_system_prompt();
+    assert!(
+        system.contains("config.slug"),
         "the copilot system prompt teaches the tool_call rule"
+    );
+    // Issue #813: the system prompt states the delivery invariant and shows an
+    // `output` node with a destination in the schema example.
+    assert!(
+        system.contains("an `agent` node cannot send"),
+        "the delivery invariant is stated: {system}"
+    );
+    assert!(
+        system.contains("\"kind\": \"output\"") && system.contains("\"destination\""),
+        "the schema example includes an output node with a destination: {system}"
+    );
+    assert!(
+        system.contains("copied EXACTLY"),
+        "the roster-copy rule is stated: {system}"
     );
 }
 
@@ -867,6 +916,305 @@ async fn the_description_prompt_names_an_empty_roster_and_toolset() {
     assert!(prompt.contains("no teammates"), "{prompt}");
     assert!(prompt.contains("no tools granted"), "{prompt}");
     assert!(prompt.contains("(none yet)"), "{prompt}");
+}
+
+// ---------------------------------------------------------------------------
+// Grounding & gates (issue #813) — unit tier over the pure helpers
+// ---------------------------------------------------------------------------
+
+/// A roster teammate for the pure-helper units.
+fn roster_entry(id: &str, role: &str, name: Option<&str>) -> RosterEntry {
+    RosterEntry {
+        id: id.to_string(),
+        role: role.to_string(),
+        name: name.map(str::to_string),
+        description: None,
+    }
+}
+
+/// A `WorkflowGraphSpec` from a JSON literal.
+fn spec_from(value: serde_json::Value) -> WorkflowGraphSpec {
+    serde_json::from_value(value).expect("the spec parses")
+}
+
+/// The normalizer collapses `-`, `_` and whitespace runs so a role, an id and a
+/// name spelled three ways compare equal — and nothing fuzzier.
+#[test]
+fn normalize_label_collapses_separators_only() {
+    assert_eq!(normalize_label("QA Engineer"), "qa engineer");
+    assert_eq!(normalize_label("qa_engineer"), "qa engineer");
+    assert_eq!(normalize_label("  Qa--Engineer  "), "qa engineer");
+    // Different words never collapse together.
+    assert_ne!(normalize_label("writer"), normalize_label("rewriter"));
+}
+
+/// Delivery detection stays conservative: a request to deliver to the operator
+/// or a concrete target is a signal; the business activity "we email customers"
+/// is not (no address, no #channel, no verb aimed at the operator).
+#[test]
+fn delivery_signals_are_conservative() {
+    assert!(!delivery_signals("email me the digest every monday").is_empty());
+    assert!(!delivery_signals("post the summary to #ops").is_empty());
+    assert!(!delivery_signals("send the report to jo@acme.com").is_empty());
+    assert!(delivery_signals("we email customers a weekly newsletter").is_empty());
+    assert!(delivery_signals("summarize the week's work").is_empty());
+    // A numeric ticket/issue reference is not a #channel (leading-digit guard).
+    assert!(delivery_signals("summarize ticket #4521 each friday").is_empty());
+    // "send used" is not the whole word "send us" (whole-word verb match).
+    assert!(delivery_signals("send used parts to the warehouse").is_empty());
+}
+
+/// (a) The resolver rewrites a role-named agent to its roster id and records a
+/// note; the rewrite is exact-normalized, never fuzzy.
+#[test]
+fn the_resolver_rewrites_a_role_named_agent_and_notes_it() {
+    let roster = vec![roster_entry("qa_engineer", "QA Engineer", None)];
+    let mut spec = spec_from(json!({
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "T" },
+            { "id": "a", "kind": "agent", "name": "Test it", "agent": "QA Engineer" }
+        ],
+        "edges": []
+    }));
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    resolve_agent_ids(&mut spec, &roster, &mut notes, &mut errors);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(spec.nodes[1].agent.as_deref(), Some("qa_engineer"));
+    assert_eq!(notes.len(), 1);
+    assert!(notes[0].contains("qa_engineer"), "{notes:?}");
+}
+
+/// (a) An agent id that matches nothing on the roster is a gate error that NAMES
+/// the roster ids — proving the old silent fold (issue #813) is dead. An already
+/// valid id is left untouched.
+#[test]
+fn the_resolver_names_the_roster_on_an_unknown_agent() {
+    let roster = vec![
+        roster_entry("qa_engineer", "QA Engineer", None),
+        roster_entry("ceo", "Chief Executive", None),
+    ];
+    let mut spec = spec_from(json!({
+        "nodes": [
+            { "id": "a", "kind": "agent", "name": "X", "agent": "019fcbc3cb55-nope" },
+            { "id": "b", "kind": "agent", "name": "Y", "agent": "ceo" }
+        ],
+        "edges": []
+    }));
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    resolve_agent_ids(&mut spec, &roster, &mut notes, &mut errors);
+    assert_eq!(errors.len(), 1, "only the unknown agent errors: {errors:?}");
+    assert!(
+        errors[0].contains("qa_engineer") && errors[0].contains("ceo"),
+        "the roster is named so the model can self-correct: {errors:?}"
+    );
+    // The already-valid `ceo` node is untouched.
+    assert_eq!(spec.nodes[1].agent.as_deref(), Some("ceo"));
+}
+
+/// (b) The delivery gate fires when a delivery is asked for and no `output` node
+/// carries a destination; it is silent with one, and silent absent a signal.
+#[test]
+fn the_delivery_gate_fires_only_when_delivery_is_asked_and_missing() {
+    let no_output = spec_from(json!({
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "T" },
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "maya" }
+        ],
+        "edges": []
+    }));
+    let mut fired = Vec::new();
+    delivery_gate(&no_output, "email me the digest", &mut fired);
+    assert_eq!(fired.len(), 1, "{fired:?}");
+    assert!(fired[0].contains("output"), "{fired:?}");
+
+    let with_output = spec_from(json!({
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "T" },
+            { "id": "o", "kind": "output", "name": "Send", "destination": { "kind": "owner" } }
+        ],
+        "edges": []
+    }));
+    let mut satisfied = Vec::new();
+    delivery_gate(&with_output, "email me the digest", &mut satisfied);
+    assert!(satisfied.is_empty(), "{satisfied:?}");
+
+    let mut no_signal = Vec::new();
+    delivery_gate(&no_output, "summarize the week", &mut no_signal);
+    assert!(no_signal.is_empty(), "{no_signal:?}");
+}
+
+/// (c) The wrong-but-real arm flags a draft that uses a real teammate the request
+/// did not name while ignoring the one it did; it is silent when the draft uses
+/// the named teammate.
+#[test]
+fn the_wrong_but_real_arm_flags_the_unnamed_teammate() {
+    let roster = vec![
+        roster_entry("qa_engineer", "QA Engineer", None),
+        roster_entry("ceo", "Chief Executive", None),
+    ];
+    let uses_ceo = spec_from(json!({
+        "nodes": [{ "id": "a", "kind": "agent", "name": "Do it", "agent": "ceo" }],
+        "edges": []
+    }));
+    let mut errors = Vec::new();
+    wrong_but_real_agent_gate(
+        &uses_ceo,
+        "have the qa engineer run the tests",
+        &roster,
+        &mut errors,
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("qa_engineer"), "{errors:?}");
+
+    let uses_qa = spec_from(json!({
+        "nodes": [{ "id": "a", "kind": "agent", "name": "Do it", "agent": "qa_engineer" }],
+        "edges": []
+    }));
+    let mut ok = Vec::new();
+    wrong_but_real_agent_gate(
+        &uses_qa,
+        "have the qa engineer run the tests",
+        &roster,
+        &mut ok,
+    );
+    assert!(ok.is_empty(), "{ok:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Grounding, gates & the retry loop (issue #813) — pass tier
+// ---------------------------------------------------------------------------
+
+/// A description that names a teammate by ROLE drafts a graph with the resolver's
+/// id rewrite and a note explaining it — one model call, no retry (the fixture
+/// roster has `maya`, role "Writer").
+#[tokio::test]
+async fn a_role_named_agent_is_resolved_end_to_end_with_a_note() {
+    let reply = r#"{"automatable":true,"summary":"draft it","workflow":{"name":"Draft",
+        "nodes":[{"id":"t","kind":"trigger","name":"Start"},
+                 {"id":"a","kind":"agent","name":"Write","agent":"Writer"}],
+        "edges":[{"from":"t","to":"a"}]}}"#;
+    let model = ScriptedModel::replying(reply);
+    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
+    let outcome = draft_workflow_from_description(&runtime, "have the writer draft an update")
+        .await
+        .unwrap();
+    match outcome {
+        DescriptionDraftOutcome::Graph { spec, notes, .. } => {
+            assert_eq!(spec.nodes[1].agent.as_deref(), Some("maya"));
+            assert!(notes.iter().any(|n| n.contains("maya")), "{notes:?}");
+        }
+        DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
+    }
+    assert_eq!(model.calls(), 1, "a clean resolve needs no retry");
+}
+
+/// An agent id that resolves to nothing folds — after one corrective retry — to
+/// not-automatable whose reason NAMES the roster (proving the silent fold is
+/// gone). Two model calls, both metered.
+#[tokio::test]
+async fn an_unresolvable_agent_folds_to_not_automatable_naming_the_roster() {
+    let reply = r#"{"automatable":true,"summary":"x","workflow":{"name":"Bad",
+        "nodes":[{"id":"t","kind":"trigger","name":"Start"},
+                 {"id":"a","kind":"agent","name":"Do","agent":"019fcbc3cb55-nope"}],
+        "edges":[{"from":"t","to":"a"}]}}"#;
+    let model = ScriptedModel::replying(reply);
+    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
+    let outcome = draft_workflow_from_description(&runtime, "do the thing")
+        .await
+        .unwrap();
+    match outcome {
+        DescriptionDraftOutcome::NotAutomatable(reason) => {
+            assert!(reason.contains("maya"), "the roster is named: {reason}");
+        }
+        DescriptionDraftOutcome::Graph { .. } => panic!("an unknown agent must not draft"),
+    }
+    assert_eq!(
+        model.calls(),
+        2,
+        "one draft, one corrective retry — both metered"
+    );
+}
+
+/// The draft→correct loop recovers: a first answer that fails the roster gate,
+/// then a good one, yields a graph — two model calls (both metered).
+#[tokio::test]
+async fn the_retry_recovers_from_a_correctable_first_answer() {
+    let bad = r#"{"automatable":true,"summary":"x","workflow":{"name":"Bad",
+        "nodes":[{"id":"t","kind":"trigger","name":"Start"},
+                 {"id":"a","kind":"agent","name":"Do","agent":"ghost"}],
+        "edges":[{"from":"t","to":"a"}]}}"#;
+    let good = r#"{"automatable":true,"summary":"fixed","workflow":{"name":"Good",
+        "nodes":[{"id":"t","kind":"trigger","name":"Start"},
+                 {"id":"a","kind":"agent","name":"Do","agent":"maya"}],
+        "edges":[{"from":"t","to":"a"}]}}"#;
+    let model = ScriptedModel::scripting(vec![bad.to_string(), good.to_string()]);
+    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
+    let outcome = draft_workflow_from_description(&runtime, "do the thing")
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, DescriptionDraftOutcome::Graph { .. }),
+        "the retry recovers a correctable draft"
+    );
+    assert_eq!(
+        model.calls(),
+        2,
+        "one bad draft, one good retry — both metered"
+    );
+}
+
+/// The delivery gate is enforced end-to-end: an "email me" request whose draft
+/// tries to deliver from an agent summary (no output node) is refused, and — bad
+/// on both attempts — folds to not-automatable naming the missing output node.
+#[tokio::test]
+async fn the_delivery_gate_is_enforced_end_to_end() {
+    let reply = r#"{"automatable":true,"summary":"digest","workflow":{"name":"Digest",
+        "nodes":[{"id":"t","kind":"trigger","name":"Monday","schedule":"0 9 * * 1"},
+                 {"id":"a","kind":"agent","name":"Draft and email","agent":"maya",
+                  "summary":"email the digest to the owner"}],
+        "edges":[{"from":"t","to":"a"}]}}"#;
+    let model = ScriptedModel::replying(reply);
+    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
+    let outcome =
+        draft_workflow_from_description(&runtime, "email me the weekly digest every monday")
+            .await
+            .unwrap();
+    match outcome {
+        DescriptionDraftOutcome::NotAutomatable(reason) => {
+            assert!(
+                reason.contains("output"),
+                "names the missing output node: {reason}"
+            );
+        }
+        DescriptionDraftOutcome::Graph { .. } => {
+            panic!("a delivery with no output node must be refused")
+        }
+    }
+    assert_eq!(model.calls(), 2);
+}
+
+/// The same "email me" request draws no gate when the draft actually ends in an
+/// `output` node with a destination — the gate is about missing delivery, not
+/// about the word "email".
+#[tokio::test]
+async fn a_delivery_with_an_output_node_drafts_cleanly() {
+    let reply = r#"{"automatable":true,"summary":"digest","workflow":{"name":"Digest",
+        "nodes":[{"id":"t","kind":"trigger","name":"Monday","schedule":"0 9 * * 1"},
+                 {"id":"a","kind":"agent","name":"Draft","agent":"maya"},
+                 {"id":"o","kind":"output","name":"Send","destination":{"kind":"owner"}}],
+        "edges":[{"from":"t","to":"a"},{"from":"a","to":"o"}]}}"#;
+    let model = ScriptedModel::replying(reply);
+    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
+    let outcome = draft_workflow_from_description(&runtime, "email me the weekly digest")
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, DescriptionDraftOutcome::Graph { .. }),
+        "a correct delivery graph drafts"
+    );
+    assert_eq!(model.calls(), 1, "a correct delivery graph needs no retry");
 }
 
 /// The card entering the pass is not the assignee's dispatch: no artifact, no

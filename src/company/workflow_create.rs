@@ -813,6 +813,45 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
                 node.id
             )));
         }
+        // (d) Required args present (issue #813). The engine reads a `tool_call`'s
+        // arguments from `config.args` (tinyflows
+        // `nodes/integration/tool_call.rs`), so a known slug whose required args
+        // are absent THERE runs and does nothing useful — the legal-but-empty
+        // `read_workspace_state` (which cannot read a file anyway) was the case
+        // that motivated this. Reject the missing args at author time, naming them
+        // and what the tool is, so the console/copilot fixes it now instead of
+        // shipping a dud node. Same philosophy as the #661 `required_config`
+        // arm, one level down (the args sub-table, not the config root). Because
+        // this is the SHARED create/update gate, a hand-author hears it at save
+        // and the create-time copilot hears it via courtesy validation → one
+        // corrective retry. A tool with no required args (`read_workspace_state`)
+        // is unaffected here — its uselessness is handled by copilot grounding.
+        if let Some(info) = crate::workflows::caps::workflow_tool_info(slug) {
+            let args = node
+                .config
+                .as_ref()
+                .and_then(toml::Value::as_table)
+                .and_then(|table| table.get("args"))
+                .and_then(toml::Value::as_table);
+            let missing: Vec<&str> = info
+                .required_args
+                .iter()
+                .copied()
+                .filter(|arg| !tool_arg_present(args, arg))
+                .collect();
+            if !missing.is_empty() {
+                return Err(OpenCompanyError::InvalidRequest(format!(
+                    "node `{}` calls tool `{slug}` but its `config.args` is missing {} — {}.",
+                    node.id,
+                    missing
+                        .iter()
+                        .map(|arg| format!("`{arg}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    info.capability
+                )));
+            }
+        }
     }
     #[cfg(not(feature = "openhuman"))]
     {
@@ -834,7 +873,7 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
 /// `search` grant (a `*` wildcard never confers it). So the tools the copilot
 /// shows the model are precisely the ones a proposed `tool_call` node will clear
 /// at courtesy validation, and the two cannot drift: both read
-/// [`WORKFLOW_TOOL_SLUGS`](crate::workflows::caps) (itself pinned to
+/// [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) (itself pinned to
 /// `namespace_of`) and both apply the same grant rule.
 ///
 /// Gated with the copilot it serves — the only caller is
@@ -844,17 +883,35 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
 #[cfg(feature = "openhuman")]
 pub(crate) fn workflow_callable_tool_slugs(record: &CompanyRecord) -> Vec<String> {
     let grants = &record.manifest.tools.allow;
-    crate::workflows::caps::WORKFLOW_TOOL_SLUGS
+    // Reads the rich [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) since #813
+    // (the same grant rule, just the catalogue as the source), so the slugs the
+    // copilot grounds on and the ones it can validate come from one table.
+    crate::workflows::caps::WORKFLOW_TOOL_CATALOG
         .iter()
-        .filter(|(_slug, namespace)| {
-            if *namespace == "search" {
+        .filter(|info| {
+            if info.namespace == "search" {
                 crate::company::grants_search_explicit(grants)
             } else {
-                crate::harness::build::grants_cover(grants, namespace)
+                crate::harness::build::grants_cover(grants, info.namespace)
             }
         })
-        .map(|(slug, _namespace)| (*slug).to_string())
+        .map(|info| info.slug.to_string())
         .collect()
+}
+
+/// Whether a required `config.args` key is present and carries a usable value
+/// (issue #813): a non-blank string — a `=`-expression that binds at run time
+/// counts — or any non-null non-string value (a number, a non-empty array or
+/// table). A blank string or an absent key is treated as missing.
+#[cfg(feature = "openhuman")]
+fn tool_arg_present(args: Option<&toml::Table>, key: &str) -> bool {
+    match args.and_then(|table| table.get(key)) {
+        Some(toml::Value::String(text)) => !text.trim().is_empty(),
+        Some(toml::Value::Array(items)) => !items.is_empty(),
+        Some(toml::Value::Table(table)) => !table.is_empty(),
+        Some(_) => true, // integer / float / bool / datetime — presence is meaningful
+        None => false,
+    }
 }
 
 /// An opaque version token for a stored overlay body: the hex SHA-256 of the
@@ -3066,11 +3123,43 @@ to = "done"
     }
 
     /// A `trigger → tool_call` draft. `slug` of `None` omits `config` entirely,
-    /// so the ungated slug-presence check fires.
+    /// so the ungated slug-presence check fires. Otherwise the node carries a
+    /// generic `config.args` table with every workflow-tool required-arg key set
+    /// (issue #813), so a positive-control slug clears the required-args arm — the
+    /// arm checks only presence, so the extra keys are harmless and this stays
+    /// feature-agnostic (no catalogue reference).
     fn tool_call_draft(id: &str, name: &str, slug: Option<&str>) -> RawWorkflow {
+        let mut args = toml::map::Map::new();
+        for key in [
+            "command",
+            "edits",
+            "operation",
+            "data",
+            "filename",
+            "url",
+            "path",
+            "query",
+        ] {
+            args.insert(key.to_string(), toml::Value::String("x".to_string()));
+        }
+        tool_call_draft_args(id, name, slug, Some(toml::Value::Table(args)))
+    }
+
+    /// A `trigger → tool_call` draft with explicit control over `config.args` —
+    /// used to exercise the #813 required-args arm (absent args, present args)
+    /// directly. `args` of `None` omits the `args` table entirely.
+    fn tool_call_draft_args(
+        id: &str,
+        name: &str,
+        slug: Option<&str>,
+        args: Option<toml::Value>,
+    ) -> RawWorkflow {
         let config = slug.map(|slug| {
             let mut table = toml::map::Map::new();
             table.insert("slug".to_string(), toml::Value::String(slug.to_string()));
+            if let Some(args) = &args {
+                table.insert("args".to_string(), args.clone());
+            }
             toml::Value::Table(table)
         });
         RawWorkflow {
@@ -3345,6 +3434,137 @@ to = "done"
             "{err:?}"
         );
         assert!(err.to_string().contains("cannot run"), "{err}");
+    }
+
+    // --- #813: required `config.args` on a workflow tool_call -----------------
+
+    /// A granted `tool_call` whose required `config.args` are absent is refused at
+    /// author time, naming the missing args — the same gate the create-time
+    /// copilot hears via courtesy validation. `csv_export` needs `data` and
+    /// `filename`; the run would otherwise export nothing.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_missing_required_args_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args("wf", "WF", Some("csv_export"), None),
+        )
+        .await
+        .expect_err("missing required args");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("config.args") && msg.contains("data") && msg.contains("filename"),
+            "the missing args are named: {msg}"
+        );
+    }
+
+    /// The same slug WITH its required args under `config.args` is accepted — the
+    /// arm gates the absence, not the tool. A `=`-expression counts as present.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_required_args_is_accepted() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        let mut args = toml::map::Map::new();
+        args.insert(
+            "data".to_string(),
+            toml::Value::String("=nodes.pick.items".to_string()),
+        );
+        args.insert(
+            "filename".to_string(),
+            toml::Value::String("out.csv".to_string()),
+        );
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args(
+                "wf",
+                "WF",
+                Some("csv_export"),
+                Some(toml::Value::Table(args)),
+            ),
+        )
+        .await
+        .expect("required args present");
+    }
+
+    /// `read_workspace_state` has NO required args, so an empty-args node is not
+    /// blocked by the arm — its inability to read a file is a grounding concern
+    /// (the copilot's honest capability line), not an author-time gate.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_no_required_args_is_accepted_empty() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["shell"]),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args("wf", "WF", Some("read_workspace_state"), None),
+        )
+        .await
+        .expect("read_workspace_state needs no args");
+    }
+
+    /// A required arg that is PRESENT but blank (a whitespace-only string or an
+    /// empty array/table) counts as missing — presence alone is not enough, since
+    /// a `""` filename would export to nowhere. This is the branch that carries
+    /// the real difference from a plain `contains_key` check.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_a_blank_required_arg_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        let mut args = toml::map::Map::new();
+        // Empty array and a whitespace-only string: both present, both unusable.
+        args.insert("data".to_string(), toml::Value::Array(Vec::new()));
+        args.insert(
+            "filename".to_string(),
+            toml::Value::String("   ".to_string()),
+        );
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args(
+                "wf",
+                "WF",
+                Some("csv_export"),
+                Some(toml::Value::Table(args)),
+            ),
+        )
+        .await
+        .expect_err("blank required args count as missing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("data") && msg.contains("filename"),
+            "both blank args are named: {msg}"
+        );
     }
 
     // --- issue #661/#682: required config + condition labels on the draft path

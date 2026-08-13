@@ -1589,6 +1589,11 @@ enum DraftFromDescriptionResponse {
         automatable: bool,
         summary: String,
         workflow: Value,
+        /// Host corrections the operator should see (issue #813) — e.g. a
+        /// name/role→id rewrite the resolver made. Empty when the draft needed
+        /// none; `#[serde(default)]` on the reader keeps the older shape valid.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
     },
     /// The described work is not worth a reusable workflow — or could not be
     /// drafted into one that would survive Create; `reason` says why.
@@ -1635,13 +1640,16 @@ async fn draft_from_description(
         DescriptionDraftOutcome, draft_workflow_from_description,
     };
     match draft_workflow_from_description(&company.runtime, &description).await {
-        Ok(DescriptionDraftOutcome::Graph { summary, spec }) => {
-            Ok(Json(DraftFromDescriptionResponse::Drafted {
-                automatable: true,
-                summary,
-                workflow: serde_json::to_value(&spec).unwrap_or(Value::Null),
-            }))
-        }
+        Ok(DescriptionDraftOutcome::Graph {
+            summary,
+            spec,
+            notes,
+        }) => Ok(Json(DraftFromDescriptionResponse::Drafted {
+            automatable: true,
+            summary,
+            workflow: serde_json::to_value(&spec).unwrap_or(Value::Null),
+            notes,
+        })),
         Ok(DescriptionDraftOutcome::NotAutomatable(reason)) => {
             Ok(Json(DraftFromDescriptionResponse::NotAutomatable {
                 automatable: false,

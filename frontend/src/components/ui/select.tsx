@@ -56,6 +56,38 @@ function SelectTrigger({
   )
 }
 
+/**
+ * The select popup's own box.
+ *
+ * **Width is a floor, not a match** (issue #811). `--anchor-width` is the
+ * trigger's width, and the triggers are `w-fit` — so binding `width` to it made
+ * every popup exactly as wide as whatever short value happened to be selected
+ * (`trigger`, `none`, `agent`) and clipped its own options mid-word. The
+ * workflow node-kind picker was the worst case: each label explains what the
+ * kind does, and the explanation is the half that got cut — `Trigger — starts
+ * the w…`. An operator meeting that picker for the first time is reading
+ * exactly the text that is missing.
+ *
+ * `min-w` keeps the popup from ever being *narrower* than its trigger, which is
+ * the only thing the exact binding bought, while leaving it free to grow to its
+ * content. The `max(9rem, …)` inside preserves the old `min-w-36` floor for a
+ * trigger narrower than that.
+ *
+ * `max-w` then stops a long option pushing the popup off-screen:
+ * `--available-width` is what the positioner measured to the viewport edge, and
+ * 28rem is a readable line length, so it takes the smaller of the two.
+ *
+ * **The floor is capped by that same ceiling, and it has to be.** When the two
+ * conflict CSS resolves in favour of `min-width` — measured, not assumed:
+ * `min-width:max(9rem,40rem)` against `max-width:min(28rem,20rem)` lays out at
+ * 640px, not 320px. So an uncapped floor would let a trigger wider than the
+ * space beside it push the popup straight off the viewport, which is the one
+ * thing `max-w` is here to prevent. Wrapping the floor in the same `min(…)`
+ * makes the ceiling authoritative in every case.
+ */
+const SELECT_POPUP_CLASSES =
+  "relative isolate z-50 max-h-(--available-height) max-w-[min(28rem,var(--available-width))] min-w-[min(max(9rem,var(--anchor-width)),28rem,var(--available-width))] origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10"
+
 function SelectContent({
   className,
   children,
@@ -83,7 +115,7 @@ function SelectContent({
         <SelectPrimitive.Popup
           data-slot="select-content"
           data-align-trigger={alignItemWithTrigger}
-          className={cn("relative isolate z-50 max-h-(--available-height) w-(--anchor-width) min-w-36 origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10 duration-100 data-[align-trigger=true]:animate-none data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95", className )}
+          className={cn(SELECT_POPUP_CLASSES, "duration-100 data-[align-trigger=true]:animate-none data-[side=bottom]:slide-in-from-top-2 data-[side=inline-end]:slide-in-from-left-2 data-[side=inline-start]:slide-in-from-right-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95", className )}
           {...props}
         >
           <SelectScrollUpButton />
