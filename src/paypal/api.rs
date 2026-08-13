@@ -47,6 +47,43 @@ pub struct Transaction {
     pub note: Option<String>,
 }
 
+/// Rewrites PayPal's opaque "Data for the given start date is not available"
+/// into something the caller can act on.
+///
+/// PayPal serves transaction data on a lag — a completed payment takes up to
+/// three hours to appear — and rejects any window whose start is inside that
+/// gap. Its own message says only that data "is not available", which reads as
+/// "there were no transactions" rather than "ask for an earlier window", so an
+/// agent handed it starts guessing at timeframes instead of moving the start
+/// date back. That is exactly what happened in testing: a start date of today
+/// failed, and the agent asked the operator to pick a different period rather
+/// than knowing what to do.
+///
+/// Only this one error is rewritten, and the original text is kept alongside the
+/// remedy so nothing is hidden.
+fn explain_unavailable_window(error: OpenCompanyError) -> OpenCompanyError {
+    let OpenCompanyError::Paypal {
+        status,
+        code,
+        message,
+    } = &error
+    else {
+        return error;
+    };
+    if !message.to_ascii_lowercase().contains("not available") {
+        return error;
+    }
+    OpenCompanyError::Paypal {
+        status: *status,
+        code: code.clone(),
+        message: format!(
+            "{message} PayPal publishes transactions on a delay of up to 3 hours, so a window \
+             that starts today may have no data yet — retry with a `start_date` at least a day \
+             earlier. The window must also span no more than 31 days."
+        ),
+    }
+}
+
 fn text(value: Option<&Value>, key: &str) -> Option<String> {
     value?
         .get(key)
@@ -124,7 +161,10 @@ pub async fn list_transactions(
         ),
     ];
 
-    let body = client.get("/v1/reporting/transactions", &query).await?;
+    let body = client
+        .get("/v1/reporting/transactions", &query)
+        .await
+        .map_err(explain_unavailable_window)?;
     Ok(body
         .get("transaction_details")
         .and_then(Value::as_array)
@@ -184,6 +224,34 @@ mod tests {
         assert_eq!(b.available, "4320.50");
         assert_eq!(b.currency_code, "USD");
         assert!(b.primary);
+    }
+
+    #[test]
+    fn an_unavailable_window_is_explained_rather_than_relayed() {
+        // PayPal's own words read as "there were no transactions", which sends
+        // an agent guessing at timeframes instead of moving the start date back.
+        let raw = OpenCompanyError::Paypal {
+            status: 400,
+            code: "INVALID_REQUEST".to_string(),
+            message: "Data for the given start date is not available.".to_string(),
+        };
+        let explained = explain_unavailable_window(raw).to_string();
+        assert!(
+            explained.contains("Data for the given start date"),
+            "{explained}"
+        );
+        assert!(explained.contains("3 hours"), "{explained}");
+        assert!(explained.contains("start_date"), "{explained}");
+
+        // Every other failure passes through untouched — this must not become a
+        // catch-all that buries unrelated PayPal errors under a date hint.
+        let other = OpenCompanyError::Paypal {
+            status: 401,
+            code: "NOT_AUTHORIZED".to_string(),
+            message: "Authorization failed due to insufficient permissions.".to_string(),
+        };
+        let untouched = explain_unavailable_window(other).to_string();
+        assert!(!untouched.contains("3 hours"), "{untouched}");
     }
 
     #[tokio::test]

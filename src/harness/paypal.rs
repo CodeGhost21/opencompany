@@ -178,9 +178,10 @@ mod live {
         }
 
         fn description(&self) -> &str {
-            "List PayPal transactions between two dates. PayPal allows a window of at most 31 \
-             days and takes up to 3 hours to show a completed transaction, so a payment made \
-             moments ago may not appear yet."
+            "List PayPal transactions between two dates. PayPal publishes on a delay of up to 3 \
+             hours, so a window ENDING today is fine but one STARTING today usually has no data \
+             and is rejected — start at least one day back. The window must span no more than 31 \
+             days. To answer 'was I paid recently?', ask for the last 7 days rather than today."
         }
 
         fn parameters_schema(&self) -> Value {
