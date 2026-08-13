@@ -33,6 +33,7 @@ import {
   SidebarMenuItem,
   SidebarProvider,
   SidebarRail,
+  SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import {
@@ -1052,6 +1053,15 @@ export function AppShell({
 
   return (
     <SidebarProvider className="h-svh overflow-hidden">
+      {/* Mobile turns the sidebar into a sheet, so its own collapse control is
+          not mounted while it is closed. Keep the way back fixed to the
+          viewport and below the page controls rather than competing with a
+          view's toolbar. Desktop keeps the labelled collapse row in the
+          sidebar itself. */}
+      <SidebarTrigger
+        aria-label="Toggle sidebar"
+        className="fixed bottom-4 left-4 z-50 md:hidden"
+      />
       <AutoCollapse view={view} />
       <Sidebar collapsible="icon">
         <SidebarHeader>

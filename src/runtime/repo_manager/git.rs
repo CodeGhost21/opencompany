@@ -5,27 +5,31 @@
 //! ## The credential never becomes an argument or a variable
 //!
 //! A token handed to `git` the obvious ways is readable by anything running as
-//! the same user for as long as the fetch lasts: `/proc/<pid>/cmdline` for an
-//! argument, `/proc/<pid>/environ` for an environment variable, and the file
-//! itself forever for a persisted `credential.helper` or a URL with userinfo in
-//! it. So none of those are used. [`run`] spawns `git` with a
+//! the same user for as long as the call lasts: `/proc/<pid>/cmdline` for an
+//! argument, `/proc/<pid>/environ` for an environment variable, and a persisted
+//! `credential.helper` or a URL with userinfo would leave it lying around long
+//! after. So none of those are used. [`run`] spawns `git` with a
 //! [`GIT_ASKPASS`](https://git-scm.com/docs/git#Documentation/git.txt-codeGITASKPASScode)
-//! helper — a fixed six-line script containing no secret — and writes the token
-//! into the child's **stdin**, which is an anonymous pipe. The helper reads one
-//! line from it and prints it back to `git`. The bytes exist in a pipe buffer
-//! and in two process memories, and nowhere else: not in argv, not in the
-//! environment, not on disk, not in any git config.
+//! helper — a fixed script containing no secret — and puts the token in a
+//! **0600 file inside a 0700 directory this process owns and unlinks on drop**
+//! (the helper's own `$HOME`). The helper reads that file on each prompt and
+//! prints the token back to `git`. The bytes are never in argv, never in the
+//! environment, never in any git config, and never in a URL — the surfaces that
+//! leak to other processes or outlive the call. They are on disk, briefly, in a
+//! private per-invocation file that is removed the moment the call returns.
 //!
 //! Two deliberate details:
 //!
-//! * **stdin, rather than a dedicated inherited descriptor.** Passing `git` an
-//!   extra open descriptor means `pre_exec` and a `dup2`, i.e. `unsafe` plus a
-//!   new `libc` dependency, to obtain a pipe with exactly the properties stdin
-//!   already has. The commands run here (`init`, `remote`, `config`,
-//!   `ls-remote`, `fetch`) read nothing from stdin, so it is free, and the
-//!   helper inherits it because `git` passes its own stdio through.
-//! * **`printf`/`echo` are shell builtins.** The helper never passes the token
-//!   to an external program, which would put it back in an argv.
+//! * **A file the helper re-reads, not a one-shot stdin pipe (issue #796).** A
+//!   `git push` authenticates twice — the ref-advertisement probe and the pack
+//!   upload — so `git` invokes the helper for the password more than once. The
+//!   token used to travel on the child's stdin, which held it once: the second
+//!   prompt read EOF and `git-remote-https`, with the OS keychain deliberately
+//!   disabled here, stalled to the network timeout instead of failing. A file
+//!   answers every prompt. A fetch authenticates once, which is why it never
+//!   showed the bug.
+//! * **`cat`/`echo` are POSIX utilities/builtins.** The helper never passes the
+//!   token to a program that would put it back in an argv.
 //!
 //! Honest limit, restated because it is easy to oversell this: the agent shell
 //! and this fetch run as the same user in the same container. This closes the
@@ -48,8 +52,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-
-use tokio::io::AsyncWriteExt;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -74,18 +76,32 @@ const TOKEN_USERNAME: &str = "x-access-token";
 /// repository over a slow link; finite, which is the point.
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// The askpass helper. Contains no credential: the password branch reads one
-/// line from stdin, which the parent wrote the token into.
+/// The askpass helper. Contains no credential: the password branch reads the
+/// token from a 0600 file the parent wrote into this helper's own private
+/// `$HOME`, so it can answer the SAME prompt more than once (issue #796).
 ///
-/// `read` and `echo` are POSIX shell builtins, so the token never appears in
-/// any process's argument list. GitHub tokens are `[A-Za-z0-9_]` only, so
-/// `echo` cannot mangle one.
+/// # Why a file and not stdin
+///
+/// A `git push` authenticates **twice** — the ref-advertisement probe
+/// (`GET …/info/refs`) and then the pack upload (`POST …/git-receive-pack`) —
+/// so git invokes this helper for the password more than once. The token was
+/// fed down stdin, a one-shot anonymous pipe: it answered the first prompt and
+/// EOF'd the second, and `git-remote-https`, handed no password and with the OS
+/// keychain deliberately disabled here, **stalled until the network timeout**
+/// rather than failing. That is exactly why the write tier's push hung for
+/// 300s. A file the helper re-reads answers every prompt. (A fetch survives on
+/// one answer, which is why it never showed the bug.)
+///
+/// The token lives only in a 0600 file inside a 0700 directory this process
+/// owns and deletes on drop, and `cat`/`echo` are POSIX built-ins so it still
+/// never reaches any process's argument list.
 const ASKPASS_SCRIPT: &str = r#"#!/bin/sh
-# Answers git's credential prompts for an OpenCompany host-side fetch.
-# Holds no secret: the password is read from stdin, an anonymous pipe.
+# Answers git's credential prompts for an OpenCompany host-side call.
+# The password is read from a 0600 file in this helper's own $HOME, so the same
+# prompt can be answered more than once (a push authenticates twice).
 case "$1" in
   Username*|username*) echo "x-access-token" ;;
-  *) IFS= read -r secret || exit 1; echo "$secret" ;;
+  *) cat "$HOME/token" 2>/dev/null || exit 1 ;;
 esac
 "#;
 
@@ -147,31 +163,80 @@ impl AskpassDir {
     /// the script is a program this host is about to execute, and re-writing it
     /// means nothing that happened between two fetches can have edited it.
     pub(crate) fn create(base: &Path) -> Result<Self> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-
         let io_err = |p: &Path, e: std::io::Error| {
             OpenCompanyError::Store(format!(
                 "preparing git credential helper {}: {e}",
                 p.display()
             ))
         };
-        let path = base.join(format!(
-            ".askpass-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).map_err(|e| io_err(&path, e))?;
-        set_mode(&path, 0o700)?;
-        let script = path.join("askpass.sh");
-        std::fs::write(&script, ASKPASS_SCRIPT).map_err(|e| io_err(&script, e))?;
-        set_mode(&script, 0o700)?;
-        Ok(Self { path })
+        // `base` is a shared directory (the company's repo cache), so the name
+        // under it must be unpredictable AND created exclusively. The old
+        // `.askpass-<pid>-<seq>` under `create_dir_all` was neither: a local
+        // attacker who guessed it could pre-create the directory — or a symlink
+        // wearing its name — and have this process write the token into
+        // something it does not own. The name is now 16 bytes from the OS
+        // CSPRNG, and `create_private_dir` (a non-recursive create) fails if the
+        // name already exists, so the directory returned is one nothing else
+        // could have prepared. It is created 0700 in one step, never briefly
+        // wider.
+        std::fs::create_dir_all(base).map_err(|e| io_err(base, e))?;
+        let mut last = None;
+        for _ in 0..8 {
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes).map_err(|e| {
+                OpenCompanyError::Store(format!("the OS CSPRNG is unavailable: {e}"))
+            })?;
+            let name: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let path = base.join(format!(".askpass-{name}"));
+            match create_private_dir(&path) {
+                Ok(()) => {
+                    let script = path.join("askpass.sh");
+                    // `create_new`, so a pre-planted script or symlink at the
+                    // name is refused rather than executed.
+                    write_exclusive(&script, ASKPASS_SCRIPT.as_bytes(), 0o700)
+                        .map_err(|e| io_err(&script, e))?;
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(io_err(&path, e)),
+            }
+        }
+        Err(io_err(
+            base,
+            last.unwrap_or_else(|| std::io::Error::other("exhausted askpass name attempts")),
+        ))
     }
 
     /// The helper script's path, for `GIT_ASKPASS`.
     fn script(&self) -> PathBuf {
         self.path.join("askpass.sh")
+    }
+
+    /// Writes the token the helper answers with into a fresh 0600 file in this
+    /// directory — the child's `$HOME`, where the script reads `$HOME/token`
+    /// (issue #796).
+    ///
+    /// Called once, before the child is spawned, so the helper can be re-invoked
+    /// within a single git call (a push asks for the password twice) and answer
+    /// every time. The file is created **exclusively** at 0600: the directory is
+    /// freshly this process's own so no `token` exists yet, and `create_new`
+    /// guarantees the write neither follows a pre-planted symlink (which would
+    /// route the secret to an attacker's target) nor adopts a wider existing
+    /// file. The whole directory is removed on drop.
+    fn write_token(&self, token: &str) -> Result<()> {
+        let path = self.path.join("token");
+        let mut line = String::with_capacity(token.len() + 1);
+        line.push_str(token);
+        line.push('\n');
+        write_exclusive(&path, line.as_bytes(), 0o600).map_err(|e| {
+            OpenCompanyError::Store(format!(
+                "writing the git credential {}: {e}",
+                path.display()
+            ))
+        })
     }
 }
 
@@ -183,18 +248,42 @@ impl Drop for AskpassDir {
     }
 }
 
-/// Restricts a path to the owning user. A no-op off unix, where this surface
-/// does not run.
-fn set_mode(path: &Path, mode: u32) -> Result<()> {
+/// Creates `path` as a private directory, failing if anything is already there.
+///
+/// A non-recursive create (not `create_dir_all`): it fails rather than adopting
+/// a pre-existing directory — or a symlink wearing the name — under a shared
+/// parent, which is the exclusivity the token's safety rests on. On unix the
+/// 0700 mode is applied at creation, so the directory is never briefly wider.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .map_err(|e| OpenCompanyError::Store(format!("restricting {}: {e}", path.display())))?;
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// Writes `bytes` to a newly created `path` at `mode`, failing if anything is
+/// already there.
+///
+/// `create_new` opens with `O_EXCL | O_CREAT`, which never follows a symlink at
+/// the final component and never adopts an existing file — so a pre-planted
+/// `token` symlink cannot route the secret elsewhere and a pre-created file
+/// cannot leave it wider than intended. On unix the mode is set at open time, so
+/// the file is 0600 from the instant it exists rather than briefly wider.
+fn write_exclusive(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(mode);
     }
     #[cfg(not(unix))]
-    let _ = (path, mode);
-    Ok(())
+    let _ = mode;
+    opts.open(path)?.write_all(bytes)
 }
 
 /// The hardening flags every invocation carries, in front of the subcommand.
@@ -327,31 +416,26 @@ async fn run_bounded(
     // `git-remote-https` helper running, still holding the credential.
     cmd.kill_on_drop(true);
 
+    // The credential the askpass helper answers with, written to its private
+    // `$HOME` as a 0600 file BEFORE git runs (issue #796). git may invoke the
+    // helper more than once for a single call — a push authenticates twice — so
+    // a file answers every prompt, where the old one-shot stdin pipe EOF'd the
+    // second prompt and hung the push until the network timeout. The token is
+    // not on the argument list, not in the environment, and gone when the
+    // `AskpassDir` drops.
+    if let (Some(dir), Some(token)) = (askpass, token) {
+        dir.write_token(token)?;
+    }
+
     let mut child = cmd.spawn().map_err(|e| {
         OpenCompanyError::Store(format!(
             "could not run git (is it installed on this host?): {e}"
         ))
     })?;
 
-    // The token goes down the pipe before anything is awaited. It is a few
-    // dozen bytes against a pipe buffer measured in kilobytes, so this cannot
-    // block, and closing the pipe afterwards is what lets the helper's `read`
-    // terminate if git never asks.
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Some(token) = token {
-            let mut line = String::with_capacity(token.len() + 1);
-            line.push_str(token);
-            line.push('\n');
-            let write = stdin.write_all(line.as_bytes()).await;
-            // Deliberately not `?`: a git that exited before reading its stdin
-            // gives a broken pipe here, and its own exit status is the better
-            // error to report.
-            if let Err(err) = write {
-                tracing::debug!("git stdin closed before the credential was written: {err}");
-            }
-        }
-        drop(stdin);
-    }
+    // Close the child's stdin so a git that reads it sees EOF at once rather
+    // than blocking on input that no longer carries the credential.
+    drop(child.stdin.take());
 
     let output = match tokio::time::timeout(limit, child.wait_with_output()).await {
         Ok(result) => {
@@ -382,50 +466,40 @@ mod test {
         // The script is written verbatim to disk and executed. If a future edit
         // ever interpolates a token into it, this is the line that objects.
         assert!(!ASKPASS_SCRIPT.contains("{}"), "no interpolation");
-        assert!(ASKPASS_SCRIPT.contains("read -r secret"));
+        // The password comes from the token file the parent writes (issue #796),
+        // never from the argv or the script body.
+        assert!(ASKPASS_SCRIPT.contains("cat \"$HOME/token\""));
         assert!(ASKPASS_SCRIPT.contains(TOKEN_USERNAME));
     }
 
     #[tokio::test]
-    async fn the_helper_emits_the_token_once_and_the_username_without_consuming_it() {
-        // Drives the helper exactly as git does — two separate invocations
-        // sharing one stdin pipe — and proves the username answer does not eat
-        // the password line.
+    async fn the_helper_answers_the_password_from_its_file_on_every_prompt() {
+        // Issue #796: git asks the helper for the password more than once for a
+        // single push. Prove the file-backed helper answers each time — where the
+        // old one-shot stdin pipe answered once and hung the second — and that
+        // the username answer is a fixed literal, not the token.
         let base = std::env::temp_dir().join(format!("oc-askpass-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let dir = AskpassDir::create(&base).unwrap();
+        dir.write_token("SENTINEL").unwrap();
         let script = dir.script();
+        let home = dir.path.clone();
 
         let run_helper = |prompt: &str| {
             let script = script.clone();
+            let home = home.clone();
             let prompt = prompt.to_string();
             async move {
-                let mut child = tokio::process::Command::new(&script)
+                let out = tokio::process::Command::new(&script)
                     .arg(&prompt)
-                    .stdin(Stdio::piped())
+                    // The helper reads its token from `$HOME/token`, exactly as
+                    // git spawns it (`SpawnPlan` sets `HOME` to the helper's dir).
+                    .env("HOME", &home)
+                    .stdin(Stdio::null())
                     .stdout(Stdio::piped())
-                    .spawn()
+                    .output()
+                    .await
                     .unwrap();
-                let mut stdin = child.stdin.take().unwrap();
-                // The username invocation answers a fixed literal *without*
-                // reading stdin — the very property this test exists to prove —
-                // so the helper can exit before this write lands and the pipe
-                // is already closed. `run_git` tolerates the same `EPIPE`
-                // deliberately for the same reason; a test that unwraps here
-                // passes only where the pipe buffer happens to win the race
-                // (macOS) and fails where the child does (Linux CI).
-                //
-                // Still asserted, not swallowed: any error other than a broken
-                // pipe is a real failure.
-                if let Err(err) = stdin.write_all(b"SENTINEL\n").await {
-                    assert_eq!(
-                        err.kind(),
-                        std::io::ErrorKind::BrokenPipe,
-                        "writing the credential failed for a reason other than the helper having already exited: {err}"
-                    );
-                }
-                drop(stdin);
-                let out = child.wait_with_output().await.unwrap();
                 String::from_utf8_lossy(&out.stdout).trim().to_string()
             }
         };
@@ -435,11 +509,15 @@ mod test {
             TOKEN_USERNAME,
             "the username answer is a fixed literal, not the token"
         );
-        assert_eq!(
-            run_helper("Password for 'https://x-access-token@github.com': ").await,
-            "SENTINEL",
-            "the password answer is the line read off stdin"
-        );
+        // The password prompt, answered TWICE from the file — the property the
+        // fix restores (a push authenticates twice).
+        for _ in 0..2 {
+            assert_eq!(
+                run_helper("Password for 'https://x-access-token@github.com': ").await,
+                "SENTINEL",
+                "the password is read from the helper's token file, every time"
+            );
+        }
 
         drop(dir);
         std::fs::remove_dir_all(&base).ok();
@@ -518,6 +596,92 @@ mod test {
         assert!(!out.stderr.contains("SENTINEL"), "{}", out.stderr);
 
         drop(dir);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The directory name is unpredictable (a CSPRNG suffix, distinct per call)
+    /// and the two files land exclusively at their locked-down modes — the shape
+    /// that denies a local attacker a name to pre-plant (issue #815).
+    #[cfg(unix)]
+    #[test]
+    fn the_askpass_files_are_created_exclusively_and_locked_down() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("oc-askpass-excl-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = AskpassDir::create(&base).unwrap();
+        dir.write_token("SENTINEL").unwrap();
+
+        // Unpredictable: `.askpass-` + 16 CSPRNG bytes as hex. Asserting the pid
+        // is *absent* from the name would be flaky — a random hex string can
+        // contain the pid's decimal digits by chance — so the real property is
+        // pinned instead: a full-width hex suffix, and a second call that lands
+        // on a different name.
+        let name = dir.path.file_name().unwrap().to_string_lossy().into_owned();
+        let suffix = name
+            .strip_prefix(".askpass-")
+            .unwrap_or_else(|| panic!("askpass prefix missing: {name}"));
+        assert_eq!(suffix.len(), 32, "expected a 16-byte hex suffix: {name}");
+        assert!(
+            suffix.chars().all(|c| c.is_ascii_hexdigit()),
+            "the suffix is not hex: {name}"
+        );
+        let dir2 = AskpassDir::create(&base).unwrap();
+        assert_ne!(dir2.path, dir.path, "two askpass dirs collided on a name");
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir.path), 0o700, "the dir is not owner-only");
+        assert_eq!(mode(&dir.script()), 0o700);
+        let token = dir.path.join("token");
+        assert_eq!(mode(&token), 0o600, "the token file is not 0600");
+        assert_eq!(std::fs::read_to_string(&token).unwrap(), "SENTINEL\n");
+
+        drop(dir);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A `token` symlink pre-planted at the name is refused rather than followed,
+    /// so the secret never reaches an attacker's target (issue #815).
+    #[cfg(unix)]
+    #[test]
+    fn write_exclusive_refuses_a_pre_planted_symlink_and_spares_its_target() {
+        let base = std::env::temp_dir().join(format!("oc-askpass-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("attacker-target");
+        std::fs::write(&target, "original").unwrap();
+        let link = base.join("token");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = write_exclusive(&link, b"SENTINEL\n", 0o600).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "original",
+            "the secret was written through the symlink"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Both exclusive-creation primitives fail on a name that already exists,
+    /// rather than adopting or overwriting it (issue #815).
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_creation_refuses_what_already_exists() {
+        let base = std::env::temp_dir().join(format!("oc-askpass-exists-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        let file = base.join("f");
+        write_exclusive(&file, b"first", 0o600).unwrap();
+        let err = write_exclusive(&file, b"second", 0o600).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "first");
+
+        let sub = base.join("d");
+        create_private_dir(&sub).unwrap();
+        let err = create_private_dir(&sub).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
         std::fs::remove_dir_all(&base).ok();
     }
 
