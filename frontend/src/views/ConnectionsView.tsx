@@ -19,7 +19,6 @@ import { catalogWarning } from "@/lib/composio-catalog";
 import { toolkitSlug, type ComposioReach } from "@/lib/connections";
 import { buildGridProviders, disconnectRouteFor, type GridProvider } from "@/lib/provider-grid";
 import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
-import { armTourResume } from "@/tour/state";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
@@ -27,7 +26,6 @@ import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
 import { RepositoriesCard } from "@/views/connections/RepositoriesCard";
 import { ChannelsSection } from "./connections/ChannelsSection";
-import { useLocalScope } from "@/connections/ConnectionContext";
 
 interface Props {
   client: OpenCompanyClient;
@@ -47,8 +45,6 @@ const COMPOSIO_PROBE_TIMEOUT_MS = 5_000;
 
 /** Wire the third-party accounts your company can act through. */
 export function ConnectionsView({ client, company }: Props) {
-  // Which (connection, company) this subtree's browser-local state belongs to.
-  const scope = useLocalScope();
   const [load, setLoad] = useState<Load>("loading");
   const [states, setStates] = useState<Record<string, ConnectionState>>({});
   // The Composio connection objects behind those booleans, keyed by normalized
@@ -135,9 +131,10 @@ export function ConnectionsView({ client, company }: Props) {
     void refresh();
   }, [refresh]);
 
-  // Composio status drives the hosted route for every tile. A host without the
-  // feature, without the grant, or without a credential simply leaves `reach`
-  // null, and `connectRoute` falls back to the native/managed/unavailable arms.
+  // Composio status drives the only route this page offers (issue #822). A host
+  // without the feature, without the grant, or without a credential simply
+  // leaves `reach` null, and `connectRoute` falls back to managed/unavailable —
+  // there is no native arm to fall back to any more.
   useEffect(() => {
     let live = true;
     setReachSettled(false);
@@ -199,20 +196,6 @@ export function ConnectionsView({ client, company }: Props) {
       live = false;
     };
   }, [client, company]);
-
-  /** The self-hosted hatch: navigate the document to the host's authorize URL. */
-  async function connectNative(p: GridProvider) {
-    const { url } = await client.startConnection(p.providerId, company);
-    // Unlike the Composio sign-in below (which opens a tab and survives), this
-    // navigates the whole document away — taking the product tour's
-    // in-memory step state with it. Arm a resume marker so the operator comes
-    // back to the stop they left instead of the tour restarting from step 1
-    // (issue #300). No-op when no tour is running, and deliberately after the
-    // start call succeeds: a provider that isn't configured 400s here and
-    // never navigates, so it must not leave a marker behind.
-    armTourResume(scope);
-    window.location.href = url;
-  }
 
   /**
    * The hosted route: Composio runs the OAuth on its own side, so there is no
@@ -303,12 +286,10 @@ export function ConnectionsView({ client, company }: Props) {
         await connectComposio(p, p.route.toolkit);
         return;
       }
-      if (p.route.kind === "native") {
-        await connectNative(p);
-        return;
-      }
       // `managed` / `unavailable` render no Connect button, so reaching here
-      // would be a rendering bug rather than an operator action.
+      // would be a rendering bug rather than an operator action. Composio is
+      // the only route left: the native hatch stopped being offered with #822,
+      // because what it stores is read by no agent tool (#396).
       setBusy(null);
     } catch {
       toast.error(`Couldn't start the ${p.label} connection.`);

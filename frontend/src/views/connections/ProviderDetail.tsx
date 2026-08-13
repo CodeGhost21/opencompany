@@ -131,6 +131,12 @@ const USAGE_RANGE = "30d";
  * read by nothing (#396), and a page devoted to how healthy a connection is,
  * is exactly where an inert one would look most alive. A provider that also
  * holds a native credential says so as a caveat, not as a second connection.
+ *
+ * #822 finished the other half of that reasoning: the catalog is no longer
+ * *listed* either, so the case this panel declines to open now mostly cannot
+ * arise from the grid at all. What still reaches the caveat below is a provider
+ * connected natively and offered by Composio — one connection object, one
+ * inert secret beside it.
  */
 export function ProviderDetail({ client, company, subject, canManage, busy, onClose }: Props) {
   // The `byProvider` key this subject's calls land on. `null` for a closed
