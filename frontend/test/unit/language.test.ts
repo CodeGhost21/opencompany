@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { approvalAction, payloadLines, toolAction } from "@/lib/language";
-import type { ApprovalSummary } from "@/api/types";
+import { approvalAction, grantHeadline, payloadLines, toolAction } from "@/lib/language";
+import type { ApprovalSummary, StandingGrant } from "@/api/types";
 
 /**
  * The gated tools an operator is asked to sign off on say what they are (#701).
@@ -126,5 +126,59 @@ describe("a kind nobody has named", () => {
 
   it("falls back the same way from the permissions list", () => {
     expect(toolAction("some_tool_nobody_declared")).toBe("Use one of its tools");
+  });
+});
+
+/**
+ * A standing permission's headline (#457), and the scope suffix it carries.
+ *
+ * `StandingGrant.scope` is one string holding two kinds of value — a Composio
+ * toolkit slug, and (since #673/#739) a URL origin for `web_fetch`. Issue #785
+ * was the second kind going through the first kind's speller, so a host-scoped
+ * grant rendered `Https://docs.rs`.
+ *
+ * Both kinds are asserted here on purpose: the toolkit case alone is what CI and
+ * review already had, and it stayed green through the whole of #785.
+ */
+function grant(over: Partial<StandingGrant> & Pick<StandingGrant, "tool">): StandingGrant {
+  return {
+    id: "g1",
+    agent: "ceo",
+    granted_by: { kind: "user", id: "u1" },
+    at_millis: 1_000,
+    expires_at_millis: 2_000,
+    ...over,
+  };
+}
+
+describe("what a standing permission covers", () => {
+  it("keeps a host scope verbatim, scheme and all", () => {
+    expect(grantHeadline(grant({ tool: "web_fetch", scope: "https://docs.rs" }))).toBe(
+      "Fetch a web page — https://docs.rs only",
+    );
+  });
+
+  it("keeps the scheme of every origin shape the host can mint", () => {
+    // `standing_scope_of` mints `scheme://host[:port]` — lower-case, port kept.
+    for (const origin of [
+      "https://www.bbc.com",
+      "http://localhost:8080",
+      "https://docs.rs:443",
+      "https://sub.domain.example.co.uk",
+    ]) {
+      expect(grantHeadline(grant({ tool: "web_fetch", scope: origin }))).toBe(
+        `Fetch a web page — ${origin} only`,
+      );
+    }
+  });
+
+  it("still spells a toolkit slug out for an operator", () => {
+    expect(
+      grantHeadline(grant({ tool: "composio_execute", scope: "microsoft_teams" })),
+    ).toBe("Act in one of its connected accounts — Microsoft Teams only");
+  });
+
+  it("says only the action when the grant narrows to nothing", () => {
+    expect(grantHeadline(grant({ tool: "file_write" }))).toBe("Write a file in its workspace");
   });
 });

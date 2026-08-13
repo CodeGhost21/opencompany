@@ -335,6 +335,16 @@ pub struct StandingGrant {
     /// passing. Slug-exact would re-park every new action and make the grant
     /// worth nothing.
     ///
+    /// `Some(origin)` — a `scheme://host[:port]` URL origin — for `web_fetch`
+    /// since issues #673/#739, on the same terms and from the same function.
+    /// **This is a second kind of value in the same string**, and a reader that
+    /// assumes the toolkit kind is wrong about it: the console spelled
+    /// `https://docs.rs` out with the toolkit speller and rendered
+    /// `Https://docs.rs` for three releases (issue #785). Anything that
+    /// *displays* a scope has to tell the two apart; anything that *matches* one
+    /// must not care, because [`admits_scope`](Self::admits_scope) is exact
+    /// string equality over whichever kind was minted.
+    ///
     /// `None` also on a grant replayed from a journal line written before this
     /// field existed, where it means "unscoped" and reproduces the old
     /// behaviour exactly — see [`admits_scope`](Self::admits_scope).
