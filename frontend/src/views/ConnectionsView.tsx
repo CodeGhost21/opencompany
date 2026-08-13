@@ -18,7 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { catalogWarning } from "@/lib/composio-catalog";
 import { toolkitSlug, type ComposioReach } from "@/lib/connections";
 import { buildGridProviders, disconnectRouteFor, type GridProvider } from "@/lib/provider-grid";
-import { ProviderDetail } from "@/views/connections/ProviderDetail";
+import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
 import { armTourResume } from "@/tour/state";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
@@ -458,6 +458,27 @@ export function ConnectionsView({ client, company }: Props) {
     [providers, opened],
   );
 
+  // The panel's subject, with this arm's controls attached (issue #821). A
+  // Composio provider cannot be opened without the revoke that actually
+  // releases it — `disconnectConnection` answers 200 while releasing nothing,
+  // which is the defect `disconnect()` above exists to route around — so the
+  // handlers travel inside the variant rather than as sibling props.
+  //
+  // Rebuilt every render rather than memoized: nothing downstream keys off this
+  // object's identity (the panel's usage read keys off the slug it derives),
+  // and a memo whose value carries fresh closures would have to lie about its
+  // dependencies to stay stable.
+  const detailSubject: ConnectionSubject | null =
+    openedProvider === null
+      ? null
+      : {
+          kind: "composio",
+          provider: openedProvider,
+          noCredential: status?.credentialSource === "none",
+          onConnectAnother: (p) => void connect(p),
+          onDisconnectAccount: (p, account) => void disconnectAccount(p, account),
+        };
+
   // Counted off the rendered grid, not off the raw host rows. The badge used to
   // count every row `GET …/connections` returned while the grid below drew only
   // the eleven tiles the console had metadata for — so the header could read "3
@@ -564,19 +585,17 @@ export function ConnectionsView({ client, company }: Props) {
         />
 
         {/* A connection as an object you open rather than a row with a button
-            (issue #404). Composio only: the native catalog is inert — its
-            credential is written and read by nothing (#396) — and a detail view
-            is exactly where that would look healthiest. */}
+            (issue #404). The grid's half is Composio only: the native catalog is
+            inert — its credential is written and read by nothing (#396) — and a
+            detail view is exactly where that would look healthiest. The same
+            panel opens a remote MCP server, from `McpServersSection` (#821). */}
         <ProviderDetail
           client={client}
           company={company}
-          provider={openedProvider}
+          subject={detailSubject}
           canManage={canManage && load !== "unavailable"}
-          noCredential={status?.credentialSource === "none"}
           busy={busy !== null}
           onClose={() => setOpened(null)}
-          onConnectAnother={(p) => void connect(p)}
-          onDisconnectAccount={(p, account) => void disconnectAccount(p, account)}
         />
       </div>
     </div>

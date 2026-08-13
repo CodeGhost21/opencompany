@@ -148,6 +148,32 @@ Settings page built on it crashed on open (issue #414). The client casts an
 unparsed body to the declared type, so a second surface is never caught by the
 compiler — only by whoever opens the page.
 
+### Opening one server
+
+A row's name opens the server into
+[`ProviderDetail`](../../frontend/src/views/connections/ProviderDetail.tsx) — the
+same panel a Composio provider opens into (issues #404, #821), on a
+`ConnectionSubject` union rather than a second MCP-specific panel. The reason is
+the paragraph above one level up: two surfaces describing the same idea acquire
+two vocabularies and then drift.
+
+The panel is read-only. Enable, `Test`, `Tools` and `Remove` stay on the row;
+what it adds is what the row cannot say —
+
+- **Connected, and as what.** MCP has no connection object, so this is assembled
+  from two facts a single badge would collapse: `enabled` (whether any agent
+  receives the tools at all) and the last probe (whether the endpoint answered
+  when someone last asked). A server nobody has pressed `Test` on has no `health`
+  at all, and "never probed" is neither reachable nor broken. See `mcpStanding`
+  in `frontend/src/lib/connection-detail.ts`.
+- **Usage**, read from `byProvider` under the `mcp:<server>` key this module's
+  metering records (`src/metering/oauth.rs`) — never the bare slug, which is the
+  same-named Composio toolkit's row.
+- **No connection date**, stated rather than left blank. There is no connect step
+  to record one; the probe timestamp the host *does* keep sits beside it.
+- **What a disconnect reaches**: the tool belt on the next turn, and nothing at
+  the server's own end. A manifest server says it cannot be removed at all.
+
 ## Pool-staleness caveat
 
 Agents materialize their MCP registry once, when the
