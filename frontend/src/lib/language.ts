@@ -150,6 +150,10 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // does not exist. Two permissions both reading "Use one of its tools" would be
   // indistinguishable, so the tools that can actually hold one (the catch-all
   // `Other` group) need real words rather than the generic fallback.
+  // Billing (issues #788, #789). Only the two that park need words here; the
+  // read tools never reach an approval card.
+  chargebee_send_invoice: "Send an invoice to a customer",
+  chargebee_create_customer: "Add a customer to Chargebee",
   workspace_write: "Edit a note in its workspace",
   workspace_read: "Read a note in its workspace",
   workspace_list: "List its workspace notes",

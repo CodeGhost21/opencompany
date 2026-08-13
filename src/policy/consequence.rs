@@ -577,6 +577,42 @@ const DECLARED: &[Declared] = &[
         Reach::Nothing,
     ),
     d("mcp_call_tool", EffectGroup::Other, Reach::Consequence),
+    // Billing (issues #788, #789). Both integrations read the company's OWN
+    // Chargebee site and PayPal account, so the reads are `Nothing` rather than
+    // `ExternalRead`: that tier exists for reaching into a *counterparty's*
+    // account, and a `readonly` desk answering "has Alan paid?" about the
+    // company's own ledger changes nothing and bills nothing.
+    d("chargebee_get_invoice", EffectGroup::Other, Reach::Nothing),
+    d(
+        "chargebee_list_invoices",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    d("chargebee_get_customer", EffectGroup::Other, Reach::Nothing),
+    d(
+        "paypal_get_wallet_balance",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    d(
+        "paypal_list_transactions",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    // Raising an invoice reaches a real customer of a real business and creates
+    // a demand for money, so it is `Send` and it parks.
+    d(
+        "chargebee_send_invoice",
+        EffectGroup::Send,
+        Reach::Consequence,
+    ),
+    // Writes a record into an external billing system. No money moves, but it
+    // is still a change somebody else's system will keep.
+    d(
+        "chargebee_create_customer",
+        EffectGroup::Other,
+        Reach::Consequence,
+    ),
     d(
         "mcp_registry_tool_call",
         EffectGroup::Other,

@@ -95,7 +95,8 @@ export function BillingView({ client, company }: Props) {
     // an untouched key keeps its stored value rather than being cleared.
     const body: Record<string, string> = {};
     if (apiKey.trim()) body.apiKey = apiKey.trim();
-    if (site.trim() && site.trim() !== (status?.site ?? "")) body.site = site.trim();
+    if (site.trim() && site.trim() !== (status?.site ?? ""))
+      body.site = site.trim();
     if (webhookSecret.trim()) body.webhookSecret = webhookSecret.trim();
 
     if (Object.keys(body).length === 0) {
@@ -113,7 +114,11 @@ export function BillingView({ client, company }: Props) {
       setWebhookSecret("");
       toast.success("Chargebee settings saved.");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not save Chargebee settings.");
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : "Could not save Chargebee settings.",
+      );
     } finally {
       setBusy(false);
     }
@@ -129,7 +134,9 @@ export function BillingView({ client, company }: Props) {
       setSite("");
       toast.success("Chargebee credentials cleared.");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not clear the credentials.");
+      toast.error(
+        err instanceof Error ? err.message : "Could not clear the credentials.",
+      );
     } finally {
       setBusy(false);
     }
@@ -139,7 +146,8 @@ export function BillingView({ client, company }: Props) {
     const body: Record<string, string> = {};
     if (clientId.trim()) body.clientId = clientId.trim();
     if (clientSecret.trim()) body.clientSecret = clientSecret.trim();
-    if (environment !== (paypal?.environment ?? "sandbox")) body.environment = environment;
+    if (environment !== (paypal?.environment ?? "sandbox"))
+      body.environment = environment;
 
     if (Object.keys(body).length === 0) {
       toast.info("Nothing to save — fill in a field first.");
@@ -153,7 +161,9 @@ export function BillingView({ client, company }: Props) {
       setClientSecret("");
       toast.success("PayPal settings saved.");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not save PayPal settings.");
+      toast.error(
+        err instanceof Error ? err.message : "Could not save PayPal settings.",
+      );
     } finally {
       setBusy(false);
     }
@@ -169,7 +179,9 @@ export function BillingView({ client, company }: Props) {
       setEnvironment(next.environment || "sandbox");
       toast.success("PayPal disconnected.");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not disconnect PayPal.");
+      toast.error(
+        err instanceof Error ? err.message : "Could not disconnect PayPal.",
+      );
     } finally {
       setBusy(false);
     }
@@ -177,10 +189,14 @@ export function BillingView({ client, company }: Props) {
 
   if (loadError) {
     return (
-      <Alert variant="destructive" data-testid="billing-load-error">
-        <TriangleAlert className="size-4" />
-        <AlertDescription>Could not load billing settings: {loadError}</AlertDescription>
-      </Alert>
+      <div className="mx-auto w-full max-w-5xl px-4 py-6">
+        <Alert variant="destructive" data-testid="billing-load-error">
+          <TriangleAlert className="size-4" />
+          <AlertDescription>
+            Could not load billing settings: {loadError}
+          </AlertDescription>
+        </Alert>
+      </div>
     );
   }
 
@@ -193,288 +209,327 @@ export function BillingView({ client, company }: Props) {
   }
 
   const connected = status.apiKeyConfigured && !!status.site;
-  const paypalConnected = !!paypal?.clientIdConfigured && !!paypal?.clientSecretConfigured;
+  const paypalConnected =
+    !!paypal?.clientIdConfigured && !!paypal?.clientSecretConfigured;
 
   return (
-    <div className="space-y-6" data-testid="billing-view">
-      <div>
-        <h2 className="flex items-center gap-2 text-lg font-medium">
-          <CreditCard className="size-5" /> Billing
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Connect Chargebee so your teammates can raise invoices and answer questions about who
-          has paid, and PayPal so they can report the wallet — without leaving this app.
-        </p>
-      </div>
+    // `flex-1 overflow-y-auto` is load-bearing, not cosmetic: without it this
+    // page is clipped at the viewport and the PayPal card below cannot be
+    // scrolled to at all. Matches McpServersView, its nearest sibling.
+    <div className="flex-1 overflow-y-auto" data-testid="billing-view">
+      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
+        <div>
+          <h2 className="flex items-center gap-2 text-lg font-medium">
+            <CreditCard className="size-5" /> Billing
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Connect Chargebee so your teammates can raise invoices and answer
+            questions about who has paid, and PayPal so they can report the
+            wallet — without leaving this app.
+          </p>
+        </div>
 
-      {/* The two problems this form cannot fix, said before the form so an
+        {/* The two problems this form cannot fix, said before the form so an
           operator does not fill it in and wonder why nothing happened. */}
-      {!status.inBuild ? (
-        <Alert data-testid="billing-not-in-build">
-          <TriangleAlert className="size-4" />
-          <AlertDescription>
-            This host was built without Chargebee support, so these settings will be stored and
-            have no effect. Rebuild with the <code>chargebee</code> feature.
-          </AlertDescription>
-        </Alert>
-      ) : null}
+        {!status.inBuild ? (
+          <Alert data-testid="billing-not-in-build">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              This host was built without Chargebee support, so these settings
+              will be stored and have no effect. Rebuild with the{" "}
+              <code>chargebee</code> feature.
+            </AlertDescription>
+          </Alert>
+        ) : null}
 
-      {status.inBuild && !status.granted ? (
-        <Alert data-testid="billing-not-granted">
-          <TriangleAlert className="size-4" />
-          <AlertDescription>
-            This company does not grant <code>chargebee</code>, so billing tools will not reach any
-            teammate even once these credentials are saved. Add <code>chargebee</code> to{" "}
-            <code>[tools].allow</code> in the company&rsquo;s manifest — it cannot be fixed from
-            this page.
-          </AlertDescription>
-        </Alert>
-      ) : null}
+        {status.inBuild && !status.granted ? (
+          <Alert data-testid="billing-not-granted">
+            <TriangleAlert className="size-4" />
+            <AlertDescription>
+              This company does not grant <code>chargebee</code>, so billing
+              tools will not reach any teammate even once these credentials are
+              saved. Add <code>chargebee</code> to <code>[tools].allow</code> in
+              the company&rsquo;s manifest — it cannot be fixed from this page.
+            </AlertDescription>
+          </Alert>
+        ) : null}
 
-      <Card>
-        <CardContent className="space-y-4 pt-6">
-          <div className="flex items-center justify-between">
+        <Card>
+          <CardContent className="space-y-4 pt-6">
+            <div className="flex items-center justify-between">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Chargebee</p>
+                <p className="text-xs text-muted-foreground">
+                  {connected
+                    ? `Connected to ${status.site}.chargebee.com`
+                    : "Not connected yet."}
+                </p>
+              </div>
+              {connected ? (
+                <Badge variant="secondary" data-testid="billing-connected">
+                  <Check className="mr-1 size-3" /> Connected
+                </Badge>
+              ) : null}
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="cb-site">Site</Label>
+                <Input
+                  id="cb-site"
+                  data-testid="billing-site"
+                  placeholder="acme-test"
+                  value={site}
+                  onChange={(e) => setSite(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  The part before <code>.chargebee.com</code>. Pasting the full
+                  URL is fine.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="cb-key">API key</Label>
+                <Input
+                  id="cb-key"
+                  data-testid="billing-api-key"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={
+                    status.apiKeyConfigured
+                      ? "Configured — type to replace"
+                      : "From Chargebee → API Keys"
+                  }
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {status.apiKeyConfigured
+                    ? "Stored. It is never shown again."
+                    : "Stored write-only; it is never shown again."}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <Button
+                onClick={onSave}
+                disabled={busy}
+                data-testid="billing-save"
+              >
+                {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                Save
+              </Button>
+              {status.apiKeyConfigured || status.webhookConfigured ? (
+                <Button
+                  variant="ghost"
+                  onClick={onClear}
+                  disabled={busy}
+                  data-testid="billing-clear"
+                >
+                  Disconnect
+                </Button>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardContent className="space-y-4 pt-6">
             <div className="space-y-1">
-              <p className="text-sm font-medium">Chargebee</p>
+              <p className="text-sm font-medium">Payment notifications</p>
               <p className="text-xs text-muted-foreground">
-                {connected
-                  ? `Connected to ${status.site}.chargebee.com`
-                  : "Not connected yet."}
-              </p>
-            </div>
-            {connected ? (
-              <Badge variant="secondary" data-testid="billing-connected">
-                <Check className="mr-1 size-3" /> Connected
-              </Badge>
-            ) : null}
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="cb-site">Site</Label>
-              <Input
-                id="cb-site"
-                data-testid="billing-site"
-                placeholder="acme-test"
-                value={site}
-                onChange={(e) => setSite(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">
-                The part before <code>.chargebee.com</code>. Pasting the full URL is fine.
+                Optional. Without this, invoicing still works — nobody is just
+                told when a customer pays.
               </p>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="cb-key">API key</Label>
+              <Label>Webhook URL</Label>
+              {status.webhookUrl ? (
+                <div className="flex gap-2">
+                  <Input
+                    readOnly
+                    value={status.webhookUrl}
+                    data-testid="billing-webhook-url"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(
+                        status.webhookUrl ?? "",
+                      );
+                      toast.success("Webhook URL copied.");
+                    }}
+                  >
+                    <Copy className="size-4" />
+                  </Button>
+                </div>
+              ) : (
+                // Deliberately not a disabled box showing a loopback address:
+                // Chargebee cannot deliver to one, and showing it would send an
+                // operator to configure a webhook that silently never arrives.
+                <p
+                  className="text-xs text-muted-foreground"
+                  data-testid="billing-no-webhook-url"
+                >
+                  This host has no public URL, so Chargebee cannot reach it. Set{" "}
+                  <code>OPENCOMPANY_PUBLIC_URL</code> to an https address to get
+                  a webhook URL.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="cb-hook">Webhook credential</Label>
               <Input
-                id="cb-key"
-                data-testid="billing-api-key"
+                id="cb-hook"
+                data-testid="billing-webhook-secret"
                 type="password"
                 autoComplete="off"
                 placeholder={
-                  status.apiKeyConfigured ? "Configured — type to replace" : "From Chargebee → API Keys"
+                  status.webhookConfigured
+                    ? "Configured — type to replace"
+                    : "username:password"
                 }
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
+                value={webhookSecret}
+                onChange={(e) => setWebhookSecret(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
-                {status.apiKeyConfigured
-                  ? "Stored. It is never shown again."
-                  : "Stored write-only; it is never shown again."}
+                Invent a username and password, save them here as{" "}
+                <code>username:password</code>, then set the same pair in
+                Chargebee under{" "}
+                <em>Protect webhook URL with basic authentication</em>.
+                Subscribe to <code>payment_succeeded</code> and{" "}
+                <code>payment_failed</code>.
               </p>
             </div>
-          </div>
+          </CardContent>
+        </Card>
 
-          <div className="flex gap-2">
-            <Button onClick={onSave} disabled={busy} data-testid="billing-save">
-              {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-              Save
-            </Button>
-            {status.apiKeyConfigured || status.webhookConfigured ? (
-              <Button
-                variant="ghost"
-                onClick={onClear}
-                disabled={busy}
-                data-testid="billing-clear"
-              >
-                Disconnect
-              </Button>
-            ) : null}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="space-y-4 pt-6">
-          <div className="space-y-1">
-            <p className="text-sm font-medium">Payment notifications</p>
-            <p className="text-xs text-muted-foreground">
-              Optional. Without this, invoicing still works — nobody is just told when a customer
-              pays.
-            </p>
-          </div>
-
-          <div className="space-y-2">
-            <Label>Webhook URL</Label>
-            {status.webhookUrl ? (
-              <div className="flex gap-2">
-                <Input readOnly value={status.webhookUrl} data-testid="billing-webhook-url" />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={() => {
-                    void navigator.clipboard.writeText(status.webhookUrl ?? "");
-                    toast.success("Webhook URL copied.");
-                  }}
-                >
-                  <Copy className="size-4" />
-                </Button>
-              </div>
-            ) : (
-              // Deliberately not a disabled box showing a loopback address:
-              // Chargebee cannot deliver to one, and showing it would send an
-              // operator to configure a webhook that silently never arrives.
-              <p className="text-xs text-muted-foreground" data-testid="billing-no-webhook-url">
-                This host has no public URL, so Chargebee cannot reach it. Set{" "}
-                <code>OPENCOMPANY_PUBLIC_URL</code> to an https address to get a webhook URL.
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="cb-hook">Webhook credential</Label>
-            <Input
-              id="cb-hook"
-              data-testid="billing-webhook-secret"
-              type="password"
-              autoComplete="off"
-              placeholder={
-                status.webhookConfigured ? "Configured — type to replace" : "username:password"
-              }
-              value={webhookSecret}
-              onChange={(e) => setWebhookSecret(e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">
-              Invent a username and password, save them here as{" "}
-              <code>username:password</code>, then set the same pair in Chargebee under{" "}
-              <em>Protect webhook URL with basic authentication</em>. Subscribe to{" "}
-              <code>payment_succeeded</code> and <code>payment_failed</code>.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* PayPal (issue #789). A form, not a "Connect PayPal" button: these
+        {/* PayPal (issue #789). A form, not a "Connect PayPal" button: these
           tools read the company's OWN wallet, so there is no third party for an
           OAuth popup to ask permission of. */}
-      <Card>
-        <CardContent className="space-y-4 pt-6">
-          <div className="flex items-center justify-between">
-            <div className="space-y-1">
-              <p className="text-sm font-medium">PayPal</p>
+        <Card>
+          <CardContent className="space-y-4 pt-6">
+            <div className="flex items-center justify-between">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">PayPal</p>
+                <p className="text-xs text-muted-foreground">
+                  Lets your teammates report the wallet balance and recent
+                  transactions. Invoice payments already route through PayPal
+                  when you set it as a payment method inside Chargebee — that
+                  needs nothing here.
+                </p>
+              </div>
+              {paypalConnected ? (
+                <Badge variant="secondary" data-testid="paypal-connected">
+                  <Check className="mr-1 size-3" /> Connected
+                </Badge>
+              ) : null}
+            </div>
+
+            {paypal && !paypal.inBuild ? (
+              <Alert data-testid="paypal-not-in-build">
+                <TriangleAlert className="size-4" />
+                <AlertDescription>
+                  This host was built without PayPal support, so these settings
+                  will be stored and have no effect.
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            {paypal?.inBuild && !paypal.granted ? (
+              <Alert data-testid="paypal-not-granted">
+                <TriangleAlert className="size-4" />
+                <AlertDescription>
+                  This company does not grant <code>paypal</code>, so wallet
+                  tools will not reach any teammate. Add <code>paypal</code> to{" "}
+                  <code>[tools].allow</code> in the company&rsquo;s manifest.
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="pp-id">Client ID</Label>
+                <Input
+                  id="pp-id"
+                  data-testid="paypal-client-id"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={
+                    paypal?.clientIdConfigured
+                      ? "Configured — type to replace"
+                      : "From developer.paypal.com → Apps & Credentials"
+                  }
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pp-secret">Client secret</Label>
+                <Input
+                  id="pp-secret"
+                  data-testid="paypal-client-secret"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={
+                    paypal?.clientSecretConfigured
+                      ? "Configured — type to replace"
+                      : "Secret"
+                  }
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="pp-env">Environment</Label>
+              <select
+                id="pp-env"
+                data-testid="paypal-environment"
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                value={environment}
+                onChange={(e) => setEnvironment(e.target.value)}
+              >
+                <option value="sandbox">
+                  Sandbox — developer.paypal.com test accounts
+                </option>
+                <option value="live">Live — real money</option>
+              </select>
               <p className="text-xs text-muted-foreground">
-                Lets your teammates report the wallet balance and recent transactions. Invoice
-                payments already route through PayPal when you set it as a payment method inside
-                Chargebee — that needs nothing here.
+                Sandbox and live credentials are not interchangeable. Picking
+                the wrong one fails with &ldquo;invalid client&rdquo;, which
+                reads like a typo.
               </p>
             </div>
-            {paypalConnected ? (
-              <Badge variant="secondary" data-testid="paypal-connected">
-                <Check className="mr-1 size-3" /> Connected
-              </Badge>
-            ) : null}
-          </div>
 
-          {paypal && !paypal.inBuild ? (
-            <Alert data-testid="paypal-not-in-build">
-              <TriangleAlert className="size-4" />
-              <AlertDescription>
-                This host was built without PayPal support, so these settings will be stored and
-                have no effect.
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          {paypal?.inBuild && !paypal.granted ? (
-            <Alert data-testid="paypal-not-granted">
-              <TriangleAlert className="size-4" />
-              <AlertDescription>
-                This company does not grant <code>paypal</code>, so wallet tools will not reach any
-                teammate. Add <code>paypal</code> to <code>[tools].allow</code> in the
-                company&rsquo;s manifest.
-              </AlertDescription>
-            </Alert>
-          ) : null}
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="pp-id">Client ID</Label>
-              <Input
-                id="pp-id"
-                data-testid="paypal-client-id"
-                type="password"
-                autoComplete="off"
-                placeholder={
-                  paypal?.clientIdConfigured
-                    ? "Configured — type to replace"
-                    : "From developer.paypal.com → Apps & Credentials"
-                }
-                value={clientId}
-                onChange={(e) => setClientId(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="pp-secret">Client secret</Label>
-              <Input
-                id="pp-secret"
-                data-testid="paypal-client-secret"
-                type="password"
-                autoComplete="off"
-                placeholder={
-                  paypal?.clientSecretConfigured ? "Configured — type to replace" : "Secret"
-                }
-                value={clientSecret}
-                onChange={(e) => setClientSecret(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="pp-env">Environment</Label>
-            <select
-              id="pp-env"
-              data-testid="paypal-environment"
-              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-              value={environment}
-              onChange={(e) => setEnvironment(e.target.value)}
-            >
-              <option value="sandbox">Sandbox — developer.paypal.com test accounts</option>
-              <option value="live">Live — real money</option>
-            </select>
-            <p className="text-xs text-muted-foreground">
-              Sandbox and live credentials are not interchangeable. Picking the wrong one fails
-              with &ldquo;invalid client&rdquo;, which reads like a typo.
-            </p>
-          </div>
-
-          <div className="flex gap-2">
-            <Button onClick={onSavePaypal} disabled={busy} data-testid="paypal-save">
-              {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-              Save
-            </Button>
-            {paypal?.clientIdConfigured || paypal?.clientSecretConfigured ? (
+            <div className="flex gap-2">
               <Button
-                variant="ghost"
-                onClick={onClearPaypal}
+                onClick={onSavePaypal}
                 disabled={busy}
-                data-testid="paypal-clear"
+                data-testid="paypal-save"
               >
-                Disconnect
+                {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                Save
               </Button>
-            ) : null}
-          </div>
-        </CardContent>
-      </Card>
+              {paypal?.clientIdConfigured || paypal?.clientSecretConfigured ? (
+                <Button
+                  variant="ghost"
+                  onClick={onClearPaypal}
+                  disabled={busy}
+                  data-testid="paypal-clear"
+                >
+                  Disconnect
+                </Button>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

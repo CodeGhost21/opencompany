@@ -883,6 +883,14 @@ pub struct HarnessPool {
     /// store wired the config is the static [`HarnessDeps::composio`], whose
     /// fingerprint never moves.
     composio_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the billing connections (Chargebee #788, PayPal #789) the
+    /// cached roster was built from, keyed by company.
+    ///
+    /// Without this axis a credential saved from the console reaches nothing
+    /// until a restart — the roster is cached, so `build_agent` is never called
+    /// again to notice it. That was live for both integrations until the tools
+    /// were observed missing from an agent whose settings page said "Connected".
+    billing_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Fingerprint of the company's bound-repository set the cached roster was
     /// built from, keyed by company (issue #245). Drives repository freshness:
     /// [`ensure`](Self::ensure) re-reads the binding index from the
@@ -972,6 +980,7 @@ impl HarnessPool {
             overlay_fingerprints: RwLock::new(HashMap::new()),
             capability_fingerprints: RwLock::new(HashMap::new()),
             composio_fingerprints: RwLock::new(HashMap::new()),
+            billing_fingerprints: RwLock::new(HashMap::new()),
             repo_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
@@ -1080,6 +1089,20 @@ impl HarnessPool {
         let composio_config = self.resolve_composio(company, deps).await;
         let composio_fp = composio::TenantComposio::fingerprint(&composio_config);
 
+        // Re-resolve + fingerprint the billing connections (#788, #789) for the
+        // same reason as Composio above: both are set from the console, so a
+        // roster that never re-reads them leaves an agent without billing tools
+        // on a company whose settings page reads "Connected".
+        let chargebee_config = self.resolve_chargebee(company, deps).await;
+        let paypal_config = self.resolve_paypal(company, deps).await;
+        let billing_fp = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            chargebee::TenantChargebee::fingerprint(&chargebee_config).hash(&mut hasher);
+            paypal::TenantPaypal::fingerprint(&paypal_config).hash(&mut hasher);
+            hasher.finish()
+        };
+
         // Re-read + fingerprint the company's bound repositories (issue #245):
         // one index document, read live, so a bind / rotate / revoke reaches the
         // agent on the next turn. Only companies that explicitly grant `repo`
@@ -1108,6 +1131,7 @@ impl HarnessPool {
             let overlay_fingerprints = self.overlay_fingerprints.read().await;
             let capability_fingerprints = self.capability_fingerprints.read().await;
             let composio_fingerprints = self.composio_fingerprints.read().await;
+            let billing_fingerprints = self.billing_fingerprints.read().await;
             let repo_fingerprints = self.repo_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
@@ -1117,6 +1141,7 @@ impl HarnessPool {
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
                 && capability_fingerprints.get(&company.id) == Some(&capability_fp)
                 && composio_fingerprints.get(&company.id) == Some(&composio_fp)
+                && billing_fingerprints.get(&company.id) == Some(&billing_fp)
                 && repo_fingerprints.get(&company.id) == Some(&repo_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
@@ -1139,6 +1164,8 @@ impl HarnessPool {
         // Install the freshly-resolved Composio config the same way, so a token
         // set/rotate/clear reaches the rebuilt agents (issue #110).
         fresh_deps.composio = composio_config;
+        fresh_deps.chargebee = chargebee_config;
+        fresh_deps.paypal = paypal_config;
         // And the freshly-read bindings (issue #245), so a repository bound or
         // revoked in the console is what the rebuilt agents' tools resolve
         // against — including the descriptions that name what is bound.
@@ -1194,6 +1221,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), composio_fp);
+        self.billing_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), billing_fp);
         self.repo_fingerprints
             .write()
             .await
@@ -1255,6 +1286,38 @@ impl HarnessPool {
     /// Re-deriving the token source every turn costs nothing — building it reads
     /// no file — and the roster that keeps it holds one instance for its whole
     /// lifetime, so its rotation cache still works.
+    /// Re-reads the company's Chargebee connection from the secret store, so a
+    /// key saved or rotated in Settings → Billing reaches the agent on its next
+    /// turn rather than at the next restart (issue #788).
+    async fn resolve_chargebee(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<chargebee::TenantChargebee> {
+        if !crate::company::grants_chargebee_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        match &deps.secrets {
+            Some(secrets) => chargebee::TenantChargebee::resolve(secrets, &company.id).await,
+            None => deps.chargebee.clone(),
+        }
+    }
+
+    /// The PayPal equivalent (issue #789), for the same reason.
+    async fn resolve_paypal(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<paypal::TenantPaypal> {
+        if !crate::company::grants_paypal_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        match &deps.secrets {
+            Some(secrets) => paypal::TenantPaypal::resolve(secrets, &company.id).await,
+            None => deps.paypal.clone(),
+        }
+    }
+
     async fn resolve_composio(
         &self,
         company: &CompanyRecord,

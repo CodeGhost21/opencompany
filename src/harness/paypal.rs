@@ -65,6 +65,26 @@ impl TenantPaypal {
     pub fn environment(&self) -> PaypalEnvironment {
         self.config.environment
     }
+
+    /// A stable hash of the connection, for the roster staleness check.
+    ///
+    /// Covers the environment as well as both halves of the credential: moving
+    /// a company from sandbox to live with the same keys must rebuild, or its
+    /// agents keep reading the wrong world's balance until a restart.
+    pub fn fingerprint(config: &Option<TenantPaypal>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        match config {
+            None => 0u8.hash(&mut hasher),
+            Some(c) => {
+                1u8.hash(&mut hasher);
+                c.config.client_id.hash(&mut hasher);
+                c.config.client_secret.hash(&mut hasher);
+                c.config.environment.as_str().hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
 }
 
 #[cfg(feature = "paypal")]

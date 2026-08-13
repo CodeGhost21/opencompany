@@ -70,6 +70,25 @@ impl TenantChargebee {
     pub fn site(&self) -> &str {
         &self.config.site
     }
+
+    /// A stable hash of the connection, for the roster staleness check.
+    ///
+    /// Covers the site AND the key, so rotating a key with the site unchanged
+    /// still rebuilds the roster — otherwise a rotated credential would keep
+    /// authenticating with the old one until a restart.
+    pub fn fingerprint(config: &Option<TenantChargebee>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        match config {
+            None => 0u8.hash(&mut hasher),
+            Some(c) => {
+                1u8.hash(&mut hasher);
+                c.config.site.hash(&mut hasher);
+                c.config.api_key.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
 }
 
 #[cfg(feature = "chargebee")]
