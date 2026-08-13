@@ -134,7 +134,12 @@ impl std::fmt::Debug for OperatorChannel {
 /// assert is "how many times did the report reach the channel", and a refusal
 /// answers a different question. This carries an ordinary channel id so it
 /// clears the refusal, and keeps the buffer so the counting still works.
+// Every consumer of this lives behind `openhuman`/`tinycortex`, so a
+// default-feature build compiles it and constructs it nowhere. That is a
+// feature-configuration fact, not dead code: the runner and delivery suites
+// that use it are simply not selected in that lane (issue #770).
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Clone, Default)]
 pub(crate) struct RecordingChannel {
     id: String,
@@ -142,6 +147,7 @@ pub(crate) struct RecordingChannel {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 impl RecordingChannel {
     pub(crate) fn new(id: &str) -> Self {
         Self {
@@ -196,5 +202,60 @@ mod test {
             .unwrap();
         assert_eq!(channel.sent().len(), 1);
         assert_eq!(channel.sent()[0].text, "hello");
+    }
+
+    /// An [`EventLog`] whose `append` always errors, so the desk channel's own
+    /// failure path is reachable.
+    struct FailingEventLog;
+
+    #[async_trait]
+    impl EventLog for FailingEventLog {
+        async fn append(&self, _company: &CompanyId, _event: CompanyEvent) -> Result<EventSeq> {
+            Err(crate::OpenCompanyError::Config(
+                "event journal is unwritable".into(),
+            ))
+        }
+
+        async fn read_from(
+            &self,
+            _company: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> Result<Vec<crate::ports::types::StoredEvent>> {
+            Ok(Vec::new())
+        }
+
+        fn subscribe(
+            &self,
+            _company: &CompanyId,
+        ) -> BoxStream<'static, crate::ports::types::StoredEvent> {
+            Box::pin(stream::empty())
+        }
+    }
+
+    /// A desk send is a durable write, so a journal that refuses it is a failed
+    /// delivery — not a silent one. `send` propagates rather than logging and
+    /// answering `Ok`, and this pins that: swallowing the error would leave
+    /// delivery reporting `Sent` for a report that reached nobody, which is the
+    /// exact defect the desk channel exists to end (issue #835).
+    #[tokio::test]
+    async fn a_desk_send_fails_when_the_journal_refuses_it() {
+        let channel = DeskChannel::new(
+            CompanyId::new("acme"),
+            "engineering".to_string(),
+            Arc::new(FailingEventLog),
+        );
+        assert_eq!(channel.channel_id(), "engineering");
+        let result = channel
+            .send(OutboundMessage {
+                message_id: None,
+                task_id: None,
+                channel: "engineering".into(),
+                text: "the weekly digest".into(),
+                steps: Vec::new(),
+                reply_to: None,
+            })
+            .await;
+        assert!(result.is_err(), "an unwritable journal must fail the send");
     }
 }

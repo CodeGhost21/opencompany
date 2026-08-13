@@ -1430,7 +1430,7 @@ to = "done"
 
     // --- Output destinations, end to end (issue #170) ------------------------
 
-    /// A graph whose terminal `output` node routes its report to the operator
+    /// A graph whose terminal `output` node routes its report to a desk
     /// channel. `trigger → output` only, so it needs no roster.
     const REPORT_TO_DESK: &str = r#"
 id = "report"

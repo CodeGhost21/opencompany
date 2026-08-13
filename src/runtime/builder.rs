@@ -1605,7 +1605,13 @@ impl RuntimeBuilder {
         // threads. Resolve both manifest and operator-created candidates
         // through CompanyRecord so this wiring cannot drift from the desk
         // existence rules used by the server and the harness.
-        let desk_record = existing.clone().unwrap_or_else(|| CompanyRecord {
+        // Built fresh rather than cloned from `existing`: the persisted record
+        // carries the manifest of a PREVIOUS boot, so cloning it would wire
+        // desk channels from a stale `[[group_chat]]` list — a desk added to
+        // `company.toml` would never become a delivery destination, and one
+        // removed there would linger as one. The overlay halves are already
+        // lifted out of `existing` above, so this loses nothing.
+        let desk_record = CompanyRecord {
             id: id.clone(),
             manifest: self.manifest.clone(),
             ledger: Vec::new(),
@@ -1619,7 +1625,7 @@ impl RuntimeBuilder {
             overlay_policy: None,
             disabled_workflows: Vec::new(),
             template_provenance: None,
-        });
+        };
         let mut desk_ids = Vec::new();
         let candidates = desk_record
             .manifest
@@ -4503,6 +4509,76 @@ mod test {
             .collect();
         assert!(ids.contains(&"engineering"));
         assert!(ids.contains(&"research"));
+    }
+
+    /// A desk added to `company.toml` since the last boot is wired on this one.
+    ///
+    /// The persisted record carries the manifest of a PREVIOUS boot, so reusing
+    /// it for desk resolution silently wires yesterday's `[[group_chat]]` list:
+    /// a desk the operator has just added would never become a delivery
+    /// destination, and the only symptom would be a workflow refusing a
+    /// destination the manifest plainly declares. The overlay halves still come
+    /// from the persisted record, which the `research` assertion pins.
+    #[tokio::test]
+    async fn a_desk_added_to_the_manifest_since_the_last_boot_is_wired() {
+        use crate::ports::CompanyStore;
+        use crate::store::FsCompanyStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let common = r#"
+            [company]
+            name = "Acme"
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            [[group_chat]]
+            id = "engineering"
+            name = "Engineering"
+            members = ["ceo"]
+        "#;
+        let persisted = parse(common);
+        let booting = parse(&format!(
+            "{common}\n[[group_chat]]\nid = \"growth\"\nname = \"Growth\"\nmembers = [\"ceo\"]\n"
+        ));
+        let id = CompanyId::new("acme");
+        FsCompanyStore::new(dir.path())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: persisted,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: vec![crate::ports::types::OverlayDesk {
+                    id: "research".to_string(),
+                    name: "Research".to_string(),
+                    description: None,
+                    members: vec!["ceo".to_string()],
+                }],
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+
+        let runtime = RuntimeBuilder::new(dir.path(), booting)
+            .with_id(id)
+            .build()
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = runtime
+            .channels
+            .iter()
+            .map(|channel| channel.channel_id())
+            .collect();
+        assert!(ids.contains(&"growth"), "{ids:?}");
+        assert!(ids.contains(&"engineering"), "{ids:?}");
+        assert!(ids.contains(&"research"), "{ids:?}");
     }
 
     #[cfg(feature = "tinyplace")]

@@ -1466,6 +1466,12 @@ allow = [{allow}]
         deps: WorkflowDeliveryDeps,
         mail: RecordingMailSender,
         channel: OperatorChannel,
+        /// A durable-looking channel, present only when
+        /// [`with_recording_channel`](Harness::with_recording_channel) wired
+        /// one. Needed by any case whose subject is what happens AFTER a send
+        /// succeeds: `operator` is refused before the send, so it can no longer
+        /// stand in for a channel that works.
+        recording: Option<crate::runtime::channel::RecordingChannel>,
         inbox: Arc<FsInboxStore>,
         users: Arc<FsOps>,
         company: CompanyId,
@@ -1511,6 +1517,7 @@ allow = [{allow}]
                 },
                 mail,
                 channel,
+                recording: None,
                 inbox,
                 users,
                 company: CompanyId::new("acme"),
@@ -1671,6 +1678,26 @@ admins = [{list}]
         fn with_failing_events(mut self) -> Self {
             self.deps.events = Arc::new(FailingEventLog);
             self
+        }
+
+        /// Wires a channel that accepts a send, under an ordinary channel id.
+        ///
+        /// The operator channel used to serve this purpose, but delivery now
+        /// refuses it outright, which lands the caller in the refusal branch
+        /// before the behaviour under test is reached. Anything that asserts
+        /// what follows a successful send needs this instead.
+        fn with_recording_channel(mut self, id: &str) -> Self {
+            let channel = crate::runtime::channel::RecordingChannel::new(id);
+            self.deps.channels.push(Arc::new(channel.clone()));
+            self.recording = Some(channel);
+            self
+        }
+
+        /// The channel [`with_recording_channel`](Harness::with_recording_channel) wired.
+        fn recording(&self) -> &crate::runtime::channel::RecordingChannel {
+            self.recording
+                .as_ref()
+                .expect("with_recording_channel was not called")
         }
     }
 
@@ -3262,12 +3289,17 @@ to = "done"
     #[tokio::test]
     async fn a_journal_failure_does_not_fail_a_delivery() {
         let dir = tempfile::tempdir().unwrap();
-        let h = Harness::new(dir.path(), false, true).with_failing_events();
+        // A channel that accepts the send, so the journal write is what this
+        // case actually reaches. Pointed at `operator` it would fail on the
+        // refusal instead and pass for the wrong reason.
+        let h = Harness::new(dir.path(), false, true)
+            .with_recording_channel("engineering")
+            .with_failing_events();
 
         let reports = deliver_outputs(
             Some(&h.deps),
             &record(&[]),
-            &graph("channel", Some("operator")),
+            &graph("channel", Some("engineering")),
             "run-1",
             &reached_output(),
             &[],
@@ -3275,8 +3307,12 @@ to = "done"
         .await;
 
         assert_eq!(reports.len(), 1, "{reports:?}");
-        assert_eq!(reports[0].status, DeliveryStatus::Failed, "{reports:?}");
-        assert!(h.channel.sent().is_empty());
+        assert_eq!(reports[0].status, DeliveryStatus::Sent, "{reports:?}");
+        assert_eq!(
+            h.recording().sent().len(),
+            1,
+            "the report reached the channel despite the journal"
+        );
     }
 
     /// Issue #542: the dry router runs the routing half only. A reached output
