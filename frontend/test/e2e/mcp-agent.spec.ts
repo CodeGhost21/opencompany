@@ -124,7 +124,12 @@ test("an agent calls a tool on a registered MCP server and shows the result", as
       { timeout: 90_000 },
     );
     await page.getByPlaceholder(/^Message /).fill(directive);
-    await page.getByRole("button", { name: "Send" }).click();
+    // `exact`, because the composer's button is labelled exactly "Send" while
+    // the sidebar's thread previews take their accessible names from message
+    // text — so a loose match resolves to two elements the moment any message
+    // in the transcript mentions sending, and dies on a strict-mode violation
+    // in a spec that has nothing to do with whatever wrote that message.
+    await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
     expect((await posted).ok(), "the chat POST did not succeed").toBeTruthy();
 

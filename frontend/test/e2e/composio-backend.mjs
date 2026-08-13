@@ -150,9 +150,9 @@ const server = createServer(async (req, res) => {
     executes.push(body);
     // The shape the harness parses: a provider result plus the cost. The
     // account it *would* have acted as is echoed back so a failure reads as
-    // "sent ca_ops, expected ca_billing" rather than as an empty diff.
+    // "actedAs ca_ops, expected ca_billing" rather than as an empty diff.
     return ok(res, {
-      data: { sentAs: body.connectionId ?? null, tool: body.tool },
+      data: { actedAs: body.connectionId ?? null, tool: body.tool },
       successful: true,
       error: null,
       costUsd: 0,

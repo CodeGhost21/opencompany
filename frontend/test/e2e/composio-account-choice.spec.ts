@@ -113,16 +113,33 @@ async function clearChoice(page: Page): Promise<void> {
  * provider grid, and they would be asserting about a page this file configured.
  * The `PW_COMPOSIO` lane is new; the specs it runs alongside are not.
  */
-test.afterAll(async ({ playwright }) => {
+test.afterAll(async ({ playwright }, testInfo) => {
+  // `testInfo.project.use`, NOT the environment. `playwright.config.ts` DERIVES
+  // both of these — `baseURL` defaults when `PW_BASE_URL` is unset, and
+  // `storageState` defaults to `target/e2e/storage-state.json` whenever the run
+  // manages its own host — so reading the variables gets the unset case wrong
+  // in exactly the configuration CI uses. That is not hypothetical: this hook
+  // built an ANONYMOUS context on the first CI run, its writes were refused
+  // 401, the token stayed set, and `oauth-onboarding-resume.spec.ts` failed two
+  // files later on a Slack tile this file had connected.
   const request = await playwright.request.newContext({
-    baseURL: process.env.PW_BASE_URL || "http://127.0.0.1:8080",
-    storageState: process.env.PW_STORAGE_STATE,
+    baseURL: testInfo.project.use.baseURL,
+    storageState: testInfo.project.use.storageState as string | undefined,
   });
   try {
     for (const id of ["ca_ops", "ca_billing"]) {
       await request.delete(`/api/v1/company/composio/connections/${id}/default`);
     }
-    await request.put("/api/v1/company/composio/token", { data: { token: "" } });
+    const cleared = await request.put("/api/v1/company/composio/token", {
+      data: { token: "" },
+    });
+    // Asserted, not fired and forgotten. A silently-refused cleanup is what
+    // broke the run above, and it broke it somewhere else — two files later, in
+    // a spec with no idea this one exists. A failure here names the right file.
+    expect(
+      cleared.ok(),
+      `clearing the composio token failed: ${cleared.status()} ${await cleared.text()}`,
+    ).toBeTruthy();
   } finally {
     await request.dispose();
   }
@@ -236,6 +253,12 @@ test.describe("the agent acts as the chosen account", () => {
       .first()
       .click();
 
+    // A SEND, deliberately. `composio_execute` is parked for approval on the
+    // strength of the slug — a fetch runs straight through — and the send is
+    // both the case #820 is written around ("send from billing@, not ops@")
+    // and the one that exercises the gate: park → operator approves → the
+    // agent re-issues → the pinned account reaches the wire. A fetch here
+    // would pass while quietly covering none of that.
     const directive = `__MOCK_TOOL_CALL__ ${JSON.stringify({
       name: "composio_execute",
       arguments: {
@@ -249,10 +272,9 @@ test.describe("the agent acts as the chosen account", () => {
       { timeout: 90_000 },
     );
     await page.getByPlaceholder(/^Message /).fill(directive);
-    // `exact`, because the sidebar's thread preview takes its accessible name
-    // from the last message — and this spec's directive contains the word
-    // GMAIL_SEND_EMAIL, so a loose match resolves to two buttons on the second
-    // turn and to one on the first.
+    // `exact`. The composer's button is labelled exactly "Send"; the sidebar's
+    // thread preview takes its accessible name from the last message, so a
+    // loose match resolves to both as soon as any message mentions sending.
     await page.getByRole("button", { name: "Send", exact: true }).click();
     expect((await posted).ok(), "the chat POST did not succeed").toBeTruthy();
 

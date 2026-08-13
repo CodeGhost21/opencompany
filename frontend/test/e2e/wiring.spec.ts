@@ -53,7 +53,12 @@ test("operator console renders a mocked backend reply end to end", async ({
   // Send a unique prompt through the operator chat input.
   const prompt = `e2e wiring ping ${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(prompt);
-  await page.getByRole("button", { name: "Send" }).click();
+  // `exact`, because the composer's button is labelled exactly "Send" while the
+  // sidebar's thread previews take their accessible names from message text — so
+  // a loose match resolves to two elements the moment any message in the
+  // transcript mentions sending, and dies on a strict-mode violation in a spec
+  // that has nothing to do with whatever wrote that message.
+  await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // The mocked backend reply must render as a company bubble, and no send
   //    error may appear.
