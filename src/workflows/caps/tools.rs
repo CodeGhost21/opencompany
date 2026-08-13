@@ -306,6 +306,19 @@ impl ToolInvoker for WorkflowToolInvoker {
     /// tools are workspace/company scoped, not per-external-account). Threading a
     /// real connection is a documented follow-on.
     async fn invoke(&self, slug: &str, args: Value, _conn: Option<&str>) -> TfResult<Value> {
+        // Issue #846: a call this lineage already made, replayed rather than
+        // repeated. Answered from the arguments the host wrote onto the node at
+        // translation time; nothing is looked up and nothing executes.
+        //
+        // Deliberately ABOVE the grant check, and that is not a hole. The check
+        // exists to stop a call reaching a capability the company did not grant,
+        // and this arm reaches no capability at all — there is no tool, no
+        // namespace and no network. Below the check it would have to be granted
+        // a namespace of its own, which would be a real widening in exchange for
+        // nothing.
+        if let Some(result) = super::super::replay::replayed_result(slug, &args) {
+            return Ok(result);
+        }
         // FAIL-CLOSED grant check FIRST, before any lookup or execution.
         let Some(namespace) = toolbelt::namespace_of(slug) else {
             return Err(EngineError::Capability(format!(
@@ -501,6 +514,57 @@ mod tests {
         assert!(
             matches!(looked_up, Err(EngineError::Capability(ref m)) if m.contains("not available")),
             "{looked_up:?}"
+        );
+    }
+
+    /// The replay arm answers a sentinel invocation on an invoker that grants
+    /// **nothing**, and reaches no capability doing it (issue #846).
+    ///
+    /// Both halves matter and neither is provable without the other. Answering
+    /// on a zero-grant invoker is what proves the arm sits ABOVE the fail-closed
+    /// grant check — if it sat below, a continuation would have to be granted a
+    /// namespace for a call it does not make. And the same invoker refusing a
+    /// real slug in the same test is what proves the arm is a narrow sentinel
+    /// rather than a hole: nothing else got easier to invoke.
+    #[tokio::test]
+    async fn the_replay_sentinel_is_answered_without_a_grant_and_reaches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let security = Arc::new(toolbelt::exec_security(
+            dir.path(),
+            crate::harness::policy::PolicyMode::Supervised,
+        ));
+        let invoker = WorkflowToolInvoker::new(
+            security,
+            dir.path(),
+            audit.path(),
+            Vec::new(),
+            // No grants at all: every real slug is refused fail-closed.
+            Vec::new(),
+            &CapabilityFilter::AllowAll,
+            None,
+            test_metering(),
+        );
+
+        let recorded = json!({ "status": 201, "id": "abc" });
+        let encoded = serde_json::to_string(&recorded).unwrap();
+        let replayed = invoker
+            .invoke(
+                crate::workflows::replay::REPLAY_SLUG,
+                json!({ crate::workflows::replay::REPLAY_RESULT_KEY: encoded }),
+                None,
+            )
+            .await
+            .expect("the sentinel is answered from its own arguments");
+        assert_eq!(replayed, recorded);
+
+        // The control: the same invoker still refuses an ungranted real tool.
+        let refused = invoker
+            .invoke("shell", json!({ "command": "id" }), None)
+            .await;
+        assert!(
+            matches!(refused, Err(EngineError::Capability(ref m)) if m.contains("not granted")),
+            "{refused:?}"
         );
     }
 

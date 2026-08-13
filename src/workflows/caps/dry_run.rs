@@ -100,6 +100,19 @@ impl DryRunTools {
 #[async_trait]
 impl ToolInvoker for DryRunTools {
     async fn invoke(&self, slug: &str, args: Value, _conn: Option<&str>) -> TfResult<Value> {
+        // Issue #846: the replay arm, mirrored from the live invoker.
+        //
+        // A dry run cannot reach here through the host's own path — dry runs are
+        // never continuations, park no gate and stub every effect — so this is
+        // not load-bearing today. It is here because the alternative is worse
+        // than redundant: without it, a graph carrying a replay slug would fall
+        // through to `namespace_of` and fail the node with "not a wired workflow
+        // tool", which is a dry run reporting a routing failure that the real run
+        // does not have. The two invokers agreeing about every slug is the
+        // property a test run's answer is worth anything for.
+        if let Some(result) = super::super::replay::replayed_result(slug, &args) {
+            return Ok(result);
+        }
         // FAIL-CLOSED grant check FIRST, identical to the live invoker
         // (`WorkflowToolInvoker::invoke`): a dry run must refuse an ungranted
         // tool exactly as a real one does, because that refusal is part of the

@@ -33,6 +33,25 @@ export function pendingCount(deliveries: DeliveryReport[]): number {
   return deliveries.filter((d) => d.status === PENDING_STATUS).length;
 }
 
+/**
+ * Everything about this run that is waiting on a person: the gates it paused at
+ * **and** the reports it parked (issue #846).
+ *
+ * The two were never read together, and that is what let a run report success
+ * while a human had not answered it. `pendingCount` sees only `deliveries`, so a
+ * run that paused at a `requires_approval` node and therefore never reached an
+ * `output` node at all — the exact shape of a gated workflow — has an empty
+ * `deliveries` array and scored as a clean run.
+ *
+ * `pendingApprovals` has been on the wire since #395 and the history row has
+ * badged its count since; nothing read it for the run's *state*. This is that
+ * read, in one place, so the tone, the chip and the row cannot disagree about
+ * whether somebody is being waited on.
+ */
+export function awaitingCount(run: WorkflowRunOutcome): number {
+  return (run.pendingApprovals?.length ?? 0) + pendingCount(run.deliveries);
+}
+
 /** A compact "N minutes ago" for a run timestamp — enough to tell last night's
  * scheduled run from the one just clicked, without a date library. */
 export function relativeTime(atMillis: number): string {
@@ -77,8 +96,12 @@ export function runTone(run: WorkflowRunOutcome): { dot: string; label: string }
   // Blocked, not running. This was the running colour, which said "the machine
   // is working on it" about the one state that means the opposite: it is
   // parked until a human decides. Amber is the colour that gets looked at.
-  if (pendingCount(run.deliveries) > 0)
-    return { dot: "bg-status-blocked", label: "awaiting approval" };
+  //
+  // Issue #846: `awaitingCount`, not `pendingCount`. A run that paused at a gate
+  // parked no report — it never reached an output node — so the delivery-only
+  // read scored it green and the operator was told a run that did none of its
+  // work had succeeded.
+  if (awaitingCount(run) > 0) return { dot: "bg-status-blocked", label: "awaiting approval" };
   return { dot: "bg-status-done", label: "ok" };
 }
 

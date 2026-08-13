@@ -139,6 +139,15 @@ pub const PAYLOAD_INPUT: &str = "input";
 /// The payload key holding this lineage's delivery ledger (issue #438) — the
 /// reports a continuation must NOT send again.
 pub const PAYLOAD_DELIVERED: &str = "delivered";
+/// The payload key holding this lineage's **outward-call** ledger (issue #846)
+/// — the `tool_call` nodes that already reached a counterparty, and the result
+/// each returned, so a continuation replays them instead of calling again.
+///
+/// The `output`-node sibling of [`PAYLOAD_DELIVERED`], for the other half of
+/// #438's exposure: #496 guarded a report a *delivery* node routed, and nothing
+/// guarded a `send` / `publish` / `repo_publish` the graph made as a node of its
+/// own. See [`PerformedCall`].
+pub const PAYLOAD_PERFORMED: &str = "performed";
 /// The payload key holding the plain-prose statement of what approving costs.
 pub const PAYLOAD_NOTE: &str = "note";
 /// The payload key holding the verbatim output of the gate's upstream nodes —
@@ -155,24 +164,45 @@ pub const PAYLOAD_TOOL: &str = "tool";
 /// (issue #460) — the same sentence the agent path puts on its card. Absent for
 /// the same reason as [`PAYLOAD_TOOL`].
 pub const PAYLOAD_REASON: &str = "reason";
-/// The payload key holding what a policy-gated call would reach — `"POST
-/// api.example.com"` for an `http_request` node (issue #614). Absent when the
+/// The payload key holding what a gated call would reach — `"POST
+/// api.example.com"` for an `http_request` node (issue #614), the host for a
+/// `tool_call` node whose arguments name a URL (issue #846). Absent when the
 /// node's call has no destination worth naming, or when the URL is still an
 /// unresolved `=`-expression at gate time.
 pub const PAYLOAD_TARGET: &str = "target";
-
-/// What a policy-gated node's card says about the call being decided
-/// (issues #460, #614).
+/// The payload key holding the gated node's **authored arguments** (issue #846)
+/// — the `url` a `web_fetch` will fetch, the recipient a `send` will reach.
 ///
-/// Grouped rather than passed as three more arguments to [`gate_effect`]: they
-/// are written together or not at all, and an authored `requires_approval` gate
-/// passes `None` for the lot — no particular call is being decided there.
+/// This is what makes a workflow card decidable in the way #372/#375 made a
+/// chat card decidable: the operator sees the call, not a node id. It is
+/// credential-redacted host-side by the same projection that redacts a tool
+/// call's payload on the chat path — see
+/// [`display_payload`](crate::runtime::approval_display) — so this key adds no
+/// new redaction rule and cannot bypass the existing one.
+///
+/// Absent when the node makes no classifiable call (an authored gate on a
+/// `transform`, say), which the console must render as "no arguments" rather
+/// than as an empty object.
+pub const PAYLOAD_ARGS: &str = "args";
+
+/// What a gated node's card says about the call being decided (issues #460,
+/// #614, #846).
+///
+/// Grouped rather than passed as four more arguments to [`gate_effect`]: they
+/// describe one thing — the call — and a node whose call the host cannot
+/// classify at all passes `None` for the lot.
 #[derive(Debug, Clone, Copy)]
 pub struct GateCall<'a> {
     /// The tool the node would run.
     pub tool: &'a str,
-    /// The policy's own words for why it stopped.
-    pub reason: &'a str,
+    /// The policy's own words for why it stopped — `None` on an authored
+    /// `requires_approval` gate, where nobody wrote a reason because nobody was
+    /// asked to. The call is still named (issue #846).
+    pub reason: Option<&'a str>,
+    /// The node's authored arguments, so the operator decides about a call
+    /// rather than about a node id (issue #846). Redacted downstream, at the
+    /// same projection that redacts a chat card's payload.
+    pub args: Option<&'a Value>,
     /// Method and host, when knowable. Never the path or query — see
     /// `GatedCall::target` in `crate::workflows::gate` for why.
     pub target: Option<&'a str>,
@@ -188,6 +218,17 @@ pub struct GateCall<'a> {
 /// every continuation gate a "new" decision and stack a duplicate card.
 pub const CONTINUATION_DELIVERED_KEY: &str = "__opencompany_delivered";
 
+/// The reserved trigger-input key the **outward-call** ledger rides into a
+/// continuation run under (issue #846).
+///
+/// Reserved on exactly the terms [`CONTINUATION_DELIVERED_KEY`] is: host-written,
+/// host-read, never authored and never seen by the engine as anything but
+/// opaque trigger data. Stripped before two parked gates are compared
+/// ([`is_same_gate`]) for the same reason its sibling is — it describes what has
+/// already happened, not what is being decided, so counting it would make every
+/// continuation gate read as a new decision and stack a duplicate card.
+pub const CONTINUATION_PERFORMED_KEY: &str = "__opencompany_performed";
+
 /// What approving a workflow gate actually does, in the operator's own terms.
 ///
 /// This rides the card as [`PAYLOAD_NOTE`] rather than living only in a design
@@ -197,7 +238,8 @@ pub const CONTINUATION_DELIVERED_KEY: &str = "__opencompany_delivered";
 /// Approvals card.
 pub const CONTINUATION_NOTE: &str = "Approving this re-runs the whole workflow from the start — every step before this gate runs \
      again, and any agent steps spend tokens again. Reports this run already delivered will not be \
-     sent a second time.";
+     sent a second time, and a step that already sent or published something replays what it \
+     returned instead of doing it again.";
 
 /// One `output` node whose report a run in this lineage has already delivered.
 ///
@@ -212,6 +254,74 @@ pub struct DeliveredReport {
     pub node: String,
     /// The destination kind it was delivered to (`owner` / `email` / `channel`).
     pub kind: String,
+}
+
+/// One `tool_call` node whose call **left the building** in a prior run of this
+/// lineage, together with the result it returned (issue #846).
+///
+/// # Why this exists beside [`DeliveredReport`] rather than inside it
+///
+/// #438's exposure is "approving re-runs the graph, so something that already
+/// left the building leaves it again". #496 closed that for the half the host
+/// performs itself — an `output` node's report, routed by `deliver_outputs` —
+/// because that is the half the host can skip by simply not calling out. A
+/// `tool_call` node's send is performed by the **engine**, through a capability,
+/// and the host cannot decline it after the fact: it has to arrange, before the
+/// run starts, for the call not to be made. So the identity is the same (the
+/// node) but the mechanism is not, and folding the two ledgers into one type
+/// would put a `result` field on a record whose whole point is that there is
+/// nothing to replay.
+///
+/// `result` is the **verbatim capability return** — the value the engine wrapped
+/// in its `{ json, text, raw }` envelope — so replaying it reconstructs the
+/// node's output byte-for-byte rather than approximating it. A node whose
+/// recorded result would have to be truncated to fit the card is deliberately
+/// **not** recorded: see `outward_calls_performed` in `crate::workflows::replay`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PerformedCall {
+    /// The `tool_call` node that made the call.
+    pub node: String,
+    /// The toolbelt slug it invoked, for the log line and the operator's card.
+    pub tool: String,
+    /// The verbatim value the capability returned.
+    pub result: Value,
+}
+
+/// The outward calls this lineage has already made, read off a trigger input.
+///
+/// Tolerant on exactly [`delivered_in_input`]'s terms, and for the same reason:
+/// a missing key, a non-array or a malformed row yields "nothing known to have
+/// been performed", which is the pre-#846 behaviour (call it). The failure mode
+/// of being wrong in the other direction is a node that silently never runs.
+pub fn performed_in_input(input: &Value) -> Vec<PerformedCall> {
+    input
+        .get(CONTINUATION_PERFORMED_KEY)
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| serde_json::from_value(row.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The outward-call ledger a gate parked on this run should carry: what this run
+/// performed, unioned with what its own trigger input already listed.
+///
+/// The union is what makes a **two-gate** graph correct, exactly as
+/// [`delivery_ledger`]'s is: a continuation that replayed a send rather than
+/// making it has performed nothing itself, so a ledger built from this run alone
+/// would be empty at the second gate and the third run would send for real.
+/// First entry per node wins — the earliest run in the lineage is the one that
+/// actually reached the counterparty, and its result is the one to replay.
+fn performed_ledger(input: &Value, performed: &[PerformedCall]) -> Vec<PerformedCall> {
+    let mut ledger = performed_in_input(input);
+    for call in performed {
+        if !ledger.iter().any(|prior| prior.node == call.node) {
+            ledger.push(call.clone());
+        }
+    }
+    ledger
 }
 
 /// The reports this lineage has already delivered, read off a trigger input.
@@ -291,18 +401,25 @@ fn delivery_ledger(input: &Value, deliveries: &[DeliveryReport]) -> Vec<Delivere
 /// reason the input is copied in: a card that needs a side table is a card that
 /// stops working after a restart.
 ///
-/// `call` is `Some(..)` when the company's `ApprovalPolicy` is what stopped this
-/// node (issues #460, #614), and `None` for an authored `requires_approval`
-/// gate, where no particular call is being decided. It is
-/// deliberately outside the dedupe identity ([`is_same_gate`]): it describes the
-/// *same* decision in more words, so two cards that differ only here are still
-/// one question.
+/// `call` describes the call the gate is stopping — which tool, with which
+/// arguments, reaching where. It is `Some(..)` for **every** node whose call the
+/// host can classify, whoever raised the gate: the company's `ApprovalPolicy`
+/// (issues #460, #614) or the author's own `requires_approval` (issue #846).
+/// Only [`GateCall::reason`] distinguishes them, because only a policy has words
+/// for why it stopped. It is deliberately outside the dedupe identity
+/// ([`is_same_gate`]): it describes the *same* decision in more words, so two
+/// cards that differ only here are still one question.
+///
+/// `performed` is what this lineage has already sent (issue #846), folded into
+/// the card's ledger on exactly the terms `deliveries` is: a card that needs a
+/// side table is a card that stops working after a restart.
 pub fn gate_effect(
     workflow_id: &str,
     node_id: &str,
     input: &Value,
     run_id: &str,
     deliveries: &[DeliveryReport],
+    performed: &[PerformedCall],
     call: Option<GateCall<'_>>,
 ) -> Effect {
     let mut payload = Map::new();
@@ -317,15 +434,39 @@ pub fn gate_effect(
         PAYLOAD_DELIVERED.to_string(),
         json!(delivery_ledger(input, deliveries)),
     );
+    // Issue #846: what must NOT be *called* again when this card is approved.
+    // Written unconditionally, including when empty, so a reader can tell a host
+    // that considered the question and found nothing from one that never asked.
+    payload.insert(
+        PAYLOAD_PERFORMED.to_string(),
+        json!(performed_ledger(input, performed)),
+    );
     // What approving costs, in the operator's own terms.
     payload.insert(PAYLOAD_NOTE.to_string(), json!(CONTINUATION_NOTE));
     // Issue #460: which call the policy stopped, and why. The keys are ABSENT
     // rather than null on an authored gate — a card that names no tool is a
     // different thing from one whose tool could not be determined, and a
     // console reading `payload.tool` should be able to tell them apart.
+    // Issue #460: which call was stopped, and — when a policy stopped it — why.
+    // The keys are ABSENT rather than null on a node whose call cannot be
+    // classified: a card that names no tool is a different thing from one whose
+    // tool could not be determined, and a console reading `payload.tool` should
+    // be able to tell them apart.
+    //
+    // Issue #846: `reason` remains policy-only while `tool` / `args` / `target`
+    // are written for an **authored** gate too. That asymmetry is the point. An
+    // author's `requires_approval` has no reason to state — they asked for a
+    // human, and the console says so in its own words — but the call itself is
+    // just as knowable, and a card that withholds it because *nobody wrote a
+    // sentence about it* is the bug this closes.
     if let Some(call) = call {
         payload.insert(PAYLOAD_TOOL.to_string(), json!(call.tool));
-        payload.insert(PAYLOAD_REASON.to_string(), json!(call.reason));
+        if let Some(reason) = call.reason {
+            payload.insert(PAYLOAD_REASON.to_string(), json!(reason));
+        }
+        if let Some(args) = call.args {
+            payload.insert(PAYLOAD_ARGS.to_string(), args.clone());
+        }
         if let Some(target) = call.target {
             payload.insert(PAYLOAD_TARGET.to_string(), json!(target));
         }
@@ -440,11 +581,16 @@ fn decided_input(effect: &Effect) -> Option<Value> {
         .map(without_ledger)
 }
 
-/// `input` with the reserved delivery-ledger key removed. A non-object input is
-/// returned as-is — there is nothing to strip.
+/// `input` with the reserved host-threaded ledger keys removed. A non-object
+/// input is returned as-is — there is nothing to strip.
+///
+/// Both keys, and neither is optional: a continuation's input differs from the
+/// paused run's by exactly these, so letting either difference count would make
+/// every continuation gate a "new" decision and stack a duplicate card.
 fn without_ledger(mut input: Value) -> Value {
     if let Value::Object(map) = &mut input {
         map.remove(CONTINUATION_DELIVERED_KEY);
+        map.remove(CONTINUATION_PERFORMED_KEY);
     }
     input
 }
@@ -554,7 +700,52 @@ pub(crate) fn continuation_input(effect: &Effect) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(with_delivered(with_approval(input, node_id), &delivered))
+    // Issue #846: the outward-call ledger travels on the same terms and for the
+    // same reason. An input that carries the approval but not this resumes and
+    // **re-sends**, which is #438 on the node the host does not route itself.
+    let performed: Vec<PerformedCall> = effect
+        .payload
+        .get(PAYLOAD_PERFORMED)
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| serde_json::from_value(row.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(with_performed(
+        with_delivered(with_approval(input, node_id), &delivered),
+        &performed,
+    ))
+}
+
+/// Writes `performed` onto the trigger input under
+/// [`CONTINUATION_PERFORMED_KEY`], replacing whatever was there.
+///
+/// Replace rather than merge, on [`with_delivered`]'s reasoning exactly: the
+/// card's ledger was *built* by unioning the input's own list with what the run
+/// performed ([`performed_ledger`]), so it is already the superset, and merging
+/// again here would be a second place for that rule to drift.
+///
+/// An empty ledger writes nothing at all, so a first run's input shape is
+/// untouched and the reserved key appears only once there is something to
+/// suppress.
+fn with_performed(input: Value, performed: &[PerformedCall]) -> Value {
+    if performed.is_empty() {
+        return input;
+    }
+    match input {
+        Value::Object(mut map) => {
+            map.insert(
+                CONTINUATION_PERFORMED_KEY.to_string(),
+                serde_json::json!(performed),
+            );
+            Value::Object(map)
+        }
+        // `with_approval` always yields an object, so this is unreachable
+        // through `continuation_input`. Kept total rather than panicking.
+        other => other,
+    }
 }
 
 /// Writes `delivered` onto the trigger input under
@@ -646,7 +837,7 @@ mod tests {
     use super::*;
 
     fn effect(workflow: &str, node: &str, input: Value) -> Effect {
-        gate_effect(workflow, node, &input, "run-1", &[], None)
+        gate_effect(workflow, node, &input, "run-1", &[], &[], None)
     }
 
     /// A delivery row with `status`, as `deliver_outputs` would have returned it.
@@ -778,6 +969,7 @@ mod tests {
                 delivery("owner_summary", "owner", DeliveryStatus::Sent),
                 delivery("cold_note", "email", DeliveryStatus::Pending),
             ],
+            &[],
             None,
         );
         assert_eq!(
@@ -811,6 +1003,7 @@ mod tests {
                 &Value::Null,
                 "run-1",
                 &[delivery("summary", "owner", status)],
+                &[],
                 None,
             );
             assert!(
@@ -833,6 +1026,7 @@ mod tests {
                 delivery("summary", "owner", DeliveryStatus::Sent),
                 delivery("summary", "owner", DeliveryStatus::Sent),
             ],
+            &[],
             None,
         );
         assert_eq!(ledger(&e).len(), 1);
@@ -848,6 +1042,7 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            &[],
             None,
         );
 
@@ -881,12 +1076,13 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            &[],
             None,
         );
         let continuation = continuation_input(&first).expect("continues");
 
         // Run 2 skips the summary (delivering nothing) and pauses on gate-b.
-        let second = gate_effect("digest", "gate-b", &continuation, "run-2", &[], None);
+        let second = gate_effect("digest", "gate-b", &continuation, "run-2", &[], &[], None);
         assert_eq!(
             ledger(&second),
             vec![DeliveredReport {
@@ -900,6 +1096,168 @@ mod tests {
         let next = continuation_input(&second).expect("continues");
         assert_eq!(next["approvals"], serde_json::json!(["gate-a", "gate-b"]));
         assert_eq!(delivered_in_input(&next).len(), 1);
+    }
+
+    // --- issue #846: the outward-call ledger -------------------------------
+
+    /// One outward call, made once, across a whole lineage — **the headline
+    /// claim for issue #846**, in the shape #496 proved for the delivery half.
+    ///
+    /// A `POST` upstream of two gates. Run 1 fires it and pauses; approving
+    /// starts run 2, which must NOT fire it again and must pause on the second
+    /// gate; approving that starts run 3, which must not fire it either. The
+    /// ledger has to accumulate down the lineage or run 3 posts for real —
+    /// exactly the trap the delivery ledger's own two-gate test exists for.
+    ///
+    /// Asserted on the ledger the card carries and the input it produces,
+    /// because those are what decide whether the call is made: the graph rewrite
+    /// that consumes them is pinned in `crate::workflows::replay`, and the
+    /// invoker arm that answers it is pinned in `crate::workflows::caps::tools`.
+    #[test]
+    fn an_outward_call_is_made_once_across_two_gates() {
+        let posted = PerformedCall {
+            node: "notify".into(),
+            tool: "http_request POST".into(),
+            result: serde_json::json!({ "status": 201 }),
+        };
+
+        // Run 1: the POST fires, the run pauses on gate-a.
+        let first = gate_effect(
+            "digest",
+            "gate-a",
+            &serde_json::json!({ "request": "x" }),
+            "run-1",
+            &[],
+            std::slice::from_ref(&posted),
+            None,
+        );
+        let continuation = continuation_input(&first).expect("continues");
+        assert_eq!(
+            performed_in_input(&continuation),
+            vec![posted.clone()],
+            "the continuation must know what run 1 already posted"
+        );
+
+        // Run 2: the first POST is replayed (this run does not repeat it), and
+        // a SECOND outward node fires before the run pauses on gate-b.
+        //
+        // The second call is what makes this the real two-gate case rather than
+        // a walk-through. A card carrying a non-empty ledger REPLACES the input's
+        // key rather than merging into it — `with_performed` documents why — so
+        // if `performed_ledger` did not union the input's own entries first, run
+        // 2's card would carry only its own call and run 3 would post the first
+        // one a second time. Reverting that union fails this test on the
+        // `notify` entry alone.
+        let also_posted = PerformedCall {
+            node: "escalate".into(),
+            tool: "http_request POST".into(),
+            result: serde_json::json!({ "status": 202 }),
+        };
+        let second = gate_effect(
+            "digest",
+            "gate-b",
+            &continuation,
+            "run-2",
+            &[],
+            std::slice::from_ref(&also_posted),
+            None,
+        );
+        let next = continuation_input(&second).expect("continues");
+
+        assert_eq!(
+            performed_in_input(&next),
+            vec![posted, also_posted],
+            "run 3 must be told about BOTH earlier posts, not just the last one"
+        );
+        assert_eq!(next["approvals"], serde_json::json!(["gate-a", "gate-b"]));
+    }
+
+    /// The earliest result in the lineage wins, and a node is listed once.
+    ///
+    /// The run that actually reached the counterparty is the one whose receipt
+    /// downstream nodes saw, so a later run must not overwrite it — and a ledger
+    /// that grew an entry per hop would bloat every card in a long lineage.
+    #[test]
+    fn the_outward_ledger_keeps_the_first_result_per_node() {
+        let original = PerformedCall {
+            node: "notify".into(),
+            tool: "http_request POST".into(),
+            result: serde_json::json!({ "id": "first" }),
+        };
+        let input = serde_json::json!({ CONTINUATION_PERFORMED_KEY: [original.clone()] });
+
+        let card = gate_effect(
+            "digest",
+            "gate",
+            &input,
+            "run-2",
+            &[],
+            &[PerformedCall {
+                node: "notify".into(),
+                tool: "http_request POST".into(),
+                result: serde_json::json!({ "id": "second" }),
+            }],
+            None,
+        );
+
+        let ledger: Vec<PerformedCall> = serde_json::from_value(
+            card.payload
+                .get(PAYLOAD_PERFORMED)
+                .expect("carried")
+                .clone(),
+        )
+        .expect("well-formed");
+        assert_eq!(ledger, vec![original]);
+    }
+
+    /// A card with no outward ledger produces an input with no reserved key —
+    /// so a first run's trigger payload keeps exactly the shape it always had.
+    #[test]
+    fn an_empty_outward_ledger_leaves_the_input_untouched() {
+        let card = gate_effect(
+            "digest",
+            "gate",
+            &serde_json::json!({ "request": "x" }),
+            "run-1",
+            &[],
+            &[],
+            None,
+        );
+        let input = continuation_input(&card).expect("continues");
+        assert!(
+            input.get(CONTINUATION_PERFORMED_KEY).is_none(),
+            "nothing to suppress must write nothing: {input}"
+        );
+        assert!(performed_in_input(&input).is_empty());
+    }
+
+    /// The outward ledger is NOT part of a gate's identity.
+    ///
+    /// A continuation's input differs from the paused run's by exactly the
+    /// reserved ledger keys, so counting either would make every continuation
+    /// gate read as a new decision and stack a duplicate card for one question —
+    /// the failure `is_same_gate` exists to prevent. The delivery half of this
+    /// is pinned beside it; this is the same claim for the #846 key.
+    #[test]
+    fn the_outward_ledger_is_not_part_of_a_gates_identity() {
+        let input = serde_json::json!({ "request": "x" });
+        let paused = gate_effect("wf", "publish", &input, "run-1", &[], &[], None);
+
+        let mut continuation = input.clone();
+        continuation.as_object_mut().expect("object").insert(
+            CONTINUATION_PERFORMED_KEY.to_string(),
+            serde_json::json!([PerformedCall {
+                node: "notify".into(),
+                tool: "http_request POST".into(),
+                result: serde_json::json!({ "status": 201 }),
+            }]),
+        );
+        let re_reached = gate_effect("wf", "publish", &continuation, "run-2", &[], &[], None);
+
+        assert!(
+            is_same_gate(&paused, &re_reached),
+            "a ledger key must not split one decision into two cards"
+        );
     }
 
     /// A run that delivered nothing writes no reserved key at all, so an
@@ -923,6 +1281,7 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            &[],
             None,
         );
         // The same gate, re-reached by the continuation the card started: same
@@ -933,7 +1292,7 @@ mod tests {
             .as_object_mut()
             .expect("object")
             .remove("approvals");
-        let re_reached = gate_effect("digest", "gate", &continuation, "run-2", &[], None);
+        let re_reached = gate_effect("digest", "gate", &continuation, "run-2", &[], &[], None);
 
         assert!(
             is_same_gate(&paused, &re_reached),
@@ -965,7 +1324,7 @@ mod tests {
         });
         let edges = [edge("start", "writer"), edge("writer", "publish")];
 
-        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], None);
+        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], &[], None);
         attach_upstream_content(&mut effect, &output, &edges, "publish");
 
         let content = &effect.payload[PAYLOAD_CONTENT];
@@ -986,7 +1345,7 @@ mod tests {
     fn a_gate_with_no_upstream_output_gets_an_empty_preview() {
         let output = serde_json::json!({ "nodes": {} });
         let edges = [edge("writer", "publish")];
-        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], None);
+        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], &[], None);
         attach_upstream_content(&mut effect, &output, &edges, "publish");
         assert_eq!(effect.payload[PAYLOAD_CONTENT], serde_json::json!({}));
     }
@@ -1001,7 +1360,7 @@ mod tests {
         let edges = [edge("writer", "publish")];
         let input = serde_json::json!({ "request": "x" });
 
-        let mut a = gate_effect("wf", "publish", &input, "run-1", &[], None);
+        let mut a = gate_effect("wf", "publish", &input, "run-1", &[], &[], None);
         attach_upstream_content(
             &mut a,
             &serde_json::json!({ "nodes": { "writer": { "items": ["draft one"] } } }),
@@ -1009,7 +1368,7 @@ mod tests {
             "publish",
         );
 
-        let mut b = gate_effect("wf", "publish", &input, "run-2", &[], None);
+        let mut b = gate_effect("wf", "publish", &input, "run-2", &[], &[], None);
         attach_upstream_content(
             &mut b,
             &serde_json::json!({ "nodes": { "writer": { "items": ["a totally different draft"] } } }),
@@ -1231,7 +1590,15 @@ mode = "full"
         input: Value,
         deliveries: &[DeliveryReport],
     ) -> ApprovalId {
-        let effect = gate_effect("gated", "gate", &input, "run-that-paused", deliveries, None);
+        let effect = gate_effect(
+            "gated",
+            "gate",
+            &input,
+            "run-that-paused",
+            deliveries,
+            &[],
+            None,
+        );
         let id = rt
             .approvals
             .park(rt.id(), effect.clone())

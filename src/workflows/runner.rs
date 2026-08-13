@@ -223,6 +223,29 @@ async fn run_workflow_inner(
     } else {
         super::gate::apply_policy_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
     };
+    // Issue #846: a node whose call already left the building in an earlier run
+    // of this lineage replays its recorded result instead of calling again.
+    // Driven entirely off the trigger input's ledger, so a first run rewrites
+    // nothing and the graph stays byte-identical.
+    //
+    // **After the gate pass, and the order is load-bearing.** The gate pass
+    // classifies a node by its slug; running it second would have it classify
+    // the host's replay sentinel — an inert slug no policy has an opinion about
+    // — and either gate a node that does nothing or fail to gate one that does.
+    // Nothing is lost by this order: a replayed node was necessarily executed by
+    // an earlier run, so its id is already in the input's `approvals` array and
+    // the gate it still carries falls straight through.
+    let replayed = super::replay::replay_performed(&mut graph, &input);
+    if !replayed.is_empty() {
+        tracing::info!(
+            company = %record.id,
+            workflow = %workflow.id,
+            run_id = %ctx.run_id,
+            nodes = ?replayed,
+            "workflow: this continuation replays calls an earlier run in its lineage already \
+             made, rather than repeating them"
+        );
+    }
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
     // Issue #371: the caller's run id, not a freshly minted one. Correlating the
     // run's progress events with the `WorkflowRunFinished` the caller journals
@@ -653,6 +676,32 @@ async fn run_workflow_inner(
     // Skipped for a cancelled run, which returns above: an operator who stopped
     // a run is not asking to be asked about the gates it never reached. (A dry
     // run also never reaches here — it returned above, having parked nothing.)
+    // Issue #846: what this run's `tool_call` nodes sent outside the company,
+    // and what it could not record. Computed here, beside the delivery ledger
+    // and for the same reason — the card an approval is decided from has to
+    // carry both, or approving repeats one of them.
+    //
+    // Only when the run actually paused: a run that reached the end has no
+    // continuation coming, so there is nothing to guard against and nothing to
+    // warn about.
+    let (performed, unreplayable) = if outcome.pending_approvals.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        super::replay::outward_calls_performed(&graph, &outcome.output)
+    };
+    for call in &unreplayable {
+        tracing::warn!(
+            company = %record.id,
+            workflow = %workflow.id,
+            %run_id,
+            node = %call.node_id,
+            tool = %call.slug,
+            why = call.why,
+            "workflow: an outward call this run made cannot be replayed, so approving a gate \
+             below it will repeat it"
+        );
+        notices.push(call.notice());
+    }
     park_pending_gates(
         delivery.as_ref(),
         record,
@@ -662,7 +711,9 @@ async fn run_workflow_inner(
             trigger_input: &trigger_input,
             pending: &outcome.pending_approvals,
             deliveries: &deliveries,
+            performed: &performed,
             gated: &gated,
+            graph: &graph,
             // Issue #596: the reached-node output + the graph's edges, so each
             // parked gate can carry the verbatim upstream content awaiting
             // sign-off.
@@ -760,9 +811,15 @@ struct PausedGates<'a> {
     pending: &'a [String],
     /// What this run actually routed (issue #438).
     deliveries: &'a [crate::ports::DeliveryReport],
-    /// The policy-raised gates, so a card can say which tool and why. An
-    /// authored gate has no entry here and its card stays as #395 shipped it.
+    /// What this run already sent outside the company (issue #846), so
+    /// approving replays it rather than repeating it.
+    performed: &'a [crate::runtime::workflow_resume::PerformedCall],
+    /// The policy-raised gates, so a card can say which tool and **why**. An
+    /// authored gate has no entry here — nobody stated a reason — and issue #846
+    /// reads its call off the graph instead, so the card still names it.
     gated: &'a [super::gate::GatedCall],
+    /// The run's graph, for the authored-gate description above (issue #846).
+    graph: &'a tinyflows::model::WorkflowGraph,
     /// Issue #596: the run's reached-node output and the graph's edges, so a
     /// parked gate's card can carry the verbatim upstream content awaiting
     /// sign-off. Additive to the #460 struct — the pre-existing fields are
@@ -817,7 +874,9 @@ async fn park_pending_gates(
         trigger_input,
         pending,
         deliveries,
+        performed,
         gated,
+        graph,
         // Issue #596: the reached-node output + the graph's edges, so each parked
         // gate's card can carry the verbatim upstream content awaiting sign-off.
         output,
@@ -843,22 +902,39 @@ async fn park_pending_gates(
 
     for node_id in pending {
         // Issue #460: when the policy is what stopped this node, the card says
-        // which tool and why. An authored gate carries neither — nobody asked a
-        // question on its behalf — so it stays exactly as #395 shipped it.
-        let call = gated
-            .iter()
-            .find(|gate| gate.node_id == *node_id)
-            .map(|gate| crate::runtime::workflow_resume::GateCall {
-                tool: gate.slug.as_str(),
-                reason: gate.reason.as_str(),
-                target: gate.target.as_deref(),
-            });
+        // which tool and why.
+        //
+        // Issue #846: when the **author** stopped it, the card still says which
+        // tool — read off the graph, which has known the node's slug and
+        // arguments all along. Only the reason is policy-specific, and it is the
+        // one thing an authored gate genuinely does not have. Falling back rather
+        // than merging: a policy-raised gate already carries the same call, so
+        // consulting the graph for it would be a second answer to a question that
+        // already has one.
+        let described;
+        let gate = match gated.iter().find(|gate| gate.node_id == *node_id) {
+            Some(gate) => Some(gate),
+            None => {
+                described = super::gate::describe_call(graph, node_id);
+                described.as_ref()
+            }
+        };
+        let call = gate.map(|gate| crate::runtime::workflow_resume::GateCall {
+            tool: gate.slug.as_str(),
+            // Empty means "nobody wrote one", which `describe_call` documents;
+            // the key is then absent from the payload rather than present and
+            // blank, so a console can tell an unstated reason from an empty one.
+            reason: Some(gate.reason.as_str()).filter(|reason| !reason.is_empty()),
+            args: Some(&gate.args),
+            target: gate.target.as_deref(),
+        });
         let mut effect = crate::runtime::workflow_resume::gate_effect(
             workflow_id,
             node_id,
             trigger_input,
             run_id,
             deliveries,
+            performed,
             call,
         );
         // Issue #596: enrich the card with the verbatim output of this gate's
