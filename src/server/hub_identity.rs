@@ -138,8 +138,11 @@ pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> Str
 /// deliberately owns no configuration — a knob to turn it off would outlive the
 /// condition it exists for.
 ///
-/// Divergence is one-directional by construction: an input this rejects and the
-/// hub would have accepted costs a hidden button, never a broken sign-in.
+/// Divergence is one-directional by construction: this is stricter than the
+/// hub, never laxer. It refuses the IPv4 shorthands `URL` normalizes
+/// (`http://127.1/`, `http://2130706433/` are both `127.0.0.1` there), which
+/// costs a hidden button on a console configured that way — and never a click
+/// that 400s.
 pub fn hub_accepts_redirect_uri(redirect_uri: &str) -> bool {
     let Some((scheme, rest)) = redirect_uri.split_once("://") else {
         return false;
@@ -147,16 +150,51 @@ pub fn hub_accepts_redirect_uri(redirect_uri: &str) -> bool {
     if !scheme.eq_ignore_ascii_case("http") {
         return false;
     }
-    // The authority is everything before the path, query, or fragment...
+    // The authority is everything before the path, query, or fragment.
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    // ...minus any userinfo, which `new URL(…).hostname` also discards.
-    let host_port = authority.rsplit('@').next().unwrap_or_default();
-    let host = match host_port.strip_prefix('[') {
-        // An IPv6 literal keeps its own colons; a port, if any, follows `]`.
-        Some(inner) => inner.split(']').next().unwrap_or_default(),
-        None => host_port.split(':').next().unwrap_or_default(),
+    let Some(host) = authority_host(authority) else {
+        return false;
     };
-    matches!(host, "127.0.0.1" | "localhost" | "::1")
+    // `URL` lowercases a hostname, so `LOCALHOST` is a loopback host there too.
+    host.eq_ignore_ascii_case("127.0.0.1")
+        || host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("::1")
+}
+
+/// The host of an authority, or `None` when it is not one `URL` would parse.
+///
+/// Being strict is the whole job. A malformed authority this waved through and
+/// the hub rejects is the one direction that costs something: the console
+/// renders a button, and the click lands on the very `400` this guard exists to
+/// keep people away from.
+fn authority_host(authority: &str) -> Option<&str> {
+    // Userinfo is discarded, as `new URL(…).hostname` discards it — the host of
+    // `http://127.0.0.1@evil.example/` is `evil.example`.
+    let host_port = match authority.rsplit_once('@') {
+        Some((_, after)) => after,
+        None => authority,
+    };
+    let (host, port) = match host_port.strip_prefix('[') {
+        // An IPv6 literal must close its bracket, and nothing but a port may
+        // follow it: `[::1` and `[::1]junk` are parse errors, not hosts.
+        Some(tail) => tail.split_once(']')?,
+        // Otherwise the first colon begins the port — which is what makes a
+        // bare `::1` fall out here as a bad port rather than a host. To be one
+        // it has to be bracketed.
+        None => match host_port.find(':') {
+            Some(at) => (&host_port[..at], &host_port[at..]),
+            None => (host_port, ""),
+        },
+    };
+    if !port.is_empty() {
+        // A colon then digits, or nothing at all. An empty port
+        // (`http://127.0.0.1:/`) means the default, which `URL` also accepts.
+        let digits = port.strip_prefix(':')?;
+        if !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+    }
+    Some(host)
 }
 
 /// Percent-encodes `value` for use as a single query-string value.
@@ -311,6 +349,51 @@ mod test {
         assert!(hub_accepts_redirect_uri("http://[::1]:8080/?company=acme"));
         assert!(hub_accepts_redirect_uri("http://127.0.0.1/"));
         assert!(hub_accepts_redirect_uri("HTTP://127.0.0.1:8080/"));
+        // `URL` lowercases the host, so these are loopback at the hub too.
+        // Rejecting them would hide a button that works.
+        assert!(hub_accepts_redirect_uri(
+            "http://LOCALHOST:8080/?company=acme"
+        ));
+        assert!(hub_accepts_redirect_uri("http://LocalHost/"));
+        assert!(hub_accepts_redirect_uri("http://[::1]/"));
+        // An empty port is legal and means the default.
+        assert!(hub_accepts_redirect_uri("http://127.0.0.1:/"));
+    }
+
+    /// An authority the hub's `new URL` throws on must be refused here too.
+    ///
+    /// This is the direction that costs something. Accepting a shape the hub
+    /// rejects renders a button whose click ends on the bare `400` this guard
+    /// exists to prevent, so each of these is a live regression rather than a
+    /// tidiness rule.
+    #[test]
+    fn a_malformed_authority_is_refused_as_the_hub_refuses_it() {
+        // An unclosed IPv6 bracket.
+        assert!(!hub_accepts_redirect_uri("http://[::1/?company=acme"));
+        assert!(!hub_accepts_redirect_uri("http://[::1"));
+        // Closed, but with something other than a port trailing it.
+        assert!(!hub_accepts_redirect_uri("http://[::1]junk/?company=acme"));
+        assert!(!hub_accepts_redirect_uri("http://[::1]:80junk/"));
+        // A port that is not a number.
+        assert!(!hub_accepts_redirect_uri(
+            "http://127.0.0.1:abc/?company=acme"
+        ));
+        assert!(!hub_accepts_redirect_uri("http://127.0.0.1:80:90/"));
+        // An IPv6 address has to be bracketed to be a host at all.
+        assert!(!hub_accepts_redirect_uri("http://::1/"));
+    }
+
+    /// Where this is knowingly stricter than the hub.
+    ///
+    /// `URL` normalizes both of these to `127.0.0.1`, so the hub would take
+    /// them. Pinned deliberately: the cost is a hidden button on a console
+    /// nobody configures this way, and the alternative is reimplementing
+    /// WHATWG's IPv4 parser inside a guard that gets deleted when
+    /// `tinyhumansai/backend#1243` lands.
+    #[test]
+    fn ipv4_shorthand_is_refused_though_the_hub_would_take_it() {
+        assert!(!hub_accepts_redirect_uri("http://127.1:8080/"));
+        assert!(!hub_accepts_redirect_uri("http://2130706433/"));
     }
 
     #[test]
