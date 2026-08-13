@@ -39,7 +39,7 @@
 // delivery path, so the duplicate-bubble race #391 deliberately left open
 // outside chat POSTs cannot exist here.
 
-import { Check, Loader2, ShieldCheck, X } from "lucide-react";
+import { Check, Loader2, ShieldCheck, TriangleAlert, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
@@ -79,6 +79,27 @@ function partialLabel(settled: number, total: number): string {
 }
 
 /**
+ * What the card says when a decision did not land (#842 review).
+ *
+ * The failure consolidation makes worse, said out loud. Deciding three cards
+ * separately, a failure belongs to the one card just clicked. Deciding one card
+ * covering three, a failure on the third leaves two effects authorised and one
+ * not — and a toast is both the wrong home for that (it does not say *which*)
+ * and a temporary one. So the count is stated on the card, the failed rows name
+ * themselves, and the buttons stay live because a retry is the way out.
+ *
+ * Never "nothing was recorded" unless that is true: on a batch, saying so about
+ * a click that authorised two of three would be a fresh lie in place of the
+ * silence it replaces.
+ */
+function failureLabel(failedCount: number, total: number): string {
+  if (total === 1) return "Not recorded — try again";
+  return failedCount === total
+    ? `None of the ${total} were recorded — try again`
+    : `${failedCount} of ${total} weren't recorded — try again`;
+}
+
+/**
  * One item's line in a batch: what this particular call will do.
  *
  * The **first payload line**, which is the tool's leading argument — the URL for
@@ -99,6 +120,7 @@ export function ApprovalRow({
   askerNames,
   deciding,
   decided,
+  failed,
   onDecide,
 }: {
   /** The gated calls this turn parked. Never empty — see `TimelineItem`. */
@@ -109,6 +131,16 @@ export function ApprovalRow({
   deciding: ReadonlyMap<string, Verdict>;
   /** Verdicts already witnessed — from this console or from the page. */
   decided: Record<string, Verdict>;
+  /**
+   * Decisions that did not land, keyed by approval id — the message to show.
+   *
+   * Separate from {@link decided} because a failed decision is neither: the
+   * item is not settled, and it is not simply still pending either. One click
+   * covering three calls can leave two authorised and one not, and an item that
+   * dropped back to its pending look would read as "still working" rather than
+   * "this one did not take" — the operator would believe they got all three.
+   */
+  failed: Record<string, string>;
   onDecide: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
 }) {
   // Per-card, exactly as on the page: two batches can be parked in one channel
@@ -120,6 +152,7 @@ export function ApprovalRow({
   const lead = approvals[0];
   const pending = useMemo(() => approvals.filter((a) => !decided[a.id]), [approvals, decided]);
   const settledCount = approvals.length - pending.length;
+  const failedCount = pending.filter((a) => failed[a.id]).length;
   const busy = deciding.size > 0;
   // Everything decided: the card has nothing left to ask and steps back.
   const done = pending.length === 0;
@@ -207,6 +240,7 @@ export function ApprovalRow({
                   approval={a}
                   verdict={decided[a.id] ?? null}
                   deciding={deciding.get(a.id) ?? null}
+                  failure={failed[a.id] ?? null}
                 />
               ))}
             </ul>
@@ -252,9 +286,15 @@ export function ApprovalRow({
                   ? awaiting("approve")
                     ? "Waiting for the agent…"
                     : "Recording…"
-                  : settledCount > 0
-                    ? partialLabel(settledCount, approvals.length)
-                    : undefined
+                  : // A failure outranks the partial count, because it is the
+                    // one thing here the operator has to act on. It also has to
+                    // reach a single-item card, which renders no item list to
+                    // carry the per-row form.
+                    failedCount > 0
+                    ? failureLabel(failedCount, approvals.length)
+                    : settledCount > 0
+                      ? partialLabel(settledCount, approvals.length)
+                      : undefined
             }
           />
         </div>
@@ -322,14 +362,36 @@ function BatchItem({
   approval: a,
   verdict,
   deciding,
+  failure,
 }: {
   approval: ApprovalSummary;
   /** A verdict already witnessed for this item, or `null` while it is pending. */
   verdict: Verdict | null;
   /** The verdict this item is waiting on, or `null` when idle. */
   deciding: Verdict | null;
+  /** Why this item's decision did not land, or `null` when none has failed. */
+  failure: string | null;
 }) {
   const label = itemLabel(a);
+
+  // A failed decision outranks the pending look, and says which item and why.
+  // Silence here is the failure mode worth designing against: the operator
+  // clicked once for three calls, two were authorised, and a third that merely
+  // looks unstarted reads as "still working". Stated plainly, with the way back
+  // — the card's own buttons are still live, so a retry is one press.
+  if (failure && !deciding) {
+    return (
+      <li
+        data-approval-item={a.id}
+        data-approval-failed="true"
+        className="flex items-center gap-2 text-sm text-status-blocked-text"
+      >
+        <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+        <span className="min-w-0 flex-1 truncate font-mono text-xs">{label}</span>
+        <span className="shrink-0 text-xs">Not recorded — {failure}</span>
+      </li>
+    );
+  }
 
   return (
     // Addressable per item, because the card is no longer one approval. The

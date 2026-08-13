@@ -127,6 +127,13 @@ interface Props {
   /** The verdict each card is waiting on, and the ones already witnessed. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   decidedApprovals?: Record<string, DecidedApproval>;
+  /**
+   * Decisions that did not land, per approval id (#842) — the message to show
+   * on that item. Owned by the shell, like the two maps above, because a
+   * failure has to outlive this view unmounting: the operator's next move after
+   * one is often to open the Approvals page and come back.
+   */
+  failedApprovals?: Record<string, string>;
 }
 
 /**
@@ -161,6 +168,7 @@ export function ChatView({
   onDecideApproval,
   decidingApprovals,
   decidedApprovals,
+  failedApprovals,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -827,6 +835,7 @@ export function ChatView({
               now={now}
               askerNames={askerNames}
               decidingApprovals={decidingApprovals}
+              failedApprovals={failedApprovals}
               onDecideApproval={onDecideApproval}
             />
             {consoleOnlyMember && (

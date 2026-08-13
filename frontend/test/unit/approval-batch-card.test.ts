@@ -64,6 +64,7 @@ let decisions: Decision[];
 async function render(
   approvals: ApprovalSummary[],
   decided: Record<string, Verdict> = {},
+  failed: Record<string, string> = {},
   deciding: ReadonlyMap<string, Verdict> = new Map(),
 ) {
   await act(async () => {
@@ -74,6 +75,7 @@ async function render(
         askerNames: new Map([["seo", "SEO Specialist"]]),
         deciding,
         decided,
+        failed,
         onDecide: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) =>
           decisions.push({ id: approval.id, verdict, scope }),
       }),
@@ -211,6 +213,44 @@ describe("the consolidated approval card", () => {
     // And an approve here covers only what is still open. Re-resolving a1 would
     // be a second decision on an approval the host has already dropped.
     expect(decisions.map((d) => d.id)).toEqual(["a2", "a3"]);
+  });
+
+  it("names the item whose decision did not land, and does not call it pending", async () => {
+    // The failure consolidation makes worse. One click, three resolves, and the
+    // third fails: two effects are authorised and one is not. An item that
+    // simply dropped back to its pending look would read as "still working",
+    // and the operator's honest conclusion would be that they got all three.
+    await render([ESPN, BBC, GUARDIAN], { a1: "approve", a2: "approve" }, { a3: "host is away" });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Not recorded");
+    expect(text).toContain("host is away");
+    // Which one, on the row itself — a toast says a decision failed without
+    // saying which, and is gone by the time the operator looks back.
+    const failedRow = container.querySelector('[data-approval-failed="true"]');
+    expect(failedRow?.getAttribute("data-approval-item")).toBe("a3");
+    expect(failedRow?.textContent).toContain("https://theguardian.com/uk");
+  });
+
+  it("counts the failures honestly rather than claiming nothing was recorded", async () => {
+    await render([ESPN, BBC, GUARDIAN], { a1: "approve", a2: "approve" }, { a3: "host is away" });
+
+    // Two of the three DID take. "Nothing was recorded" would be a fresh lie in
+    // place of the silence this replaces.
+    const text = container.textContent ?? "";
+    expect(text).toContain("1 of 3 weren't recorded");
+    expect(text).not.toContain("None of the 3");
+  });
+
+  it("leaves the buttons live after a failure, because a retry is the way out", async () => {
+    await render([ESPN, BBC, GUARDIAN], { a1: "approve", a2: "approve" }, { a3: "host is away" });
+
+    expect(button("Approve").disabled).toBe(false);
+    await click(button("Approve"));
+    // Only the item that never landed is retried — the two that did are settled
+    // and re-resolving them would be a second decision on approvals the host
+    // has already dropped.
+    expect(decisions.map((d) => d.id)).toEqual(["a3"]);
   });
 
   it("settles rather than vanishing once every item is decided", async () => {

@@ -36,6 +36,8 @@ interface Props {
   askerNames?: Map<string, string>;
   /** The verdict each inline card is currently waiting on. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
+  /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
+  failedApprovals?: Record<string, string>;
   onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
 }
 
@@ -78,6 +80,7 @@ export function MessageTimeline({
   now,
   askerNames,
   decidingApprovals,
+  failedApprovals,
   onDecideApproval,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
@@ -159,6 +162,7 @@ export function MessageTimeline({
                  the same rule #373 established one level down. */
               deciding={decidingIn(item.approvals, decidingApprovals)}
               decided={item.decided}
+              failed={failedApprovals ?? EMPTY_FAILURES}
               onDecide={(approval, verdict, scope) =>
                 onDecideApproval?.(approval, verdict, scope)
               }
@@ -180,6 +184,9 @@ const EMPTY_NAMES: Map<string, string> = new Map();
 
 /** Stable identity, for the same reason as {@link EMPTY_NAMES}. */
 const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+
+/** Ditto — no failure has been recorded on any card. */
+const EMPTY_FAILURES: Record<string, string> = {};
 
 /**
  * The in-flight verdicts belonging to one card's items (#842).

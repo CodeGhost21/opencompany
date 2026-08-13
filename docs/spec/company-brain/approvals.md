@@ -270,6 +270,14 @@ Two renderings over that one state, divided by what each surface is **for**:
 Granular control in *both* places would be redundant, and would double the state
 that has to stay in step between two surfaces — so it lives in one.
 
+**A decision that does not land is named, not swallowed.** One click fans out to
+one resolve per item, so a failure on the third leaves two effects authorised
+and one not. A toast is the wrong home for that — it does not say *which*, and
+it is gone by the time the operator looks back at the card — so the row that
+failed says so itself, the card counts the failures honestly (never "nothing was
+recorded" about a click that authorised two of three), and the buttons stay live,
+because a retry is the way out. A retry re-resolves only what is still pending.
+
 The two must not drift, and do not, because neither owns any state: both render
 the same feed, and both react to the `approval_resolved` frame. Deciding a row
 on the page settles that item on the chat card without a reload, and the card
