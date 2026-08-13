@@ -1304,7 +1304,20 @@ export function WorkflowsView({
             </p>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        {/* Issue #824. `flex-wrap` on the ACTION ROW, not just on the header
+            above it. The header already wraps, but that wrap only breaks
+            between its two children — and this row is one child whose buttons
+            are `shrink-0`, so on its own line it stayed 1386px wide inside a
+            1289px container and overflowed into an `overflow-hidden` ancestor.
+            Nothing in that chain scrolls, so `New workflow` was not merely
+            off-screen, it could not be clicked.
+
+            The row grows every time a control is added — `Pause` (#814) took
+            the overhang from 22px to 113px, which is what finally made it
+            visible — so it needs a break point of its own rather than a wider
+            budget. `justify-end` keeps the wrapped line aligned to the right
+            edge it belongs to instead of drifting left under the title. */}
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
           <Select
             // Issue #406, half one. NOT `selectedId ?? undefined`: Base UI
             // decides controlled-vs-uncontrolled ONCE, on the first render,
