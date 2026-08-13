@@ -33,7 +33,6 @@ import {
   fromDto,
   initials,
   newMember,
-  starterTeam,
   TEAM_TONES,
   type TeamMember,
 } from "@/lib/team";
@@ -173,9 +172,11 @@ export function TeamView({
         setHostEmpty(true);
       }
     } catch {
-      // No roster surface on this host yet — start from an editable team. NOT
-      // `hostEmpty`: we never learned who is on this company.
-      setMembers(starterTeam());
+      // The roster read failed, so we never learned who is on this company.
+      // Show nobody rather than a fabricated team: an operator cannot tell an
+      // invented roster from a real one, and every action on a fake row fails.
+      // NOT `hostEmpty` — that means "the host answered, with nobody".
+      setMembers([]);
       setFromHost(false);
       setHostEmpty(false);
     } finally {

@@ -108,16 +108,6 @@ function roleHash(role: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function member(name: string, role: string, description: string): TeamMember {
-  return {
-    id: localMemberId(role),
-    name,
-    role,
-    description,
-    tone: toneFor(name),
-    inboxEnabled: false,
-  };
-}
 
 /**
  * A generic starter team that fits any company; the operator edits from here.
@@ -127,22 +117,18 @@ function member(name: string, role: string, description: string): TeamMember {
  * roles, so a company that has not defined its own roster still reads as an org
  * rather than a list.
  */
-export function starterTeam(): TeamMember[] {
-  return [
-    member("Ops Lead", "Operations Lead", "Keeps work moving and unblocks the team."),
-    member("Front Desk", "Front Desk", "Scheduling, inbox, and everyday errands."),
-    member("Product Lead", "Product Manager", "Decides what gets built, and in what order."),
-    member("Researcher", "User Researcher", "Gathers facts, sources, and context."),
-    member("Analyst", "Data Analyst", "Measures performance and reports back."),
-    member("Engineer", "Software Engineer", "Builds and ships the product."),
-    member("Reviewer", "QA Engineer", "Tests changes before they reach anyone."),
-    member("Ops Engineer", "DevOps Engineer", "Runs the infrastructure and keeps it up."),
-    member("Designer", "Product Designer", "Creates visuals and holds the brand."),
-    member("Writer", "Content Writer", "Drafts copy, docs, and outbound messages."),
-    member("Marketer", "Growth Marketer", "Finds the audience and brings them in."),
-    member("Support", "Support Specialist", "Answers customers and closes the loop."),
-  ];
-}
+// `starterTeam()` used to live here: twelve invented agents ("Ops Lead", "Front
+// Desk", "Product Lead", …) rendered whenever the host's roster came back empty
+// or unreadable. It is deleted rather than deprecated.
+//
+// It was there to keep the console from looking bare, and the cost was that
+// every surface lied. The Team page offered budgets and inboxes for teammates
+// the host had never heard of; Chat offered DMs whose first message went
+// nowhere; the Overview graph drew a full org chart for a company with nobody in
+// it. First-run setup replaces the reason it existed — an unstaffed company now
+// gets offered a real team it can create — so the honest empty state is what
+// remains. See `docs/spec/runtime/company-setup.md`.
+
 
 /**
  * Create a member from operator-entered fields, for a host with no team write

@@ -433,13 +433,39 @@ pub fn match_template(answers: &SetupAnswers) -> &'static RosterTemplate {
 pub struct RosterProposal {
     pub agents: Vec<ProposedAgent>,
     /// The [`RosterTemplate::key`] whose reference team framed this proposal.
-    /// Reported even for a generated roster, because it is what the model was
-    /// shown as a quality bar and what a failure would have fallen back to.
+    /// Reported for either source: it is what the model was shown as a quality
+    /// bar, and what a failure fell back to.
     pub template_key: &'static str,
-    /// Whether a model designed this team from the operator's answers. `false`
-    /// is the offline path and every failure path — the curated team, shipped
-    /// as-is. See [`crate::company::setup`].
-    pub generated: bool,
+    /// Who wrote this team.
+    pub source: RosterSource,
+}
+
+/// Who wrote a proposed roster.
+///
+/// Replaces an earlier `generated: bool`, which was accurate and read as a lie.
+/// `generated = true` meant "a model answered the call" — but with the whole
+/// roster still assembled from canned strings it was taken to mean "a model
+/// wrote these words", which it did not. Naming the source makes the difference
+/// unmissable, and lets the console say which one an operator is looking at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosterSource {
+    /// A model designed this team from the operator's own answers.
+    Model,
+    /// The curated team for this kind of business, shipped whole because no
+    /// model was reachable, its answer could not be read, or what it returned
+    /// was too thin to be a company. Never blended with a model's answer —
+    /// see [`validate_roster`].
+    Fallback,
+}
+
+impl RosterSource {
+    /// The wire spelling the console reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Fallback => "fallback",
+        }
+    }
 }
 
 /// The proposal for these answers with no model involved: the matched template,
@@ -451,9 +477,9 @@ pub struct RosterProposal {
 pub fn template_proposal(answers: &SetupAnswers) -> RosterProposal {
     let template = match_template(answers);
     RosterProposal {
-        agents: validate_roster(template.proposed(), template),
+        agents: validate_roster(template.proposed()),
         template_key: template.key,
-        generated: false,
+        source: RosterSource::Fallback,
     }
 }
 
@@ -506,16 +532,24 @@ fn clamp_description(description: &str) -> String {
 /// * mandates clamped to [`MAX_DESCRIPTION`];
 /// * duplicate roles collapsed (first wins), so a model that repeats itself
 ///   cannot land two teammates who share one job;
-/// * truncated to [`MAX_AGENTS`], then topped up from `fallback` if it is short
-///   of [`MIN_AGENTS`].
+/// * truncated to [`MAX_AGENTS`].
 ///
-/// The top-up is what makes the floor real: a model that returns one usable
-/// agent yields a full team rather than a thin one, and the additions come from
-/// the template already chosen for this business.
-pub fn validate_roster(
-    proposed: Vec<ProposedAgent>,
-    fallback: &'static RosterTemplate,
-) -> Vec<ProposedAgent> {
+/// ## It does not top a short roster up, and used to
+///
+/// An earlier version padded anything under [`MIN_AGENTS`] with agents from the
+/// matched template. It produced exactly the outcome it was meant to prevent: a
+/// yoga studio asked for bookings and retention, the pass returned three agents,
+/// and the fourth teammate the operator was shown was a **Content Strategist**
+/// — from a template they had never seen, for work they had not mentioned. The
+/// padding was invisible in the result, so the roster read as though a model had
+/// chosen it.
+///
+/// Three relevant teammates beat four with one stranger in them. A roster too
+/// thin to be a company is now the *caller's* decision, made by comparing
+/// against [`MIN_AGENTS`] and falling back to the curated team **whole** — so an
+/// operator is always looking at one authored team or the other, never a blend
+/// of both. See [`crate::harness::roster_build`].
+pub fn validate_roster(proposed: Vec<ProposedAgent>) -> Vec<ProposedAgent> {
     let mut seen: Vec<String> = Vec::new();
     let mut roster: Vec<ProposedAgent> = Vec::new();
 
@@ -543,14 +577,6 @@ pub fn validate_roster(
 
     for agent in proposed {
         push(agent, &mut roster, &mut seen);
-    }
-    if roster.len() < MIN_AGENTS {
-        for agent in fallback.proposed() {
-            if roster.len() >= MIN_AGENTS {
-                break;
-            }
-            push(agent, &mut roster, &mut seen);
-        }
     }
     roster
 }
@@ -631,7 +657,7 @@ mod tests {
                 "{} has {count} agents",
                 template.key
             );
-            let validated = validate_roster(template.proposed(), &GENERIC);
+            let validated = validate_roster(template.proposed());
             assert_eq!(
                 validated.len(),
                 count,
@@ -667,39 +693,34 @@ mod tests {
     #[test]
     fn an_over_long_roster_is_truncated() {
         let long: Vec<ProposedAgent> = (0..12).map(|i| agent(&format!("Role {i}"))).collect();
-        assert_eq!(validate_roster(long, &GENERIC).len(), MAX_AGENTS);
+        assert_eq!(validate_roster(long).len(), MAX_AGENTS);
     }
 
-    /// The top-up. A model that returns one usable agent must not leave the
-    /// team page looking thinner than the empty state we are replacing.
+    /// **No padding.** A short roster comes back short, so nothing an operator is
+    /// shown was quietly borrowed from a template they never saw.
+    ///
+    /// The regression this guards is concrete: a yoga studio's pass returned
+    /// three agents, validation padded it to four from the `content` template,
+    /// and the fourth teammate on screen was a Content Strategist — rendered
+    /// identically to the three the operator had actually asked for. Deciding
+    /// what to do about a thin roster belongs to the caller, which falls back to
+    /// the curated team **whole**.
     #[test]
-    fn a_short_roster_is_topped_up_from_its_template() {
-        let roster = validate_roster(vec![agent("Meta Ads Specialist")], &ECOMMERCE);
-        assert_eq!(roster.len(), MIN_AGENTS);
-        assert_eq!(
-            roster[0].role, "Meta Ads Specialist",
-            "the model's row leads"
-        );
-        // And the top-up did not duplicate the row it was topping up.
-        let slugs: Vec<String> = roster.iter().map(|a| role_slug(&a.role)).collect();
-        let mut deduped = slugs.clone();
-        deduped.sort();
-        deduped.dedup();
-        assert_eq!(deduped.len(), slugs.len(), "{slugs:?}");
+    fn a_short_roster_is_left_short_rather_than_padded() {
+        let roster = validate_roster(vec![agent("Meta Ads Specialist")]);
+        assert_eq!(roster.len(), 1, "validation must not invent teammates");
+        assert_eq!(roster[0].role, "Meta Ads Specialist");
     }
 
     /// Two teammates sharing one job is the failure the operator would have to
     /// clean up by hand, so near-miss spellings collapse too.
     #[test]
     fn duplicate_roles_collapse_however_they_are_spelled() {
-        let roster = validate_roster(
-            vec![
-                agent("SEO Specialist"),
-                agent("seo  specialist"),
-                agent("SEO-Specialist"),
-            ],
-            &GENERIC,
-        );
+        let roster = validate_roster(vec![
+            agent("SEO Specialist"),
+            agent("seo  specialist"),
+            agent("SEO-Specialist"),
+        ]);
         let seo = roster
             .iter()
             .filter(|a| role_slug(&a.role) == "seo-specialist")
@@ -709,21 +730,18 @@ mod tests {
 
     #[test]
     fn a_roleless_entry_is_dropped_and_a_blank_name_falls_back_to_the_role() {
-        let roster = validate_roster(
-            vec![
-                ProposedAgent {
-                    name: "Ghost".into(),
-                    role: "   ".into(),
-                    description: String::new(),
-                },
-                ProposedAgent {
-                    name: "  ".into(),
-                    role: "Data Analyst".into(),
-                    description: String::new(),
-                },
-            ],
-            &GENERIC,
-        );
+        let roster = validate_roster(vec![
+            ProposedAgent {
+                name: "Ghost".into(),
+                role: "   ".into(),
+                description: String::new(),
+            },
+            ProposedAgent {
+                name: "  ".into(),
+                role: "Data Analyst".into(),
+                description: String::new(),
+            },
+        ]);
         assert!(roster.iter().all(|a| !a.role.trim().is_empty()));
         let analyst = roster.iter().find(|a| a.role == "Data Analyst").unwrap();
         assert_eq!(analyst.name, "Data Analyst");
@@ -734,26 +752,46 @@ mod tests {
     #[test]
     fn an_over_long_mandate_is_clamped() {
         let essay = "word ".repeat(200);
-        let roster = validate_roster(
-            vec![ProposedAgent {
-                name: "A".into(),
-                role: "Analyst".into(),
-                description: essay,
-            }],
-            &GENERIC,
-        );
+        let roster = validate_roster(vec![ProposedAgent {
+            name: "A".into(),
+            role: "Analyst".into(),
+            description: essay,
+        }]);
         let clamped = &roster[0].description;
         assert!(clamped.chars().count() <= MAX_DESCRIPTION + 1, "{clamped}");
         assert!(clamped.ends_with('…'), "{clamped}");
     }
 
-    /// An empty proposal is the total-failure case — no model, unreadable
-    /// answer — and it must still produce a working team.
+    /// Validation of nothing is nothing. The floor is the caller's business now,
+    /// and `template_proposal` is where an operator with no usable model still
+    /// gets a real team.
     #[test]
-    fn an_empty_proposal_falls_back_to_the_template() {
-        let roster = validate_roster(Vec::new(), &ECOMMERCE);
-        assert_eq!(roster.len(), MIN_AGENTS);
-        assert_eq!(roster[0].role, ECOMMERCE.agents[0].role);
+    fn validation_of_an_empty_roster_stays_empty() {
+        assert!(validate_roster(Vec::new()).is_empty());
+    }
+
+    /// The honest fallback: a full curated team, labelled as such, for the
+    /// offline path and every failure path.
+    #[test]
+    fn the_fallback_is_a_whole_curated_team_and_says_so() {
+        let proposal = template_proposal(&answers("I sell homeware online", ""));
+        assert_eq!(proposal.template_key, "ecommerce");
+        assert_eq!(proposal.source, RosterSource::Fallback);
+        assert_eq!(proposal.source.as_str(), "fallback");
+        assert!(
+            proposal.agents.len() >= MIN_AGENTS,
+            "a fallback must be a workable team, got {}",
+            proposal.agents.len()
+        );
+        // Whole, not blended: every row is the template's own.
+        let curated: Vec<&str> = ECOMMERCE.agents.iter().map(|a| a.role).collect();
+        for a in &proposal.agents {
+            assert!(
+                curated.contains(&a.role.as_str()),
+                "{} is not curated",
+                a.role
+            );
+        }
     }
 
     /// The answers ride on the company record, so they must survive the round

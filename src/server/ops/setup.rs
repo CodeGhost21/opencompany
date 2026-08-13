@@ -106,13 +106,17 @@ impl From<ProposedAgent> for ProposedAgentDto {
 #[serde(rename_all = "camelCase")]
 struct RosterProposalDto {
     agents: Vec<ProposedAgentDto>,
-    /// Which curated roster this came from, e.g. `ecommerce`.
+    /// Which curated roster framed this proposal, e.g. `ecommerce`.
     template: String,
-    /// Whether a model designed this team from the answers. `false` is the
-    /// offline path and every failure path — the console renders both
-    /// identically, because to the operator they are the same thing: a starting
-    /// point they can edit.
-    generated: bool,
+    /// Who wrote this team: `model` or `fallback`.
+    ///
+    /// The console **says which**. An earlier version reported a `generated`
+    /// boolean and rendered both cases identically, on the theory that to an
+    /// operator they are the same thing — a starting point they can edit. That
+    /// was wrong in the one direction that matters: someone shown a canned team
+    /// with no indication believes a model read their answers and produced it,
+    /// and judges the product on a roster it never wrote.
+    source: String,
 }
 
 impl From<RosterProposal> for RosterProposalDto {
@@ -120,7 +124,7 @@ impl From<RosterProposal> for RosterProposalDto {
         Self {
             agents: proposal.agents.into_iter().map(Into::into).collect(),
             template: proposal.template_key.to_string(),
-            generated: proposal.generated,
+            source: proposal.source.as_str().to_string(),
         }
     }
 }
@@ -139,6 +143,21 @@ async fn propose_roster(
     store_answers(&company, &answers).await?;
 
     let proposal = build_proposal(&company, &answers).await;
+    // Logged on the way out, including the happy path.
+    //
+    // Until this line the only `tracing` calls on this route were on failure
+    // arms, so a setup that worked left no trace at all: reconstructing what a
+    // company had been given meant reading `usage.jsonl` and `meta.json` by
+    // hand. This is the first thing anyone asks about a first-run flow, so it
+    // belongs in the log — which template framed it, whether a model designed
+    // the team, and how many agents the operator is about to be shown.
+    tracing::info!(
+        company = %company.id(),
+        template = proposal.template_key,
+        source = proposal.source.as_str(),
+        agents = proposal.agents.len(),
+        "[setup] proposed a starting roster"
+    );
     Ok(Json(proposal.into()))
 }
 

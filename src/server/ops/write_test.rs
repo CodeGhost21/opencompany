@@ -6498,8 +6498,8 @@ async fn setup_proposes_a_real_roster_with_no_model_wired() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["template"], "ecommerce", "{body}");
     assert_eq!(
-        body["generated"], false,
-        "no harness is wired, so nothing generated the roster: {body}"
+        body["source"], "fallback",
+        "no harness is wired, so the curated team ships: {body}"
     );
     let agents = body["agents"].as_array().expect("agents array");
     assert!(

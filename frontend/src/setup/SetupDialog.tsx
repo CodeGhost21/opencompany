@@ -43,8 +43,8 @@ const REVEAL_MS = 450;
 type Phase =
   | { kind: "asking"; step: number }
   | { kind: "thinking" }
-  | { kind: "building"; agents: ProposedAgent[]; created: number }
-  | { kind: "done"; agents: ProposedAgent[] }
+  | { kind: "building"; agents: ProposedAgent[]; created: number; fallback: boolean }
+  | { kind: "done"; agents: ProposedAgent[]; fallback: boolean }
   | { kind: "failed"; reason: string };
 
 /**
@@ -114,7 +114,12 @@ export function SetupDialog({
         });
         return;
       }
-      setPhase({ kind: "building", agents: proposal.agents, created: 0 });
+      setPhase({
+        kind: "building",
+        agents: proposal.agents,
+        created: 0,
+        fallback: proposal.source === "fallback",
+      });
     } catch {
       // A real transport or auth failure — the host answers with its reference
       // team rather than an error for anything less.
@@ -154,6 +159,7 @@ export function SetupDialog({
     const agents = phase.agents;
 
     (async () => {
+      const fallback = phase.fallback;
       for (let i = 0; i < agents.length; i++) {
         const agent = agents[i];
         try {
@@ -168,14 +174,14 @@ export function SetupDialog({
           // celebration screen into an error list.
         }
         if (cancelled) return;
-        setPhase({ kind: "building", agents, created: i + 1 });
+        setPhase({ kind: "building", agents, created: i + 1, fallback });
         if (i + 1 < agents.length) {
           await new Promise((resolve) => setTimeout(resolve, REVEAL_MS));
           if (cancelled) return;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, REVEAL_MS * 1.5));
-      if (!cancelled) setPhase({ kind: "done", agents });
+      if (!cancelled) setPhase({ kind: "done", agents, fallback });
     })();
 
     return () => {
@@ -267,9 +273,10 @@ export function SetupDialog({
 
         {(phase.kind === "building" || phase.kind === "done") && (
           <BuildOut
-            agents={phase.kind === "building" ? phase.agents : phase.agents}
+            agents={phase.agents}
             created={phase.kind === "building" ? phase.created : phase.agents.length}
             finished={phase.kind === "done"}
+            fallback={phase.fallback}
             onDone={onDone}
           />
         )}
@@ -298,11 +305,14 @@ function BuildOut({
   agents,
   created,
   finished,
+  fallback,
   onDone,
 }: {
   agents: ProposedAgent[];
   created: number;
   finished: boolean;
+  /** The curated team shipped instead of a designed one — said out loud below. */
+  fallback: boolean;
   onDone: () => void;
 }) {
   return (
@@ -316,7 +326,9 @@ function BuildOut({
         </DialogTitle>
         <DialogDescription>
           {finished
-            ? "A starting point — rename, retire, or add anyone from the Team page."
+            ? fallback
+              ? "A general starting team for your industry — we couldn't reach a model to tailor it to your answers. Rename, retire, or add anyone from the Team page."
+              : "Built from your answers. A starting point — rename, retire, or add anyone from the Team page."
             : buildOutLabel(created, agents.length)}
         </DialogDescription>
       </DialogHeader>

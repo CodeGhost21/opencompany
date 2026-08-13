@@ -8,7 +8,7 @@ import { listMemory, type MemoryEntry } from "@/api/memory";
 import { listSkills, type Skill } from "@/api/skills";
 import { listTasks, type Task } from "@/api/tasks";
 import { ApiError, type DeskDto, type McpServer, type McpToolInfo } from "@/api/types";
-import { fromDto, starterTeam, type TeamMember } from "@/lib/team";
+import { fromDto, type TeamMember } from "@/lib/team";
 import { adapt, buildMemoryGraph } from "./overview/kg/adapter";
 import { buildKnowledgeGraph } from "./overview/kg/model";
 import { ownedBy } from "./overview/pulse";
@@ -58,7 +58,10 @@ interface Sources {
 
 const EMPTY: Sources = {
   tasks: [],
-  team: starterTeam(),
+  // Empty, not a fabricated roster. This is the pre-load state, and seeding it
+  // with twelve invented agents drew a full org graph for a company that has
+  // nobody in it (`docs/spec/runtime/company-setup.md`).
+  team: [],
   desks: [],
   people: [],
   skills: [],
@@ -151,7 +154,10 @@ export function Overview({ client, company }: Props) {
 
       setSources({
         tasks,
-        team: roster?.length ? roster.map(fromDto) : starterTeam(),
+        // The host's roster, or nobody. Never a fabricated stand-in: an operator
+        // reading this graph is reading who works here, and inventing twelve
+        // agents made an unstaffed company look busy.
+        team: roster?.length ? roster.map(fromDto) : [],
         desks,
         people,
         skills,

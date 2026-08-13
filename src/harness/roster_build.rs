@@ -48,8 +48,8 @@ use tinyagents::harness::message::Message;
 use tinyagents::harness::model::{ModelRequest, ModelResponse};
 
 use crate::company::setup::{
-    MAX_AGENTS, MAX_DESCRIPTION, MIN_AGENTS, ProposedAgent, RosterProposal, RosterTemplate,
-    SetupAnswers, match_template, template_proposal, validate_roster,
+    MAX_AGENTS, MAX_DESCRIPTION, MIN_AGENTS, ProposedAgent, RosterProposal, RosterSource,
+    RosterTemplate, SetupAnswers, match_template, template_proposal, validate_roster,
 };
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;
@@ -157,20 +157,25 @@ impl RosterBuilder {
             return (fallback(), usage);
         };
 
-        // Validation is the same one the template passes through, so a generated
-        // roster obeys every rule a curated one does — including the top-up that
-        // keeps a model which returned two agents from landing a thin team.
-        let agents = validate_roster(
-            draft.agents.into_iter().map(ProposedAgent::from).collect(),
-            template,
-        );
-        if agents.is_empty() {
-            // Unreachable while `validate_roster` tops up from a non-empty
-            // template, and handled anyway: an empty team is the one outcome
-            // that would be worse than not running setup at all.
-            tracing::warn!(
+        // The same validation the curated team passes through, so one definition
+        // of a well-formed roster governs both.
+        let agents = validate_roster(draft.agents.into_iter().map(ProposedAgent::from).collect());
+
+        // Too thin to be a company: take the curated team WHOLE rather than
+        // padding the model's answer with strangers.
+        //
+        // This is the decision that used to live inside `validate_roster` as a
+        // silent top-up, and moving it here is the point. Padding produced a
+        // roster that was part-authored and part-canned with no way to tell
+        // which — a yoga studio was handed a Content Strategist it had never
+        // asked for, presented exactly like the three agents it had. An operator
+        // now always sees one authored team or the other.
+        if agents.len() < MIN_AGENTS {
+            tracing::info!(
                 template = template.key,
-                "[setup] validation emptied the model's roster; shipping the curated one"
+                returned = agents.len(),
+                minimum = MIN_AGENTS,
+                "[setup] the model's roster was too thin to be a company; shipping the curated one"
             );
             return (fallback(), usage);
         }
@@ -178,7 +183,7 @@ impl RosterBuilder {
             RosterProposal {
                 agents,
                 template_key: template.key,
-                generated: true,
+                source: RosterSource::Model,
             },
             usage,
         )

@@ -23,15 +23,21 @@ export interface RosterProposal {
   /** Which reference team framed the proposal, e.g. `ecommerce`. */
   template: string;
   /**
-   * Whether a model designed this team from the answers.
+   * Who wrote this team.
    *
-   * `false` is the offline path (no inference credential) and every failure
-   * path — a timeout, an unreadable answer — where the curated reference team
-   * ships instead. The dialog renders both identically **on purpose**: to the
-   * operator they are the same thing, a starting point they can edit, and
-   * captioning one "we guessed" would undersell a perfectly good roster.
+   * `"model"` — designed from the operator's own answers.
+   * `"fallback"` — the curated team for this kind of business, shipped whole
+   * because no model was reachable, its answer could not be read, or what came
+   * back was too thin to be a company.
+   *
+   * **The dialog says which, and an earlier version did not.** Rendering both
+   * identically was defended as "to the operator they are the same thing — a
+   * starting point they can edit". That is wrong in the direction that costs
+   * trust: someone shown a canned team with no indication assumes a model read
+   * their answers and wrote it, and judges the product on a roster it never
+   * produced.
    */
-  generated: boolean;
+  source: "model" | "fallback";
 }
 
 /**
