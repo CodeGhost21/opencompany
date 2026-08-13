@@ -4358,6 +4358,9 @@ mod test {
         // No openhuman channel is added when the daemon is unreachable.
         assert_eq!(runtime.channels.len(), 1);
         assert_eq!(runtime.channels[0].channel_id(), "operator");
+        // The #813 accessor the console's channel picker reads: `operator` is
+        // always wired, so a workflow always has at least one real target.
+        assert_eq!(runtime.wired_channel_ids(), vec!["operator".to_string()]);
 
         // Tools degrade to the grant-enforcing built-in: ungranted rejected,
         // granted returns a well-formed not-implemented result — and the RPC
