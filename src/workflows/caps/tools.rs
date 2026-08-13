@@ -706,7 +706,10 @@ mod tests {
             &CapabilityFilter::AllowAll,
             None,
             test_metering(),
-            WorkflowToolWiring::default(),
+            WorkflowToolWiring {
+                wired_namespaces: ["code"].into_iter().collect(),
+                ..WorkflowToolWiring::default()
+            },
         );
         assert!(code.tools.contains_key("apply_patch"));
         assert!(code.tools.contains_key("csv_export"));
