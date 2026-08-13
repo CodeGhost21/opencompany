@@ -133,12 +133,52 @@ export interface ComposioAuthorize {
   connectUrl: string;
 }
 
+/** One connected account inside a {@link ComposioConnection} (issue #404). */
+export interface ComposioAccount {
+  /** Composio's connection id — what a disconnect or a default is named by. */
+  id: string;
+  /** Composio's raw status string (`ACTIVE`, `INITIATED`, `EXPIRED`, …). */
+  status: string;
+  /** Whether this individual account is usable. */
+  connected: boolean;
+  /** When Composio recorded the connection, when it says. */
+  createdAt?: string;
+  /**
+   * The account label the provider published — an email, a workspace, a handle.
+   * Absent for the many toolkits that publish no identity; the console shows the
+   * id rather than inventing one.
+   */
+  account?: string;
+  /**
+   * Whether this is the account the company chose to act as for the toolkit
+   * (issue #820). False on every account until somebody chooses.
+   */
+  isDefault: boolean;
+}
+
 /** One toolkit's connected state, as returned by `GET …/composio/connections`. */
 export interface ComposioConnection {
   /** Toolkit slug, e.g. `gmail`. */
   toolkit: string;
   /** Whether the company has at least one active connection for this toolkit. */
   connected: boolean;
+  /**
+   * Every connection the company holds for this toolkit (issue #404).
+   *
+   * Optional on the wire only for a host predating it — the field is always sent
+   * by a current host, and the console treats a missing one as "no detail
+   * available" rather than "no accounts".
+   */
+  accounts?: ComposioAccount[];
+  /**
+   * The account the company chose for this toolkit (issue #820), or absent.
+   *
+   * **Absent is the ordinary state and means nothing is chosen** — Composio
+   * resolves the account itself, exactly as it did before a company could
+   * express a preference. The console must not fill this in from the account
+   * list: a default the harness does not honour reads as a guarantee.
+   */
+  defaultConnectionId?: string;
 }
 
 /** The company's Composio status. */
@@ -190,4 +230,48 @@ export function listComposioConnections(
   company: string | null,
 ): Promise<ComposioConnection[]> {
   return client.get<ComposioConnection[]>(`${client.scopeFor(company)}/composio/connections`);
+}
+
+/** The `…/default` response: what the company now acts as, and a sentence. */
+export interface ComposioDefaultMutation {
+  /** The toolkit the change applied to. Empty on a clear. */
+  toolkit: string;
+  /** The account now acting for that toolkit — absent after a clear. */
+  connectionId?: string;
+  /** Plain-language confirmation, in the host's own words. */
+  note: string;
+}
+
+/**
+ * Make `connectionId` the account this company's agents act as for its toolkit
+ * (issue #820). Admin-only; 404 when the id names no connection this company
+ * holds, or names one that is connected but not usable.
+ *
+ * The toolkit is not passed: it is a property of the connection, and asking the
+ * caller to repeat it would only let the two disagree.
+ */
+export function setComposioDefaultAccount(
+  client: OpenCompanyClient,
+  company: string | null,
+  connectionId: string,
+): Promise<ComposioDefaultMutation> {
+  return client.put<ComposioDefaultMutation>(
+    `${client.scopeFor(company)}/composio/connections/${encodeURIComponent(connectionId)}/default`,
+    {},
+  );
+}
+
+/**
+ * Stop naming an account for that connection's toolkit — Composio resolves it
+ * again, as it did before. Needs no live provider, so it still works when the
+ * account is gone or the backend is unreachable.
+ */
+export function clearComposioDefaultAccount(
+  client: OpenCompanyClient,
+  company: string | null,
+  connectionId: string,
+): Promise<ComposioDefaultMutation> {
+  return client.del<ComposioDefaultMutation>(
+    `${client.scopeFor(company)}/composio/connections/${encodeURIComponent(connectionId)}/default`,
+  );
 }

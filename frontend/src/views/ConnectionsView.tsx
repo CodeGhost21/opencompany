@@ -19,6 +19,7 @@ import { buildGridProviders, type GridProvider } from "@/lib/provider-grid";
 import { armTourResume } from "@/tour/state";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
+import { AccountChoiceSection } from "@/views/connections/AccountChoiceSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
@@ -87,6 +88,11 @@ export function ConnectionsView({ client, company }: Props) {
   // switch or unmount cannot leave one running.
   const pollTimers = useRef<Record<string, number>>({});
 
+  // Bumped on every reconciled re-read, so the account-choice section re-reads
+  // with it: connecting a second Gmail is exactly when that section appears,
+  // and releasing one is exactly when it stops being a choice (issue #820).
+  const [connectionsGeneration, setConnectionsGeneration] = useState(0);
+
   const refresh = useCallback(async () => {
     try {
       const list = await client.listConnections(company);
@@ -95,6 +101,8 @@ export function ConnectionsView({ client, company }: Props) {
     } catch {
       // No connections surface on this host yet — show the catalog read-only.
       setLoad("unavailable");
+    } finally {
+      setConnectionsGeneration((n) => n + 1);
     }
   }, [client, company]);
 
@@ -453,6 +461,16 @@ export function ConnectionsView({ client, company }: Props) {
           onConnect={(p) => void connect(p)}
           onDisconnect={(p) => void disconnect(p)}
           onConnectSlug={(slug) => void connectSlug(slug)}
+        />
+
+        {/* Only renders for a provider this company holds two or more accounts
+            for — the one case where "which account do agents act as" is a
+            question the product can answer (issue #820). */}
+        <AccountChoiceSection
+          client={client}
+          company={company}
+          canManage={canManage}
+          generation={connectionsGeneration + credentialGeneration}
         />
       </div>
     </div>
