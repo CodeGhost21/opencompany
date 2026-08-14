@@ -401,7 +401,9 @@ impl MongoStore {
         // re-mark is a no-op `E11000` and read stays a latch. Created outside the
         // fixed array above so adding them does not disturb its length.
         self.collection("notifications")
-            .create_index(nonunique(doc! {"company_id": 1, "created_ms": -1}))
+            .create_index(nonunique(
+                doc! {"company_id": 1, "created_ms": -1, "id": -1},
+            ))
             .await
             .map_err(mongo_err)?;
         // Unique per (company_id, id): makes `append` idempotent — a duplicate

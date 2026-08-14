@@ -209,6 +209,11 @@ CREATE TABLE IF NOT EXISTS notifications (
     created_ms   INTEGER NOT NULL,
     PRIMARY KEY (company_id, id)
 );
+-- Backs the documented newest-first feed (`NotificationStore::list`):
+-- `WHERE company_id = ? ORDER BY created_ms DESC, id DESC`, so a company's feed
+-- reads straight off the index instead of sorting at read time.
+CREATE INDEX IF NOT EXISTS notifications_feed
+    ON notifications (company_id, created_ms DESC, id DESC);
 CREATE TABLE IF NOT EXISTS notification_reads (
     company_id      TEXT NOT NULL,
     user_id         TEXT NOT NULL,
