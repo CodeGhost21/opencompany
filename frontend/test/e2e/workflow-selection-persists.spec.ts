@@ -136,7 +136,10 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     await expect(picker(page)).toContainText(secondName);
 
     await page.goto(`/#/workflows/${firstId}`);
-    await expect(picker(page)).toContainText(firstName);
+    // A full navigation, so the view has to fetch the workflow list again
+    // before the picker can name anything — the default 5s assertion timeout
+    // is the flake, not the console.
+    await expect(picker(page)).toContainText(firstName, { timeout: 30_000 });
 
     await page.getByRole("button", { name: "Workspace" }).click();
     await page.getByRole("button", { name: "Workflows" }).click();
