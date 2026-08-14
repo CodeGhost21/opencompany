@@ -485,6 +485,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_fingerprint_moves_on_either_half_and_is_stable_otherwise() {
+        // This function is the whole input to the roster staleness check, so a
+        // half of the pair dropped out of the hash would silently stop
+        // rebuilding: agents would keep authenticating with a revoked key until
+        // the process restarted, with nothing failing to say so.
+        let of = |site: &str, key: &str| {
+            TenantChargebee::fingerprint(&Some(TenantChargebee {
+                config: ChargebeeConfig {
+                    site: site.to_string(),
+                    api_key: key.to_string(),
+                },
+            }))
+        };
+
+        let base = of("acme-test", "cb_key");
+        assert_eq!(base, of("acme-test", "cb_key"), "stable for one config");
+        assert_ne!(base, of("acme-live", "cb_key"), "the site must count");
+        assert_ne!(base, of("acme-test", "cb_rotated"), "the KEY must count");
+        assert_ne!(
+            base,
+            TenantChargebee::fingerprint(&None),
+            "connected and unconnected must differ"
+        );
+    }
+
     #[tokio::test]
     async fn a_blank_secret_counts_as_absent() {
         // The console writing an empty string is a cleared field, not a

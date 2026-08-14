@@ -278,6 +278,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_fingerprint_moves_on_the_credential_and_on_the_environment() {
+        // Symmetric with the Chargebee side, plus the environment: moving a
+        // company from sandbox to live with the same keys must rebuild, or its
+        // agents keep reading the wrong world's balance.
+        let of = |id: &str, secret: &str, env: PaypalEnvironment| {
+            TenantPaypal::fingerprint(&Some(TenantPaypal {
+                config: crate::paypal::PaypalConfig {
+                    client_id: id.to_string(),
+                    client_secret: secret.to_string(),
+                    environment: env,
+                },
+            }))
+        };
+
+        let base = of("AY_id", "EL_secret", PaypalEnvironment::Sandbox);
+        assert_eq!(
+            base,
+            of("AY_id", "EL_secret", PaypalEnvironment::Sandbox),
+            "stable for one config"
+        );
+        assert_ne!(
+            base,
+            of("AY_other", "EL_secret", PaypalEnvironment::Sandbox)
+        );
+        assert_ne!(base, of("AY_id", "EL_rotated", PaypalEnvironment::Sandbox));
+        assert_ne!(
+            base,
+            of("AY_id", "EL_secret", PaypalEnvironment::Live),
+            "the environment must count on its own"
+        );
+        assert_ne!(base, TenantPaypal::fingerprint(&None));
+    }
+
     #[tokio::test]
     async fn an_unset_environment_resolves_to_sandbox() {
         // The safe default, and the one that matters most: an operator who never

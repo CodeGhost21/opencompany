@@ -64,7 +64,7 @@ composio       | partial      | openhuman,tinycortex,composio   | harness::compo
 export         | partial      | export                          | store::export
 imap           | partial      | imap,smtp                       | server::ops::imap
 chargebee      | partial      | openhuman,tinycortex,chargebee  | chargebee
-paypal         | partial      | paypal                          | paypal
+paypal         | partial      | openhuman,tinycortex,paypal     | paypal
 sidecar        | partial      | sidecar                         | brain::sidecar
 
 # --- Owed a lane: gated tests exist, and they are currently RED -------------
