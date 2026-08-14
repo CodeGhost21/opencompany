@@ -205,7 +205,7 @@ mod live {
                     "invoice_note": {"type": "string"},
                     "idempotency_key": {
                         "type": "string",
-                        "description": "Reuse on a retry of the SAME invoice to avoid billing the customer twice."
+                        "description": "Rarely needed. One is derived from the invoice automatically, so a retry of the same invoice cannot bill the customer twice. Supply a distinct value ONLY to raise a second, deliberately identical invoice for the same customer."
                     }
                 }
             })

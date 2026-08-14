@@ -165,6 +165,22 @@ pub struct InvoiceSummary {
     /// invoice exists, and an invoice that was created but whose link could not
     /// be raised is still a real invoice the operator should hear about.
     pub payment_url: Option<String>,
+    /// Set when Chargebee **replayed** an earlier invoice for this idempotency
+    /// key rather than raising a new one.
+    ///
+    /// Serialised only when true, so the ordinary result is unchanged. It has to
+    /// be reported at all because a replayed response is byte-identical to the
+    /// original: without this flag a deliberate second identical invoice that
+    /// was deduped reads exactly like a successful new one, which is a silent
+    /// failure to bill.
+    #[serde(skip_serializing_if = "is_false")]
+    pub replayed_earlier_invoice: bool,
+}
+
+/// `skip_serializing_if` predicate — `bool::not` takes `self` by value and so
+/// cannot be used here.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A compact projection of a Chargebee customer.

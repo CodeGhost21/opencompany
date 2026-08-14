@@ -119,6 +119,9 @@ fn summarize_invoice(invoice: &Value, payment_url: Option<String>) -> InvoiceSum
             })
             .unwrap_or_default(),
         payment_url,
+        // Only `send_invoice` can observe a replay; a fetched or listed invoice
+        // is never one.
+        replayed_earlier_invoice: false,
     }
 }
 
@@ -258,6 +261,44 @@ async fn payment_url(
     }
 }
 
+/// Derives an idempotency key from the request itself.
+///
+/// # Why a key is always sent, even when the caller supplied none
+///
+/// The runtime's at-most-once guard covers **approval replay**: an approved
+/// effect is recorded executed before it is performed, so re-approving does not
+/// re-send. It does not cover **transport retry**, which is the failure that
+/// actually duplicates an invoice — the request reaches Chargebee, the response
+/// is lost to a timeout, the tool reports failure, and the agent (or an
+/// operator reading that failure) sends again. The customer receives two
+/// invoices.
+///
+/// The key was an optional tool argument, which in practice meant absent: a
+/// model has no reason to invent one, and every send observed in testing
+/// omitted it. Deriving one from the request body closes that by default. It is
+/// deliberately derived from the REQUEST rather than from the approved effect —
+/// the effect id is not reachable here, because an approved call is re-issued
+/// by the model through the ordinary tool path (`redispatch_granted_call`)
+/// rather than executed by the runtime with the effect in scope.
+///
+/// The trade this makes is explicit: two byte-identical invoices raised inside
+/// Chargebee's key-retention window collapse to one. That is why a replay is
+/// reported back rather than passed off as a new invoice — see
+/// [`InvoiceSummary::replayed_earlier_invoice`] — and why a caller who means to
+/// bill twice can pass a distinct `idempotency_key`.
+///
+/// `DefaultHasher` is not stable across Rust releases, which is fine for what
+/// this is: a retry and its original are the same binary, minutes apart.
+fn derived_idempotency_key(form: &Form) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (key, value) in form.pairs() {
+        key.hash(&mut hasher);
+        value.hash(&mut hasher);
+    }
+    format!("oc-invoice-{:016x}", hasher.finish())
+}
+
 /// Creates an invoice for `customer_email`, creating the customer if needed,
 /// and returns it with a payment link when one could be raised.
 pub async fn send_invoice(
@@ -301,11 +342,12 @@ pub async fn send_invoice(
     }
 
     let path = "/invoices/create_for_charge_items_and_charges";
-    let body = match client
-        .post_form(path, &form, args.idempotency_key.as_deref())
-        .await
-    {
-        Ok(body) => body,
+    let key = args
+        .idempotency_key
+        .clone()
+        .unwrap_or_else(|| derived_idempotency_key(&form));
+    let (body, replayed) = match client.post_form_replayable(path, &form, Some(&key)).await {
+        Ok(outcome) => outcome,
         // `net_term_days` is refused outright by a site that has not enabled
         // "Payment Terms for One-Time Invoices" — a per-site feature most test
         // sites ship without. Failing the whole invoice over a DUE DATE is the
@@ -321,20 +363,43 @@ pub async fn send_invoice(
                  raising the invoice without a due date"
             );
             let mut retry = Form::new();
-            for (key, value) in form.pairs() {
-                if key != "net_term_days" {
-                    retry.push(key.clone(), value.clone());
+            for (field, value) in form.pairs() {
+                if field != "net_term_days" {
+                    retry.push(field.clone(), value.clone());
                 }
             }
+            // A DIFFERENT key from the first attempt, deliberately. Chargebee
+            // may have stored that attempt's 400 against its key, and replaying
+            // a refusal would turn the recovery into the failure it exists to
+            // avoid. The retry is a genuinely different request — it asks for
+            // no payment terms — so it gets its own key. A derived key changes
+            // on its own, since the body changed; a caller-supplied one is
+            // suffixed rather than reused.
+            let retry_key = match &args.idempotency_key {
+                Some(supplied) => format!("{supplied}-no-terms"),
+                None => derived_idempotency_key(&retry),
+            };
             client
-                .post_form(path, &retry, args.idempotency_key.as_deref())
+                .post_form_replayable(path, &retry, Some(&retry_key))
                 .await?
         }
         Err(e) => return Err(e),
     };
     let invoice = require(&body, "invoice")?.clone();
     let url = payment_url(client, &customer.id, &currency).await;
-    Ok(summarize_invoice(&invoice, url))
+    let mut summary = summarize_invoice(&invoice, url);
+    if replayed {
+        // Chargebee returned an earlier invoice verbatim, so nothing was
+        // raised. Reported rather than swallowed: for a retry this is the
+        // outcome you want, and for a deliberate second charge it is the one
+        // fact that distinguishes "billed twice" from "billed once".
+        tracing::warn!(
+            invoice_id = %summary.id,
+            "[chargebee] send_invoice replayed an earlier invoice for this idempotency key"
+        );
+        summary.replayed_earlier_invoice = true;
+    }
+    Ok(summary)
 }
 
 /// Fetches one invoice by id.
@@ -461,6 +526,8 @@ mod tests {
         path: String,
         query: String,
         body: String,
+        /// The `chargebee-idempotency-key` header, when one was sent.
+        idempotency: Option<String>,
     }
 
     /// Serves canned responses by path prefix and records every request.
@@ -470,6 +537,11 @@ mod tests {
     /// them share the `/customers` path — a route table keyed on path alone
     /// answers the create with the lookup's body, which is exactly how the
     /// fabricated-empty-id bug surfaced.
+    ///
+    /// Listing the SAME prefix more than once makes it answer differently per
+    /// attempt: the Nth request matching a prefix gets that prefix's Nth entry,
+    /// clamped to the last. That is what lets a test drive a failure and its
+    /// retry through one route table; a prefix listed once behaves as before.
     async fn stub<F, Fut, T>(routes: Vec<Route>, call: F) -> (Result<T>, Vec<Seen>)
     where
         F: FnOnce(ChargebeeClient) -> Fut,
@@ -482,22 +554,55 @@ mod tests {
         let handler = move |State((seen, routes)): State<StubState>,
                             method: axum::http::Method,
                             uri: axum::http::Uri,
+                            headers: axum::http::HeaderMap,
                             body: String| async move {
             let path = format!("{method} {}", uri.path());
-            seen.lock().expect("lock").push(Seen {
-                method: method.to_string(),
-                path: uri.path().to_string(),
-                query: uri.query().unwrap_or_default().to_string(),
-                body,
-            });
-            let (status, payload) = routes
+            let attempt = {
+                let mut log = seen.lock().expect("lock");
+                let attempt = log
+                    .iter()
+                    .filter(|s| format!("{} {}", s.method, s.path) == path)
+                    .count();
+                log.push(Seen {
+                    method: method.to_string(),
+                    path: uri.path().to_string(),
+                    query: uri.query().unwrap_or_default().to_string(),
+                    body,
+                    idempotency: headers
+                        .get("chargebee-idempotency-key")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string),
+                });
+                attempt
+            };
+            let matching: Vec<&Route> = routes
                 .iter()
-                .find(|(prefix, _, _)| path.contains(prefix))
+                .filter(|(prefix, _, _)| path.contains(prefix))
+                .collect();
+            let (status, payload) = matching
+                .get(attempt.min(matching.len().saturating_sub(1)))
                 .map(|(_, s, b)| (*s, *b))
                 .unwrap_or((404, "{}"));
+            let mut out = axum::http::HeaderMap::new();
+            out.insert("content-type", "application/json".parse().expect("header"));
+            // Test affordance: an idempotency key beginning `replay-` makes the
+            // stub answer the way Chargebee answers a replayed request, so the
+            // replay path can be driven end to end without a second live send.
+            if seen
+                .lock()
+                .expect("lock")
+                .last()
+                .and_then(|s| s.idempotency.as_deref())
+                .is_some_and(|key| key.starts_with("replay-"))
+            {
+                out.insert(
+                    "chargebee-idempotency-replayed",
+                    "true".parse().expect("header"),
+                );
+            }
             (
                 axum::http::StatusCode::from_u16(status).expect("status"),
-                [("content-type", "application/json")],
+                out,
                 payload,
             )
         };
@@ -770,6 +875,214 @@ mod tests {
         assert!(
             seen.iter().any(|r| r.body.contains("net_term_days=7")),
             "the term must still be sent to a site that accepts it: {seen:?}"
+        );
+    }
+
+    /// Chargebee's own words when the site lacks the feature.
+    const TERMS_REFUSED: &str = r#"{"api_error_code":"invalid_request","message":"net_term_days : should not be sent as the Payment Terms for One-Time Invoices feature is not enabled"}"#;
+
+    #[tokio::test]
+    async fn the_payment_terms_refusal_is_retried_without_the_term() {
+        // The other half of the trade above: when the site actually refuses,
+        // the invoice is raised anyway, once, without `net_term_days`.
+        let (result, seen) = stub(
+            vec![
+                ("GET /customers", 200, ONE_CUSTOMER),
+                // Listed twice — the first attempt is refused, the retry lands.
+                (
+                    "POST /invoices/create_for_charge_items_and_charges",
+                    400,
+                    TERMS_REFUSED,
+                ),
+                (
+                    "POST /invoices/create_for_charge_items_and_charges",
+                    200,
+                    CREATED_INVOICE,
+                ),
+                ("POST /hosted_pages/collect_now", 200, HOSTED_PAGE),
+            ],
+            |client| async move {
+                send_invoice(
+                    &client,
+                    SendInvoiceArgs {
+                        customer_email: "alan@tinyhumans.ai".to_string(),
+                        customer_name: None,
+                        currency_code: "USD".to_string(),
+                        line_items: vec![line("Consulting", 10_000)],
+                        due_days: Some(7),
+                        invoice_note: None,
+                        idempotency_key: None,
+                    },
+                )
+                .await
+            },
+        )
+        .await;
+
+        let invoice = result.expect("the invoice survives a site without payment terms");
+        assert_eq!(invoice.id, "inv_1");
+
+        let creates: Vec<&Seen> = seen
+            .iter()
+            .filter(|r| r.path.contains("create_for_charge_items_and_charges"))
+            .collect();
+        assert_eq!(creates.len(), 2, "one refusal, one retry: {seen:?}");
+        assert!(
+            creates[0].body.contains("net_term_days=7"),
+            "the first attempt asks for the term: {:?}",
+            creates[0]
+        );
+        assert!(
+            !creates[1].body.contains("net_term_days"),
+            "the retry must drop it: {:?}",
+            creates[1]
+        );
+        // The rest of the invoice is unchanged — a retry that also lost the
+        // amount would be worse than the failure it replaces.
+        assert!(creates[1].body.contains("charges%5Bamount%5D%5B0%5D=10000"));
+        // And it carries a DIFFERENT key: Chargebee may have stored the 400
+        // against the first one, and replaying a refusal would defeat the
+        // retry entirely.
+        let first = creates[0].idempotency.as_deref().expect("first key");
+        let retry = creates[1].idempotency.as_deref().expect("retry key");
+        assert_ne!(first, retry, "the retry needs its own key: {seen:?}");
+    }
+
+    #[tokio::test]
+    async fn every_send_carries_an_idempotency_key_even_when_none_was_supplied() {
+        // The model has no reason to invent one, so every send observed in
+        // testing omitted it — leaving a lost response and a resend to bill the
+        // customer twice.
+        let (result, seen) = stub(
+            vec![
+                ("GET /customers", 200, ONE_CUSTOMER),
+                (
+                    "POST /invoices/create_for_charge_items_and_charges",
+                    200,
+                    CREATED_INVOICE,
+                ),
+                ("POST /hosted_pages/collect_now", 200, HOSTED_PAGE),
+            ],
+            |client| async move {
+                send_invoice(
+                    &client,
+                    SendInvoiceArgs {
+                        customer_email: "alan@tinyhumans.ai".to_string(),
+                        customer_name: None,
+                        currency_code: "USD".to_string(),
+                        line_items: vec![line("Consulting", 10_000)],
+                        due_days: None,
+                        invoice_note: None,
+                        idempotency_key: None,
+                    },
+                )
+                .await
+            },
+        )
+        .await;
+        let invoice = result.expect("invoice created");
+        // Nothing was replayed, so the field stays out of the agent's view.
+        assert!(!invoice.replayed_earlier_invoice);
+        let create = seen
+            .iter()
+            .find(|r| r.path.contains("create_for_charge_items_and_charges"))
+            .expect("the invoice was created");
+        assert!(
+            create
+                .idempotency
+                .as_deref()
+                .is_some_and(|key| key.starts_with("oc-invoice-")),
+            "a key must be derived when the caller supplies none: {create:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_derived_key_is_stable_for_the_same_invoice_and_differs_across_invoices() {
+        // The whole point: a retry of the same send must reuse the key, and a
+        // different invoice must not collide with it.
+        async fn key_for(amount: i64) -> String {
+            let (result, seen) = stub(
+                vec![
+                    ("GET /customers", 200, ONE_CUSTOMER),
+                    (
+                        "POST /invoices/create_for_charge_items_and_charges",
+                        200,
+                        CREATED_INVOICE,
+                    ),
+                    ("POST /hosted_pages/collect_now", 200, HOSTED_PAGE),
+                ],
+                |client| async move {
+                    send_invoice(
+                        &client,
+                        SendInvoiceArgs {
+                            customer_email: "alan@tinyhumans.ai".to_string(),
+                            customer_name: None,
+                            currency_code: "USD".to_string(),
+                            line_items: vec![line("Consulting", amount)],
+                            due_days: None,
+                            invoice_note: None,
+                            idempotency_key: None,
+                        },
+                    )
+                    .await
+                },
+            )
+            .await;
+            result.expect("invoice created");
+            seen.iter()
+                .find(|r| r.path.contains("create_for_charge_items_and_charges"))
+                .and_then(|r| r.idempotency.clone())
+                .expect("a key was sent")
+        }
+
+        assert_eq!(key_for(10_000).await, key_for(10_000).await);
+        assert_ne!(key_for(10_000).await, key_for(20_000).await);
+    }
+
+    #[tokio::test]
+    async fn a_replayed_invoice_says_so_rather_than_reading_as_a_new_one() {
+        // A replay returns the original invoice verbatim, so without this flag
+        // a deliberate second charge that was deduped is indistinguishable from
+        // a successful new invoice — a silent failure to bill.
+        let (result, _seen) = stub(
+            vec![
+                ("GET /customers", 200, ONE_CUSTOMER),
+                (
+                    "POST /invoices/create_for_charge_items_and_charges",
+                    200,
+                    CREATED_INVOICE,
+                ),
+                ("POST /hosted_pages/collect_now", 200, HOSTED_PAGE),
+            ],
+            |client| async move {
+                send_invoice(
+                    &client,
+                    SendInvoiceArgs {
+                        customer_email: "alan@tinyhumans.ai".to_string(),
+                        customer_name: None,
+                        currency_code: "USD".to_string(),
+                        line_items: vec![line("Consulting", 10_000)],
+                        due_days: None,
+                        invoice_note: None,
+                        // The stub answers this the way Chargebee answers a
+                        // replay.
+                        idempotency_key: Some("replay-abc".to_string()),
+                    },
+                )
+                .await
+            },
+        )
+        .await;
+
+        let invoice = result.expect("a replay is still a successful call");
+        assert!(
+            invoice.replayed_earlier_invoice,
+            "the replay must be reported: {invoice:?}"
+        );
+        let rendered = serde_json::to_string(&invoice).expect("serialises");
+        assert!(
+            rendered.contains("replayed_earlier_invoice"),
+            "and it must reach the agent: {rendered}"
         );
     }
 

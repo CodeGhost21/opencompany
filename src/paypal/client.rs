@@ -82,6 +82,26 @@ fn err(status: u16, code: &str, message: impl Into<String>) -> OpenCompanyError 
     }
 }
 
+/// Reports a body PayPal did not describe, WITHOUT putting it in the message.
+///
+/// Same rule as the Chargebee client's `unparsed_body_message`, for the same
+/// reason: PayPal's own `message` / `error_description` is a classified failure
+/// the agent should read, but a body carrying neither is unidentified text on a
+/// payments API, and this string reaches the model's context and the turn's
+/// durable transcript.
+fn unparsed_body_message(status: u16, body: &str) -> String {
+    tracing::warn!(
+        status,
+        body = %body.chars().take(200).collect::<String>(),
+        "[paypal] response body carried no error description"
+    );
+    format!(
+        "PayPal returned {status} with a body this host could not interpret. The body is in the \
+         host log; it is not reproduced here because its contents are unknown and may carry \
+         account data."
+    )
+}
+
 impl PaypalClient {
     /// Builds a client against the environment named in `config`.
     pub fn new(config: PaypalConfig) -> Result<Self> {
@@ -149,7 +169,8 @@ impl PaypalClient {
                     parsed
                         .get("error_description")
                         .and_then(Value::as_str)
-                        .unwrap_or(&body.chars().take(200).collect::<String>())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| unparsed_body_message(status, &body))
                 ),
             ));
         }
@@ -214,7 +235,7 @@ impl PaypalClient {
                 .get("message")
                 .and_then(Value::as_str)
                 .map(str::to_string)
-                .unwrap_or_else(|| body.chars().take(300).collect()),
+                .unwrap_or_else(|| unparsed_body_message(status, &body)),
         ))
     }
 }
@@ -314,6 +335,42 @@ mod tests {
             message.contains("Client Authentication failed"),
             "{message}"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_body_paypal_did_not_describe_is_logged_rather_than_relayed() {
+        // Symmetric with the Chargebee client: PayPal's own `message` is a
+        // classified failure the agent should read, but a body carrying none is
+        // unidentified text on a payments API and this string reaches the
+        // model's context and the durable transcript.
+        let app = axum::Router::new().fallback(axum::routing::any(|| async {
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                [("content-type", "text/html")],
+                "<html>upstream error for sb-ml643z@business.example.com, balance 5000.00</html>",
+            )
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client =
+            PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
+        // The token call fails on the same body, which is the path that runs
+        // first — both fallbacks share `unparsed_body_message`.
+        let message = client
+            .get("/v1/reporting/balances", &[])
+            .await
+            .expect_err("502 is an error")
+            .to_string();
+        assert!(!message.contains("business.example.com"), "{message}");
+        assert!(!message.contains("5000.00"), "{message}");
+        assert!(message.contains("host log"), "{message}");
         server.abort();
     }
 }
