@@ -225,8 +225,13 @@ mod live {
                 Ok(client) => client,
                 Err(e) => return Ok(ToolResult::error(format!("chargebee client: {e}"))),
             };
+            // Deliberately no customer email: this line lands in durable host
+            // logs, and a counterparty's address is their personal data, not
+            // ours to retain for operational telemetry. The site and line count
+            // are enough to trace a call.
             tracing::info!(
-                site = %self.0.site(), email = %args.customer_email,
+                site = %self.0.site(),
+                line_items = args.line_items.len(),
                 "[chargebee] send_invoice"
             );
             Ok(render(

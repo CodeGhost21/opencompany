@@ -23,6 +23,18 @@ use super::types::ChargebeeConfig;
 /// The header Chargebee reads for idempotent replay of a `POST`.
 const IDEMPOTENCY_HEADER: &str = "chargebee-idempotency-key";
 
+/// Builds the error for a reply whose body could not be used.
+fn err_body(status: u16, code: &str, body: &str) -> OpenCompanyError {
+    OpenCompanyError::Chargebee {
+        status,
+        code: code.to_string(),
+        message: format!(
+            "Chargebee returned {status} with a body that is not a JSON object — got: {}",
+            body.chars().take(200).collect::<String>()
+        ),
+    }
+}
+
 /// A form body under construction.
 ///
 /// Deliberately a `Vec` of pairs rather than a map: Chargebee's bracket-array
@@ -86,6 +98,14 @@ impl ChargebeeClient {
     pub fn with_base_url(config: ChargebeeConfig, base_url: String) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            // Every request carries HTTP Basic with the API key as the
+            // username. reqwest follows redirects by default and re-sends the
+            // Authorization header, so a 30x pointing at `http://` would put the
+            // key on the wire in clear text. Chargebee's API does not redirect,
+            // so refusing them outright costs nothing and removes the downgrade
+            // entirely — a scheme check would still leave same-scheme
+            // redirection to an unintended host.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| OpenCompanyError::Chargebee {
                 status: 0,
@@ -160,6 +180,14 @@ impl ChargebeeClient {
         let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
 
         if (200..300).contains(&status) {
+            // A success whose body is not a JSON object is not a success we can
+            // use: `Value::Null` would flow on and every field read would yield
+            // a default, so a proxy's HTML 200 became an invoice with an empty
+            // id rather than a reported failure. The raw-body fallback below
+            // stays for NON-2xx replies, where prose is all there is.
+            if !parsed.is_object() {
+                return Err(err_body(status, "unexpected_response", &body));
+            }
             return Ok(parsed);
         }
 

@@ -356,11 +356,21 @@ export function BillingView({ client, company }: Props) {
                   <Button
                     variant="outline"
                     size="icon"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(
-                        status.webhookUrl ?? "",
-                      );
-                      toast.success("Webhook URL copied.");
+                    onClick={async () => {
+                      // Await before claiming success: clipboard writes are
+                      // refused in some browsers and over plain http, and a
+                      // toast saying "copied" over an empty clipboard sends an
+                      // operator to paste nothing into Chargebee.
+                      try {
+                        await navigator.clipboard.writeText(
+                          status.webhookUrl ?? "",
+                        );
+                        toast.success("Webhook URL copied.");
+                      } catch {
+                        toast.error(
+                          "Could not copy — select the URL and copy it manually.",
+                        );
+                      }
                     }}
                   >
                     <Copy className="size-4" />

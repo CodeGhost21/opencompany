@@ -127,9 +127,13 @@ pub async fn get_wallet_balance(client: &PaypalClient) -> Result<Vec<Balance>> {
 
 /// Fetches transactions between two ISO 8601 instants.
 ///
-/// PayPal caps the window at **31 days** and refuses anything wider, so the
-/// caller's range is validated here rather than spent on a round trip that
-/// returns a parameter error.
+/// PayPal caps the window at **31 days** and publishes on a lag of up to three
+/// hours; both limits are enforced by PayPal, not here. Only the non-empty
+/// check below is local — parsing ISO 8601 to pre-validate the span would mean
+/// duplicating PayPal's calendar rules to save one round trip, and getting that
+/// subtly wrong would reject windows PayPal would have accepted. What this does
+/// instead is make PayPal's own refusal actionable: see
+/// [`explain_unavailable_window`].
 pub async fn list_transactions(
     client: &PaypalClient,
     start_date: &str,
@@ -140,8 +144,8 @@ pub async fn list_transactions(
         return Err(OpenCompanyError::Paypal {
             status: 0,
             code: "invalid_arguments".to_string(),
-            message: "`start_date` and `end_date` are both required, in ISO 8601 (PayPal allows a \
-                      window of at most 31 days)"
+            message: "`start_date` and `end_date` are both required, in ISO 8601. PayPal allows a \
+                      window of at most 31 days and publishes on a delay of up to 3 hours."
                 .to_string(),
         });
     }

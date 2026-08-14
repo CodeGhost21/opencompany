@@ -96,20 +96,41 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 fn decode_basic(header: &str) -> Option<String> {
     let encoded = header.strip_prefix("Basic ")?.trim();
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    // Structure first. An earlier version decoded until it met a `=` or an
+    // unknown byte, so `QQ` and `QQ=garbage` both yielded a prefix that then
+    // went into a credential comparison — a decoder that accepts more than it
+    // should is a poor thing to put in front of an auth check, even when the
+    // comparison itself would fail.
+    let bytes = encoded.as_bytes();
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    let padding = bytes.iter().rev().take_while(|b| **b == b'=').count();
+    if padding > 2 {
+        return None;
+    }
+    let body = &bytes[..bytes.len() - padding];
+    if body.iter().any(|b| !ALPHABET.contains(b)) {
+        return None;
+    }
+
     let mut bits: u32 = 0;
     let mut nbits = 0;
     let mut out: Vec<u8> = Vec::new();
-    for byte in encoded.bytes() {
-        if byte == b'=' {
-            break;
-        }
-        let value = ALPHABET.iter().position(|c| *c == byte)? as u32;
+    for byte in body {
+        let value = ALPHABET.iter().position(|c| c == byte)? as u32;
         bits = (bits << 6) | value;
         nbits += 6;
         if nbits >= 8 {
             nbits -= 8;
             out.push((bits >> nbits) as u8);
         }
+    }
+    // Leftover bits must be zero in canonical base64; anything else means the
+    // input was not produced by an encoder.
+    if nbits > 0 && (bits & ((1 << nbits) - 1)) != 0 {
+        return None;
     }
     String::from_utf8(out).ok()
 }
@@ -221,9 +242,11 @@ fn summarize(event_type: &str, event: &Value) -> String {
         .and_then(Value::as_i64)
         .map(|t| format!("{t} {currency} (minor units)"))
         .unwrap_or_else(|| "an unknown amount".to_string());
-    let who = field(content.get("customer"), "email")
-        .or_else(|| field(content.get("customer"), "id"))
-        .unwrap_or_else(|| "the customer".to_string());
+    // The customer id, never their email. This string is persisted in the
+    // company journal and replayed into model prompts, so a counterparty's
+    // address would outlive the notification it was needed for. The id is
+    // sufficient to look them up in Chargebee.
+    let who = field(content.get("customer"), "id").unwrap_or_else(|| "the customer".to_string());
 
     match event_type {
         "payment_succeeded" => format!(
@@ -251,6 +274,17 @@ mod tests {
         // Anything that is not Basic is not ours to interpret.
         assert_eq!(decode_basic("Bearer abc"), None);
         assert_eq!(decode_basic("Basic !!!not base64!!!"), None);
+
+        // Malformed input must be REFUSED, not decoded to a prefix that then
+        // reaches a credential comparison.
+        assert_eq!(decode_basic("Basic QQ"), None, "length not a multiple of 4");
+        assert_eq!(decode_basic("Basic QQ=garbage"), None, "data after padding");
+        assert_eq!(decode_basic("Basic ===="), None, "padding only");
+        assert_eq!(decode_basic("Basic "), None, "empty");
+        assert_eq!(decode_basic("Basic QUJD!"), None, "alphabet violation");
+        // Canonical padding still works.
+        assert_eq!(decode_basic("Basic QUJD").as_deref(), Some("ABC"));
+        assert_eq!(decode_basic("Basic QUI=").as_deref(), Some("AB"));
     }
 
     #[test]
@@ -279,13 +313,17 @@ mod tests {
             "event_type": "payment_succeeded",
             "content": {
                 "invoice": {"id": "inv_42", "total": 10000, "currency_code": "USD"},
-                "customer": {"email": "alan@tinyhumans.ai"}
+                "customer": {"id": "cus_7", "email": "alan@tinyhumans.ai"}
             }
         });
         let text = summarize("payment_succeeded", &event);
         assert!(text.contains("inv_42"), "{text}");
-        assert!(text.contains("alan@tinyhumans.ai"), "{text}");
         assert!(text.contains("PAID"), "{text}");
+        // The id identifies them; the EMAIL must not travel. This string is
+        // persisted in the journal and replayed into model prompts, so a
+        // counterparty's address would outlive the notification.
+        assert!(text.contains("cus_7"), "{text}");
+        assert!(!text.contains("alan@tinyhumans.ai"), "email leaked: {text}");
         // The unit must travel with the number or $100 gets reported as $10,000.
         assert!(text.contains("minor units"), "{text}");
     }

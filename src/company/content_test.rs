@@ -7,8 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    CompanyManifest, Tools, grants_composio_explicit, grants_media_explicit,
-    grants_search_explicit, load_dir_skills, parse_workflow, walk_workspace,
+    CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_skills,
+    parse_workflow, walk_workspace,
 };
 use crate::runtime::builder::effective_grants;
 
@@ -231,6 +232,33 @@ fn granting_search_never_strips_the_inherited_default_belt() {
             "{name}: expected `allow = [\"search\"]` to strip `composio`"
         );
     }
+}
+
+#[test]
+fn a_wildcard_never_confers_a_billing_namespace() {
+    // The point of these helpers: `*` is set for file and shell tools and must
+    // not quietly hand out invoicing or a wallet balance.
+    for grants in [
+        vec!["*".to_string()],
+        vec!["workspace".to_string(), "*".to_string()],
+        vec![],
+        vec!["chargebeeish".to_string(), "paypalish".to_string()],
+        vec!["mcp:chargebee".to_string()],
+    ] {
+        assert!(!grants_chargebee_explicit(&grants), "{grants:?}");
+        assert!(!grants_paypal_explicit(&grants), "{grants:?}");
+    }
+}
+
+#[test]
+fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
+    assert!(grants_chargebee_explicit(&["chargebee".to_string()]));
+    assert!(grants_chargebee_explicit(&["chargebee.read".to_string()]));
+    assert!(grants_paypal_explicit(&["paypal".to_string()]));
+    assert!(grants_paypal_explicit(&["paypal.wallet".to_string()]));
+    // Two namespaces, neither implying the other.
+    assert!(!grants_paypal_explicit(&["chargebee".to_string()]));
+    assert!(!grants_chargebee_explicit(&["paypal".to_string()]));
 }
 
 #[test]

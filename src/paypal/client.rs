@@ -93,6 +93,10 @@ impl PaypalClient {
     pub fn with_base_url(config: PaypalConfig, base_url: String) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            // The token call carries HTTP Basic and every other call a bearer;
+            // reqwest re-sends both across redirects, so a 30x to `http://`
+            // would leak them. PayPal's API does not redirect.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| err(0, "client_build_failed", e.to_string()))?;
         Ok(Self {
