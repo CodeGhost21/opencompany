@@ -22,6 +22,7 @@ use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
 use crate::ports::types::CompanyId;
+use crate::ports::{UsageMeter, UsageSample};
 
 // ---------------------------------------------------------------------------
 // A scripted model
@@ -142,6 +143,23 @@ allow = ["docs", "web"]
 
 fn manifest() -> CompanyManifest {
     toml::from_str(MANIFEST).expect("the fixture manifest parses")
+}
+
+struct EmptyUsageMeter;
+
+#[async_trait]
+impl UsageMeter for EmptyUsageMeter {
+    async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn query(
+        &self,
+        _company: &CompanyId,
+        _since_millis: u64,
+    ) -> crate::Result<Vec<UsageSample>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A valid answer: a two-node scheduled graph whose agent is on the roster.
@@ -853,7 +871,7 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
     let slugs = crate::company::workflow_callable_tool_slugs(&company.record);
 
     let description = "email the weekly digest every Monday morning";
-    let prompt = description_evidence_prompt(&company, &slugs, description);
+    let prompt = description_evidence_prompt(&company, &slugs, &[], description);
     assert!(
         prompt.contains(description),
         "the description appears verbatim"
@@ -898,6 +916,57 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
     );
 }
 
+#[tokio::test]
+async fn the_description_prompt_excludes_capability_filtered_tools() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(DESC_GRAPH)).await;
+    let company = gather_company_evidence(&runtime).await.unwrap();
+    let mut record = company.record.clone();
+    record.manifest.tools.allow.push("search".to_string());
+    // The live resolver reads a plan whose namespace key set is the callable
+    // tier. Omitting `web` must remove every web slug from prompt grounding,
+    // even when the company grants the namespace.
+    let capability_filter = crate::harness::capability_budget::resolve_filter(
+        &crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: [
+                ("shell".to_string(), u64::MAX),
+                ("code".to_string(), u64::MAX),
+                ("search".to_string(), u64::MAX),
+            ]
+            .into_iter()
+            .collect(),
+            total_budget: None,
+        },
+        Some(&EmptyUsageMeter),
+        &record.id,
+        crate::ports::now_millis(),
+    )
+    .await;
+    let wired: std::collections::BTreeSet<&'static str> =
+        crate::workflows::caps::WORKFLOW_TOOL_NAMESPACES
+            .into_iter()
+            .filter(|namespace| {
+                !matches!(
+                    &capability_filter,
+                    crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(denied)
+                        if denied.contains(namespace)
+                )
+            })
+            .collect();
+    let effective = crate::company::workflow_effective_tool_slugs(&record, Some(&wired));
+    let unwired = crate::company::workflow_granted_but_unwired_tool_slugs(&record, Some(&wired));
+    assert!(!effective.iter().any(|slug| slug == "web_fetch"));
+    assert!(effective.iter().any(|slug| slug == "web_search"));
+    assert!(unwired.iter().any(|slug| slug == "web_fetch"));
+
+    let evidence = CompanyEvidence { record, ..company };
+    let prompt = description_evidence_prompt(&evidence, &effective, &unwired, "search the web");
+    assert!(!prompt.contains("web_fetch —"));
+    assert!(prompt.contains("granted but not wired"));
+    assert!(prompt.contains("web_fetch"));
+    assert!(prompt.contains("if the task needs one, say so"));
+}
+
 /// A company with no teammates and no granted tools renders the guiding lines
 /// that keep the model from authoring an `agent` or `tool_call` node it cannot
 /// ground.
@@ -912,9 +981,9 @@ async fn the_description_prompt_names_an_empty_roster_and_toolset() {
         existing_ids: HashSet::new(),
         ..base
     };
-    let prompt = description_evidence_prompt(&empty, &[], "do the thing");
+    let prompt = description_evidence_prompt(&empty, &[], &[], "do the thing");
     assert!(prompt.contains("no teammates"), "{prompt}");
-    assert!(prompt.contains("no tools granted"), "{prompt}");
+    assert!(prompt.contains("no callable tools are wired"), "{prompt}");
     assert!(prompt.contains("(none yet)"), "{prompt}");
 }
 

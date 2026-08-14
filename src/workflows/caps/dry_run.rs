@@ -40,6 +40,8 @@ use serde_json::{Value, json};
 use tinyflows::caps::{AgentRunner, HttpClient, ToolInvoker};
 use tinyflows::error::{EngineError, Result as TfResult};
 
+use super::tools::{WorkflowToolWiring, refusal_for};
+
 /// A marker key set on every dry-stub output, so a downstream node (or a test)
 /// can tell a stubbed item from a real one.
 pub(super) const DRY_RUN_MARKER: &str = "dry_run";
@@ -88,12 +90,13 @@ pub(super) struct DryRunTools {
     /// The company's `[tools].allow` grant globs — the same gate the live
     /// invoker applies, reused verbatim.
     grants: Vec<String>,
+    wiring: WorkflowToolWiring,
 }
 
 impl DryRunTools {
     /// Builds a dry invoker gated by the company's `[tools].allow`.
-    pub(super) fn new(grants: Vec<String>) -> Self {
-        Self { grants }
+    pub(super) fn new(grants: Vec<String>, wiring: WorkflowToolWiring) -> Self {
+        Self { grants, wiring }
     }
 }
 
@@ -117,21 +120,8 @@ impl ToolInvoker for DryRunTools {
         // (`WorkflowToolInvoker::invoke`): a dry run must refuse an ungranted
         // tool exactly as a real one does, because that refusal is part of the
         // routing a test run exists to prove. The check is pure — no effect.
-        let Some(namespace) = crate::harness::toolbelt::namespace_of(slug) else {
-            return Err(EngineError::Capability(format!(
-                "tool_call '{slug}' is not a wired workflow tool"
-            )));
-        };
-        let granted = if namespace == "search" {
-            crate::company::grants_search_explicit(&self.grants)
-        } else {
-            crate::harness::build::grants_cover(&self.grants, namespace)
-        };
-        if !granted {
-            return Err(EngineError::Capability(format!(
-                "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's \
-                 [tools].allow"
-            )));
+        if let Some(message) = refusal_for(slug, &self.grants, &self.wiring) {
+            return Err(EngineError::Capability(message));
         }
         tracing::debug!(slug, "workflow dry run: stubbing tool_call (not executed)");
         Ok(json!({
@@ -181,7 +171,13 @@ mod tests {
     #[tokio::test]
     async fn dry_tools_keep_the_grant_gate_but_do_not_execute() {
         // No `code` grant → a `code`-namespace slug is refused, exactly as live.
-        let ungranted = DryRunTools::new(vec!["web.*".to_string()]);
+        let ungranted = DryRunTools::new(
+            vec!["web.*".to_string()],
+            WorkflowToolWiring {
+                wired_namespaces: ["web"].into_iter().collect(),
+                ..WorkflowToolWiring::default()
+            },
+        );
         let denied = ungranted.invoke("csv_export", json!({}), None).await;
         assert!(
             matches!(denied, Err(EngineError::Capability(ref m)) if m.contains("not granted")),
@@ -194,13 +190,42 @@ mod tests {
             "{unwired:?}"
         );
         // A granted slug returns the canned echo — no execution.
-        let granted = DryRunTools::new(vec!["code.*".to_string()]);
+        let granted = DryRunTools::new(
+            vec!["code.*".to_string()],
+            WorkflowToolWiring {
+                wired_namespaces: ["code"].into_iter().collect(),
+                ..WorkflowToolWiring::default()
+            },
+        );
         let echoed = granted
             .invoke("csv_export", json!({ "filename": "x.csv" }), None)
             .await
             .expect("granted dry tool echoes");
         assert_eq!(echoed[DRY_RUN_MARKER], json!(true));
         assert_eq!(echoed["slug"], "csv_export");
+    }
+
+    #[tokio::test]
+    async fn dry_tools_refuse_granted_search_without_a_backend() {
+        let dry = DryRunTools::new(
+            vec!["search".to_string()],
+            WorkflowToolWiring {
+                missing: [(
+                    "search",
+                    super::super::tools::MissingReason::SearchBackendNotConfigured,
+                )]
+                .into_iter()
+                .collect(),
+                ..WorkflowToolWiring::default()
+            },
+        );
+        let refused = dry.invoke("web_search", json!({}), None).await;
+        assert!(
+            matches!(refused, Err(EngineError::Capability(ref message))
+                if message.contains("no managed search backend")
+                    && message.contains("ask the platform operator")),
+            "{refused:?}"
+        );
     }
 
     #[tokio::test]

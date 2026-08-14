@@ -27,7 +27,7 @@
 //! coverage, so `*` never buys a managed search call and the invoke-time gate
 //! matches construction.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -57,6 +57,82 @@ use crate::harness::toolbelt::{self, CapabilityFilter};
 /// slug whose namespace falls outside this set, so a save can't green-light a
 /// slug the run would always fail to look up — keep the two in lockstep.
 pub(crate) const WORKFLOW_TOOL_NAMESPACES: [&str; 4] = ["shell", "code", "web", "search"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MissingReason {
+    SearchBackendNotConfigured,
+    CapabilityTierFiltered,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct WorkflowToolWiring {
+    pub(crate) wired_namespaces: BTreeSet<&'static str>,
+    pub(crate) missing: BTreeMap<&'static str, MissingReason>,
+}
+
+fn capability_filtered(filter: &CapabilityFilter, namespace: &'static str) -> bool {
+    match filter {
+        CapabilityFilter::AllowAll => false,
+        CapabilityFilter::DenyNamespaces(denied) => denied.contains(namespace),
+    }
+}
+
+pub(crate) fn workflow_tool_wiring(deps: &crate::harness::HarnessDeps) -> WorkflowToolWiring {
+    let mut wiring = WorkflowToolWiring::default();
+    for namespace in WORKFLOW_TOOL_NAMESPACES {
+        let missing = if namespace == "search" && deps.search.is_none() {
+            Some(MissingReason::SearchBackendNotConfigured)
+        } else if capability_filtered(&deps.capabilities, namespace) {
+            Some(MissingReason::CapabilityTierFiltered)
+        } else {
+            None
+        };
+        if let Some(reason) = missing {
+            wiring.missing.insert(namespace, reason);
+        } else {
+            wiring.wired_namespaces.insert(namespace);
+        }
+    }
+    wiring
+}
+
+pub(crate) fn wired_workflow_namespaces(
+    deps: &crate::harness::HarnessDeps,
+) -> BTreeSet<&'static str> {
+    workflow_tool_wiring(deps).wired_namespaces
+}
+
+pub(crate) fn refusal_for(
+    slug: &str,
+    grants: &[String],
+    wiring: &WorkflowToolWiring,
+) -> Option<String> {
+    let Some(namespace) = toolbelt::namespace_of(slug) else {
+        return Some(format!("tool_call '{slug}' is not a wired workflow tool"));
+    };
+    let granted = if namespace == "search" {
+        crate::company::grants_search_explicit(grants)
+    } else {
+        crate::harness::build::grants_cover(grants, namespace)
+    };
+    if !granted {
+        return Some(format!(
+            "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's [tools].allow"
+        ));
+    }
+    match wiring.missing.get(namespace) {
+        Some(MissingReason::SearchBackendNotConfigured) => Some(format!(
+            "tool_call '{slug}' is granted, but no managed search backend is configured on this deployment; ask the platform operator to configure search or remove the node"
+        )),
+        Some(MissingReason::CapabilityTierFiltered) => Some(format!(
+            "tool_call '{slug}' is granted, but the deployment's capability tier filtered it; ask the platform operator to raise the capability tier or remove the node"
+        )),
+        None if !wiring.wired_namespaces.contains(namespace) => Some(format!(
+            "tool_call '{slug}' is not available in company workflows"
+        )),
+        None => None,
+    }
+}
 
 /// The wired workflow-tool slugs, paired with the grant namespace each maps to —
 /// the reverse of [`toolbelt::namespace_of`], restricted to the families
@@ -213,6 +289,7 @@ pub struct WorkflowToolInvoker {
     tools: HashMap<String, Arc<dyn Tool>>,
     /// The company's `[tools].allow` grant globs — the fail-closed gate.
     grants: Vec<String>,
+    wiring: WorkflowToolWiring,
 }
 
 impl WorkflowToolInvoker {
@@ -238,11 +315,14 @@ impl WorkflowToolInvoker {
         filter: &CapabilityFilter,
         search: Option<&SearchBackend>,
         search_metering: SearchMetering,
+        wiring: WorkflowToolWiring,
     ) -> Self {
         // Mirror `build_agent`: do not initialize a tool family (or its audit
         // state) unless the company's grants can invoke that namespace.
         let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-        if crate::harness::build::grants_cover(&grants, "shell") {
+        if crate::harness::build::grants_cover(&grants, "shell")
+            && wiring.wired_namespaces.contains("shell")
+        {
             tools.extend(toolbelt::shell_tools(
                 security.clone(),
                 toolbelt::native_runtime(),
@@ -250,10 +330,14 @@ impl WorkflowToolInvoker {
                 workspace,
             ));
         }
-        if crate::harness::build::grants_cover(&grants, "code") {
+        if crate::harness::build::grants_cover(&grants, "code")
+            && wiring.wired_namespaces.contains("code")
+        {
             tools.extend(toolbelt::code_tools(security.clone(), workspace));
         }
-        if crate::harness::build::grants_cover(&grants, "web") {
+        if crate::harness::build::grants_cover(&grants, "web")
+            && wiring.wired_namespaces.contains("web")
+        {
             tools.extend(toolbelt::web_tools(
                 security,
                 web_allowed_domains,
@@ -266,7 +350,9 @@ impl WorkflowToolInvoker {
         // managed request) AND a managed search backend on the deps. Granted-but-
         // uncredentialed wires nothing and warns, so `web_search` degrades
         // gracefully when no managed credential is configured (fail-closed).
-        if crate::company::grants_search_explicit(&grants) {
+        if crate::company::grants_search_explicit(&grants)
+            && wiring.wired_namespaces.contains("search")
+        {
             match search {
                 Some(backend) => {
                     tools.extend(crate::harness::search::search_tools(
@@ -293,7 +379,11 @@ impl WorkflowToolInvoker {
             .map(|tool| (tool.name().to_string(), Arc::<dyn Tool>::from(tool)))
             .collect();
 
-        Self { tools, grants }
+        Self {
+            tools,
+            grants,
+            wiring,
+        }
     }
 }
 
@@ -320,27 +410,13 @@ impl ToolInvoker for WorkflowToolInvoker {
             return Ok(result);
         }
         // FAIL-CLOSED grant check FIRST, before any lookup or execution.
-        let Some(namespace) = toolbelt::namespace_of(slug) else {
-            return Err(EngineError::Capability(format!(
-                "tool_call '{slug}' is not a wired workflow tool"
-            )));
-        };
+        if let Some(message) = refusal_for(slug, &self.grants, &self.wiring) {
+            return Err(EngineError::Capability(message));
+        }
         // The priced `search` namespace needs an EXPLICIT `search` grant — the
         // catch-all `*` must never confer a managed search call — so this gate
         // matches the construction gate in `new` (and `build::build_agent`).
         // Every other namespace uses the ordinary grant-glob intersection.
-        let granted = if namespace == "search" {
-            crate::company::grants_search_explicit(&self.grants)
-        } else {
-            crate::harness::build::grants_cover(&self.grants, namespace)
-        };
-        if !granted {
-            return Err(EngineError::Capability(format!(
-                "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's \
-                 [tools].allow"
-            )));
-        }
-
         let tool = self.tools.get(slug).ok_or_else(|| {
             EngineError::Capability(format!(
                 "tool_call '{slug}' is not available in company workflows"
@@ -476,6 +552,7 @@ mod tests {
         let invoker = WorkflowToolInvoker {
             tools: HashMap::new(),
             grants: vec!["web.*".to_string()],
+            wiring: WorkflowToolWiring::default(),
         };
         let denied = tokio_test_block_on(invoker.invoke("csv_export", json!({}), None));
         assert!(
@@ -498,6 +575,7 @@ mod tests {
         let wildcard = WorkflowToolInvoker {
             tools: HashMap::new(),
             grants: vec!["*".to_string()],
+            wiring: WorkflowToolWiring::default(),
         };
         let denied = tokio_test_block_on(wildcard.invoke("web_search", json!({}), None));
         assert!(
@@ -509,6 +587,7 @@ mod tests {
         let granted = WorkflowToolInvoker {
             tools: HashMap::new(),
             grants: vec!["search".to_string()],
+            wiring: WorkflowToolWiring::default(),
         };
         let looked_up = tokio_test_block_on(granted.invoke("web_search", json!({}), None));
         assert!(
@@ -544,6 +623,7 @@ mod tests {
             &CapabilityFilter::AllowAll,
             None,
             test_metering(),
+            WorkflowToolWiring::default(),
         );
 
         let recorded = json!({ "status": 201, "id": "abc" });
@@ -569,6 +649,31 @@ mod tests {
     }
 
     #[test]
+    fn granted_search_refusals_name_provider_and_capability_failures() {
+        let provider = WorkflowToolWiring {
+            missing: [("search", MissingReason::SearchBackendNotConfigured)]
+                .into_iter()
+                .collect(),
+            ..WorkflowToolWiring::default()
+        };
+        let provider_message = refusal_for("web_search", &["search".to_string()], &provider)
+            .expect("missing provider refuses");
+        assert!(provider_message.contains("no managed search backend"));
+        assert!(provider_message.contains("ask the platform operator"));
+
+        let tier = WorkflowToolWiring {
+            missing: [("search", MissingReason::CapabilityTierFiltered)]
+                .into_iter()
+                .collect(),
+            ..WorkflowToolWiring::default()
+        };
+        let tier_message = refusal_for("web_search", &["search".to_string()], &tier)
+            .expect("tier filtering refuses");
+        assert!(tier_message.contains("capability tier filtered"));
+        assert!(tier_message.contains("raise the capability tier"));
+    }
+
+    #[test]
     fn construction_only_initializes_granted_tool_families() {
         let dir = tempfile::tempdir().unwrap();
         // A SEPARATE root from the workspace: the audit sink is host-owned and
@@ -589,6 +694,7 @@ mod tests {
             &CapabilityFilter::AllowAll,
             None,
             test_metering(),
+            WorkflowToolWiring::default(),
         );
         assert!(none.tools.is_empty());
 
@@ -601,6 +707,10 @@ mod tests {
             &CapabilityFilter::AllowAll,
             None,
             test_metering(),
+            WorkflowToolWiring {
+                wired_namespaces: ["code"].into_iter().collect(),
+                ..WorkflowToolWiring::default()
+            },
         );
         assert!(code.tools.contains_key("apply_patch"));
         assert!(code.tools.contains_key("csv_export"));
@@ -632,6 +742,10 @@ mod tests {
             &CapabilityFilter::AllowAll,
             Some(&backend),
             test_metering(),
+            WorkflowToolWiring {
+                wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
+                missing: BTreeMap::new(),
+            },
         );
         assert!(wired.tools.contains_key("web_search"));
 
@@ -645,6 +759,10 @@ mod tests {
             &CapabilityFilter::AllowAll,
             Some(&backend),
             test_metering(),
+            WorkflowToolWiring {
+                wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
+                missing: BTreeMap::new(),
+            },
         );
         assert!(!wildcard.tools.contains_key("web_search"));
 
@@ -658,8 +776,47 @@ mod tests {
             &CapabilityFilter::AllowAll,
             None,
             test_metering(),
+            WorkflowToolWiring {
+                wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
+                missing: BTreeMap::new(),
+            },
         );
         assert!(!uncredentialed.tools.contains_key("web_search"));
+    }
+
+    #[test]
+    fn wiring_namespaces_match_constructed_tool_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let security = Arc::new(toolbelt::exec_security(
+            dir.path(),
+            crate::harness::policy::PolicyMode::Supervised,
+        ));
+        let wiring = WorkflowToolWiring {
+            wired_namespaces: WORKFLOW_TOOL_NAMESPACES.into_iter().collect(),
+            missing: BTreeMap::new(),
+        };
+        let invoker = WorkflowToolInvoker::new(
+            security,
+            dir.path(),
+            audit.path(),
+            Vec::new(),
+            vec!["*".to_string(), "search".to_string()],
+            &CapabilityFilter::AllowAll,
+            Some(&SearchBackend::new(
+                "https://api.example.test".to_string(),
+                crate::company::credentials::Credential::from_value("managed"),
+                5,
+            )),
+            test_metering(),
+            wiring.clone(),
+        );
+        let constructed: BTreeSet<&str> = invoker
+            .tools
+            .keys()
+            .filter_map(|slug| toolbelt::namespace_of(slug))
+            .collect();
+        assert_eq!(constructed, wiring.wired_namespaces);
     }
 
     /// A throwaway [`SearchMetering`] for the construction tests — the tool is

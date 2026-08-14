@@ -864,8 +864,10 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
     Ok(())
 }
 
-/// The wired `tool_call` slugs this company can actually reach from a workflow,
-/// for grounding the create-time copilot (issue #753).
+/// The granted `tool_call` slugs this company may author and pass create-time
+/// validation (issue #753). Deployment wiring is intentionally not checked:
+/// author-now-wire-later remains legal, while prompt grounding uses the
+/// effective sibling below.
 ///
 /// It is the exact companion of [`validate_tool_call_node`]'s grant half: a slug
 /// survives here iff that gate would accept it — its namespace covered by
@@ -894,6 +896,50 @@ pub(crate) fn workflow_callable_tool_slugs(record: &CompanyRecord) -> Vec<String
             } else {
                 crate::harness::build::grants_cover(grants, info.namespace)
             }
+        })
+        .map(|info| info.slug.to_string())
+        .collect()
+}
+
+/// The tools the create-time copilot may ground on: catalogue, company grant,
+/// and deployment wiring all agree. Create validation intentionally remains
+/// permissive for a granted-but-unwired tool so an operator may author now and
+/// wire the provider later; this narrower set is prompt grounding only.
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_effective_tool_slugs(
+    record: &CompanyRecord,
+    wired: Option<&std::collections::BTreeSet<&'static str>>,
+) -> Vec<String> {
+    let grants = &record.manifest.tools.allow;
+    crate::workflows::caps::WORKFLOW_TOOL_CATALOG
+        .iter()
+        .filter(|info| {
+            let granted = if info.namespace == "search" {
+                crate::company::grants_search_explicit(grants)
+            } else {
+                crate::harness::build::grants_cover(grants, info.namespace)
+            };
+            granted && wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
+        })
+        .map(|info| info.slug.to_string())
+        .collect()
+}
+
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_granted_but_unwired_tool_slugs(
+    record: &CompanyRecord,
+    wired: Option<&std::collections::BTreeSet<&'static str>>,
+) -> Vec<String> {
+    let grants = &record.manifest.tools.allow;
+    crate::workflows::caps::WORKFLOW_TOOL_CATALOG
+        .iter()
+        .filter(|info| {
+            let granted = if info.namespace == "search" {
+                crate::company::grants_search_explicit(grants)
+            } else {
+                crate::harness::build::grants_cover(grants, info.namespace)
+            };
+            granted && !wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
         })
         .map(|info| info.slug.to_string())
         .collect()
