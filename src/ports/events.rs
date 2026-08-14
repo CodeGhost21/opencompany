@@ -223,6 +223,25 @@ pub trait EventLog: Send + Sync {
         seq: EventSeq,
         limit: usize,
     ) -> Result<Vec<StoredEvent>>;
+    /// Reads up to `limit` events with sequence `< before`, newest first.
+    ///
+    /// An absent cursor means the current tail. Backends should implement this
+    /// directly when they can: transcript readers open at the tail, and doing
+    /// a forward `read_from(0, MAX)` merely to keep its last page turns every
+    /// chat open into an ever-growing allocation. The fallback keeps custom
+    /// test ports source-compatible; production stores override it.
+    async fn read_before(
+        &self,
+        id: &CompanyId,
+        before: Option<EventSeq>,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        let mut events = self.read_from(id, EventSeq::new(0), usize::MAX).await?;
+        events.retain(|event| before.is_none_or(|cursor| event.seq < cursor));
+        events.reverse();
+        events.truncate(limit);
+        Ok(events)
+    }
     /// Subscribes to events appended after the call.
     fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent>;
 

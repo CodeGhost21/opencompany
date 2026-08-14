@@ -665,6 +665,39 @@ impl EventLog for MongoStore {
         Ok(out)
     }
 
+    async fn read_before(
+        &self,
+        id: &CompanyId,
+        before: Option<EventSeq>,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let events = self.collection("events");
+        let mut filter = doc! { "company_id": id.as_ref() };
+        if let Some(cursor) = before {
+            filter.insert("seq", doc! { "$lt": cursor.value() as i64 });
+        }
+        let mut find = events.find(filter).sort(doc! { "seq": -1 });
+        match find_limit(limit) {
+            FindLimit::Empty => return Ok(Vec::new()),
+            FindLimit::Unlimited => {}
+            FindLimit::AtMost(n) => find = find.limit(n),
+        }
+        let mut cursor = find.await.map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(StoredEvent {
+                seq: EventSeq::new(get_i64(&doc, "seq")? as u64),
+                company: id.clone(),
+                event: serde_json::from_str(&get_str(&doc, "event_json")?)?,
+                at_millis: get_i64(&doc, "at_ms")? as u64,
+            });
+        }
+        Ok(out)
+    }
+
     fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent> {
         let rx = self.sender_for(id).subscribe();
         let stream = futures::stream::unfold(rx, |mut rx| async move {

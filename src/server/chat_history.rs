@@ -8,7 +8,7 @@
 //! it; both surfaces call through it instead of each keeping their own copy of
 //! the filter + projection logic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
@@ -260,15 +260,14 @@ fn reaction_actor_key(by: &Option<Actor>) -> String {
 /// route's explicit `on` flag idempotent — and a row that ends up `off` is
 /// dropped entirely rather than kept as a zero. Order is first-set order, so a
 /// message's chips do not reshuffle between reads.
-fn fold_reactions(
-    stored: &[StoredEvent],
-    viewer: &Viewer,
-    authors: &HashMap<String, String>,
-) -> HashMap<String, Vec<ReactionView>> {
+struct ReactionFold {
     // (message, actor, emoji) → (position among first-seen keys, currently on).
-    let mut state: HashMap<(u64, String, String), (usize, bool)> = HashMap::new();
-    let mut seen = 0usize;
-    for event in stored {
+    state: HashMap<(u64, String, String), (usize, bool)>,
+    seen: usize,
+}
+
+impl ReactionFold {
+    fn observe(&mut self, event: &StoredEvent, wanted: Option<&HashSet<u64>>) {
         let CompanyEvent::ReactionToggled {
             message_seq,
             emoji,
@@ -276,46 +275,72 @@ fn fold_reactions(
             by,
         } = &event.event
         else {
-            continue;
+            return;
         };
+        if wanted.is_some_and(|ids| !ids.contains(&message_seq.value())) {
+            return;
+        }
         let key = (message_seq.value(), reaction_actor_key(by), emoji.clone());
-        match state.get_mut(&key) {
+        match self.state.get_mut(&key) {
             Some(slot) => slot.1 = *on,
             None => {
-                state.insert(key, (seen, *on));
-                seen += 1;
+                self.state.insert(key, (self.seen, *on));
+                self.seen += 1;
             }
         }
     }
 
-    let mut rows: Vec<(usize, u64, String, String)> = state
-        .into_iter()
-        .filter(|(_, (_, on))| *on)
-        .map(|((message, actor, emoji), (order, _))| (order, message, actor, emoji))
-        .collect();
-    rows.sort_unstable();
+    fn finish(
+        self,
+        viewer: &Viewer,
+        authors: &HashMap<String, String>,
+    ) -> HashMap<String, Vec<ReactionView>> {
+        let mut rows: Vec<(usize, u64, String, String)> = self
+            .state
+            .into_iter()
+            .filter(|(_, (_, on))| *on)
+            .map(|((message, actor, emoji), (order, _))| (order, message, actor, emoji))
+            .collect();
+        rows.sort_unstable();
 
-    let mut out: HashMap<String, Vec<ReactionView>> = HashMap::new();
-    for (_, message, actor, emoji) in rows {
-        let (by_label, mine) = match actor.strip_prefix("user:") {
-            Some(user_id) => (
-                authors
-                    .get(user_id)
-                    .cloned()
-                    .unwrap_or_else(|| "someone".to_string()),
-                *viewer == Viewer::User(user_id.to_string()),
-            ),
-            None => ("operator".to_string(), matches!(viewer, Viewer::Operator)),
-        };
-        out.entry(message.to_string())
-            .or_default()
-            .push(ReactionView {
-                emoji,
-                by_label,
-                mine,
-            });
+        let mut out: HashMap<String, Vec<ReactionView>> = HashMap::new();
+        for (_, message, actor, emoji) in rows {
+            let (by_label, mine) = match actor.strip_prefix("user:") {
+                Some(user_id) => (
+                    authors
+                        .get(user_id)
+                        .cloned()
+                        .unwrap_or_else(|| "someone".to_string()),
+                    *viewer == Viewer::User(user_id.to_string()),
+                ),
+                None => ("operator".to_string(), matches!(viewer, Viewer::Operator)),
+            };
+            out.entry(message.to_string())
+                .or_default()
+                .push(ReactionView {
+                    emoji,
+                    by_label,
+                    mine,
+                });
+        }
+        out
     }
-    out
+}
+
+#[cfg(test)]
+fn fold_reactions(
+    stored: &[StoredEvent],
+    viewer: &Viewer,
+    authors: &HashMap<String, String>,
+) -> HashMap<String, Vec<ReactionView>> {
+    let mut fold = ReactionFold {
+        state: HashMap::new(),
+        seen: 0,
+    };
+    for event in stored {
+        fold.observe(event, None);
+    }
+    fold.finish(viewer, authors)
 }
 
 impl MessageView {
@@ -473,35 +498,81 @@ pub async fn history_for_desk(
     before_seq: Option<u64>,
     first: usize,
 ) -> Result<(Vec<MessageView>, i32), OpenCompanyError> {
-    let stored = runtime
-        .events()
-        .read_from(runtime.id(), EventSeq::new(0), usize::MAX)
-        .await?;
-    // One roster read per history, not one per message: the scan above is
-    // already O(log), and an N+1 on top of it would be worse.
+    // A page is events rather than messages: a busy company can put unrelated
+    // events between two chat turns. Walking backward keeps the newest `first`
+    // transcript entries without ever materialising that unrelated journal.
+    const EVENT_PAGE: usize = 512;
+
+    // One roster read per history, not one per message.
     let authors = author_labels(runtime).await?;
-    // Issue #364: reactions ride the same full-log read the messages do — a
-    // second pass over a list already in memory, not a second query. Folded
-    // before the messages are consumed, and attached only to messages this desk
-    // owns, so a reaction can no more cross a desk boundary than the message it
-    // is about can.
-    let mut reactions = fold_reactions(&stored, viewer, &authors);
+    let mut cursor = before_seq.map(EventSeq::new);
+    let mut messages = Vec::with_capacity(first);
+    let mut total = 0i32;
+    loop {
+        let page = runtime
+            .events()
+            .read_before(runtime.id(), cursor, EVENT_PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|event| event.seq);
+        for event in page {
+            if owns(desk_id, desk_name, &event.event) {
+                total += 1;
+                if messages.len() < first {
+                    messages.push(MessageView::project(event, viewer, &authors));
+                }
+            }
+        }
+    }
 
-    let mut messages: Vec<MessageView> = stored
-        .into_iter()
-        .filter(|event| owns(desk_id, desk_name, &event.event))
-        .filter(|event| before_seq.is_none_or(|before| event.seq.value() < before))
-        .map(|event| MessageView::project(event, viewer, &authors))
-        .map(|mut view| {
-            view.reactions = reactions.remove(&view.id).unwrap_or_default();
-            view
-        })
+    // `read_before` supplies each page newest-first, as does `messages` above.
+    // Restore chronological order for the renderer before attaching reactions.
+    messages.reverse();
+
+    // Reactions necessarily follow their message. Once the displayed window is
+    // known, fold only toggles that could affect one of its messages, streaming
+    // forward from the window's oldest id to this request's cursor.
+    let wanted: HashSet<u64> = messages
+        .iter()
+        .filter_map(|message| message.id.parse::<u64>().ok())
         .collect();
-
-    let total = messages.len() as i32;
-    // Keep the most recent `first`, still in chronological order.
-    if messages.len() > first {
-        messages.drain(0..messages.len() - first);
+    if let Some(oldest) = wanted.iter().min().copied() {
+        let upper = before_seq;
+        let mut next = oldest.saturating_add(1);
+        let mut fold = ReactionFold {
+            state: HashMap::new(),
+            seen: 0,
+        };
+        loop {
+            let page = runtime
+                .events()
+                .read_from(runtime.id(), EventSeq::new(next), EVENT_PAGE)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            let mut reached_upper = false;
+            for event in &page {
+                if upper.is_some_and(|before| event.seq.value() >= before) {
+                    reached_upper = true;
+                    break;
+                }
+                fold.observe(event, Some(&wanted));
+            }
+            next = page
+                .last()
+                .map(|event| event.seq.value() + 1)
+                .unwrap_or(next);
+            if reached_upper || page.len() < EVENT_PAGE {
+                break;
+            }
+        }
+        let mut reactions = fold.finish(viewer, &authors);
+        for message in &mut messages {
+            message.reactions = reactions.remove(&message.id).unwrap_or_default();
+        }
     }
     Ok((messages, total))
 }

@@ -7,13 +7,14 @@
 //! Those locks live in one process-wide registry (`path_lock`) rather than on
 //! each store, so two instances over one bundle actually meet (issue #388).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex as TokioMutex, broadcast};
 
 use crate::Result;
@@ -908,6 +909,45 @@ impl EventLog for FsEventLog {
             .filter(|ev| ev.seq >= seq)
             .take(limit)
             .collect())
+    }
+
+    async fn read_before(
+        &self,
+        id: &CompanyId,
+        before: Option<EventSeq>,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let path = self.bundle(id).events_jsonl();
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(io_err(&path, error)),
+        };
+        let mut lines = BufReader::new(file).lines();
+        let mut tail = VecDeque::with_capacity(limit);
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|error| io_err(&path, error))?
+        {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: StoredEvent = serde_json::from_str(&line)?;
+            // Event logs are ordered by sequence. Once the cursor is reached,
+            // no later line belongs to this page, so do not scan the tail.
+            if before.is_some_and(|cursor| event.seq >= cursor) {
+                break;
+            }
+            if tail.len() == limit {
+                tail.pop_front();
+            }
+            tail.push_back(event);
+        }
+        Ok(tail.into_iter().rev().collect())
     }
 
     fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent> {

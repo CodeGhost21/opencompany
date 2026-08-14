@@ -1457,6 +1457,14 @@ struct ChatHistoryQuery {
     /// General/"main" line — the console's default thread (issue #65).
     #[serde(default)]
     desk: Option<String>,
+    /// Exclusive event cursor. Omitted reads the current tail; passing the
+    /// oldest id already held walks backward without rereading newer events.
+    #[serde(default)]
+    before: Option<u64>,
+    /// Maximum transcript messages to return. Capped server-side so a caller
+    /// cannot turn one history read back into an unbounded response.
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// One desk-history message, as the console renders it. Mirrors `ChatMessage`
@@ -1545,8 +1553,8 @@ impl From<MessageView> for ChatHistoryMessageDto {
 
 /// How many messages `GET .../chat/history` returns. Generous enough to
 /// hydrate a console thread on load (issue #65) while still bounding the
-/// response on a very long transcript; pagination is a GraphQL `Chat.history`
-/// concern, not this REST convenience route's.
+/// response on a very long transcript. REST callers can request a smaller
+/// page or walk backwards with `?before=<oldest-id>`.
 const CHAT_HISTORY_LIMIT: usize = 200;
 
 /// Resolves a `?desk=` selector to the `(id, name)` pair `history_for_desk`
@@ -1607,16 +1615,14 @@ async fn chat_history_response(
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    let (messages, _total) = history_for_desk(
-        &runtime,
-        &desk_id,
-        &desk_name,
-        &viewer,
-        None,
-        CHAT_HISTORY_LIMIT,
-    )
-    .await
-    .map_err(|e| ApiError(e).into_response())?;
+    let limit = query
+        .limit
+        .unwrap_or(CHAT_HISTORY_LIMIT)
+        .min(CHAT_HISTORY_LIMIT);
+    let (messages, _total) =
+        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
+            .await
+            .map_err(|e| ApiError(e).into_response())?;
     Ok(Json(
         messages
             .into_iter()
@@ -3531,6 +3537,58 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 0);
+    }
+
+    /// Issue #862: REST history carries the same cursor/window contract as the
+    /// paginated GraphQL surface. A copilot replay can therefore ask for the
+    /// tail it needs without the route reading past its cursor.
+    #[tokio::test]
+    async fn chat_history_route_honors_before_and_limit() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let mut seqs = Vec::new();
+        for text in ["oldest", "kept", "newest"] {
+            seqs.push(
+                runtime
+                    .events()
+                    .append(
+                        runtime.id(),
+                        CompanyEvent::AgentReply {
+                            parent: None,
+                            task_id: None,
+                            chat_id: "workflow-copilot:weekly_report".to_string(),
+                            agent_id: "ceo".to_string(),
+                            text: text.to_string(),
+                            steps: Vec::new(),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let uri = format!(
+            "/api/v1/company/chat/history?desk=workflow-copilot:weekly_report&before={}&limit=1",
+            seqs[2].value()
+        );
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value[0]["text"], "kept");
+        assert_eq!(value.as_array().unwrap().len(), 1);
     }
 
     /* ---- issue #364: durable ids, threads, reactions, channel isolation ---- */
