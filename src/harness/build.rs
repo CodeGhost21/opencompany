@@ -449,6 +449,8 @@ pub fn build_agent(
                 tools.extend(crate::harness::chargebee::chargebee_tools(config));
             }
             None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
                 "[build] agent explicitly grants `chargebee` but no per-company Chargebee \
                  credentials are configured; billing tools NOT wired (fail-closed)"
             ),
@@ -465,6 +467,8 @@ pub fn build_agent(
         match &deps.paypal {
             Some(config) => tools.extend(crate::harness::paypal::paypal_tools(config)),
             None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
                 "[build] agent explicitly grants `paypal` but no per-company PayPal credentials \
                  are configured; wallet tools NOT wired (fail-closed)"
             ),
