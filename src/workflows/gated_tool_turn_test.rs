@@ -232,7 +232,9 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
         chargebee: None,
+        #[cfg(feature = "paypal")]
         paypal: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),

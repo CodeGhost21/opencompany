@@ -1961,6 +1961,7 @@ impl RuntimeBuilder {
                             // Issue #789: the per-company PayPal connection,
                             // resolved from this company's own secret store for
                             // the same reason chargebee is.
+                            #[cfg(feature = "paypal")]
                             let paypal_config = if crate::company::grants_paypal_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -1968,6 +1969,7 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            #[cfg(feature = "chargebee")]
                             let chargebee_config = if crate::company::grants_chargebee_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2148,7 +2150,9 @@ impl RuntimeBuilder {
                                 // resolved above (token from the secret store,
                                 // never an env/platform key). `None` fails closed.
                                 composio: composio_config,
+                                #[cfg(feature = "chargebee")]
                                 chargebee: chargebee_config,
+                                #[cfg(feature = "paypal")]
                                 paypal: paypal_config,
                                 steer,
                                 run_supervisor: supervisor,

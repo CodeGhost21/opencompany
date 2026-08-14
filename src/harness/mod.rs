@@ -51,6 +51,7 @@ pub mod audit;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
+#[cfg(feature = "chargebee")]
 pub mod chargebee;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
@@ -86,6 +87,7 @@ pub mod orchestrator;
 /// PayPal wallet + transaction tools (issue #789), wired per company from its
 /// own SecretStore. Always compiled so credential resolution and the
 /// fail-closed decision are testable at default features.
+#[cfg(feature = "paypal")]
 pub mod paypal;
 /// Issue #337: the planning station — one tool-less model call per card entering
 /// `planning`, with the host gathering the evidence and verifying every
@@ -430,11 +432,13 @@ pub struct HarnessDeps {
     /// environment: two companies on one host bill two different sites.
     /// `HarnessPool::ensure` re-resolves it each turn, so a key set or rotated in
     /// the console takes effect next turn with no restart.
+    #[cfg(feature = "chargebee")]
     pub chargebee: Option<chargebee::TenantChargebee>,
 
     /// The per-company PayPal connection (issue #789). `None` fails closed —
     /// no wallet tools are wired. Resolved from that company's own secret store
     /// and re-resolved each turn, like `chargebee`.
+    #[cfg(feature = "paypal")]
     pub paypal: Option<paypal::TenantPaypal>,
     /// The MANAGED web-search backend (issue #238). `None` (the default at every
     /// construction site but the production runtime builder) **fails closed** —
@@ -1093,13 +1097,22 @@ impl HarnessPool {
         // same reason as Composio above: both are set from the console, so a
         // roster that never re-reads them leaves an agent without billing tools
         // on a company whose settings page reads "Connected".
+        #[cfg(feature = "chargebee")]
         let chargebee_config = self.resolve_chargebee(company, deps).await;
+        #[cfg(feature = "paypal")]
         let paypal_config = self.resolve_paypal(company, deps).await;
+        // A build without either feature has no billing axis to go stale on, so
+        // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
-            use std::hash::{Hash, Hasher};
+            use std::hash::Hasher;
+            // `mut` is only exercised when a billing feature is compiled in; a
+            // build with neither writes nothing and the hasher stays untouched.
+            #[cfg_attr(not(any(feature = "chargebee", feature = "paypal")), allow(unused_mut))]
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            chargebee::TenantChargebee::fingerprint(&chargebee_config).hash(&mut hasher);
-            paypal::TenantPaypal::fingerprint(&paypal_config).hash(&mut hasher);
+            #[cfg(feature = "chargebee")]
+            hasher.write_u64(chargebee::TenantChargebee::fingerprint(&chargebee_config));
+            #[cfg(feature = "paypal")]
+            hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
             hasher.finish()
         };
 
@@ -1164,8 +1177,14 @@ impl HarnessPool {
         // Install the freshly-resolved Composio config the same way, so a token
         // set/rotate/clear reaches the rebuilt agents (issue #110).
         fresh_deps.composio = composio_config;
-        fresh_deps.chargebee = chargebee_config;
-        fresh_deps.paypal = paypal_config;
+        #[cfg(feature = "chargebee")]
+        {
+            fresh_deps.chargebee = chargebee_config;
+        }
+        #[cfg(feature = "paypal")]
+        {
+            fresh_deps.paypal = paypal_config;
+        }
         // And the freshly-read bindings (issue #245), so a repository bound or
         // revoked in the console is what the rebuilt agents' tools resolve
         // against — including the descriptions that name what is bound.
@@ -1289,6 +1308,7 @@ impl HarnessPool {
     /// Re-reads the company's Chargebee connection from the secret store, so a
     /// key saved or rotated in Settings → Billing reaches the agent on its next
     /// turn rather than at the next restart (issue #788).
+    #[cfg(feature = "chargebee")]
     async fn resolve_chargebee(
         &self,
         company: &CompanyRecord,
@@ -1304,6 +1324,7 @@ impl HarnessPool {
     }
 
     /// The PayPal equivalent (issue #789), for the same reason.
+    #[cfg(feature = "paypal")]
     async fn resolve_paypal(
         &self,
         company: &CompanyRecord,
@@ -2852,7 +2873,9 @@ description = "Builds the product."
                 plan: None,
                 media: None,
                 composio: None,
+                #[cfg(feature = "chargebee")]
                 chargebee: None,
+                #[cfg(feature = "paypal")]
                 paypal: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -2928,7 +2951,9 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
             chargebee: None,
+            #[cfg(feature = "paypal")]
             paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -3616,7 +3641,9 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
             chargebee: None,
+            #[cfg(feature = "paypal")]
             paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -3796,7 +3823,9 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
             chargebee: None,
+            #[cfg(feature = "paypal")]
             paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -4316,7 +4345,9 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
             chargebee: None,
+            #[cfg(feature = "paypal")]
             paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -4489,7 +4520,9 @@ description = "Sets direction."
             plan: Some(plan),
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
             chargebee: None,
+            #[cfg(feature = "paypal")]
             paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -4643,7 +4676,9 @@ description = "Sets direction."
             plan,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
             chargebee: None,
+            #[cfg(feature = "paypal")]
             paypal: None,
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
