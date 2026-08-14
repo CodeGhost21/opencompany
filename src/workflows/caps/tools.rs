@@ -623,6 +623,7 @@ mod tests {
             &CapabilityFilter::AllowAll,
             None,
             test_metering(),
+            WorkflowToolWiring::default(),
         );
 
         let recorded = json!({ "status": 201, "id": "abc" });
