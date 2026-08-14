@@ -22,6 +22,7 @@ use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
 use crate::ports::types::CompanyId;
+use crate::ports::{UsageMeter, UsageSample};
 
 // ---------------------------------------------------------------------------
 // A scripted model
@@ -142,6 +143,23 @@ allow = ["docs", "web"]
 
 fn manifest() -> CompanyManifest {
     toml::from_str(MANIFEST).expect("the fixture manifest parses")
+}
+
+struct EmptyUsageMeter;
+
+#[async_trait]
+impl UsageMeter for EmptyUsageMeter {
+    async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn query(
+        &self,
+        _company: &CompanyId,
+        _since_millis: u64,
+    ) -> crate::Result<Vec<UsageSample>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A valid answer: a two-node scheduled graph whose agent is on the roster.
@@ -904,11 +922,26 @@ async fn the_description_prompt_excludes_capability_filtered_tools() {
     let company = gather_company_evidence(&runtime).await.unwrap();
     let mut record = company.record.clone();
     record.manifest.tools.allow.push("search".to_string());
-    // This is the resolved result a capability plan supplies to the live
-    // wiring resolver: a plan that filters `web` must remove every web slug
-    // from prompt grounding, even when the company grants the namespace.
-    let capability_filter =
-        crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(["web"].into_iter().collect());
+    // The live resolver reads a plan whose namespace key set is the callable
+    // tier. Omitting `web` must remove every web slug from prompt grounding,
+    // even when the company grants the namespace.
+    let capability_filter = crate::harness::capability_budget::resolve_filter(
+        &crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: [
+                ("shell".to_string(), u64::MAX),
+                ("code".to_string(), u64::MAX),
+                ("search".to_string(), u64::MAX),
+            ]
+            .into_iter()
+            .collect(),
+            total_budget: None,
+        },
+        Some(&EmptyUsageMeter),
+        &record.id,
+        crate::ports::now_millis(),
+    )
+    .await;
     let wired: std::collections::BTreeSet<&'static str> =
         crate::workflows::caps::WORKFLOW_TOOL_NAMESPACES
             .into_iter()
