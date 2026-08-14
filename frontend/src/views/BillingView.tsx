@@ -68,17 +68,19 @@ export function BillingView({ client, company }: Props) {
   const [clientSecret, setClientSecret] = useState("");
   const [environment, setEnvironment] = useState("sandbox");
 
+  // Every piece of state here belongs to ONE company: the status badges, the
+  // site box, and — the dangerous ones — the typed-but-unsaved API key, webhook
+  // secret and PayPal credentials. `SettingsSection` renders this with
+  // `key={company}`, so a company switch remounts rather than re-running this
+  // against carried-over state.
+  //
+  // That key is load-bearing, not cosmetic. Clearing fields by hand here fixed
+  // only the ones somebody remembered, and left an operator who typed a key for
+  // one company, switched, and pressed Save writing that credential into the
+  // other company's secret store. It also makes `company` constant for this
+  // instance's lifetime, so a slow response from a previous company cannot land
+  // on a later one's view — there is no later one to land on.
   const load = useCallback(async () => {
-    // Drop the previous company's answer before fetching the next one. This
-    // view is rendered from `SettingsSection` with `company` as a prop and no
-    // `key`, so switching companies re-runs this without remounting — and
-    // every field on this page is a claim about which credentials a specific
-    // company has stored. Showing the last one's "Configured" badges and site
-    // while the fetch is in flight tells the operator something false about
-    // the company they just switched to.
-    setStatus(null);
-    setPaypal(null);
-    setSite("");
     try {
       const [next, pp] = await Promise.all([
         getBilling(client, company),

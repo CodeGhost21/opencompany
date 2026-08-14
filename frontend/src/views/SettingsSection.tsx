@@ -125,7 +125,12 @@ export function SettingsSection({ client, company, feed, sub, onNavigate, onFlag
         {page === "people" && <PeopleView client={client} company={company} />}
         {page === "connections" && <ConnectionsView client={client} company={company} />}
         {page === "mcp" && <McpServersView client={client} company={company} />}
-        {page === "billing" && <BillingView client={client} company={company} />}
+        {/* `key` remounts on a company switch, which is what keeps one
+            company's typed-but-unsaved credentials out of another's Save. See
+            the note above `load` in BillingView. */}
+        {page === "billing" && (
+          <BillingView key={company ?? "self"} client={client} company={company} />
+        )}
         {page === "skills" && <SkillsView client={client} company={company} />}
         {page === "usage" && (
           <Suspense
