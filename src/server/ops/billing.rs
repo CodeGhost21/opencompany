@@ -617,7 +617,14 @@ mod tests {
             .registry()
             .get(&CompanyId::new("acme"))
             .expect("company");
-        for key in [API_KEY_SECRET, SITE_SECRET, CLIENT_ID_SECRET] {
+        for key in [
+            API_KEY_SECRET,
+            SITE_SECRET,
+            WEBHOOK_SECRET_KEY,
+            CLIENT_ID_SECRET,
+            CLIENT_SECRET_SECRET,
+            ENVIRONMENT_SECRET,
+        ] {
             let stored = runtime
                 .secrets()
                 .get(runtime.id(), key)

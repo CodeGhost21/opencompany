@@ -219,30 +219,97 @@ pub async fn list_transactions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    #[test]
-    fn a_balance_keeps_paypals_decimal_string_verbatim() {
+    use crate::company::paypal::PaypalEnvironment;
+    use crate::paypal::client::{PaypalClient, PaypalConfig};
+
+    /// A client pointed at a stub serving `body` for every PayPal path.
+    ///
+    /// The token endpoint answers too, so an operation under test goes through
+    /// the same auth path it does in production rather than a client with the
+    /// credential step skipped. Abort the returned handle when done.
+    async fn stub_client(body: &'static str) -> (PaypalClient, tokio::task::JoinHandle<()>) {
+        let handler = move |uri: axum::http::Uri| async move {
+            let payload = if uri.path().contains("oauth2/token") {
+                r#"{"access_token":"tok","expires_in":32400}"#
+            } else {
+                body
+            };
+            (
+                axum::http::StatusCode::OK,
+                [("content-type", "application/json")],
+                payload,
+            )
+        };
+        let app = axum::Router::new().fallback(axum::routing::any(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = PaypalClient::with_base_url(
+            PaypalConfig {
+                client_id: "AY_id".to_string(),
+                client_secret: "EL_secret".to_string(),
+                environment: PaypalEnvironment::Sandbox,
+            },
+            format!("http://{addr}"),
+        )
+        .expect("client builds");
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn a_balance_keeps_paypals_decimal_string_verbatim() {
         // Through an f64 this becomes 4320.500000000001 on some inputs. It is
         // rendered to an operator and never computed on, so it stays text.
-        let raw = json!({"balances":[{
-            "currency":"USD","primary":true,
-            "available_balance":{"currency_code":"USD","value":"4320.50"},
-            "withheld_balance":{"currency_code":"USD","value":"0.00"}
-        }]});
-        let entry = &raw["balances"][0];
-        let b = Balance {
-            currency_code: text(Some(entry), "currency").unwrap_or_default(),
-            available: text(entry.get("available_balance"), "value").unwrap_or_default(),
-            withheld: text(entry.get("withheld_balance"), "value").unwrap_or_default(),
-            primary: entry
-                .get("primary")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        };
-        assert_eq!(b.available, "4320.50");
-        assert_eq!(b.currency_code, "USD");
-        assert!(b.primary);
+        // Driven through `get_wallet_balance` itself, against a stub serving
+        // PayPal's real response shape. An earlier version of this test rebuilt
+        // the projection inline and asserted on its own copy — which passes
+        // whatever the production projection does, including not existing.
+        let (client, server) = stub_client(
+            r#"{"balances":[{
+                "currency":"USD","primary":true,
+                "available_balance":{"currency_code":"USD","value":"4320.50"},
+                "withheld_balance":{"currency_code":"USD","value":"12.30"}
+            },{
+                "currency":"EUR","primary":false,
+                "available_balance":{"currency_code":"EUR","value":"0.00"},
+                "withheld_balance":{"currency_code":"EUR","value":"0.00"}
+            }]}"#,
+        )
+        .await;
+        let balances = get_wallet_balance(&client).await.expect("balances");
+        server.abort();
+
+        assert_eq!(balances.len(), 2);
+        // Through an f64 this becomes 4320.500000000001 on some inputs. It is
+        // rendered to an operator and never computed on, so it stays text.
+        assert_eq!(balances[0].available, "4320.50");
+        assert_eq!(balances[0].withheld, "12.30");
+        assert_eq!(balances[0].currency_code, "USD");
+        assert!(balances[0].primary);
+        assert_eq!(balances[1].currency_code, "EUR");
+        assert!(!balances[1].primary);
+    }
+
+    #[tokio::test]
+    async fn a_reply_without_a_balances_array_is_an_error_not_an_empty_wallet() {
+        // An account always has balances, so a reply without them is a broken
+        // integration — reporting "no funds" would be a confident lie about
+        // money. (A transaction query is the opposite case; see
+        // `list_transactions`.)
+        let (client, server) = stub_client(r#"{"name":"INTERNAL","debug_id":"x"}"#).await;
+        let err = get_wallet_balance(&client)
+            .await
+            .expect_err("a missing array is an error");
+        server.abort();
+        let rendered = err.to_string();
+        assert!(rendered.contains("balances"), "{rendered}");
+        // And the body itself is logged, not relayed into the transcript.
+        assert!(!rendered.contains("debug_id"), "{rendered}");
     }
 
     #[test]

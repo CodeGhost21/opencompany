@@ -297,16 +297,31 @@ async fn payment_url(
 /// [`InvoiceSummary::replayed_earlier_invoice`] — and why a caller who means to
 /// bill twice can pass a distinct `idempotency_key`.
 ///
-/// `DefaultHasher` is not stable across Rust releases, which is fine for what
-/// this is: a retry and its original are the same binary, minutes apart.
+/// FNV-1a rather than `DefaultHasher`, so the key is stable **as a value**, not
+/// merely within one process. `DefaultHasher`'s output is explicitly not
+/// guaranteed across Rust releases, which would mean a host upgraded mid-retry
+/// — or two hosts of one company behind a load balancer — deriving different
+/// keys for the same invoice and billing the customer twice. That is precisely
+/// the failure this function exists to prevent, so the hash cannot be one whose
+/// stability is a footnote about the toolchain. The field separators keep
+/// `("ab","c")` from colliding with `("a","bc")`.
 fn derived_idempotency_key(form: &Form) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    let mut eat = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
     for (key, value) in form.pairs() {
-        key.hash(&mut hasher);
-        value.hash(&mut hasher);
+        eat(key.as_bytes());
+        eat(b"=");
+        eat(value.as_bytes());
+        eat(b"&");
     }
-    format!("oc-invoice-{:016x}", hasher.finish())
+    format!("oc-invoice-{hash:016x}")
 }
 
 /// Creates an invoice for `customer_email`, creating the customer if needed,
@@ -1003,6 +1018,33 @@ mod tests {
                 .as_deref()
                 .is_some_and(|key| key.starts_with("oc-invoice-")),
             "a key must be derived when the caller supplies none: {create:?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_key_is_a_fixed_value_not_merely_self_consistent() {
+        // Pinned as a literal on purpose. A hash that is only stable within one
+        // process still bills a customer twice when the retry lands on a host
+        // built from a different toolchain, or on a sibling behind a load
+        // balancer -- so "same input, same key" has to hold across builds, and
+        // the only way to assert that is to write the value down.
+        let mut form = Form::new();
+        form.push("customer_id", "cus_1");
+        form.push("currency_code", "USD");
+        form.push_indexed("charges", "amount", 0, 10_000);
+        let key = derived_idempotency_key(&form);
+        assert_eq!(key, "oc-invoice-e989cc10e2e5e7d0", "{key}");
+
+        // Field boundaries are part of the input: without a separator these two
+        // hash identically, and two different invoices would share a key --
+        // which silently drops the second.
+        let mut ab_c = Form::new();
+        ab_c.push("ab", "c");
+        let mut a_bc = Form::new();
+        a_bc.push("a", "bc");
+        assert_ne!(
+            derived_idempotency_key(&ab_c),
+            derived_idempotency_key(&a_bc)
         );
     }
 

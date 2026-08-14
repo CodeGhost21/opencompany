@@ -514,6 +514,51 @@ mod tests {
     }
 
     #[test]
+    fn a_long_credential_decodes_exactly() {
+        // The accumulator is never masked, so it visibly "overflows" a u32 after
+        // a handful of characters. That is fine and this pins why: `<<` in Rust
+        // only panics when the SHIFT AMOUNT reaches the width — a constant 6
+        // here — and bits pushed off the top are discarded by definition, while
+        // the decoder only ever reads the low `nbits` (at most 6) it just wrote.
+        // A wider type or a mask would change nothing.
+        fn encode(input: &[u8]) -> String {
+            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::new();
+            for chunk in input.chunks(3) {
+                let b = [
+                    chunk[0],
+                    *chunk.get(1).unwrap_or(&0),
+                    *chunk.get(2).unwrap_or(&0),
+                ];
+                let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+                out.push(A[(n >> 18 & 63) as usize] as char);
+                out.push(A[(n >> 12 & 63) as usize] as char);
+                out.push(if chunk.len() > 1 {
+                    A[(n >> 6 & 63) as usize] as char
+                } else {
+                    '='
+                });
+                out.push(if chunk.len() > 2 {
+                    A[(n & 63) as usize] as char
+                } else {
+                    '='
+                });
+            }
+            out
+        }
+
+        for len in [1usize, 2, 3, 300, 30_000] {
+            let credential = format!("cbuser:{}", "x".repeat(len));
+            let decoded = decode_basic(&format!("Basic {}", encode(credential.as_bytes())));
+            assert_eq!(
+                decoded.as_deref(),
+                Some(credential.as_str()),
+                "a {len}-byte password must round-trip exactly"
+            );
+        }
+    }
+
+    #[test]
     fn constant_time_eq_still_compares_correctly() {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"secreT"));
