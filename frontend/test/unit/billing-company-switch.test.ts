@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { CompanyFeed } from "@/api/types";
+import type { CompanyFeed } from "@/hooks/use-company";
 import { SettingsSection } from "@/views/SettingsSection";
 
 /**
