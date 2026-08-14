@@ -1172,13 +1172,17 @@ impl crate::ports::notifications::NotificationStore for FsOps {
         )
         .await?;
         let reads = load_json_vec::<StoredNotifRead>(&bundle.notification_reads_json()).await?;
+        // This person's markers, indexed once, so the join is linear rather than
+        // O(records × markers) — mirrors the map the mongo backend builds.
+        let mine: std::collections::HashMap<&str, u64> = reads
+            .iter()
+            .filter(|r| r.user_id == user)
+            .map(|r| (r.notification_id.as_str(), r.read_at))
+            .collect();
         let mut out: Vec<_> = records
             .into_iter()
             .map(|n| {
-                let read_at = reads
-                    .iter()
-                    .find(|r| r.user_id == user && r.notification_id == n.id)
-                    .map(|r| r.read_at);
+                let read_at = mine.get(n.id.as_str()).copied();
                 crate::ports::notifications::NotificationView {
                     notification: n,
                     read_at,
@@ -1223,6 +1227,7 @@ impl crate::ports::notifications::NotificationStore for FsOps {
             None => records.iter().map(|n| n.id.as_str()).collect(),
         };
         let now = crate::ports::now_millis();
+        let mut changed = false;
         for id in targets {
             // A latch: only stamp a marker that is not already there, so the
             // original `read_at` survives a re-mark.
@@ -1235,9 +1240,15 @@ impl crate::ports::notifications::NotificationStore for FsOps {
                     notification_id: id.to_string(),
                     read_at: now,
                 });
+                changed = true;
             }
         }
-        write_atomic(&path, &serde_json::to_string(&reads)?).await?;
+        // Only rewrite the marker file when a marker was actually added, so a
+        // repeated mark-all is a pure read rather than a rewrite of the whole
+        // file for no change.
+        if changed {
+            write_atomic(&path, &serde_json::to_string(&reads)?).await?;
+        }
         // Still-unread count for this person: records with no marker of theirs.
         let unread = records
             .iter()

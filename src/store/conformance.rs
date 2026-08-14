@@ -2392,6 +2392,13 @@ pub async fn assert_notification_store(notes: Arc<dyn NotificationStore>) {
     );
 
     // A latch: re-marking does not move the timestamp forward.
+    //
+    // Wait past a millisecond boundary first: within one millisecond a backend
+    // that OVERWRITES `read_at` on every mark writes the same value a latch
+    // would, and this assertion would then pass for the very shape it exists to
+    // reject. After the wait, an overwriting backend produces a strictly greater
+    // `read_at` (and this fails); a real latch is unchanged (and this holds).
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     notes
         .mark_read(&alpha, "ada", Some(&["n-new".to_string()]))
         .await
