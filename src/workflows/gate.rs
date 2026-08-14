@@ -400,6 +400,11 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
         // decision belongs to the node they feed, which is classified above.
         | NodeKind::Condition
         | NodeKind::Dedup
+        | NodeKind::Spawn
+        | NodeKind::Scatter
+        | NodeKind::Gather
+        | NodeKind::Gate
+        | NodeKind::Void
         | NodeKind::Loop
         | NodeKind::Merge
         | NodeKind::OutputParser

@@ -368,6 +368,11 @@ pub async fn build_capabilities(
         // no company manifest can currently produce one (`NodeKind` has no
         // `memory` variant on our side).
         memory: None,
+        // New in tinyflows 0.6.1, carried by the #47 delta: concurrent work starts
+        // in `spawn` nodes through this optional runner. Keep `None` on this path
+        // to run `spawn` inline and `gate` on already-settled tickets, preserving
+        // correctness while keeping the concurrency behavior in a later phase.
+        tasks: None,
     })
 }
 
