@@ -234,8 +234,43 @@ export function AppShell({
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [view, sub, navigate] = useHashView<View>(VIEWS, "overview");
-  // Most call sites only ever change the top-level view.
-  const setView = useCallback((next: View, nextSub?: string) => navigate(next, nextSub), [navigate]);
+  // Track the latest non-default segment per view so returning to a tab with
+  // sub-pages restores operator context (for example `#/workflows/<id>`), instead
+  // of always dropping it to the parent view.
+  // Partial by construction: a view is only present here once it has been
+  // visited, and an unvisited view must read back as "nothing remembered"
+  // rather than as a key holding `undefined`.
+  const lastSubByViewRef = useRef<Partial<Record<View, string | null>>>({});
+  useEffect(() => {
+    // Company scope is the shell namespace for this state. When switching
+    // companies, do not carry a prior workflow or thread selection across the
+    // tenant boundary.
+    lastSubByViewRef.current = {};
+  }, [scope.connection, scope.company]);
+  useEffect(() => {
+    lastSubByViewRef.current = {
+      ...lastSubByViewRef.current,
+      [view]: sub,
+    };
+  }, [view, sub]);
+  // Most call sites only ever change the top-level view. Preserve the remembered
+  // sub-segment for the target view so tab switches do not discard deep tab state.
+  const setView = useCallback(
+    (next: View, nextSub?: string) => {
+      if (nextSub !== undefined) {
+        lastSubByViewRef.current[next] = nextSub;
+        navigate(next, nextSub);
+        return;
+      }
+      const remembered = lastSubByViewRef.current[next];
+      if (remembered) {
+        navigate(next, remembered);
+        return;
+      }
+      navigate(next);
+    },
+    [navigate],
+  );
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   // The shell owns every channel's transcript, not `ChatView` — the shell
   // mounts and unmounts `ChatView` per route, so component-local state there
