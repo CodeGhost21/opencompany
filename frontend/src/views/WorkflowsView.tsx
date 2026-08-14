@@ -354,6 +354,12 @@ export function WorkflowsView({
   // consults it so a console WITH a working stream never double-paints a run it
   // already watched, and one without it still gets the journaled answer.
   const liveRanRef = useRef<Set<string>>(new Set());
+  // Issue #863: the run this canvas adopted from the history rather than from a
+  // start frame. Held so the trail STAYS on screen once that run settles — the
+  // history read that reports it finished is the same read that stops reporting
+  // it as in flight, and dropping the seed on that tick would blank a canvas the
+  // operator has been watching fill in.
+  const adoptedFromHistoryRef = useRef<string | null>(null);
 
   // ---- Issue #339: the canvas as a link target -----------------------------
   //
@@ -1010,9 +1016,37 @@ export function WorkflowsView({
   // land in one render, and an accumulating reducer would see only the last —
   // losing a `workflow_run_started` that way strands every node frame behind
   // it. Recomputing from the window instead has no such state to lose.
+  //
+  // Issue #863: seeded with the run the HOST says is open, for the case the
+  // window cannot cover. The window only holds what arrived since this console
+  // connected, so a run that was already walking when the tab was opened (a
+  // cron fire, a run started from chat, a reload, an `EventSource` reconnect)
+  // has no start frame here and used to paint nothing at all — the whole run,
+  // blank, which is what #863 reports. The history read already carries that
+  // run with `running: true` and the nodes it has finished so far.
+  const inFlightSeed = useMemo(() => {
+    if (!selectedId || runsFor !== selectedId) return null;
+    // Only a run this console has NOT been following: a run whose frames are in
+    // the window folds from them, which is both fresher and the path every
+    // existing guarantee is written against.
+    const row = runs.find(
+      (r) => r.runId && (r.running || r.runId === adoptedFromHistoryRef.current),
+    );
+    if (!row?.runId) return null;
+    if (liveRanRef.current.has(row.runId) && row.runId !== adoptedFromHistoryRef.current) {
+      return null;
+    }
+    return {
+      runId: row.runId,
+      states: statesFromRun(row),
+      elapsed: elapsedFromRun(row),
+      scheduled: row.scheduled,
+    };
+  }, [runs, runsFor, selectedId]);
+
   const liveRun = useMemo(
-    () => foldLiveRun(runEvents, selectedId, graph),
-    [runEvents, selectedId, graph],
+    () => foldLiveRun(runEvents, selectedId, graph, inFlightSeed),
+    [runEvents, selectedId, graph, inFlightSeed],
   );
 
   // The optimistic frontier is only for the gap before the first frame. Once
@@ -1021,8 +1055,13 @@ export function WorkflowsView({
   useEffect(() => {
     if (!liveRun) return;
     liveRanRef.current.add(liveRun.runId);
+    // Issue #863: remember an adoption that came from the history rather than
+    // from a start frame, so the seed survives the run settling.
+    if (inFlightSeed && inFlightSeed.runId === liveRun.runId) {
+      adoptedFromHistoryRef.current = liveRun.runId;
+    }
     setOptimistic(null);
-  }, [liveRun]);
+  }, [liveRun, inFlightSeed]);
 
   // Issue #528: adopt the live run's id while the synchronous POST is still in
   // flight.
@@ -1097,6 +1136,10 @@ export function WorkflowsView({
     setActiveRunId(null);
     setResult(null);
     setRunRefusal(null);
+    // Issue #863: the adopted run belonged to the workflow being left. Holding
+    // it across the switch would keep painting one graph's trail onto another's
+    // canvas the moment the two share a node id.
+    adoptedFromHistoryRef.current = null;
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.
