@@ -37,7 +37,7 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -64,13 +64,12 @@ const ACTED_ON: &[&str] = &["payment_succeeded", "payment_failed", "invoice_gene
 
 /// The most body this route will buffer, well above any real Chargebee event.
 ///
-/// The handler authenticates, but the body is read into memory by the extractor
-/// *before* the handler runs, so the credential cannot bound what an
-/// unauthenticated caller makes this host allocate. Axum's default limit already
-/// caps that at 2 MiB — this is a narrowing to what the endpoint actually needs,
-/// not a fix for an unbounded read. A Chargebee event is a few KiB; an invoice
-/// with a long line-item list is the largest realistic case and nowhere near
-/// this.
+/// The second of two bounds, and the weaker one. [`VerifiedDelivery`] means an
+/// unauthenticated caller's body is never read at all; this caps what a caller
+/// who DID authenticate can make the host allocate. A Chargebee event is a few
+/// KiB — an invoice with a long line-item list is the largest realistic case and
+/// nowhere near this — so the 2 MiB axum defaults to is simply more room than
+/// the endpoint has any use for.
 const MAX_EVENT_BYTES: usize = 256 * 1024;
 
 /// Builds the Chargebee webhook route fragment.
@@ -149,33 +148,53 @@ fn decode_basic(header: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// `POST /hooks/{company}/chargebee`.
-async fn chargebee_hook(
-    State(state): State<AppState>,
-    Path(company): Path<String>,
-    headers: HeaderMap,
-    raw: Bytes,
-) -> Response {
-    let runtime = match resolve(&state, &company) {
-        Ok(runtime) => runtime,
-        Err(err) => return err.into_response(),
-    };
-    handle(runtime, &headers, &raw).await
+/// A delivery whose credential has already been verified.
+///
+/// This is an **extractor**, not a check inside the handler, and the difference
+/// is the point: axum runs every `FromRequestParts` extractor before the one
+/// `FromRequest` extractor that consumes the body, so an unverifiable POST is
+/// rejected while its body is still on the socket. With the check inside the
+/// handler, `Bytes` had already buffered whatever an unauthenticated caller
+/// chose to send — bounded by the route's `DefaultBodyLimit`, but bounded is
+/// not the same as never read.
+///
+/// Carrying the runtime in the type also means the handler cannot forget: there
+/// is no path to the body that does not go through a verified credential.
+struct VerifiedDelivery(Arc<CompanyRuntime>);
+
+impl axum::extract::FromRequestParts<AppState> for VerifiedDelivery {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let Path(company) = Path::<String>::from_request_parts(parts, state)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        let runtime = resolve(state, &company).map_err(IntoResponse::into_response)?;
+        verify(&runtime, &parts.headers).await?;
+        Ok(Self(runtime))
+    }
 }
 
-/// Verifies the credential, then raises one cycle for an event worth telling
-/// the operator about.
-async fn handle(runtime: Arc<CompanyRuntime>, headers: &HeaderMap, raw: &[u8]) -> Response {
-    // A stored credential must exist to verify against. An empty stored value
-    // counts as "not configured" — reject rather than accept anything.
+/// Compares the delivery's HTTP Basic credential against the company's stored
+/// one, in constant time.
+///
+/// A stored credential must exist to verify against. An empty stored value
+/// counts as "not configured" — reject rather than accept anything.
+async fn verify(
+    runtime: &Arc<CompanyRuntime>,
+    headers: &HeaderMap,
+) -> std::result::Result<(), Response> {
     let expected = match runtime
         .secrets()
         .get(runtime.id(), WEBHOOK_SECRET_KEY)
         .await
     {
         Ok(Some(secret)) if !secret.expose().is_empty() => secret.expose().to_string(),
-        Ok(_) => return unauthorized(),
-        Err(err) => return crate::server::error::ApiError(err).into_response(),
+        Ok(_) => return Err(unauthorized()),
+        Err(err) => return Err(crate::server::error::ApiError(err).into_response()),
     };
 
     let Some(provided) = headers
@@ -183,13 +202,26 @@ async fn handle(runtime: Arc<CompanyRuntime>, headers: &HeaderMap, raw: &[u8]) -
         .and_then(|v| v.to_str().ok())
         .and_then(decode_basic)
     else {
-        return unauthorized();
+        return Err(unauthorized());
     };
     if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        return unauthorized();
+        return Err(unauthorized());
     }
+    Ok(())
+}
 
-    // Only parse once the credential checks out.
+/// `POST /hooks/{company}/chargebee`.
+///
+/// `VerifiedDelivery` comes first deliberately — it is the extractor that
+/// authenticates, and `raw` is only read once it has succeeded.
+async fn chargebee_hook(VerifiedDelivery(runtime): VerifiedDelivery, raw: Bytes) -> Response {
+    handle(runtime, &raw).await
+}
+
+/// Raises one cycle for an event worth telling the operator about.
+///
+/// The credential is already verified — see [`VerifiedDelivery`].
+async fn handle(runtime: Arc<CompanyRuntime>, raw: &[u8]) -> Response {
     let Ok(event) = serde_json::from_slice::<Value>(raw) else {
         // Malformed body from a caller that DID authenticate: accept it so
         // Chargebee stops retrying, and say so in the log rather than silently.
@@ -277,6 +309,186 @@ fn summarize(event_type: &str, event: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- End-to-end, through the real router ------------------------------
+    //
+    // The unit tests below cover `decode_basic` and `summarize`. These drive the
+    // whole route, because the thing worth protecting is not either function on
+    // its own — it is that an unverifiable POST cannot reach the parser, the
+    // event filter, or a company cycle. This is the one surface here that
+    // accepts input from outside the host.
+
+    /// A host with one company, and the webhook credential `credential` stored
+    /// when it is `Some`.
+    async fn state_with(
+        home: &std::path::Path,
+        credential: Option<&str>,
+    ) -> (AppState, Arc<CompanyRuntime>) {
+        use crate::ports::{CompanyStore, types::CompanyRecord};
+        use crate::store::FsCompanyStore;
+
+        let id = crate::ports::types::CompanyId::new("acme");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        FsCompanyStore::new(home.to_path_buf())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .expect("save company");
+
+        let runtime = Arc::new(
+            crate::runtime::RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .expect("runtime"),
+        );
+        if let Some(credential) = credential {
+            runtime
+                .secrets()
+                .set(
+                    runtime.id(),
+                    WEBHOOK_SECRET_KEY,
+                    crate::ports::types::SecretValue(credential.to_string()),
+                )
+                .await
+                .expect("store credential");
+        }
+        let state = AppState::new(crate::AppConfig::default());
+        state.registry().insert(id, runtime.clone());
+        (state, runtime)
+    }
+
+    /// Posts `body` to the route, with `auth` verbatim as the header value.
+    async fn post_event(state: &AppState, auth: Option<&str>, body: Value) -> (StatusCode, Value) {
+        use axum::body::{Body, to_bytes};
+        use tower::ServiceExt;
+
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/hooks/acme/chargebee")
+            .header("content-type", "application/json");
+        if let Some(auth) = auth {
+            request = request.header("authorization", auth);
+        }
+        let request = request.body(Body::from(body.to_string())).expect("request");
+        let response = crate::server::router(state.clone())
+            .oneshot(request)
+            .await
+            .expect("routed");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    fn paid_event() -> Value {
+        json!({
+            "event_type": "payment_succeeded",
+            "content": {
+                "invoice": {"id": "inv_1", "currency_code": "USD", "total": 10000},
+                "customer": {"id": "cus_1", "email": "alan@tinyhumans.ai"}
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn an_unverifiable_delivery_is_refused_and_never_becomes_an_event() {
+        let home = tempfile::tempdir().expect("tempdir");
+        // base64("cbuser:cbpass")
+        let (state, _runtime) = state_with(home.path(), Some("cbuser:cbpass")).await;
+
+        for (label, auth) in [
+            ("no header at all", None),
+            ("a wrong password", Some("Basic Y2J1c2VyOndyb25n")),
+            ("a bearer token", Some("Bearer Y2J1c2VyOmNicGFzcw==")),
+            ("a malformed encoding", Some("Basic QQ=garbage")),
+        ] {
+            let (status, body) = post_event(&state, auth, paid_event()).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+            assert_eq!(body["code"], "unauthorized", "{label}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_company_with_no_stored_credential_accepts_nothing() {
+        // Fail closed: an unconfigured webhook must not be an open endpoint.
+        // Without the stored-secret check, "no credential" would be the one
+        // state in which any caller could drive a company cycle.
+        let home = tempfile::tempdir().expect("tempdir");
+        let (state, runtime) = state_with(home.path(), None).await;
+
+        let (status, _) =
+            post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "nothing stored");
+
+        // And an EMPTY stored value counts as unconfigured, which is how the
+        // console clears a credential — the secret port has no delete.
+        runtime
+            .secrets()
+            .set(
+                runtime.id(),
+                WEBHOOK_SECRET_KEY,
+                crate::ports::types::SecretValue(String::new()),
+            )
+            .await
+            .expect("clear");
+        let (status, _) =
+            post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "cleared to empty");
+    }
+
+    #[tokio::test]
+    async fn a_verified_delivery_is_accepted() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let (state, _runtime) = state_with(home.path(), Some("cbuser:cbpass")).await;
+
+        let (status, body) =
+            post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["ok"], true);
+        assert_eq!(
+            body["ignored"],
+            Value::Null,
+            "an acted-on event is not ignored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verified_but_unsubscribed_event_is_acknowledged_and_ignored() {
+        // 2xx on purpose: answering non-2xx would make Chargebee retry, then
+        // disable the endpoint, over an event we simply had no interest in.
+        let home = tempfile::tempdir().expect("tempdir");
+        let (state, _runtime) = state_with(home.path(), Some("cbuser:cbpass")).await;
+
+        let (status, body) = post_event(
+            &state,
+            Some("Basic Y2J1c2VyOmNicGFzcw=="),
+            json!({"event_type": "subscription_created", "content": {}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["ignored"], "subscription_created");
+    }
 
     #[test]
     fn basic_auth_decodes_to_the_user_pass_pair() {

@@ -336,6 +336,297 @@ async fn delete_billing(
 mod tests {
     use super::*;
 
+    // --- The routes, end to end -------------------------------------------
+    //
+    // The unit tests below cover the helpers. These drive the real router,
+    // because the properties worth holding are route-level: that a credential
+    // goes in and never comes back out, that clearing clears ALL of it, and
+    // that a member cannot read or write another role's billing settings.
+
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    async fn state_with_company(home: &std::path::Path) -> AppState {
+        use crate::ports::CompanyStore;
+        use crate::ports::types::CompanyRecord;
+
+        let id = CompanyId::new("acme");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        crate::store::FsCompanyStore::new(home.to_path_buf())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .expect("save");
+
+        let runtime = crate::runtime::RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .expect("runtime");
+        let state = AppState::new(crate::AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        state
+    }
+
+    async fn call(
+        state: &AppState,
+        method: &str,
+        uri: &str,
+        cookie: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        // `seed_admin` / `seed_session` hand back a ready `Cookie` header value —
+        // these routes authenticate a signed-in human, not a bearer token.
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", cookie);
+        let request = match body {
+            Some(body) => request
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string())),
+            None => request.body(Body::empty()),
+        }
+        .expect("request");
+        let response = crate::server::router(state.clone())
+            .oneshot(request)
+            .await
+            .expect("routed");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_saved_credential_is_reported_as_configured_and_never_returned() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path()).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        // Nothing stored yet.
+        let (status, before) = call(
+            &state,
+            "GET",
+            "/api/v1/companies/acme/billing/chargebee",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{before}");
+        assert_eq!(before["apiKeyConfigured"], false);
+        assert_eq!(before["webhookConfigured"], false);
+
+        let (status, saved) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/billing/chargebee",
+            &admin,
+            Some(json!({
+                "apiKey": "cb_live_supersecret",
+                "site": "https://acme-test.chargebee.com",
+                "webhookSecret": "cbuser:cbpass",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+
+        // The whole contract of this surface: it reports WHETHER a credential
+        // is stored, never what it is. A response that echoed the key back
+        // would put it in the browser, the network log and any screen share.
+        let (_, after) = call(
+            &state,
+            "GET",
+            "/api/v1/companies/acme/billing/chargebee",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(after["apiKeyConfigured"], true);
+        assert_eq!(after["webhookConfigured"], true);
+        // The site is the one NON-secret field, and comes back normalised.
+        assert_eq!(after["site"], "acme-test");
+        for rendered in [saved.to_string(), after.to_string()] {
+            assert!(!rendered.contains("cb_live_supersecret"), "{rendered}");
+            assert!(!rendered.contains("cbpass"), "{rendered}");
+        }
+    }
+
+    #[tokio::test]
+    async fn clearing_removes_the_webhook_secret_too_not_just_the_key() {
+        // The route is named `…/key`, which reads as if it clears only the API
+        // key — leaving a webhook credential behind would keep the endpoint
+        // live while the UI reported the integration as cleared.
+        let home = tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path()).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/billing/chargebee",
+            &admin,
+            Some(json!({
+                "apiKey": "cb_key",
+                "site": "acme-test",
+                "webhookSecret": "cbuser:cbpass",
+            })),
+        )
+        .await;
+        let (status, cleared) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/billing/chargebee/key",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert_eq!(cleared["apiKeyConfigured"], false);
+        assert_eq!(cleared["webhookConfigured"], false, "{cleared}");
+        assert_eq!(
+            cleared["site"],
+            Value::Null,
+            "the site is cleared as well: {cleared}"
+        );
+    }
+
+    #[tokio::test]
+    async fn paypal_clears_its_environment_so_a_reconnect_starts_at_sandbox() {
+        // Inheriting `live` from a previous account is the failure worth
+        // preventing here: the next connection would read real money.
+        let home = tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path()).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/billing/paypal",
+            &admin,
+            Some(json!({
+                "clientId": "AY_id",
+                "clientSecret": "EL_secret",
+                "environment": "live",
+            })),
+        )
+        .await;
+        let (_, live) = call(
+            &state,
+            "GET",
+            "/api/v1/companies/acme/billing/paypal",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(live["environment"], "live");
+        assert_eq!(live["clientSecretConfigured"], true);
+        assert!(!live.to_string().contains("EL_secret"), "{live}");
+
+        let (status, cleared) = call(
+            &state,
+            "DELETE",
+            "/api/v1/companies/acme/billing/paypal/key",
+            &admin,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert_eq!(cleared["clientIdConfigured"], false);
+        assert_eq!(cleared["clientSecretConfigured"], false);
+        assert_eq!(cleared["environment"], "sandbox", "{cleared}");
+    }
+
+    #[tokio::test]
+    async fn a_member_may_read_the_status_but_never_write_a_credential() {
+        // The split is deliberate. `GET` carries no secret — booleans, the site
+        // slug, the webhook URL — so a member seeing "not connected" is how they
+        // know to ask an admin. Writing is another matter: a member who could
+        // `PUT` here would point the company's invoicing at a Chargebee site
+        // they control, and one who could `DELETE` could silently stop every
+        // payment notification.
+        let home = tempfile::tempdir().expect("tempdir");
+        let state = state_with_company(home.path()).await;
+        let member = crate::server::test_support::seed_session(
+            &state,
+            "acme",
+            crate::ports::users::UserRole::Member,
+        )
+        .await;
+
+        for uri in [
+            "/api/v1/companies/acme/billing/chargebee",
+            "/api/v1/companies/acme/billing/paypal",
+        ] {
+            let (status, answer) = call(&state, "GET", uri, &member, None).await;
+            assert_eq!(status, StatusCode::OK, "GET {uri}: {answer}");
+        }
+
+        for (method, uri, body) in [
+            (
+                "PUT",
+                "/api/v1/companies/acme/billing/chargebee",
+                Some(json!({"apiKey": "cb_key", "site": "attacker-site"})),
+            ),
+            (
+                "PUT",
+                "/api/v1/companies/acme/billing/paypal",
+                Some(json!({"clientId": "AY_id", "clientSecret": "EL_secret"})),
+            ),
+            (
+                "DELETE",
+                "/api/v1/companies/acme/billing/chargebee/key",
+                None,
+            ),
+            ("DELETE", "/api/v1/companies/acme/billing/paypal/key", None),
+        ] {
+            let (status, answer) = call(&state, method, uri, &member, body).await;
+            assert!(
+                status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED,
+                "{method} {uri} answered {status}: {answer}"
+            );
+        }
+
+        // And nothing the member attempted was written. Read the store
+        // directly rather than through another principal: the refusals above
+        // are only worth having if they refused the WRITE, not merely the
+        // response.
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("company");
+        for key in [API_KEY_SECRET, SITE_SECRET, CLIENT_ID_SECRET] {
+            let stored = runtime
+                .secrets()
+                .get(runtime.id(), key)
+                .await
+                .expect("read secret");
+            assert!(stored.is_none(), "{key} was written by a member");
+        }
+    }
+
     #[test]
     fn a_site_is_normalized_from_every_shape_an_operator_pastes() {
         for raw in [
