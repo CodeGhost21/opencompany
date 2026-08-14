@@ -117,8 +117,11 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
   const stamp = Date.now();
   const firstId = `e2e-864-first-${stamp}`;
   const secondId = `e2e-864-second-${stamp}`;
-  const firstName = "Workflow selector probe A";
-  const secondName = "Workflow selector probe B";
+  // Stamped like every other probe here: a run that dies before its cleanup
+  // leaves these workflows behind, and a static name would then match twice in
+  // the picker and fail the NEXT run on a strict-mode violation.
+  const firstName = `Workflow selector probe A ${stamp}`;
+  const secondName = `Workflow selector probe B ${stamp}`;
 
   try {
     await createWorkflow(request, firstId, firstName);
