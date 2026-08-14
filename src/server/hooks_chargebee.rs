@@ -62,9 +62,23 @@ pub const CHANNEL: &str = "chargebee";
 /// — over an event we simply had no interest in.
 const ACTED_ON: &[&str] = &["payment_succeeded", "payment_failed", "invoice_generated"];
 
+/// The most body this route will buffer, well above any real Chargebee event.
+///
+/// The handler authenticates, but the body is read into memory by the extractor
+/// *before* the handler runs, so the credential cannot bound what an
+/// unauthenticated caller makes this host allocate. Axum's default limit already
+/// caps that at 2 MiB — this is a narrowing to what the endpoint actually needs,
+/// not a fix for an unbounded read. A Chargebee event is a few KiB; an invoice
+/// with a long line-item list is the largest realistic case and nowhere near
+/// this.
+const MAX_EVENT_BYTES: usize = 256 * 1024;
+
 /// Builds the Chargebee webhook route fragment.
 pub fn router() -> Router<AppState> {
-    Router::new().route("/hooks/{company}/chargebee", post(chargebee_hook))
+    Router::new().route(
+        "/hooks/{company}/chargebee",
+        post(chargebee_hook).layer(axum::extract::DefaultBodyLimit::max(MAX_EVENT_BYTES)),
+    )
 }
 
 /// A `401` drop for an unverifiable delivery.

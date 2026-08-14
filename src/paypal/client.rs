@@ -223,6 +223,17 @@ impl PaypalClient {
         let parsed: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
 
         if (200..300).contains(&status) {
+            // A success whose body is not a JSON object is not a success we can
+            // use: `Value::Null` flows on and every field read yields a default,
+            // so a proxy's HTML 200 would read as an account with no balances
+            // rather than a reported failure. Same rule as the Chargebee client.
+            if !parsed.is_object() {
+                return Err(err(
+                    status,
+                    "unexpected_response",
+                    unparsed_body_message(status, &body),
+                ));
+            }
             return Ok(parsed);
         }
         Err(err(

@@ -70,7 +70,15 @@ fn explain_unavailable_window(error: OpenCompanyError) -> OpenCompanyError {
     else {
         return error;
     };
-    if !message.to_ascii_lowercase().contains("not available") {
+    // Matched on PayPal's specific sentence, not a bare "not available".
+    // The looser test also caught unrelated failures — "The requested resource
+    // is not available" is a 404, and answering it with advice about start
+    // dates sends the agent adjusting timeframes for a problem that has nothing
+    // to do with them.
+    if !message
+        .to_ascii_lowercase()
+        .contains("data for the given start date is not available")
+    {
         return error;
     }
     OpenCompanyError::Paypal {
@@ -256,6 +264,19 @@ mod tests {
         };
         let untouched = explain_unavailable_window(other).to_string();
         assert!(!untouched.contains("3 hours"), "{untouched}");
+
+        // And neither does an unrelated failure that merely says "not
+        // available" — a 404 answered with advice about start dates sends the
+        // agent adjusting timeframes for a problem that has nothing to do with
+        // them.
+        let missing = OpenCompanyError::Paypal {
+            status: 404,
+            code: "RESOURCE_NOT_FOUND".to_string(),
+            message: "The requested resource is not available.".to_string(),
+        };
+        let relayed = explain_unavailable_window(missing).to_string();
+        assert!(!relayed.contains("3 hours"), "{relayed}");
+        assert!(!relayed.contains("start_date"), "{relayed}");
     }
 
     #[tokio::test]

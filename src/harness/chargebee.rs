@@ -44,26 +44,35 @@ pub struct TenantChargebee {
 impl TenantChargebee {
     /// Resolves a company's Chargebee credentials from its secret store.
     ///
-    /// Returns `None` when either half is missing. Both are required and the
-    /// pair is meaningless apart: a site with no key cannot be called, and a key
-    /// pointed at the wrong site fails in a way that reads like a bad key.
+    /// `Ok(None)` when either half is missing. Both are required and the pair is
+    /// meaningless apart: a site with no key cannot be called, and a key pointed
+    /// at the wrong site fails in a way that reads like a bad key.
+    ///
+    /// A store **read failure** is an `Err`, not `Ok(None)`. Collapsing the two
+    /// would make an unhealthy secret store indistinguishable from "no
+    /// credential configured", and the caller's response to those differs
+    /// completely: absence should wire no tools, while a transient read error
+    /// should keep the connection it already had. Deciding that here, rather
+    /// than at the caller, is what makes the choice visible — see
+    /// `HarnessPool::resolve_chargebee`.
     pub async fn resolve(
         secrets: &Arc<dyn SecretStore>,
         company: &CompanyId,
-    ) -> Option<TenantChargebee> {
-        let read = async |key: &str| -> Option<String> {
-            secrets
+    ) -> crate::error::Result<Option<TenantChargebee>> {
+        let read = async |key: &str| -> crate::error::Result<Option<String>> {
+            Ok(secrets
                 .get(company, key)
-                .await
-                .ok()
-                .flatten()
+                .await?
                 .map(|value| value.0.trim().to_string())
-                .filter(|value| !value.is_empty())
+                .filter(|value| !value.is_empty()))
         };
-        let (site, api_key) = (read(SITE_SECRET).await?, read(API_KEY_SECRET).await?);
-        Some(TenantChargebee {
+        let (Some(site), Some(api_key)) = (read(SITE_SECRET).await?, read(API_KEY_SECRET).await?)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(TenantChargebee {
             config: ChargebeeConfig { site, api_key },
-        })
+        }))
     }
 
     /// The Chargebee site this company bills through. Never the key.
@@ -127,8 +136,8 @@ mod live {
     ///
     /// Per call rather than once at construction so a key rotated mid-roster is
     /// never held open by a long-lived connection built from the old one.
-    fn client(config: &TenantChargebee) -> Result<ChargebeeClient, String> {
-        ChargebeeClient::new(config.config.clone()).map_err(|e| e.to_string())
+    fn client(config: &TenantChargebee) -> crate::error::Result<ChargebeeClient> {
+        ChargebeeClient::new(config.config.clone())
     }
 
     /// Renders a successful tool result, or the failure as text the agent can
@@ -455,6 +464,7 @@ mod tests {
         assert!(
             TenantChargebee::resolve(&only_site, &company)
                 .await
+                .expect("a readable store is not an error")
                 .is_none()
         );
 
@@ -462,11 +472,17 @@ mod tests {
         assert!(
             TenantChargebee::resolve(&only_key, &company)
                 .await
+                .expect("a readable store is not an error")
                 .is_none()
         );
 
         let (neither, company) = store(&[]).await;
-        assert!(TenantChargebee::resolve(&neither, &company).await.is_none());
+        assert!(
+            TenantChargebee::resolve(&neither, &company)
+                .await
+                .expect("a readable store is not an error")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -474,7 +490,12 @@ mod tests {
         // The console writing an empty string is a cleared field, not a
         // credential — resolving it would produce requests with no auth.
         let (store, company) = store(&[(SITE_SECRET, "acme-test"), (API_KEY_SECRET, "   ")]).await;
-        assert!(TenantChargebee::resolve(&store, &company).await.is_none());
+        assert!(
+            TenantChargebee::resolve(&store, &company)
+                .await
+                .expect("a readable store is not an error")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -483,6 +504,7 @@ mod tests {
             store(&[(SITE_SECRET, " acme-test "), (API_KEY_SECRET, " cb_key ")]).await;
         let resolved = TenantChargebee::resolve(&store, &company)
             .await
+            .expect("the store reads")
             .expect("both halves present");
         assert_eq!(resolved.site(), "acme-test", "whitespace is trimmed");
         // `site()` is the only accessor; there is deliberately no key getter,

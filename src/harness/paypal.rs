@@ -30,35 +30,44 @@ pub struct TenantPaypal {
 impl TenantPaypal {
     /// Resolves a company's PayPal credentials from its secret store.
     ///
-    /// Returns `None` unless BOTH halves are present: a client id with no secret
+    /// `Ok(None)` unless BOTH halves are present: a client id with no secret
     /// cannot obtain a token, and half a credential should wire no tools rather
     /// than tools that fail on first use.
-    pub async fn resolve(secrets: &Arc<dyn SecretStore>, company: &CompanyId) -> Option<Self> {
-        let read = async |key: &str| -> Option<String> {
-            secrets
+    ///
+    /// A store **read failure** is an `Err`, not `Ok(None)` — see
+    /// [`crate::harness::chargebee::TenantChargebee::resolve`] for why the two
+    /// must stay distinguishable.
+    pub async fn resolve(
+        secrets: &Arc<dyn SecretStore>,
+        company: &CompanyId,
+    ) -> crate::error::Result<Option<Self>> {
+        let read = async |key: &str| -> crate::error::Result<Option<String>> {
+            Ok(secrets
                 .get(company, key)
-                .await
-                .ok()
-                .flatten()
+                .await?
                 .map(|value| value.0.trim().to_string())
-                .filter(|value| !value.is_empty())
+                .filter(|value| !value.is_empty()))
         };
-        let client_id = read(CLIENT_ID_SECRET).await?;
-        let client_secret = read(CLIENT_SECRET_SECRET).await?;
+        let (Some(client_id), Some(client_secret)) = (
+            read(CLIENT_ID_SECRET).await?,
+            read(CLIENT_SECRET_SECRET).await?,
+        ) else {
+            return Ok(None);
+        };
         // An unset environment is sandbox, matching `PaypalEnvironment::parse`:
         // the safe default is reading fake money, never moving real money.
         let environment = read(ENVIRONMENT_SECRET)
-            .await
+            .await?
             .map(|raw| PaypalEnvironment::parse(&raw))
             .unwrap_or_default();
 
-        Some(Self {
+        Ok(Some(Self {
             config: crate::paypal::PaypalConfig {
                 client_id,
                 client_secret,
                 environment,
             },
-        })
+        }))
     }
 
     /// Which PayPal environment this company is pointed at. Never the credential.
@@ -114,8 +123,8 @@ mod live {
     }
 
     /// Builds the client for a call about to be made.
-    fn client(config: &TenantPaypal) -> std::result::Result<PaypalClient, String> {
-        PaypalClient::new(config.config.clone()).map_err(|e| e.to_string())
+    fn client(config: &TenantPaypal) -> crate::error::Result<PaypalClient> {
+        PaypalClient::new(config.config.clone())
     }
 
     /// Renders a result, or the failure as text the agent can act on.
@@ -245,17 +254,28 @@ mod tests {
     #[tokio::test]
     async fn both_halves_of_the_credential_are_required() {
         let (id_only, company) = secrets_with(&[(CLIENT_ID_SECRET, "AY_id")]).await;
-        assert!(TenantPaypal::resolve(&id_only, &company).await.is_none());
+        assert!(
+            TenantPaypal::resolve(&id_only, &company)
+                .await
+                .expect("a readable store is not an error")
+                .is_none()
+        );
 
         let (secret_only, company) = secrets_with(&[(CLIENT_SECRET_SECRET, "EL_secret")]).await;
         assert!(
             TenantPaypal::resolve(&secret_only, &company)
                 .await
+                .expect("a readable store is not an error")
                 .is_none()
         );
 
         let (neither, company) = secrets_with(&[]).await;
-        assert!(TenantPaypal::resolve(&neither, &company).await.is_none());
+        assert!(
+            TenantPaypal::resolve(&neither, &company)
+                .await
+                .expect("a readable store is not an error")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -269,6 +289,7 @@ mod tests {
         .await;
         let resolved = TenantPaypal::resolve(&store, &company)
             .await
+            .expect("the store reads")
             .expect("both halves present");
         assert_eq!(resolved.environment(), PaypalEnvironment::Sandbox);
     }
@@ -283,6 +304,7 @@ mod tests {
         .await;
         let resolved = TenantPaypal::resolve(&store, &company)
             .await
+            .expect("the store reads")
             .expect("resolves");
         assert_eq!(resolved.environment(), PaypalEnvironment::Live);
 
@@ -295,6 +317,7 @@ mod tests {
         .await;
         let resolved = TenantPaypal::resolve(&typo, &company)
             .await
+            .expect("the store reads")
             .expect("resolves");
         assert_eq!(resolved.environment(), PaypalEnvironment::Sandbox);
     }
@@ -308,6 +331,7 @@ mod tests {
         .await;
         let resolved = TenantPaypal::resolve(&store, &company)
             .await
+            .expect("the store reads")
             .expect("resolves");
         let rendered = format!("{resolved:?}");
         assert!(!rendered.contains("EL_secret"), "{rendered}");

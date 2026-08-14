@@ -107,7 +107,7 @@ impl Form {
 }
 
 /// A Chargebee API client bound to one site.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ChargebeeClient {
     http: reqwest::Client,
     api_key: String,
@@ -115,6 +115,20 @@ pub struct ChargebeeClient {
     /// it per request is what lets a test point the client at a local stub
     /// without the production path carrying a test-only branch.
     base_url: String,
+}
+
+/// Prints the site and **redacts the API key**.
+///
+/// `ChargebeeConfig` already hand-writes this, but the client holds its own copy
+/// of the key — so a derived `Debug` here would put a live key into any log line
+/// that formatted a client, which is the same leak one level down. Matches
+/// `PaypalClient`.
+impl std::fmt::Debug for ChargebeeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChargebeeClient")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ChargebeeClient {
@@ -311,6 +325,20 @@ mod tests {
     /// and an amount.
     const LEAKY_BODY: &str = "<html><body>Gateway error for alan@tinyhumans.ai — invoice \
                               INV-0042, USD 100.00, request 9f3c-aa71</body></html>";
+
+    #[test]
+    fn a_client_debug_does_not_render_its_api_key() {
+        // The client holds its own copy of the key, so redacting only
+        // `ChargebeeConfig` leaves the same leak one level down.
+        let client = ChargebeeClient::new(ChargebeeConfig {
+            site: "acme-test".to_string(),
+            api_key: "live_supersecret".to_string(),
+        })
+        .expect("builds");
+        let rendered = format!("{client:?}");
+        assert!(!rendered.contains("live_supersecret"), "{rendered}");
+        assert!(rendered.contains("acme-test"), "{rendered}");
+    }
 
     #[test]
     fn an_unparseable_body_is_logged_rather_than_put_in_the_error() {
