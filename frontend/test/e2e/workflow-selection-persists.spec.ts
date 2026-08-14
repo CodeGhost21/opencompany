@@ -54,6 +54,65 @@ async function openWorkflows(page: Page) {
   await expect(picker(page)).toBeEnabled({ timeout: 30_000 });
 }
 
+async function mockCompanySwitchApi(page: Page) {
+  const companies = [
+    { id: "acme", name: "Acme", lifecycle: "running", pending_approvals: 0 },
+    { id: "other", name: "Other", lifecycle: "running", pending_approvals: 0 },
+  ];
+  const workflows = {
+    acme: [
+      { id: "shared-workflow", name: "Acme shared workflow" },
+      { id: "acme-default", name: "Acme default workflow" },
+    ],
+    other: [
+      { id: "other-default", name: "Other default workflow" },
+      { id: "shared-workflow", name: "Other shared workflow" },
+    ],
+  };
+
+  await page.addInitScript(() => {
+    const real = Storage.prototype.getItem;
+    Storage.prototype.getItem = function getItem(key: string) {
+      return key.startsWith("oc-tour:")
+        ? '{"skipped":true}'
+        : real.call(this, key);
+    };
+  });
+
+  await page.route("**/api/v1/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const json = (body: unknown) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+
+    if (path === "/api/v1/companies") return json(companies);
+    const company = path.match(/^\/api\/v1\/companies\/(acme|other)(?:\/|$)/)?.[1] as
+      | keyof typeof workflows
+      | undefined;
+    if (!company) return json([]);
+    if (path === `/api/v1/companies/${company}`)
+      return json(companies.find((candidate) => candidate.id === company));
+    if (path === `/api/v1/companies/${company}/workflows`) return json(workflows[company]);
+    if (path.endsWith("/workflows/tool-slugs")) return json({ slugs: [] });
+    if (path.endsWith("/workflows/wired-channels")) return json({ channels: [] });
+    if (path.endsWith("/workflows/runs")) return json([]);
+
+    const workflowId = path.match(/\/workflows\/([^/]+)$/)?.[1];
+    if (workflowId) {
+      const workflow = workflows[company].find((candidate) => candidate.id === workflowId);
+      if (workflow) return json(graphBody(workflow.id, workflow.name));
+    }
+    if (path.endsWith("/team")) return json([]);
+    if (path.endsWith("/users")) return json([]);
+    if (path.endsWith("/events"))
+      return route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+    return json([]);
+  });
+}
+
 test("workflows tab selection is preserved across tab switches (#864)", async ({ page, request }) => {
   const stamp = Date.now();
   const firstId = `e2e-864-first-${stamp}`;
@@ -83,4 +142,19 @@ test("workflows tab selection is preserved across tab switches (#864)", async ({
     await deleteWorkflow(request, firstId);
     await deleteWorkflow(request, secondId);
   }
+});
+
+test("a company switch does not reuse the previous company's workflow route (#864)", async ({
+  page,
+}) => {
+  await mockCompanySwitchApi(page);
+  await page.goto("/#/workflows/shared-workflow");
+
+  await page.locator('[role="button"]').filter({ hasText: "Acme" }).click();
+  await expect(picker(page)).toContainText("Acme shared workflow", { timeout: 30_000 });
+
+  await page.getByRole("button", { name: "Switch company" }).click();
+  await page.getByRole("menuitem", { name: "Other", exact: true }).click();
+  await expect(picker(page)).toContainText("Other default workflow", { timeout: 30_000 });
+  await expect(page).toHaveURL(/#\/workflows\/other-default$/);
 });

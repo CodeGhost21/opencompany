@@ -241,18 +241,33 @@ export function AppShell({
   // visited, and an unvisited view must read back as "nothing remembered"
   // rather than as a key holding `undefined`.
   const lastSubByViewRef = useRef<Partial<Record<View, string | null>>>({});
+  const rememberedScopeRef = useRef({
+    connection: scope.connection,
+    company: scope.company,
+  });
   useEffect(() => {
-    // Company scope is the shell namespace for this state. When switching
-    // companies, do not carry a prior workflow or thread selection across the
-    // tenant boundary.
-    lastSubByViewRef.current = {};
-  }, [scope.connection, scope.company]);
-  useEffect(() => {
+    const scopeChanged =
+      rememberedScopeRef.current.connection !== scope.connection ||
+      rememberedScopeRef.current.company !== scope.company;
+    rememberedScopeRef.current = {
+      connection: scope.connection,
+      company: scope.company,
+    };
+
+    // A selected workflow or thread belongs to this company. Clear it before
+    // recording the current route, so an in-place scope change cannot restore
+    // a selection from the company being left.
+    if (scopeChanged) {
+      lastSubByViewRef.current = {};
+      if (sub) navigate(view);
+      return;
+    }
+
     lastSubByViewRef.current = {
       ...lastSubByViewRef.current,
       [view]: sub,
     };
-  }, [view, sub]);
+  }, [scope.connection, scope.company, view, sub, navigate]);
   // Most call sites only ever change the top-level view. Preserve the remembered
   // sub-segment for the target view so tab switches do not discard deep tab state.
   const setView = useCallback(
