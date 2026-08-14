@@ -25,6 +25,7 @@ use crate::ports::inbox::InboxStore;
 use crate::ports::journal::JournalStore;
 use crate::ports::login_codes::LoginCodeStore;
 use crate::ports::memory::MemoryStore;
+use crate::ports::notifications::NotificationStore;
 use crate::ports::read_state::ReadStateStore;
 use crate::ports::run_output::WorkflowRunOutputStore;
 use crate::ports::runs::RunStore;
@@ -218,6 +219,8 @@ pub struct StorageHandles {
     pub skills: Arc<dyn SkillStateStore>,
     /// Per-person, per-channel read markers (#755).
     pub read_state: Arc<dyn ReadStateStore>,
+    /// Durable notifications with per-person read state (#749).
+    pub notifications: Arc<dyn NotificationStore>,
     pub users: Arc<dyn UserStore>,
     pub sessions: Arc<dyn SessionStore>,
     pub login_codes: Arc<dyn LoginCodeStore>,
@@ -486,6 +489,7 @@ fn open_sqlite(data_dir: &Path) -> Result<Option<StorageHandles>> {
         usage: store.clone(),
         skills: store.clone(),
         read_state: store.clone(),
+        notifications: store.clone(),
         users: store.clone(),
         sessions: store.clone(),
         login_codes: store.clone(),
@@ -528,6 +532,7 @@ async fn open_mongodb(settings: &StorageSettings) -> Result<Option<StorageHandle
         usage: store.clone(),
         skills: store.clone(),
         read_state: store.clone(),
+        notifications: store.clone(),
         users: store.clone(),
         sessions: store.clone(),
         login_codes: store.clone(),

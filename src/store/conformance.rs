@@ -23,6 +23,7 @@ use crate::ports::facts::{FactKind, FactRecord, FactStore};
 use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::memory::MemoryStore;
+use crate::ports::notifications::{Notification, NotificationStore, Subject, SubjectKind};
 use crate::ports::now_millis;
 use crate::ports::run_output::{
     MAX_RUN_OUTPUTS_PER_COMPANY, WorkflowRunOutputRecord, WorkflowRunOutputStore,
@@ -2294,6 +2295,162 @@ pub async fn assert_read_state_store(reads: Arc<dyn crate::ports::read_state::Re
     assert_eq!(all.len(), 2);
     assert_eq!(all[0].channel_id, "dm:pm");
     assert_eq!(all[1].channel_id, "engineering");
+}
+
+/// Asserts the [`NotificationStore`] contract: per-company isolation, per-person
+/// read state, newest-first ordering, and the latch / `None`-marks-all
+/// semantics of `mark_read` (issue #749).
+///
+/// The property that matters most is **per-person read state**: one person
+/// marking a notification read must leave it unread for another. A `read` flag
+/// on the shared record — inbox's shape — would fail exactly this, which is why
+/// the port does not have one.
+pub async fn assert_notification_store(notes: Arc<dyn NotificationStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let note = |id: &str, created_at: u64, subject: SubjectKind, subject_id: &str| Notification {
+        id: id.to_string(),
+        kind: "approval_blocked".to_string(),
+        subject: Subject {
+            kind: subject,
+            id: subject_id.to_string(),
+        },
+        created_at,
+        title: format!("notification {id}"),
+    };
+
+    // Empty: nobody has anything.
+    assert!(notes.list(&alpha, "ada").await.unwrap().is_empty());
+
+    // Two notifications, appended oldest-then-newest.
+    notes
+        .append(&alpha, &note("n-old", 100, SubjectKind::Task, "task-1"))
+        .await
+        .unwrap();
+    notes
+        .append(&alpha, &note("n-new", 200, SubjectKind::Approval, "appr-1"))
+        .await
+        .unwrap();
+
+    // Newest first, and unread for everyone until read.
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    assert_eq!(ada.len(), 2);
+    assert_eq!(ada[0].notification.id, "n-new");
+    assert_eq!(ada[1].notification.id, "n-old");
+    assert!(ada.iter().all(|v| v.read_at.is_none()));
+    // The subject rides through untouched.
+    assert_eq!(ada[0].notification.subject.kind, SubjectKind::Approval);
+    assert_eq!(ada[0].notification.subject.id, "appr-1");
+
+    // Append is idempotent by id (first write wins): re-appending an existing
+    // id neither duplicates the record nor mutates it. Backends must agree — a
+    // naive push/insert duplicates on fs/mongo but errors on the sqlite primary
+    // key, so this pins the shared contract.
+    notes
+        .append(&alpha, &note("n-old", 999, SubjectKind::Run, "changed"))
+        .await
+        .unwrap();
+    let after = notes.list(&alpha, "ada").await.unwrap();
+    assert_eq!(after.len(), 2, "re-appending an id must not duplicate");
+    let old = after.iter().find(|v| v.notification.id == "n-old").unwrap();
+    assert_eq!(
+        old.notification.created_at, 100,
+        "first write wins: created_at unchanged"
+    );
+    assert_eq!(
+        old.notification.subject.id, "task-1",
+        "first write wins: subject unchanged"
+    );
+
+    // Per person: Ada reads the new one; the count of what is still unread for
+    // her comes back, and Grace still sees it unread.
+    let still_unread = notes
+        .mark_read(&alpha, "ada", Some(&["n-new".to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(still_unread, 1, "n-old is still unread for Ada");
+
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    let stamped = ada
+        .iter()
+        .find(|v| v.notification.id == "n-new")
+        .unwrap()
+        .read_at
+        .expect("Ada read n-new");
+    assert!(
+        ada.iter()
+            .find(|v| v.notification.id == "n-old")
+            .unwrap()
+            .read_at
+            .is_none()
+    );
+    let grace = notes.list(&alpha, "grace").await.unwrap();
+    assert!(
+        grace.iter().all(|v| v.read_at.is_none()),
+        "Ada's read must not touch Grace"
+    );
+
+    // A latch: re-marking does not move the timestamp forward.
+    notes
+        .mark_read(&alpha, "ada", Some(&["n-new".to_string()]))
+        .await
+        .unwrap();
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    assert_eq!(
+        ada.iter()
+            .find(|v| v.notification.id == "n-new")
+            .unwrap()
+            .read_at,
+        Some(stamped),
+        "re-mark must preserve the original read_at"
+    );
+
+    // Unknown ids are ignored, not an error, and change nothing.
+    let unread = notes
+        .mark_read(&alpha, "ada", Some(&["does-not-exist".to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(unread, 1);
+
+    // `None` marks the whole company read for that person.
+    let unread = notes.mark_read(&alpha, "ada", None).await.unwrap();
+    assert_eq!(unread, 0);
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    assert!(ada.iter().all(|v| v.read_at.is_some()));
+    let grace = notes.list(&alpha, "grace").await.unwrap();
+    assert!(
+        grace.iter().all(|v| v.read_at.is_none()),
+        "Ada marking all read must not touch Grace"
+    );
+
+    // Ties in created_at break by id descending — a stable order the trait
+    // documents, not each backend's insertion order. These two arrive after
+    // Ada's `None` mark, so they are unread for her.
+    notes
+        .append(&alpha, &note("id-a", 300, SubjectKind::Run, "run-1"))
+        .await
+        .unwrap();
+    notes
+        .append(&alpha, &note("id-b", 300, SubjectKind::Workflow, "wf-1"))
+        .await
+        .unwrap();
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    assert_eq!(ada[0].notification.id, "id-b");
+    assert_eq!(ada[1].notification.id, "id-a");
+
+    // Per company: beta starts empty and stays independent of alpha.
+    assert!(notes.list(&beta, "ada").await.unwrap().is_empty());
+    notes
+        .append(&beta, &note("b-1", 100, SubjectKind::Task, "task-9"))
+        .await
+        .unwrap();
+    assert_eq!(notes.list(&beta, "ada").await.unwrap().len(), 1);
+    assert_eq!(
+        notes.list(&alpha, "ada").await.unwrap().len(),
+        4,
+        "beta's write must not change alpha"
+    );
 }
 
 pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
