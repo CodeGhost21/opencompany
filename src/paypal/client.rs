@@ -143,7 +143,11 @@ impl PaypalClient {
             .form(&[("grant_type", "client_credentials")])
             .send()
             .await
-            .map_err(|e| err(0, "transport_error", e.to_string()))?;
+            // `without_url` keeps reqwest's cause — connection refused, TLS
+            // failure, timeout — and drops the URL it would otherwise print.
+            // The host is not a secret, but the query string is caller-shaped,
+            // and this text reaches the model's context and the transcript.
+            .map_err(|e| err(0, "transport_error", e.without_url().to_string()))?;
 
         let status = response.status().as_u16();
         let body = response
@@ -213,7 +217,11 @@ impl PaypalClient {
             .query(query)
             .send()
             .await
-            .map_err(|e| err(0, "transport_error", e.to_string()))?;
+            // `without_url` keeps reqwest's cause — connection refused, TLS
+            // failure, timeout — and drops the URL it would otherwise print.
+            // The host is not a secret, but the query string is caller-shaped,
+            // and this text reaches the model's context and the transcript.
+            .map_err(|e| err(0, "transport_error", e.without_url().to_string()))?;
 
         let status = response.status().as_u16();
         let body = response

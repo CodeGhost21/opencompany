@@ -106,13 +106,20 @@ pub async fn get_wallet_balance(client: &PaypalClient) -> Result<Vec<Balance>> {
     let balances = body
         .get("balances")
         .and_then(Value::as_array)
-        .ok_or_else(|| OpenCompanyError::Paypal {
-            status: 0,
-            code: "unexpected_response".to_string(),
-            message: format!(
-                "PayPal's reply carried no `balances` array — got: {}",
-                body.to_string().chars().take(200).collect::<String>()
-            ),
+        .ok_or_else(|| {
+            // Logged, not relayed — same rule as the client's
+            // `unparsed_body_message` and `chargebee::api::require`.
+            tracing::warn!(
+                body = %body.to_string().chars().take(200).collect::<String>(),
+                "[paypal] reply carried no `balances` array"
+            );
+            OpenCompanyError::Paypal {
+                status: 0,
+                code: "unexpected_response".to_string(),
+                message:
+                    "PayPal's reply carried no `balances` array. The reply is in the host log."
+                        .to_string(),
+            }
         })?;
 
     Ok(balances

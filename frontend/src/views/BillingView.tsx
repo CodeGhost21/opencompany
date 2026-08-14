@@ -69,6 +69,16 @@ export function BillingView({ client, company }: Props) {
   const [environment, setEnvironment] = useState("sandbox");
 
   const load = useCallback(async () => {
+    // Drop the previous company's answer before fetching the next one. This
+    // view is rendered from `SettingsSection` with `company` as a prop and no
+    // `key`, so switching companies re-runs this without remounting — and
+    // every field on this page is a claim about which credentials a specific
+    // company has stored. Showing the last one's "Configured" badges and site
+    // while the fetch is in flight tells the operator something false about
+    // the company they just switched to.
+    setStatus(null);
+    setPaypal(null);
+    setSite("");
     try {
       const [next, pp] = await Promise.all([
         getBilling(client, company),

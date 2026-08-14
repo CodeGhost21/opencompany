@@ -67,16 +67,26 @@ fn mentions_payment_terms(error: &OpenCompanyError) -> bool {
 /// confusing parameter error far from the real cause. So an absent object is an
 /// error here, where it can name what was expected.
 fn require<'a>(body: &'a Value, key: &str) -> Result<&'a Value> {
-    body.get(key)
-        .filter(|v| v.is_object())
-        .ok_or_else(|| OpenCompanyError::Chargebee {
+    body.get(key).filter(|v| v.is_object()).ok_or_else(|| {
+        // The body goes to the log, not into the message. This one PARSED, so
+        // unlike the client's unusable-body case it is a real Chargebee object
+        // — which is exactly why it must not be quoted back: a reply that was
+        // missing its `invoice` still carries whatever else Chargebee sent
+        // about the customer, and this message reaches the model's context and
+        // the durable transcript.
+        tracing::warn!(
+            expected = key,
+            body = %body.to_string().chars().take(200).collect::<String>(),
+            "[chargebee] reply carried no `{key}` object"
+        );
+        OpenCompanyError::Chargebee {
             status: 0,
             code: "unexpected_response".to_string(),
             message: format!(
-                "Chargebee's reply carried no `{key}` object — got: {}",
-                body.to_string().chars().take(200).collect::<String>()
+                "Chargebee's reply carried no `{key}` object. The reply is in the host log."
             ),
-        })
+        }
+    })
 }
 
 /// Projects Chargebee's invoice object onto [`InvoiceSummary`].

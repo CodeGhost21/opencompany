@@ -229,7 +229,10 @@ impl ChargebeeClient {
         let response = sent.map_err(|e| OpenCompanyError::Chargebee {
             status: e.status().map(|s| s.as_u16()).unwrap_or(0),
             code: "transport_error".to_string(),
-            message: e.to_string(),
+            // `without_url` keeps the cause and drops the URL reqwest would
+            // otherwise print. Same reasoning as the body rule below: this text
+            // reaches the model's context and the durable transcript.
+            message: e.without_url().to_string(),
         })?;
 
         let status = response.status().as_u16();
