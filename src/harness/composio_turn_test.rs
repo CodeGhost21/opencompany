@@ -360,6 +360,10 @@ async fn harness(
         // An empty toolkit allowlist is "defer to the backend" (open mode) —
         // the worst case for catalogue size, and the case a newly-connected
         // provider lands in.
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
         composio: Some(TenantComposio::new(
             composio_url,
             Credential::from_value("stub-tenant-token"),
