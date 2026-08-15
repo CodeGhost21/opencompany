@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use ed25519_dalek::{Signer as _, SigningKey};
 use tower::ServiceExt;
