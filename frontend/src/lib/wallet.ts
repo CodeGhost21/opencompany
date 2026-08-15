@@ -79,8 +79,12 @@ const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
  * bytes encode as leading `1`s, which is what makes the encoding
  * length-preserving for keys that start with a zero byte.
  */
-function base58(bytes: Uint8Array): string {
-  const digits: number[] = [0];
+export function base58(bytes: Uint8Array): string {
+  // `digits` starts empty rather than seeded with a sentinel `0`: a sentinel
+  // that is never overwritten (every byte is zero, including the empty-input
+  // case) would still emit one extra digit below, double-counting the leading
+  // zero the loop after this one already writes.
+  const digits: number[] = [];
   for (const byte of bytes) {
     let carry = byte;
     for (let i = 0; i < digits.length; i += 1) {
