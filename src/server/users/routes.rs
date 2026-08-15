@@ -1111,6 +1111,7 @@ async fn wallet_challenge(
     let Some(address) = wallet::parse_wallet_address(&body.address) else {
         return Ok(Json(wallet::unpersisted_challenge(
             runtime.id(),
+            &token::OsTokens,
             &normalize_wallet(&body.address),
             now,
         )));
@@ -1123,6 +1124,7 @@ async fn wallet_challenge(
     if eligible.is_none() {
         return Ok(Json(wallet::unpersisted_challenge(
             runtime.id(),
+            &token::OsTokens,
             &address,
             now,
         )));
