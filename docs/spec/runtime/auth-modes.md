@@ -95,11 +95,16 @@ column rather than three:
   identity, and suspension, session revocation and removal all key off the
   `UserRecord::id` it resolves to. A parallel column would be a second thing each
   of those paths has to remember.
-- **The prefixes make it safe.** An address normalized by `normalize_email` is
-  lowercase and cannot begin with a scheme the parser recognizes, and base58
-  excludes `:`. No wallet can pose as a mailbox or the reverse. An unprefixed key
-  is an email, which is what every record written before this loads as — that is
-  the whole migration.
+- **The prefixes make it safe, but only because the parser checks the whole
+  scheme, not merely the colon.** `normalize_email` only lowercases and trims —
+  an email local part may legally contain a colon, so `wallet:ada@example.com`
+  is a normalized key like any other. `LoginIdentity::parse` therefore trusts
+  `wallet:` only when the remainder actually decodes as base58, and `local:`
+  only when the remainder is exactly `owner`; anything else, including an email
+  that happens to start with one of those words, falls through to `Email`. No
+  wallet can pose as a mailbox or the reverse. An unprefixed key is an email,
+  which is what every record written before this loads as — that is the whole
+  migration.
 
 Normalization differs by scheme and the difference is load-bearing:
 `normalize_email` folds case, and folding the case of a base58 address would map
