@@ -142,9 +142,14 @@ async fn a_session_cookie_resolves_to_a_user_of_that_company() {
     let token = seed_session(&state, "acme", UserRole::Member, UserStatus::Active).await;
 
     let acme = CompanyId::new("acme");
-    let auth = resolve_principal(&headers_with_cookie("acme", &token), &state, Some(&acme))
-        .await
-        .unwrap();
+    let auth = resolve_principal(
+        &headers_with_cookie("acme", &token),
+        &state,
+        Some(&acme),
+        None,
+    )
+    .await
+    .unwrap();
     match auth {
         GqlAuth::User(user) => {
             assert_eq!(user.company, acme);
@@ -167,9 +172,14 @@ async fn a_session_for_one_company_is_refused_for_another() {
     // Presenting acme's cookie while addressing globex: the cookie name does
     // not match globex's, so no user resolves at all.
     assert!(
-        resolve_principal(&headers_with_cookie("acme", &token), &state, Some(&globex))
-            .await
-            .is_err(),
+        resolve_principal(
+            &headers_with_cookie("acme", &token),
+            &state,
+            Some(&globex),
+            None
+        )
+        .await
+        .is_err(),
         "acme's session must not authenticate against globex"
     );
 
@@ -181,7 +191,7 @@ async fn a_session_for_one_company_is_refused_for_another() {
         cookie_header("globex", &token).parse().unwrap(),
     );
     assert!(
-        resolve_principal(&headers, &state, Some(&globex))
+        resolve_principal(&headers, &state, Some(&globex), None)
             .await
             .is_err(),
         "a token from another company's partition must not resolve"
@@ -196,9 +206,14 @@ async fn a_user_may_address_only_their_own_company() {
     let token = seed_session(&state, "acme", UserRole::Admin, UserStatus::Active).await;
 
     let acme = CompanyId::new("acme");
-    let auth = resolve_principal(&headers_with_cookie("acme", &token), &state, Some(&acme))
-        .await
-        .unwrap();
+    let auth = resolve_principal(
+        &headers_with_cookie("acme", &token),
+        &state,
+        Some(&acme),
+        None,
+    )
+    .await
+    .unwrap();
 
     assert!(auth.authorize(&state, &acme).is_ok());
     assert!(
@@ -229,9 +244,14 @@ async fn a_suspended_users_live_session_stops_working_immediately() {
     runtime.users().upsert_user(&acme, &user).await.unwrap();
 
     assert!(
-        resolve_principal(&headers_with_cookie("acme", &token), &state, Some(&acme))
-            .await
-            .is_err(),
+        resolve_principal(
+            &headers_with_cookie("acme", &token),
+            &state,
+            Some(&acme),
+            None
+        )
+        .await
+        .is_err(),
         "suspension must take effect on the next request, not at cookie expiry"
     );
 }
@@ -283,9 +303,14 @@ async fn an_expired_session_does_not_resolve() {
         .unwrap();
 
     assert!(
-        resolve_principal(&headers_with_cookie("acme", &token), &state, Some(&acme))
-            .await
-            .is_err(),
+        resolve_principal(
+            &headers_with_cookie("acme", &token),
+            &state,
+            Some(&acme),
+            None
+        )
+        .await
+        .is_err(),
         "an expired session must not resolve"
     );
 }
@@ -324,7 +349,7 @@ async fn a_stale_or_garbage_cookie_falls_through_to_the_platform_bearer() {
         axum::http::header::AUTHORIZATION,
         "Bearer s3cret".parse().unwrap(),
     );
-    let auth = resolve_principal(&headers, &state, Some(&id))
+    let auth = resolve_principal(&headers, &state, Some(&id), None)
         .await
         .unwrap();
     assert!(
@@ -445,7 +470,7 @@ async fn without_an_addressed_company_a_lone_cookie_selects_its_own() {
     let state = state_with(&home, &["acme"]).await;
     let token = seed_session(&state, "acme", UserRole::Member, UserStatus::Active).await;
 
-    let auth = resolve_principal(&headers_with_cookie("acme", &token), &state, None)
+    let auth = resolve_principal(&headers_with_cookie("acme", &token), &state, None, None)
         .await
         .unwrap();
     match auth {
@@ -476,7 +501,9 @@ async fn without_an_addressed_company_ambiguous_cookies_resolve_no_user() {
         .unwrap(),
     );
     assert!(
-        resolve_principal(&headers, &state, None).await.is_err(),
+        resolve_principal(&headers, &state, None, None)
+            .await
+            .is_err(),
         "an ambiguous jar must not silently pick a company"
     );
 }
@@ -517,6 +544,7 @@ async fn a_session_header_resolves_to_a_user_of_that_company() {
         &headers_with_session_header("acme", &token),
         &state,
         Some(&acme),
+        None,
     )
     .await
     .unwrap();
@@ -542,9 +570,14 @@ async fn without_an_addressed_company_the_header_names_its_own() {
     let state = state_with(&home, &["acme"]).await;
     let token = seed_session(&state, "acme", UserRole::Member, UserStatus::Active).await;
 
-    let auth = resolve_principal(&headers_with_session_header("acme", &token), &state, None)
-        .await
-        .unwrap();
+    let auth = resolve_principal(
+        &headers_with_session_header("acme", &token),
+        &state,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     match auth {
         GqlAuth::User(u) => assert_eq!(u.company, CompanyId::new("acme")),
         other => panic!("expected a user, got {other:?}"),
@@ -564,7 +597,8 @@ async fn a_session_header_does_not_work_against_another_company() {
         resolve_principal(
             &headers_with_session_header("acme", &token),
             &state,
-            Some(&globex)
+            Some(&globex),
+            None
         )
         .await
         .is_err(),
@@ -576,7 +610,8 @@ async fn a_session_header_does_not_work_against_another_company() {
         resolve_principal(
             &headers_with_session_header("globex", &token),
             &state,
-            Some(&globex)
+            Some(&globex),
+            None
         )
         .await
         .is_err(),
@@ -599,7 +634,8 @@ async fn a_suspended_users_session_header_stops_working_immediately() {
         resolve_principal(
             &headers_with_session_header("acme", &token),
             &state,
-            Some(&acme)
+            Some(&acme),
+            None
         )
         .await
         .is_err(),
@@ -692,7 +728,7 @@ async fn a_malformed_session_header_resolves_no_user() {
         };
         headers.insert(crate::server::users::cookie::SESSION_HEADER, value);
         assert!(
-            resolve_principal(&headers, &state, Some(&acme))
+            resolve_principal(&headers, &state, Some(&acme), None)
                 .await
                 .is_err(),
             "{hostile:?} must not authenticate"
@@ -716,7 +752,7 @@ async fn a_header_naming_another_company_falls_through_to_a_valid_cookie() {
         cookie_header("acme", &acme_token).parse().unwrap(),
     );
 
-    let auth = resolve_principal(&headers, &state, Some(&acme))
+    let auth = resolve_principal(&headers, &state, Some(&acme), None)
         .await
         .unwrap();
     match auth {

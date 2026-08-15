@@ -22,6 +22,10 @@ pub const TIERS: &[&str] = &[
 /// Brain implementations selectable in `[brain].mode`.
 pub const BRAIN_MODES: &[&str] = &["hosted", "sidecar"];
 
+/// Sign-in modes selectable in `[users].mode`. See
+/// [`AuthMode`](crate::app::config::AuthMode) for what each one means.
+pub const AUTH_MODES: &[&str] = &["email", "wallet", "none"];
+
 /// Inference providers selectable in `[inference].provider` (issue #56 — BYOK).
 ///
 /// * `managed` — the hosted TinyHumans / Medulla brain (the default path).
@@ -538,7 +542,9 @@ impl Default for Workflows {
 ///
 /// ```toml
 /// [users]
-/// admins = ["ada@example.com"]
+/// mode = "email"                   # email (default) | wallet | none
+/// admins = ["ada@example.com"]     # email mode
+/// wallets = ["7xKXtg2CW87d97…"]    # wallet mode
 /// ```
 ///
 /// Listing an address does not create an account. It makes that address
@@ -546,11 +552,49 @@ impl Default for Workflows {
 /// as an admin. Removing an address from the manifest stops it bootstrapping
 /// again but does not delete an account it already created — use the admin
 /// routes for that.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+///
+/// `mode` picks *how* people sign in — see
+/// [`AuthMode`](crate::app::config::AuthMode) — and therefore which bootstrap
+/// list is read. `admins` is read in `email` mode, `wallets` in `wallet` mode,
+/// and neither in `none` mode, where there is no sign-in and the only account is
+/// the implicit local owner. The host may override the mode for every company it
+/// serves with `OPENCOMPANY_AUTH_MODE`; absent that, this is the answer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Users {
+    /// `email` (default) | `wallet` | `none`.
+    ///
+    /// Kept as a `String` here, like [`Brain::mode`], so that a manifest with an
+    /// unknown mode still *parses* and validation can name the offending value
+    /// in prosumer language instead of emitting a serde trace.
+    #[serde(default = "default_auth_mode")]
+    pub mode: String,
     /// Email addresses that may log in as admins without being invited first.
+    /// Read in `email` mode.
     #[serde(default)]
     pub admins: Vec<String>,
+    /// Base58 Ed25519 wallet addresses that may sign in as admins without being
+    /// invited first. Read in `wallet` mode.
+    ///
+    /// The wallet equivalent of [`Self::admins`], with the same semantics
+    /// exactly: listing an address makes it eligible, signing a challenge mints
+    /// the admin, and removing it stops future bootstrapping without deleting an
+    /// account it already created.
+    #[serde(default)]
+    pub wallets: Vec<String>,
+}
+
+impl Default for Users {
+    fn default() -> Self {
+        Self {
+            mode: default_auth_mode(),
+            admins: Vec::new(),
+            wallets: Vec::new(),
+        }
+    }
+}
+
+fn default_auth_mode() -> String {
+    "email".to_string()
 }
 
 /// `[brain]` — selects the `Brain` implementation.

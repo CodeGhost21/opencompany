@@ -1421,10 +1421,15 @@ async fn chat_actor(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Option<Actor>, Response> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
-    let auth = resolve_principal(headers, state, Some(company))
+    // `peer` is threaded from every one of this function's callers, all the
+    // way from their own handler's `MaybePeer` extractor, so `local_owner`'s
+    // loopback-peer gate applies on this surface exactly as it does through
+    // `CompanyAuth` and the GraphQL handler.
+    let auth = resolve_principal(headers, state, Some(company), peer)
         .await
         .map_err(|_| unauthorized_response())?;
     if let Some(resp) = authorize_address(state, &auth, company) {
@@ -1455,10 +1460,11 @@ async fn operator_chat(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatResponse>, Response> {
     let company = CompanyId::new(&id);
-    let by = chat_actor(&headers, &state, &company).await?;
+    let by = chat_actor(&headers, &state, &company, peer).await?;
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     chat_and_emit(&state, &company, runtime, message, by)
         .await
@@ -1469,11 +1475,12 @@ async fn operator_chat(
 async fn operator_chat_single(
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatResponse>, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    let by = chat_actor(&headers, &state, &id).await?;
+    let by = chat_actor(&headers, &state, &id, peer).await?;
     chat_and_emit(&state, &id, runtime, message, by)
         .await
         .map_err(IntoResponse::into_response)
@@ -1618,8 +1625,9 @@ async fn history_viewer(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Viewer, Response> {
-    let actor = chat_actor(headers, state, company).await?;
+    let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
         _ => Viewer::Operator,
@@ -1632,9 +1640,10 @@ async fn chat_history_response(
     company: &CompanyId,
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
-    let viewer = history_viewer(headers, state, company).await?;
+    let viewer = history_viewer(headers, state, company, peer).await?;
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
         .await
         .map_err(|e| ApiError(e).into_response())?;
@@ -1660,22 +1669,24 @@ async fn chat_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    chat_history_response(&state, &company, runtime, &headers, query).await
+    chat_history_response(&state, &company, runtime, &headers, peer, query).await
 }
 
 /// `GET /api/v1/company/chat/history` (single-company alias).
 async fn chat_history_single(
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    chat_history_response(&state, &id, runtime, &headers, query).await
+    chat_history_response(&state, &id, runtime, &headers, peer, query).await
 }
 
 /// Body for `POST {scope}/chat/messages/{seq}/reactions` (issue #364).
@@ -1734,10 +1745,11 @@ async fn react_to_message(
     company: &CompanyId,
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     seq: String,
     body: ReactionBody,
 ) -> Result<StatusCode, Response> {
-    let by = chat_actor(headers, state, company).await?;
+    let by = chat_actor(headers, state, company, peer).await?;
     let message_seq = parse_message_id(&seq).map_err(IntoResponse::into_response)?;
     validate_emoji(&body.emoji).map_err(IntoResponse::into_response)?;
     // The target must be a message. Without this the route would happily hang a
@@ -1785,11 +1797,12 @@ async fn react_to_message_scoped(
     State(state): State<AppState>,
     Path((id, seq)): Path<(String, String)>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
 ) -> Result<StatusCode, Response> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    react_to_message(&state, &company, runtime, &headers, seq, body).await
+    react_to_message(&state, &company, runtime, &headers, peer, seq, body).await
 }
 
 /// `POST /api/v1/company/chat/messages/{seq}/reactions` (single-company alias).
@@ -1797,11 +1810,12 @@ async fn react_to_message_single(
     State(state): State<AppState>,
     Path(seq): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
 ) -> Result<StatusCode, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    react_to_message(&state, &id, runtime, &headers, seq, body).await
+    react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
 }
 
 /// `GET /api/v1/companies/{id}/approvals`.

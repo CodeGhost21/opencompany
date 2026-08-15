@@ -222,6 +222,21 @@ async fn register_company(
         builder = builder.with_template_provenance(provenance);
     }
     let runtime = builder.build().await?;
+    // A company with no sign-in on a host anyone can reach is an unauthenticated
+    // admin console, not a desktop app. `none` mode's whole premise is that the
+    // only caller is the person at the machine, so a routable bind contradicts
+    // it — and the contradiction is silent, because the host does start and does
+    // serve. Refuse at boot, where somebody is looking, exactly as a
+    // selected-but-unavailable storage backend does.
+    if !runtime.auth_mode().has_login() && !state.config().is_local_only() {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "company `{}` is configured with `[users].mode = \"none\"`, which has no sign-in, \
+             but this host binds `{}` and would serve it to anyone who can reach that address. \
+             Bind loopback, or choose `email` or `wallet`.",
+            runtime.id().as_ref(),
+            state.config().bind,
+        )));
+    }
     let company_id = runtime.id().clone();
     let id = company_id.as_ref().to_string();
     // Record boot-company ownership so a shared-DB manager can later purge by
@@ -293,6 +308,10 @@ fn company_builder(
     // sign-in mints a user record. `None` (self-hosted, no injected address) is
     // a no-op. BootRebuilder reuses this builder, so the grant survives rebuild.
     .with_bootstrap_admin(state.config().bootstrap_admin())
+    // How humans sign in, when the host names it for every company it serves
+    // (`OPENCOMPANY_AUTH_MODE` / `config.toml`). `None` leaves each manifest's
+    // `[users].mode` to answer, which is the normal case.
+    .with_auth_mode_override(state.config().auth_mode_override)
     .with_skills_registry(state.shared_skill_registry()?)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
@@ -1102,6 +1121,22 @@ async fn async_main() -> Result<()> {
                 }
                 kept
             };
+            // A host-wide sign-in mode, when the deployment names one. Read
+            // before `resolve_serve_bind` consumes `config_file`. An unparseable
+            // value aborts boot rather than silently falling back to email:
+            // "the login screen you asked for is not the one you got" is not a
+            // failure anyone would notice from a running host.
+            let auth_mode_override = {
+                use std::str::FromStr as _;
+                let raw = std::env::var("OPENCOMPANY_AUTH_MODE")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| config_file.as_ref().and_then(|c| c.auth_mode.clone()));
+                match raw {
+                    Some(raw) => Some(opencompany::app::config::AuthMode::from_str(&raw)?),
+                    None => None,
+                }
+            };
             let (bind, bind_source) = opencompany::app::config::resolve_serve_bind(
                 bind,
                 &ProcessEnv,
@@ -1117,6 +1152,7 @@ async fn async_main() -> Result<()> {
                 instance_name,
                 tenant_namespace,
                 admin_email,
+                auth_mode_override,
                 tinyhumans_credential,
                 // Issue #553: the workspace's enforced byte limits, read from
                 // the same `[workspace]` section as the soft disk quotas above

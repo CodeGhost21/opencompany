@@ -399,6 +399,7 @@ async fn add_member(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
 ) -> Result<Json<TeamMemberDto>, Response> {
     // Setting a cap is admin-only, so an add that carries one is too — but an
@@ -410,7 +411,7 @@ async fn add_member(
             if let Some(refusal) = validate_cap(cap) {
                 return Err(refusal);
             }
-            Some(require_admin(&headers, &state, &company.runtime).await?)
+            Some(require_admin(&headers, &state, &company.runtime, peer).await?)
         }
         None => None,
     };
@@ -549,10 +550,11 @@ async fn set_budget(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<SetBudget>,
 ) -> Result<Json<TeamMemberDto>, Response> {
-    let admin = require_admin(&headers, &state, &company.runtime).await?;
+    let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
     // `Some(_)` is guaranteed by `SetBudget`'s missing-key rejection; the inner
     // option is the cap-or-uncap the operator asked for.
     let cap = body.budget_usd_daily.flatten();
@@ -602,9 +604,10 @@ async fn clear_budget(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
 ) -> Result<Json<TeamMemberDto>, Response> {
-    require_admin(&headers, &state, &company.runtime).await?;
+    require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;

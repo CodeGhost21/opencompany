@@ -37,10 +37,12 @@ pub mod adapter;
 pub mod client;
 #[cfg(feature = "tinyplace")]
 pub mod outbox;
-// Available under `identity` as well as `tinyplace`: the runner lane needs the
-// same Ed25519 keys and the same base58 handling, and a second implementation
-// is how two callers come to disagree about what verifies.
-#[cfg(feature = "identity")]
+// Always compiled. Three callers need the same Ed25519 keys and the same base58
+// handling — the tiny.place economy, the runner, and wallet sign-in
+// (`server::users::wallet`) — and a second implementation is how two of them
+// come to disagree about what verifies. Wallet sign-in is configuration rather
+// than a build option, so this cannot be behind a feature without making a
+// configurable mode silently unimplemented in the shipped binary.
 pub mod signer;
 #[cfg(feature = "tinyplace")]
 pub mod siwx;

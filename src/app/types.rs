@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::Serialize;
 
-use crate::app::config::{BrainMode, EnvSource, redacted};
+use crate::app::config::{AuthMode, BrainMode, EnvSource, redacted};
 use crate::company::{CredentialSource, SkillDoc, TinyhumansTokenSource, load_dir_skills};
 use crate::ports::normalize_email;
 use crate::ports::types::{CompanyId, SecretValue};
@@ -99,6 +99,21 @@ pub struct AppConfig {
     /// and does not delete an account it already created. `None` — and an empty
     /// or whitespace-only value — is a clean no-op.
     pub admin_email: Option<String>,
+    /// A host-wide override of every company's `[users].mode`
+    /// (`OPENCOMPANY_AUTH_MODE`, or `auth_mode` in `config.toml`).
+    ///
+    /// `None` — the normal case — leaves each company to name its own sign-in
+    /// mode in its manifest. It exists because two deployments own the answer
+    /// rather than the company definition does: the packaged desktop app, which
+    /// forces [`AuthMode::None`](crate::app::config::AuthMode::None) because
+    /// there is only ever the person at the machine, and a hosting platform,
+    /// which must be able to guarantee a mode across every tenant it builds
+    /// regardless of what a tenant wrote.
+    ///
+    /// Carried to each company by
+    /// [`RuntimeBuilder::with_auth_mode_override`](crate::runtime::RuntimeBuilder::with_auth_mode_override),
+    /// which is where it beats the manifest.
+    pub auth_mode_override: Option<AuthMode>,
 }
 
 impl Default for AppConfig {
@@ -120,6 +135,7 @@ impl Default for AppConfig {
             webhook: None,
             tenant_namespace: None,
             admin_email: None,
+            auth_mode_override: None,
         }
     }
 }

@@ -72,7 +72,10 @@ pub use tasks::{TaskRecord, TaskStore};
 pub use tools::ToolProvider;
 pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
-pub use users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore, normalize_email};
+pub use users::{
+    InviteRecord, LoginIdentity, UserRecord, UserRole, UserStatus, UserStore,
+    decode_wallet_address, normalize_email, normalize_wallet,
+};
 pub use workflow_revisions::{
     MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
 };

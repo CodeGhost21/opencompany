@@ -320,13 +320,14 @@ async fn agent_detail(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
 ) -> Result<Json<AgentDetailDto>, ApiError> {
     // Only to decide what `editable` may claim — the read itself is open to any
     // member, unchanged. A principal this cannot resolve reads as not-admin,
     // which is fail-closed in the right direction: it under-claims what the
     // caller may edit rather than over-claiming it.
-    let is_admin = is_admin_actor(&headers, &state, &company).await;
+    let is_admin = is_admin_actor(&headers, &state, &company, peer).await;
     let record = company
         .runtime
         .store()
@@ -378,6 +379,7 @@ async fn edit_agent(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<EditAgent>,
 ) -> Result<Json<AgentDetailDto>, Response> {
@@ -432,7 +434,7 @@ async fn edit_agent(
     // admin-only in full, so admin-first is self-consistent there. This one is
     // admin-only *per field*, which is what makes the ordering load-bearing.
     if body.tools.is_some() {
-        require_admin(&headers, &state, &company.runtime).await?;
+        require_admin(&headers, &state, &company.runtime, peer).await?;
     }
 
     let name = trimmed_field(body.name.as_deref(), "name").map_err(|e| e.into_response())?;
@@ -484,7 +486,7 @@ async fn edit_agent(
     // The caller either passed `require_admin` above or sent no `tools`, so
     // re-resolve rather than assume: an admin editing only a name must still
     // read back `tools` as editable.
-    let is_admin = is_admin_actor(&headers, &state, &company).await;
+    let is_admin = is_admin_actor(&headers, &state, &company, peer).await;
     detail(&company, &record, &agent_id, is_admin)
         .await
         .map_err(|e| e.into_response())
@@ -550,8 +552,13 @@ fn trimmed_globs(globs: &[String]) -> Result<Vec<String>, ApiError> {
 /// failure, which is right for a write and wrong for a read that must still
 /// succeed for a member. This answers the same question through the same
 /// `may_administer` predicate, so the two cannot drift.
-async fn is_admin_actor(headers: &HeaderMap, state: &AppState, company: &ScopedCompany) -> bool {
-    crate::server::users::routes::current_user(headers, state, company.id())
+async fn is_admin_actor(
+    headers: &HeaderMap,
+    state: &AppState,
+    company: &ScopedCompany,
+    peer: Option<std::net::SocketAddr>,
+) -> bool {
+    crate::server::users::routes::current_user(headers, state, company.id(), peer)
         .await
         .is_some_and(|user| user.may_administer())
 }
