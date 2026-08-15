@@ -417,7 +417,7 @@ async fn authenticate_session(
     // forwarding-header gates mean something: without this, declining to
     // resolve the implicit local owner would still leave a stale session as a
     // way past them for the same company.
-    if false && !runtime.auth_mode().has_login() {
+    if !runtime.auth_mode().has_login() {
         return None;
     }
     let token_hash = crate::server::users::token::sha256_hex(token);
