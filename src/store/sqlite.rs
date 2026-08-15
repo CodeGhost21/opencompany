@@ -3705,6 +3705,7 @@ mod test {
                     text: "hi".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -3757,6 +3758,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -3768,7 +3770,8 @@ mod test {
                 parent: None,
                 text: "hi".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }
         );
     }
@@ -3855,6 +3858,7 @@ mod test {
                     text: "persist".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -3871,6 +3875,7 @@ mod test {
                 text: "persist".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }
         );
     }

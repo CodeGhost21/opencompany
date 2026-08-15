@@ -2693,6 +2693,7 @@ mod tests {
                     by: None,
                     chat: Some("desk-finance".into()),
                     parent: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -2706,6 +2707,7 @@ mod tests {
                     by: None,
                     chat: Some("desk-ops".into()),
                     parent: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -2764,6 +2766,7 @@ mod tests {
                     by: None,
                     chat: Some("desk-finance".into()),
                     parent: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -2857,6 +2860,7 @@ mod tests {
                             by: None,
                             chat: chat.map(str::to_string),
                             parent: None,
+                            deliverable: None,
                         },
                     )
                     .await
@@ -2887,6 +2891,7 @@ mod tests {
                     by: None,
                     chat: Some("desk-ops".into()),
                     parent: None,
+                    deliverable: None,
                 },
             )
             .await

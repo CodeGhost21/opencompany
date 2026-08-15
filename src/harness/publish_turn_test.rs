@@ -1180,6 +1180,7 @@ fn chat(text: &str) -> CycleRequest {
             by: None,
             chat: None,
             parent: None,
+            deliverable: None,
         }],
         event_seqs: Vec::new(),
         compressed_history: Vec::new(),

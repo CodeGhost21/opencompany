@@ -4908,6 +4908,7 @@ mod test {
             text: text.to_string(),
             by: None,
             chat: Some("eng".to_string()),
+            deliverable: None,
         };
 
         // Baseline: the blueprint lead answers. Asserted rather than assumed, so
@@ -5051,6 +5052,7 @@ mod test {
                 text: "hello design".to_string(),
                 by: None,
                 chat: Some("design".to_string()),
+                deliverable: None,
             }])
             .await
             .expect("cycle");
@@ -5164,6 +5166,7 @@ mod test {
                 text: "who leads?".to_string(),
                 by: None,
                 chat: Some("eng".to_string()),
+                deliverable: None,
             }])
             .await
             .expect("cycle");

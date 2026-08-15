@@ -24,10 +24,16 @@ interface Props {
   /**
    * Show the once-vs-workflow control (issue #580), opt-in per composer.
    *
-   * Only the company-channel composer asks for it — a channel line can open a
-   * board card, so "do it once" versus "build me the workflow" belongs there.
+   * The channel and DM composers ask for it — either can open a board card, so
+   * "do it once" versus "build me the workflow" belongs at both prompt boxes.
    * The thread and copilot composers never carry it, so their `onSend` stays a
    * plain `(text)` and their wire shape is unchanged.
+   *
+   * DMs were omitted when #580 landed (issue #845). Nothing downstream was
+   * scoped to channels — the chat route reads `deliverable` off the payload
+   * whatever thread it came from — so a DM asking for a workflow was sent as a
+   * `once` card, dispatched to a desk agent holding no authoring tool, and came
+   * back as a refusal. The control was the only part missing.
    */
   deliverableChoice?: boolean;
 }

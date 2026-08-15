@@ -112,6 +112,7 @@ fn operator_request() -> CycleRequest {
             text: "hi".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }],
         event_seqs: Vec::new(),
         compressed_history: Vec::new(),
@@ -537,6 +538,7 @@ async fn e2e_operator_message_drives_tool_call_and_gated_send_dm() {
             text: "how are we doing".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -589,6 +591,7 @@ async fn e2e_supervised_effect_parks_and_acks_not_ok() {
             text: "file it".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -655,6 +658,7 @@ async fn e2e_reported_usage_lands_on_the_usage_meter() {
         text: "how are we doing".into(),
         by: None,
         chat: None,
+        deliverable: None,
     }])
     .await
     .unwrap();
@@ -741,6 +745,7 @@ async fn e2e_hosted_catalog_advertises_delegation_tools() {
         text: "hi".into(),
         by: None,
         chat: None,
+        deliverable: None,
     }])
     .await
     .unwrap();
@@ -788,6 +793,7 @@ async fn e2e_spawn_task_tool_call_opens_a_board_card() {
         text: "open a task to ship invoicing".into(),
         by: None,
         chat: None,
+        deliverable: None,
     }])
     .await
     .unwrap();
@@ -842,6 +848,7 @@ async fn e2e_delegate_to_desk_tool_call_writes_a_handoff_card() {
         text: "have engineering build invoicing".into(),
         by: None,
         chat: None,
+        deliverable: None,
     }])
     .await
     .unwrap();
@@ -894,6 +901,7 @@ async fn e2e_a_cycle_without_usage_frames_meters_nothing() {
         text: "hello".into(),
         by: None,
         chat: None,
+        deliverable: None,
     }])
     .await
     .unwrap();

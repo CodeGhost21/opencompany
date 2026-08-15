@@ -49,6 +49,10 @@ use crate::company::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md}
 use crate::error::OpenCompanyError;
 use crate::ports::skills_state::{SkillSource, SkillState};
 
+mod naming;
+
+pub use naming::{DESCRIBE_SKILL_TOOL, LIST_SKILLS_TOOL, READ_SKILL_RESOURCE_TOOL};
+
 /// One agent's effective, enabled skill set, materialized on disk so OpenHuman's
 /// skill read tools can scan it.
 pub struct EffectiveSkills {
@@ -200,6 +204,14 @@ impl EffectiveSkills {
     /// Each tool consumes only `config.workspace_dir` (verified upstream), so a
     /// throwaway [`Config`] with just that field set is enough — the global
     /// `Config::load_or_init()` and its registry are never booted.
+    ///
+    /// Wrapped by [`naming::skill_read_tools`] so they are named, described,
+    /// parameterized and answered in terms of **skills** (issue #845). Upstream
+    /// calls a skill a "workflow", which is a different thing entirely in a host
+    /// that has a workflow registry of its own — unrenamed, `list_workflows`
+    /// answered a question about the company's workflows with the contents of
+    /// `Settings → Skills`. See [`naming`] for why the rename is not only the
+    /// tool name.
     pub fn read_tools(&self) -> Vec<Box<dyn Tool>> {
         // `Config` has private fields, so build from `Default` and set the one
         // field the read tools read rather than a struct literal.
@@ -208,11 +220,11 @@ impl EffectiveSkills {
             ..Default::default()
         };
         let config = Arc::new(config);
-        vec![
+        naming::skill_read_tools(
             Box::new(WorkflowListTool::new(config.clone())),
             Box::new(WorkflowDescribeTool::new(config.clone())),
             Box::new(WorkflowReadResourceTool::new(config)),
-        ]
+        )
     }
 
     /// A plain-text catalogue of the effective skills for the persona prompt.
@@ -235,10 +247,15 @@ impl EffectiveSkills {
                 doc.name, doc.slug, doc.description
             ));
         }
-        out.push_str(
-            "Use `list_workflows` to enumerate them, `describe_workflow` to inspect one, \
-             and `read_workflow_resource` to read a skill's bundled files.\n",
-        );
+        // Named after skills, like the tools themselves (issue #845). This
+        // sentence is what hands an agent the three names, so it is also what
+        // taught every agent to call a skill a workflow.
+        out.push_str(&format!(
+            "Use `{LIST_SKILLS_TOOL}` to enumerate them, `{DESCRIBE_SKILL_TOOL}` to inspect \
+             one, and `{READ_SKILL_RESOURCE_TOOL}` to read a skill's bundled files. A skill is \
+             not one of the company's saved workflows — those are stored graphs, listed on the \
+             Workflows page, and none of these three tools can see them.\n",
+        ));
         out
     }
 
@@ -650,12 +667,14 @@ mod tests {
 
         let tools = eff.read_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        // Named after skills, not upstream's "workflow" (issue #845) — the
+        // naming boundary itself is covered in `naming::test`.
         assert_eq!(
             names,
             vec![
-                "list_workflows",
-                "describe_workflow",
-                "read_workflow_resource"
+                LIST_SKILLS_TOOL,
+                DESCRIBE_SKILL_TOOL,
+                READ_SKILL_RESOURCE_TOOL
             ]
         );
         // The tools point at the materialized scratch dir.
@@ -706,7 +725,7 @@ mod tests {
         let tools = eff.read_tools();
         let list = tools
             .iter()
-            .find(|t| t.name() == "list_workflows")
+            .find(|t| t.name() == LIST_SKILLS_TOOL)
             .expect("list tool");
         let listed = list
             .execute(json!({}))
@@ -720,12 +739,12 @@ mod tests {
 
         let describe = tools
             .iter()
-            .find(|t| t.name() == "describe_workflow")
+            .find(|t| t.name() == DESCRIBE_SKILL_TOOL)
             .expect("describe tool");
 
         // The registry skill's inline body is readable — content, not just name.
         let desc = describe
-            .execute(json!({ "workflow_id": "web-research" }))
+            .execute(json!({ "skill_id": "web-research" }))
             .await
             .expect("describe registry skill")
             .output_for_llm(false);
@@ -734,7 +753,7 @@ mod tests {
 
         // The empty-body custom skill still describes cleanly (frontmatter → def).
         let desc_empty = describe
-            .execute(json!({ "workflow_id": "quick-note" }))
+            .execute(json!({ "skill_id": "quick-note" }))
             .await
             .expect("describe empty-body skill")
             .output_for_llm(false);
@@ -742,7 +761,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_workflows_tool_sees_the_materialized_skill() {
+    async fn list_skills_tool_sees_the_materialized_skill() {
         use serde_json::json;
 
         let src = tempfile::tempdir().unwrap();
@@ -754,7 +773,7 @@ mod tests {
         let tools = eff.read_tools();
         let list = tools
             .iter()
-            .find(|t| t.name() == "list_workflows")
+            .find(|t| t.name() == LIST_SKILLS_TOOL)
             .expect("list tool");
         let result = list.execute(json!({})).await.expect("execute");
         let text = result.output_for_llm(false);

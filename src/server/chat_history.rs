@@ -529,6 +529,7 @@ mod test {
             text: "hi".to_string(),
             by: None,
             chat: chat.map(str::to_string),
+            deliverable: None,
         }
     }
 
@@ -615,6 +616,7 @@ mod test {
                 id: "u1".to_string(),
             }),
             chat: Some(MAIN_THREAD_ID.to_string()),
+            deliverable: None,
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));
@@ -629,6 +631,7 @@ mod test {
             text: "hi".to_string(),
             by: None,
             chat: Some(MAIN_THREAD_ID.to_string()),
+            deliverable: None,
         };
         // The console queries the main thread with desk = ("main", "main").
         assert!(owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
@@ -645,6 +648,7 @@ mod test {
             text: "hi".to_string(),
             by: None,
             chat: Some("strategy".to_string()),
+            deliverable: None,
         };
         assert!(owns("strategy", "Strategy desk", &event));
         assert!(!owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
@@ -763,6 +767,7 @@ mod test {
                     text: "a follow-up".to_string(),
                     by: None,
                     chat: Some("studio".to_string()),
+                    deliverable: None,
                 },
             ),
             &Viewer::Operator,
@@ -801,6 +806,7 @@ mod test {
             text: "hi".to_string(),
             by: None,
             chat: None,
+            deliverable: None,
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));

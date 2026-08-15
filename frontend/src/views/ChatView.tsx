@@ -55,6 +55,7 @@ import {
   dmChannelId,
   findChannel,
   firstChannel,
+  offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
   type DecidedApproval,
@@ -855,10 +856,11 @@ export function ChatView({
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
               onSend={(text, deliverable) => void send(text, deliverable)}
-              // Only the company-channel composer offers "do it once" vs "build
-              // me the workflow" (issue #580): a channel line can open a board
-              // card, so the once-vs-workflow choice belongs at that prompt box.
-              deliverableChoice={active.kind === "channel"}
+              // Channel *and* DM composers offer "do it once" vs "build me the
+              // workflow" (issues #580, #845) — see `offersDeliverableChoice`,
+              // which owns the rule. Only the thread and copilot composers below
+              // go without.
+              deliverableChoice={offersDeliverableChoice(active.kind)}
             />
           </div>
 
