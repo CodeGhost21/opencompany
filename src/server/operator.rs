@@ -1422,7 +1422,11 @@ async fn chat_actor(
 ) -> Result<Option<Actor>, Response> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
-    let auth = resolve_principal(headers, state, Some(company))
+    // No connect info threaded through here, same as `current_user` — this
+    // helper's callers were not carrying it before this change, so `none`
+    // mode's local owner still resolves through the bind-time guard alone on
+    // this path. See `local_owner`'s doc comment for the peer gate this omits.
+    let auth = resolve_principal(headers, state, Some(company), None)
         .await
         .map_err(|_| unauthorized_response())?;
     if let Some(resp) = authorize_address(state, &auth, company) {
