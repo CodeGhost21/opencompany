@@ -1625,7 +1625,9 @@ async fn history_viewer(
     state: &AppState,
     company: &CompanyId,
 ) -> Result<Viewer, Response> {
-    let actor = chat_actor(headers, state, company).await?;
+    // No connect info here — this helper is nested a layer below the handler,
+    // which does not thread it down. See `chat_actor`'s doc comment.
+    let actor = chat_actor(headers, state, company, None).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
         _ => Viewer::Operator,
