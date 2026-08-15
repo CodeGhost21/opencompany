@@ -474,6 +474,20 @@ mod test {
         );
     }
 
+    /// A `wallet:` remainder that is valid base58 but not 32 bytes is not a
+    /// wallet — checking mere base58-decodability would still misclassify an
+    /// email whose local part happens to be base58-alphabet characters (no
+    /// `@` needed for the collision to matter here, only for `parse` to fall
+    /// to `Email` on decode failure). `LoginIdentity::parse` must check the
+    /// same length `decode_wallet_address` enforces everywhere else.
+    #[test]
+    fn a_wallet_remainder_that_is_not_thirty_two_bytes_is_not_a_wallet() {
+        assert_eq!(
+            LoginIdentity::parse("wallet:abc"),
+            LoginIdentity::Email("wallet:abc".into())
+        );
+    }
+
     /// A stray `local:` key that is not exactly `local:owner` must not silently
     /// merge into the one local-owner identity — that would collapse two
     /// distinct stored records onto one key.
