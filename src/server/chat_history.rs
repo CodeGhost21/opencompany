@@ -570,7 +570,7 @@ pub async fn history_for_desk(
             }
             next = page
                 .last()
-                .map(|event| event.seq.value() + 1)
+                .map(|event| event.seq.value().saturating_add(1))
                 .unwrap_or(next);
             if page.len() < EVENT_PAGE {
                 break;
