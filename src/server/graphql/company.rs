@@ -465,13 +465,20 @@ impl ChatGql {
             _ => Viewer::Operator,
         };
         let first = first.max(0) as usize;
-        let (messages, total) = chat_history::history_for_desk(
+        let messages = chat_history::history_for_desk(
             &self.runtime,
             &self.desk.id,
             &self.desk.name,
             &viewer,
             before_seq,
             first,
+        )
+        .await?;
+        let total = chat_history::history_total_for_desk(
+            &self.runtime,
+            &self.desk.id,
+            &self.desk.name,
+            before_seq,
         )
         .await?;
         Ok(Page {

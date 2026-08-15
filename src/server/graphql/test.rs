@@ -479,7 +479,7 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
     let app = router(state);
     let value = query(
         app,
-        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 10) { items { text } } } } }"}"#,
+        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 1) { total items { text } } } } }"}"#,
     )
     .await;
     let texts: Vec<&str> = value["data"]["company"]["chat"]["history"]["items"]
@@ -488,10 +488,13 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .iter()
         .map(|m| m["text"].as_str().unwrap())
         .collect();
-    assert!(texts.contains(&"canonical id"), "missing: {texts:?}");
     assert!(
         texts.contains(&"console default-thread id"),
-        "missing: {texts:?}"
+        "the newest matching message is the one page returns: {texts:?}"
+    );
+    assert_eq!(
+        value["data"]["company"]["chat"]["history"]["total"], 2,
+        "the GraphQL page keeps its unpaginated total without making the REST reader scan it"
     );
 }
 

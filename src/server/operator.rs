@@ -1619,10 +1619,9 @@ async fn chat_history_response(
         .limit
         .unwrap_or(CHAT_HISTORY_LIMIT)
         .min(CHAT_HISTORY_LIMIT);
-    let (messages, _total) =
-        history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
-            .await
-            .map_err(|e| ApiError(e).into_response())?;
+    let messages = history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
     Ok(Json(
         messages
             .into_iter()
@@ -3589,6 +3588,74 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value[0]["text"], "kept");
         assert_eq!(value.as_array().unwrap().len(), 1);
+    }
+
+    /// A history cursor pages messages, not the current reaction state. A
+    /// toggle can be journaled after the cursor for a message still selected by
+    /// that cursor, and must therefore remain visible on the paged result.
+    #[tokio::test]
+    async fn chat_history_cursor_keeps_later_reactions_on_displayed_messages() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let message = runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::AgentReply {
+                    parent: None,
+                    task_id: None,
+                    chat_id: "General".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "kept".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let cursor = runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::FeedbackFiled {
+                    note: "cursor marker".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::ReactionToggled {
+                    message_seq: message,
+                    emoji: "👍".to_string(),
+                    on: true,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/company/chat/history?before={}&limit=1",
+                        cursor.value()
+                    ))
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value[0]["id"], message.value().to_string());
+        assert_eq!(value[0]["reactions"][0]["emoji"], "👍");
     }
 
     /* ---- issue #364: durable ids, threads, reactions, channel isolation ---- */

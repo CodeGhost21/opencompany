@@ -484,8 +484,7 @@ pub async fn author_labels(
 ///
 /// `before_seq` is an opaque EventLog cursor (a sequence position); only
 /// messages before it are considered. `first` caps how many of the remaining,
-/// most-recent messages come back. Returns the page plus the total count of
-/// matching messages (before the `first` cap, after the `before_seq` cut).
+/// most-recent messages come back.
 ///
 /// Shared by the GraphQL `Chat.history` resolver and the REST
 /// `GET .../chat/history` route so the two can never disagree about what a
@@ -497,18 +496,24 @@ pub async fn history_for_desk(
     viewer: &Viewer,
     before_seq: Option<u64>,
     first: usize,
-) -> Result<(Vec<MessageView>, i32), OpenCompanyError> {
+) -> Result<Vec<MessageView>, OpenCompanyError> {
     // A page is events rather than messages: a busy company can put unrelated
     // events between two chat turns. Walking backward keeps the newest `first`
     // transcript entries without ever materialising that unrelated journal.
     const EVENT_PAGE: usize = 512;
 
+    // A zero-sized GraphQL page is a valid request, and the REST limit can be
+    // clamped to zero. It must not touch the journal merely to construct an
+    // empty response.
+    if first == 0 {
+        return Ok(Vec::new());
+    }
+
     // One roster read per history, not one per message.
     let authors = author_labels(runtime).await?;
     let mut cursor = before_seq.map(EventSeq::new);
     let mut messages = Vec::with_capacity(first);
-    let mut total = 0i32;
-    loop {
+    while messages.len() < first {
         let page = runtime
             .events()
             .read_before(runtime.id(), cursor, EVENT_PAGE)
@@ -519,9 +524,9 @@ pub async fn history_for_desk(
         cursor = page.last().map(|event| event.seq);
         for event in page {
             if owns(desk_id, desk_name, &event.event) {
-                total += 1;
-                if messages.len() < first {
-                    messages.push(MessageView::project(event, viewer, &authors));
+                messages.push(MessageView::project(event, viewer, &authors));
+                if messages.len() == first {
+                    break;
                 }
             }
         }
@@ -533,13 +538,14 @@ pub async fn history_for_desk(
 
     // Reactions necessarily follow their message. Once the displayed window is
     // known, fold only toggles that could affect one of its messages, streaming
-    // forward from the window's oldest id to this request's cursor.
+    // forward from the window's oldest id through the current tail. The cursor
+    // limits *messages*, not the reaction snapshot: a later toggle still
+    // changes the state displayed on an older message.
     let wanted: HashSet<u64> = messages
         .iter()
         .filter_map(|message| message.id.parse::<u64>().ok())
         .collect();
     if let Some(oldest) = wanted.iter().min().copied() {
-        let upper = before_seq;
         let mut next = oldest.saturating_add(1);
         let mut fold = ReactionFold {
             state: HashMap::new(),
@@ -553,19 +559,14 @@ pub async fn history_for_desk(
             if page.is_empty() {
                 break;
             }
-            let mut reached_upper = false;
             for event in &page {
-                if upper.is_some_and(|before| event.seq.value() >= before) {
-                    reached_upper = true;
-                    break;
-                }
                 fold.observe(event, Some(&wanted));
             }
             next = page
                 .last()
                 .map(|event| event.seq.value() + 1)
                 .unwrap_or(next);
-            if reached_upper || page.len() < EVENT_PAGE {
+            if page.len() < EVENT_PAGE {
                 break;
             }
         }
@@ -574,7 +575,51 @@ pub async fn history_for_desk(
             message.reactions = reactions.remove(&message.id).unwrap_or_default();
         }
     }
-    Ok((messages, total))
+    Ok(messages)
+}
+
+/// Counts a desk's messages before a cursor without materialising them.
+///
+/// GraphQL's [`Page`](crate::server::graphql::pagination::Page) exposes an
+/// unpaginated `total`, while the REST transcript endpoint deliberately does
+/// not. Keep that potentially full journal walk out of [`history_for_desk`],
+/// so bounded transcript readers stop as soon as their requested window is
+/// complete.
+pub async fn history_total_for_desk(
+    runtime: &CompanyRuntime,
+    desk_id: &str,
+    desk_name: &str,
+    before_seq: Option<u64>,
+) -> Result<i32, OpenCompanyError> {
+    const EVENT_PAGE: usize = 512;
+
+    let mut next = EventSeq::new(0);
+    let mut total = 0i32;
+    loop {
+        let page = runtime
+            .events()
+            .read_from(runtime.id(), next, EVENT_PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        for event in &page {
+            if before_seq.is_some_and(|before| event.seq.value() >= before) {
+                return Ok(total);
+            }
+            if owns(desk_id, desk_name, &event.event) {
+                total = total.saturating_add(1);
+            }
+        }
+        let Some(last) = page.last() else {
+            break;
+        };
+        next = EventSeq::new(last.seq.value().saturating_add(1));
+        if page.len() < EVENT_PAGE {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
