@@ -63,9 +63,16 @@ and re-reading a manifest per request would be a `CompanyStore` read for a value
 that cannot change without a rebuild.
 
 The host layers exist because two deployments own the answer rather than the
-company definition does: the packaged desktop app, which is always `none`, and a
-hosting platform, which must be able to guarantee a mode across every tenant
-whatever a tenant wrote.
+company definition does: a hosting platform, which must be able to guarantee a
+mode across every tenant whatever a tenant wrote, and any host that must pin a
+mode independent of a per-company manifest.
+
+The packaged desktop app is not on this list today: it still signs its operator
+in over the `email` path with a synthetic, loopback-only mailbox
+(`DESKTOP_OPERATOR_EMAIL`, see `docs/spec/runtime/desktop.md`), which predates
+this change and is out of scope for it. `none` mode is a natural fit for that
+use case — a single local user with no invite flow to run — but migrating the
+desktop app onto it is separate work, tracked on its own.
 
 An unparseable value **aborts boot**. "The sign-in you configured is not the one
 you got" is invisible from a running host.
