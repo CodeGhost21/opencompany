@@ -197,10 +197,11 @@ pub(crate) async fn issue_challenge(
 ///   nothing to invent.
 pub(crate) fn unpersisted_challenge(
     company: &CompanyId,
+    src: &dyn TokenSource,
     address: &str,
     now: u64,
 ) -> ChallengeResult {
-    let nonce = token::mint_login_code(&token::OsTokens);
+    let nonce = token::mint_login_code(src);
     ChallengeResult {
         message: challenge_message(company, address, &nonce, now),
         nonce,
