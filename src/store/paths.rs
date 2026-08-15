@@ -417,6 +417,18 @@ impl Bundle {
         self.dir.join("read-state.json")
     }
 
+    /// Path to the durable notification records (`notifications.json`, #749).
+    pub fn notifications_json(&self) -> PathBuf {
+        self.dir.join("notifications.json")
+    }
+
+    /// Path to the per-person notification read markers
+    /// (`notification-reads.json`, #749) — kept beside the records rather than
+    /// on them, because read state is per person, not per company.
+    pub fn notification_reads_json(&self) -> PathBuf {
+        self.dir.join("notification-reads.json")
+    }
+
     /// The workspace subdirectory holding the seeded/edited file tree.
     pub fn workspace_dir(&self) -> PathBuf {
         self.dir.join("workspace")

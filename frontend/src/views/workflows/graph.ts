@@ -37,6 +37,23 @@ export interface LiveRun {
   scheduled: boolean;
 }
 
+/** A run the host says is still in flight, read from the run history (issue
+ * #863) so the canvas can join a run it did not watch from the beginning.
+ *
+ * The frame window only holds what arrived since this console connected, so
+ * everything before that — a cron fire, a run started from chat, the run that
+ * was already walking when the tab was opened or the page reloaded, the frames
+ * lost while an `EventSource` reconnected — is invisible to it. The host
+ * journals the same trail durably and serves it on `…/workflows/runs` with
+ * `running: true`, which is what this carries in. */
+export interface InFlightRun {
+  runId: string;
+  /** The nodes the host has already recorded as finished for this run. */
+  states: Record<string, NodeRunState>;
+  elapsed: Record<string, number>;
+  scheduled: boolean;
+}
+
 /** Folds the run-progress frame window (issue #371) into the canvas state for
  * the workflow on screen.
  *
@@ -48,11 +65,20 @@ export interface LiveRun {
  * is matched on its run id. One SSE connection carries every run in the
  * company, so without that a cron fire would repaint a canvas an operator is
  * watching, and two concurrent runs of the same graph would interleave into one
- * incoherent picture. */
+ * incoherent picture.
+ *
+ * Issue #863: `inFlight` is the run the *host* says is open, and it is what
+ * this fold adopts when the window carries no start frame for the selected
+ * workflow. Without it a console that joined mid-run painted nothing at all —
+ * not a partial trail, nothing — for the whole run, because the fold's only
+ * way to learn a run's id was a `workflow_run_started` frame it had missed.
+ * The window still wins when it has a start of its own: a live start is newer
+ * than any history read, and a rerun must supersede the run before it. */
 export function foldLiveRun(
   events: CompanyStreamEvent[],
   selectedId: string | null,
   graph: WorkflowGraph | null,
+  inFlight?: InFlightRun | null,
 ): LiveRun | null {
   if (!selectedId || !graph) return null;
 
@@ -65,7 +91,7 @@ export function foldLiveRun(
       break;
     }
   }
-  if (startIndex === -1) return null;
+  if (startIndex === -1) return inFlight ? foldFromHistory(events, graph, inFlight) : null;
   const started = events[startIndex];
   if (started.type !== "workflow_run_started") return null;
 
@@ -76,9 +102,56 @@ export function foldLiveRun(
   // host from here (#382), not derived.
   const states = initialRunState(graph);
   const elapsed: Record<string, number> = {};
-  let active = true;
+  const active = applyFrames(events, startIndex + 1, runId, selectedId, states, elapsed);
 
-  for (let i = startIndex + 1; i < events.length; i++) {
+  settle(states, active);
+  return { runId, states, elapsed, active, scheduled };
+}
+
+/** The same fold, for a run this console did not see start (issue #863).
+ *
+ * Seeded from the host's own record of the run rather than from a start frame,
+ * then brought up to date with every frame in the window that belongs to it —
+ * so a console that joined mid-run shows the trail so far AND keeps painting as
+ * the rest of the graph walks.
+ *
+ * The whole window is scanned, not a suffix: there is no start frame to scan
+ * from, and every frame is matched on the run id anyway, so a frame belonging
+ * to some other run cannot be picked up wherever it sits. */
+function foldFromHistory(
+  events: CompanyStreamEvent[],
+  graph: WorkflowGraph,
+  inFlight: InFlightRun,
+): LiveRun {
+  const states = { ...initialRunState(graph), ...inFlight.states };
+  const elapsed = { ...inFlight.elapsed };
+  // `selectedId` is not passed on: a run id is the stronger match, and the
+  // host told us this run is the selected workflow's. A pre-#371 finish frame
+  // (no run id) is deliberately NOT honoured here — with no start frame to pair
+  // it with, "the run on screen" is a guess, and guessing a run settled would
+  // clear a live node on a console that is watching it correctly.
+  const active = applyFrames(events, 0, inFlight.runId, null, states, elapsed);
+
+  settle(states, active);
+  return { runId: inFlight.runId, states, elapsed, active, scheduled: inFlight.scheduled };
+}
+
+/** Applies every frame belonging to `runId` from `from` onward, and reports
+ * whether the run is still active afterwards.
+ *
+ * `selectedId` widens the settle check to a `workflow_run_finished` that
+ * carries no run id (a pre-#371 host); pass `null` where there is no start
+ * frame to pair such a frame with. */
+function applyFrames(
+  events: CompanyStreamEvent[],
+  from: number,
+  runId: string,
+  selectedId: string | null,
+  states: Record<string, NodeRunState>,
+  elapsed: Record<string, number>,
+): boolean {
+  let active = true;
+  for (let i = from; i < events.length; i++) {
     const e = events[i];
     // Issue #382: the engine now reports when a node BEGINS, so "running" is a
     // fact rather than the old topology-derived frontier guess. Light the node
@@ -100,24 +173,27 @@ export function foldLiveRun(
       elapsed[e.nodeId] = e.elapsedMs;
       continue;
     }
-    if (e.type === "workflow_run_finished" && e.workflowId === selectedId) {
+    if (e.type === "workflow_run_finished") {
       // A pre-#371 host sends no runId; treat that as "the run on screen"
       // rather than ignoring it, else the canvas would spin forever.
-      if (!e.runId || e.runId === runId) active = false;
+      if (e.runId === runId) active = false;
+      else if (!e.runId && selectedId !== null && e.workflowId === selectedId) active = false;
     }
   }
+  return active;
+}
 
-  if (!active) {
-    // Nothing is executing any more, so any node still marked "running" is an
-    // ORPHAN — a start whose finish never arrived because the run was cancelled
-    // or crashed on it. Clear those; the REPORTED ok/error marks stay, as the
-    // answer to "how far did it get?", until a reselect or a rerun.
-    for (const [id, state] of Object.entries(states)) {
-      if (state === "running") delete states[id];
-    }
+/** Clears the orphans a settled run leaves behind.
+ *
+ * Nothing is executing any more, so any node still marked "running" is an
+ * ORPHAN — a start whose finish never arrived because the run was cancelled or
+ * crashed on it. Clear those; the REPORTED ok/error marks stay, as the answer
+ * to "how far did it get?", until a reselect or a rerun. */
+function settle(states: Record<string, NodeRunState>, active: boolean): void {
+  if (active) return;
+  for (const [id, state] of Object.entries(states)) {
+    if (state === "running") delete states[id];
   }
-
-  return { runId, states, elapsed, active, scheduled };
 }
 
 /** A node's display name, falling back to its id when the graph is not loaded

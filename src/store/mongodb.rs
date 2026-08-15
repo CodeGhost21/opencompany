@@ -395,6 +395,29 @@ impl MongoStore {
             .create_index(unique(doc! {"company_id": 1}))
             .await
             .map_err(mongo_err)?;
+        // Issue #749: durable notifications. The recency index backs the
+        // newest-first feed `NotificationStore::list` returns; the per-person
+        // read marker is unique on `(company_id, user_id, notification_id)` so a
+        // re-mark is a no-op `E11000` and read stays a latch. Created outside the
+        // fixed array above so adding them does not disturb its length.
+        self.collection("notifications")
+            .create_index(nonunique(
+                doc! {"company_id": 1, "created_ms": -1, "id": -1},
+            ))
+            .await
+            .map_err(mongo_err)?;
+        // Unique per (company_id, id): makes `append` idempotent — a duplicate
+        // id within a company is rejected, matching the sqlite primary key.
+        self.collection("notifications")
+            .create_index(unique(doc! {"company_id": 1, "id": 1}))
+            .await
+            .map_err(mongo_err)?;
+        self.collection("notification_reads")
+            .create_index(unique(
+                doc! {"company_id": 1, "user_id": 1, "notification_id": 1},
+            ))
+            .await
+            .map_err(mongo_err)?;
         Ok(())
     }
 
@@ -2467,6 +2490,157 @@ impl crate::ports::read_state::ReadStateStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// NotificationStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::notifications::NotificationStore for MongoStore {
+    async fn append(
+        &self,
+        company: &CompanyId,
+        notification: &crate::ports::notifications::Notification,
+    ) -> Result<()> {
+        // Idempotent by id (first write wins): `$setOnInsert` seeds the record
+        // only when it does not yet exist, so a retried or replayed append is a
+        // no-op rather than a duplicate. The unique (company_id, id) index in
+        // `ensure_indexes` is the backstop against a concurrent double insert.
+        // All three backends agree: no duplicate id within a company.
+        self.collection("notifications")
+            .update_one(
+                doc! {"company_id": company.as_ref(), "id": notification.id.as_str()},
+                doc! {"$setOnInsert": {
+                    "kind": notification.kind.as_str(),
+                    "subject_kind": notification.subject.kind.as_str(),
+                    "subject_id": notification.subject.id.as_str(),
+                    "title": notification.title.as_str(),
+                    "created_ms": notification.created_at as i64,
+                }},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::notifications::NotificationView>> {
+        // This person's read markers first, into an id → read_ms map.
+        let mut reads: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut read_cursor = self
+            .collection("notification_reads")
+            .find(doc! {"company_id": company.as_ref(), "user_id": user})
+            .await
+            .map_err(mongo_err)?;
+        while let Some(d) = read_cursor.try_next().await.map_err(mongo_err)? {
+            reads.insert(
+                get_str(&d, "notification_id")?,
+                d.get_i64("read_ms").unwrap_or_default(),
+            );
+        }
+        // The records, newest first; the sort is the trait's contract.
+        let mut cursor = self
+            .collection("notifications")
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"created_ms": -1, "id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(d) = cursor.try_next().await.map_err(mongo_err)? {
+            let id = get_str(&d, "id")?;
+            let subject_kind = get_str(&d, "subject_kind")?;
+            let subject_kind = crate::ports::notifications::SubjectKind::from_token(&subject_kind)
+                .ok_or_else(|| {
+                    crate::error::OpenCompanyError::Store(format!(
+                        "notification {id} has an unknown subject kind {subject_kind:?}"
+                    ))
+                })?;
+            let read_at = reads.get(&id).map(|v| *v as u64);
+            out.push(crate::ports::notifications::NotificationView {
+                notification: crate::ports::notifications::Notification {
+                    id,
+                    kind: get_str(&d, "kind")?,
+                    subject: crate::ports::notifications::Subject {
+                        kind: subject_kind,
+                        id: get_str(&d, "subject_id")?,
+                    },
+                    created_at: d.get_i64("created_ms").unwrap_or_default() as u64,
+                    title: get_str(&d, "title")?,
+                },
+                read_at,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn mark_read(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        ids: Option<&[String]>,
+    ) -> Result<u64> {
+        let now = crate::ports::now_millis() as i64;
+        // Which notifications to mark: the named ids that actually exist in this
+        // company, or every notification when `None`.
+        let targets: Vec<String> = match ids {
+            Some(ids) => {
+                let mut present = Vec::new();
+                for id in ids {
+                    let found = self
+                        .collection("notifications")
+                        .find_one(doc! {"company_id": company.as_ref(), "id": id.as_str()})
+                        .await
+                        .map_err(mongo_err)?;
+                    if found.is_some() {
+                        present.push(id.clone());
+                    }
+                }
+                present
+            }
+            None => {
+                let mut cursor = self
+                    .collection("notifications")
+                    .find(doc! {"company_id": company.as_ref()})
+                    .await
+                    .map_err(mongo_err)?;
+                let mut all = Vec::new();
+                while let Some(d) = cursor.try_next().await.map_err(mongo_err)? {
+                    all.push(get_str(&d, "id")?);
+                }
+                all
+            }
+        };
+        for id in &targets {
+            // `$setOnInsert` is the latch: it seeds `read_ms` only when the
+            // marker is first created, so a re-mark leaves the original instant.
+            self.collection("notification_reads")
+                .update_one(
+                    doc! {
+                        "company_id": company.as_ref(),
+                        "user_id": user,
+                        "notification_id": id.as_str(),
+                    },
+                    doc! {"$setOnInsert": {"read_ms": now}},
+                )
+                .with_options(UpdateOptions::builder().upsert(true).build())
+                .await
+                .map_err(mongo_err)?;
+        }
+        // Still-unread count for this person, derived from the same projection
+        // `list` uses so the two never disagree. Fully qualified because
+        // `MongoStore` implements several ports that each expose a `list`.
+        let unread = crate::ports::notifications::NotificationStore::list(self, company, user)
+            .await?
+            .iter()
+            .filter(|v| v.read_at.is_none())
+            .count() as u64;
+        Ok(unread)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
@@ -4172,6 +4346,13 @@ mod test {
     async fn conformance_read_state_store() {
         let Some(s) = store().await else { return };
         conformance::assert_read_state_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_notification_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_notification_store(s.clone()).await;
         drop_db(&s).await;
     }
 

@@ -309,6 +309,7 @@ pub struct RuntimeBuilder {
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
+    notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
     users: Option<Arc<dyn UserStore>>,
     sessions: Option<Arc<dyn SessionStore>>,
     login_codes: Option<Arc<dyn LoginCodeStore>>,
@@ -416,6 +417,7 @@ impl RuntimeBuilder {
             usage: None,
             skills: None,
             read_state: None,
+            notifications: None,
             users: None,
             sessions: None,
             login_codes: None,
@@ -537,6 +539,7 @@ impl RuntimeBuilder {
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.read_state = Some(handles.read_state.clone());
+        self.notifications = Some(handles.notifications.clone());
         self.users = Some(handles.users.clone());
         self.sessions = Some(handles.sessions.clone());
         self.login_codes = Some(handles.login_codes.clone());
@@ -679,6 +682,15 @@ impl RuntimeBuilder {
         read_state: Arc<dyn crate::ports::read_state::ReadStateStore>,
     ) -> Self {
         self.read_state = Some(read_state);
+        self
+    }
+
+    /// Swaps the durable notification store (default: fs-backed).
+    pub fn with_notifications(
+        mut self,
+        notifications: Arc<dyn crate::ports::notifications::NotificationStore>,
+    ) -> Self {
+        self.notifications = Some(notifications);
         self
     }
 
@@ -1026,6 +1038,7 @@ impl RuntimeBuilder {
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 read_state: self.read_state.unwrap_or_else(|| fs_ops.clone()),
+                notifications: self.notifications.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
                 sessions: self.sessions.unwrap_or_else(|| fs_ops.clone()),
                 login_codes: self.login_codes.unwrap_or_else(|| fs_ops.clone()),
@@ -1569,6 +1582,8 @@ impl RuntimeBuilder {
         // way via `CompanyRuntime::set_builder` below.
         #[cfg(feature = "openhuman")]
         let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
+        #[cfg(feature = "openhuman")]
+        let mut workflow_harness_deps: Option<crate::harness::HarnessDeps> = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -2179,6 +2194,7 @@ impl RuntimeBuilder {
                                 // brain's `CheckoutJanitor`.
                                 checkouts: crate::harness::repo::CheckoutLedger::default(),
                             };
+                            workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
@@ -2479,6 +2495,10 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(builder) = builder {
             runtime.set_builder(builder);
+        }
+        #[cfg(feature = "openhuman")]
+        if let Some(deps) = workflow_harness_deps {
+            runtime.set_workflow_harness_deps(deps);
         }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —

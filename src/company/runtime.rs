@@ -29,9 +29,9 @@ use crate::ports::types::{
 };
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
-    EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, ReadStateStore, RunStore,
-    SecretStore, SessionStore, SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter,
-    UserStore, WorkflowRevisionStore, WorkspaceStore,
+    EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, NotificationStore,
+    ReadStateStore, RunStore, SecretStore, SessionStore, SkillStateStore, TaskRecord, TaskStore,
+    ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore, WorkspaceStore,
 };
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
@@ -143,6 +143,8 @@ pub struct OpsStores {
     pub skills: Arc<dyn SkillStateStore>,
     /// Per-person, per-channel read markers (#755).
     pub read_state: Arc<dyn ReadStateStore>,
+    /// Durable notifications with per-person read state (#749).
+    pub notifications: Arc<dyn NotificationStore>,
     /// The company's human collaborators and their outstanding invites.
     pub users: Arc<dyn UserStore>,
     /// Live browser sessions for those users.
@@ -316,6 +318,8 @@ pub struct CompanyRuntime {
     /// and the boot reaper settles any run left mid-build.
     #[cfg(feature = "openhuman")]
     pub(crate) builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>>,
+    #[cfg(feature = "openhuman")]
+    pub(crate) workflow_harness_deps: Option<crate::harness::HarnessDeps>,
     /// MCP installs and live connections for this runtime. The wrapper owns a
     /// company-home-scoped OpenHuman config while the live registry remains
     /// shared in-process with harness agents.
@@ -387,6 +391,8 @@ impl CompanyRuntime {
             planner: None,
             #[cfg(feature = "openhuman")]
             builder: None,
+            #[cfg(feature = "openhuman")]
+            workflow_harness_deps: None,
             #[cfg(feature = "mcp")]
             mcp: None,
         }
@@ -475,6 +481,30 @@ impl CompanyRuntime {
     #[cfg(feature = "openhuman")]
     pub fn builder(&self) -> Option<&Arc<crate::harness::workflow_build::WorkflowBuilder>> {
         self.builder.as_ref()
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub async fn wired_workflow_namespaces(
+        &self,
+        company: &crate::ports::CompanyRecord,
+    ) -> Option<std::collections::BTreeSet<&'static str>> {
+        let deps = self.workflow_harness_deps.as_ref()?;
+        let mut resolved = deps.clone();
+        if let Some(plan) = &resolved.plan {
+            resolved.capabilities = crate::harness::capability_budget::resolve_filter(
+                plan,
+                resolved.meter.as_deref(),
+                &company.id,
+                crate::ports::now_millis(),
+            )
+            .await;
+        }
+        Some(crate::workflows::caps::wired_workflow_namespaces(&resolved))
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub fn set_workflow_harness_deps(&mut self, deps: crate::harness::HarnessDeps) {
+        self.workflow_harness_deps = Some(deps);
     }
 
     /// Attaches the embedded MCP runtime used by REST and harness agents.
@@ -937,6 +967,11 @@ impl CompanyRuntime {
     /// Where each person has read to, per channel (#755).
     pub fn read_state(&self) -> &Arc<dyn ReadStateStore> {
         &self.ops.read_state
+    }
+
+    /// Durable notifications with per-person read state (#749).
+    pub fn notifications(&self) -> &Arc<dyn NotificationStore> {
+        &self.ops.notifications
     }
 
     /// This company's human collaborators and their invites.
@@ -2057,6 +2092,178 @@ impl std::fmt::Debug for CompanyRuntime {
 #[cfg(test)]
 mod tests {
     use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
+
+    #[cfg(feature = "openhuman")]
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(feature = "openhuman")]
+    use async_trait::async_trait;
+
+    #[cfg(feature = "openhuman")]
+    #[derive(Default)]
+    struct RecordingMeter {
+        queried_companies: Mutex<Vec<crate::ports::types::CompanyId>>,
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[async_trait]
+    impl crate::ports::UsageMeter for RecordingMeter {
+        async fn record(
+            &self,
+            _company: &crate::ports::types::CompanyId,
+            _sample: &crate::ports::UsageSample,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn query(
+            &self,
+            company: &crate::ports::types::CompanyId,
+            _since_millis: u64,
+        ) -> crate::Result<Vec<crate::ports::UsageSample>> {
+            self.queried_companies.lock().unwrap().push(company.clone());
+            Ok(Vec::new())
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    async fn runtime_and_record() -> (
+        super::CompanyRuntime,
+        crate::ports::CompanyRecord,
+        tempfile::TempDir,
+    ) {
+        let home = tempfile::tempdir().expect("tempdir");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(crate::ports::types::CompanyId::new("acme"))
+            .build()
+            .await
+            .expect("runtime");
+        let record = runtime
+            .store()
+            .load(runtime.id())
+            .await
+            .expect("load")
+            .expect("record");
+        (runtime, record, home)
+    }
+
+    #[cfg(feature = "openhuman")]
+    fn wiring_deps(
+        runtime: &super::CompanyRuntime,
+        meter: Option<Arc<dyn crate::ports::UsageMeter>>,
+        capabilities: crate::harness::toolbelt::CapabilityFilter,
+        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
+    ) -> crate::harness::HarnessDeps {
+        crate::harness::HarnessDeps {
+            provider: Arc::new(crate::harness::provider::MockProvider::default()),
+            provider_slug: "mock".to_string(),
+            context: runtime.context.clone(),
+            store: runtime.store.clone(),
+            meter,
+            workspace_root: std::env::temp_dir(),
+            audit_root: std::env::temp_dir(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: Arc::from([]),
+            mcp_servers: Vec::new(),
+            default_mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: crate::harness::orchestrator::DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities,
+            workflow_source_dir: None,
+            plan,
+            media: None,
+            composio: None,
+            search: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_is_absent_without_harness_deps() {
+        let (runtime, record, _home) = runtime_and_record().await;
+        assert_eq!(runtime.wired_workflow_namespaces(&record).await, None);
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_keeps_the_static_capability_filter_without_a_plan() {
+        let (mut runtime, record, _home) = runtime_and_record().await;
+        runtime.set_workflow_harness_deps(wiring_deps(
+            &runtime,
+            None,
+            crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(
+                ["web"].into_iter().collect(),
+            ),
+            None,
+        ));
+        let namespaces = runtime
+            .wired_workflow_namespaces(&record)
+            .await
+            .expect("wiring");
+        assert!(!namespaces.contains("web"));
+        assert!(namespaces.contains("shell"));
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_resolves_the_plan_against_its_company_meter() {
+        let (mut runtime, record, _home) = runtime_and_record().await;
+        let meter = Arc::new(RecordingMeter::default());
+        runtime.set_workflow_harness_deps(wiring_deps(
+            &runtime,
+            Some(meter.clone()),
+            crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            Some(crate::harness::capability_budget::CapabilityPlan {
+                period: crate::harness::capability_budget::BudgetPeriod::Daily,
+                budgets: [("shell".to_string(), u64::MAX)].into_iter().collect(),
+                total_budget: None,
+            }),
+        ));
+        let namespaces = runtime
+            .wired_workflow_namespaces(&record)
+            .await
+            .expect("wiring");
+        assert!(namespaces.contains("shell"));
+        assert!(!namespaces.contains("web"));
+        assert!(!namespaces.contains("code"));
+        assert_eq!(*meter.queried_companies.lock().unwrap(), vec![record.id]);
+    }
 
     /// Issue #86: the kill switch's boot decision, including the direction it
     /// fails in.

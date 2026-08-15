@@ -148,12 +148,15 @@ export function ConnectionConsole({
     async (id: string, companies: CompanyStatus[]) => {
       try {
         const status = await client.status(id);
+        if (phase.kind === "console" && phase.company !== id) {
+          clearEntityHash();
+        }
         setPhase({ kind: "console", company: id, status, companies, canGoBack: true });
       } catch (err) {
         setPhase(connectionError(client, err, id));
       }
     },
-    [client],
+    [client, phase],
   );
 
   const backToPicker = useCallback(() => {
@@ -251,6 +254,17 @@ export function ConnectionConsole({
         </ConnectionScopeProvider>
       );
   }
+}
+
+function clearEntityHash() {
+  const [path] = window.location.hash.replace(/^#\/?/, "").split("?");
+  const [view, sub] = path.split("/").filter(Boolean);
+  if (!view || !sub) return;
+
+  // A hash sub-route names an entity within the current company. The shell
+  // remounts for a company switch, so remove that stale identity before the
+  // new shell reads the route as an intentional deep link.
+  window.history.replaceState(null, "", `#/${view}`);
 }
 
 function FullScreen({ children }: { children: React.ReactNode }) {
