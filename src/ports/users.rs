@@ -411,9 +411,11 @@ mod test {
     }
 
     /// The three identity keyspaces share one storage column, so they must be
-    /// mutually unparseable. An address normalized by `normalize_email` is
-    /// lowercase and cannot carry a scheme this parser recognizes, and base58
-    /// excludes `:`.
+    /// mutually unparseable. `normalize_email` only lowercases and trims, so an
+    /// email that happens to start with `wallet:` or `local:` is a normalized
+    /// key too — see `an_email_that_looks_like_a_scheme_prefix_still_parses_as_email`
+    /// below for that case. Here, an unrelated email and an unrelated wallet
+    /// simply do not collide.
     #[test]
     fn login_identities_round_trip_and_stay_disjoint() {
         let email = LoginIdentity::Email("Ada@Example.com".into());
