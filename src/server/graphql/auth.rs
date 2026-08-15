@@ -159,6 +159,10 @@ pub fn resolve_claims(headers: &HeaderMap, state: &AppState) -> Result<GqlAuth, 
 /// failing the request: a stale cookie must not brick an operator sharing the
 /// origin.
 ///
+/// `peer` is the request's TCP peer, when the caller can name one — see
+/// [`local_owner`] for why it matters and why its absence is not itself a
+/// refusal.
+///
 /// **This is the only function that can produce a human principal**, and every
 /// route meaning to serve people must resolve through it rather than
 /// [`resolve_claims`].
@@ -166,8 +170,9 @@ pub async fn resolve_principal(
     headers: &HeaderMap,
     state: &AppState,
     company: Option<&CompanyId>,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<GqlAuth, Unauthorized> {
-    if let Some(owner) = local_owner(state, company).await {
+    if let Some(owner) = local_owner(state, company, peer).await {
         return Ok(GqlAuth::User(owner));
     }
     if let Some(user) = resolve_session(headers, state, company).await {
