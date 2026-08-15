@@ -277,8 +277,13 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
         .registry()
         .insert(company_id.clone(), std::sync::Arc::new(runtime));
 
-    let app = crate::server::router(state);
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    // Through the one production serving path, not a bare `axum::serve` — this
+    // is where the `none`-mode local-owner peer and proxy-header gates are
+    // wired (see `serve_on`'s doc comment). Harmless today since this always
+    // binds loopback and nothing here sets `[users].mode = "none"`, but this
+    // function's name is the one someone will copy from, so it should not be
+    // the one place those guarantees are missing.
+    let server = tokio::spawn(crate::server::routes::serve_on(listener, state));
     Ok(DesktopRuntime {
         config: DesktopConfig {
             api_url: format!("http://{address}"),
