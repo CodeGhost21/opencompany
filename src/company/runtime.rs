@@ -18,6 +18,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
 use crate::Result;
+use crate::app::config::AuthMode;
 use crate::error::OpenCompanyError;
 use crate::feedback::service::{FeedbackFiler, FeedbackResponse};
 use crate::feedback::store::FeedbackStore;
@@ -205,6 +206,10 @@ pub struct CompanyRuntime {
     /// `skills/` and `workflows/` content. `None` in platform-provisioned mode
     /// (no source dir), where those resolvers degrade to manifest-derived/empty.
     pub(crate) source_dir: Option<PathBuf>,
+    /// How humans sign in to this company, resolved once at build from the
+    /// host-wide override and the manifest's `[users].mode`. Cached because it
+    /// is read on the request path — see [`Self::auth_mode`].
+    pub(crate) auth_mode: AuthMode,
     /// Issue #29: the workflow runner, when wired. Executes a company's workflow
     /// graphs on the embedded `tinyflows` engine (agent nodes on the harness
     /// pool). The port trait is default-compiled, so this field is always
@@ -376,6 +381,7 @@ impl CompanyRuntime {
             feedback,
             filer,
             source_dir: None,
+            auth_mode: AuthMode::default(),
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
@@ -409,6 +415,23 @@ impl CompanyRuntime {
     /// `None` in platform-provisioned mode.
     pub fn source_dir(&self) -> Option<&Path> {
         self.source_dir.as_deref()
+    }
+
+    /// Records how humans sign in to this company, resolved once by the
+    /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the host override
+    /// and the manifest's `[users].mode`.
+    pub fn set_auth_mode(&mut self, mode: AuthMode) {
+        self.auth_mode = mode;
+    }
+
+    /// How humans sign in to this company.
+    ///
+    /// Read on the request path — by the login routes, by the user-administration
+    /// routes, and by principal resolution — so it is a cached field rather than
+    /// a manifest read. It cannot change without a rebuild, which is what makes
+    /// caching it honest.
+    pub fn auth_mode(&self) -> AuthMode {
+        self.auth_mode
     }
 
     /// Issue #245: attach the repository manager after construction, wired by
