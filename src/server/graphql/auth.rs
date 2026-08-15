@@ -196,7 +196,7 @@ pub async fn resolve_principal(
     company: Option<&CompanyId>,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<GqlAuth, Unauthorized> {
-    if let Some(owner) = local_owner(state, company, peer).await {
+    if let Some(owner) = local_owner(state, company, peer, headers).await {
         return Ok(GqlAuth::User(owner));
     }
     if let Some(user) = resolve_session(headers, state, company).await {
