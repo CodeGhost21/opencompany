@@ -34,12 +34,36 @@
 //! need the header form.
 
 use async_graphql::ErrorExtensions;
+use axum::extract::FromRequestParts;
 use axum::http::HeaderMap;
+use axum::http::request::Parts;
 
 use crate::AppState;
 use crate::ports::types::CompanyId;
 use crate::ports::{UserRole, UserStatus};
 use crate::server::platform_auth::{PlatformClaims, bearer};
+
+/// The request's TCP peer, when [`axum::serve`] was wired with
+/// `into_make_service_with_connect_info` — `None` otherwise (an embedded
+/// caller with no real socket, or a test exercising a router directly). Unlike
+/// [`axum::extract::ConnectInfo`], never fails to extract: a handler naming
+/// this as a parameter works identically whether connect info is wired or not,
+/// which is what lets [`local_owner`]'s peer gate be additive rather than a
+/// hard requirement on every caller.
+pub(crate) struct MaybePeer(pub(crate) Option<std::net::SocketAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for MaybePeer {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(MaybePeer(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0),
+        ))
+    }
+}
 
 /// A human collaborator, authenticated by a session cookie.
 ///
