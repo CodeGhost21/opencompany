@@ -444,6 +444,41 @@ mod test {
         );
     }
 
+    /// `normalize_email` only lowercases and trims, so an email that happens to
+    /// start with `wallet:` or `local:` is a normalized key `parse` must still
+    /// read back as an email — not misparse into the other scheme just because
+    /// the prefix matches. A wallet remainder must actually be base58, and a
+    /// local remainder must be exactly `owner`.
+    #[test]
+    fn an_email_that_looks_like_a_scheme_prefix_still_parses_as_email() {
+        assert_eq!(
+            LoginIdentity::parse("wallet:ada@example.com"),
+            LoginIdentity::Email("wallet:ada@example.com".into())
+        );
+        assert_eq!(
+            LoginIdentity::parse("local:owner@example.com"),
+            LoginIdentity::Email("local:owner@example.com".into())
+        );
+        // The email path in `normalize_email` lowercases "Wallet:" to
+        // "wallet:", so the collision is real, not merely hypothetical.
+        assert_eq!(
+            normalize_email("Wallet:ada@example.com"),
+            "wallet:ada@example.com"
+        );
+    }
+
+    /// A stray `local:` key that is not exactly `local:owner` must not silently
+    /// merge into the one local-owner identity — that would collapse two
+    /// distinct stored records onto one key.
+    #[test]
+    fn a_local_prefixed_key_that_is_not_exactly_owner_is_not_local() {
+        assert_ne!(LoginIdentity::parse("local:attacker"), LoginIdentity::Local);
+        assert_eq!(
+            LoginIdentity::parse("local:attacker"),
+            LoginIdentity::Email("local:attacker".into())
+        );
+    }
+
     /// The guard that keeps `wallet:7xKX…` out of an SMTP envelope. Mail paths
     /// ask for a mailbox rather than reading the column, so the absence of one
     /// is a type, not a convention.
