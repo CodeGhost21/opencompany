@@ -283,7 +283,7 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
     // binds loopback and nothing here sets `[users].mode = "none"`, but this
     // function's name is the one someone will copy from, so it should not be
     // the one place those guarantees are missing.
-    let server = tokio::spawn(crate::server::routes::serve_on(listener, state));
+    let server = tokio::spawn(crate::server::serve_on(listener, state));
     Ok(DesktopRuntime {
         config: DesktopConfig {
             api_url: format!("http://{address}"),
