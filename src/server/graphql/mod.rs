@@ -118,11 +118,18 @@ impl QueryRoot {
 async fn graphql_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
+    // `None` when the caller has no real socket to name — an embedded caller,
+    // or a test exercising the router directly rather than through
+    // `axum::serve`'s accept loop. See
+    // `crate::server::graphql::auth::local_owner` for why that is additive
+    // rather than a refusal on its own.
+    let peer = peer.map(|axum::extract::ConnectInfo(addr)| addr);
     // `None`: the company a query addresses lives in the request body, which is
     // not available here, so a session cookie selects its own company by name.
-    let auth = match resolve_principal(&headers, &state, None).await {
+    let auth = match resolve_principal(&headers, &state, None, peer).await {
         Ok(auth) => auth,
         Err(_) => {
             let err = async_graphql::ServerError::new("unauthorized", None);
