@@ -32,18 +32,19 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
+use crate::app::config::AuthMode;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
 use crate::ports::{
-    InviteRecord, LoginCodeRecord, SessionKind, SessionRecord, UserRecord, UserRole, UserStatus,
-    generate_id, normalize_email, now_millis,
+    InviteRecord, LoginCodeRecord, LoginIdentity, SessionKind, SessionRecord, UserRecord, UserRole,
+    UserStatus, generate_id, normalize_email, normalize_wallet, now_millis,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::{GqlAuth, UserPrincipal, resolve_principal};
 use crate::server::ops::mailer::OutboundEmail;
 use crate::server::users::scope::{PublicCompany, public_scoped};
-use crate::server::users::{cookie, password, token};
+use crate::server::users::{cookie, password, token, wallet};
 use crate::{AppConfig, AppState};
 
 /// How long a manifest-bootstrapped admin invite stays redeemable once
@@ -66,8 +67,15 @@ const MANIFEST_INVITE_TTL_MILLIS: u64 = 30 * 24 * 60 * 60 * 1000;
 const RESEND_INTERVAL_MILLIS: u64 = 60 * 1000;
 
 /// Builds the user-auth route fragment.
+///
+/// Every route is mounted in every mode, and the ones a mode does not serve
+/// refuse with [`not_this_mode`] rather than being left off the router. A
+/// mounted-and-refusing route answers "this company does not sign in that way";
+/// an absent one answers `404 no such route`, which is indistinguishable from a
+/// version skew or a typo and would leave a client guessing.
 pub fn router() -> Router<AppState> {
-    public_scoped("/auth/request", post(request_code))
+    public_scoped("/auth/config", get(auth_config))
+        .merge(public_scoped("/auth/request", post(request_code)))
         .merge(public_scoped("/auth/verify", post(verify_code)))
         .merge(public_scoped("/auth/login", post(login_password)))
         .merge(public_scoped("/auth/logout", post(logout)))
@@ -77,6 +85,11 @@ pub fn router() -> Router<AppState> {
             get(hub_providers).post(hub_sign_in),
         ))
         .merge(public_scoped("/auth/password", post(set_password)))
+        .merge(public_scoped(
+            "/auth/wallet/challenge",
+            post(wallet_challenge),
+        ))
+        .merge(public_scoped("/auth/wallet/verify", post(wallet_verify)))
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +202,55 @@ pub(crate) fn no_session() -> Response {
         .into_response()
 }
 
+/// `409` for a login route this company's [`AuthMode`] does not serve.
+///
+/// It names the mode, which does **not** breach the generic-failure rule above:
+/// the rule protects who is on the roster, and the mode is a property of the
+/// deployment that [`auth_config`] already publishes to anonymous callers —
+/// because the console cannot draw a sign-in screen without knowing it.
+///
+/// `409` rather than `404` because the route exists and the request was
+/// well-formed; what is wrong is the state of the company it was aimed at. A
+/// `404` would be indistinguishable from a version skew and would send a client
+/// looking for a spelling mistake.
+pub(crate) fn not_this_mode(mode: AuthMode) -> Response {
+    let message = match mode {
+        AuthMode::Email => "this company signs in by email",
+        AuthMode::Wallet => "this company signs in with a wallet",
+        AuthMode::None => "this company has no sign-in — it is used from the app on this device",
+    };
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": message,
+            "code": "auth_mode",
+            "mode": mode.as_str(),
+        })),
+    )
+        .into_response()
+}
+
+/// The refusal to return when this company does not sign in over email, and
+/// `None` when it does.
+///
+/// `Option`, not `Result<(), Response>`: an axum `Response` is 128+ bytes and
+/// `clippy::result_large_err` is right that a guard whose success carries no
+/// value should not make every passing call pay the refusal's footprint. Same
+/// shape as the sibling guards in `ops::repos` and `ops::team`.
+pub(crate) fn wrong_mode_for_email(runtime: &CompanyRuntime) -> Option<Response> {
+    (!runtime.auth_mode().uses_email()).then(|| not_this_mode(runtime.auth_mode()))
+}
+
+/// The refusal to return when this company does not sign in with a wallet.
+fn wrong_mode_for_wallet(runtime: &CompanyRuntime) -> Option<Response> {
+    (runtime.auth_mode() != AuthMode::Wallet).then(|| not_this_mode(runtime.auth_mode()))
+}
+
+/// The refusal to return when this company has no sign-in at all.
+pub(crate) fn wrong_mode_for_login(runtime: &CompanyRuntime) -> Option<Response> {
+    (!runtime.auth_mode().has_login()).then(|| not_this_mode(runtime.auth_mode()))
+}
+
 // ---------------------------------------------------------------------------
 // Eligibility
 // ---------------------------------------------------------------------------
@@ -264,11 +326,18 @@ async fn eligibility(
         // as an unknown address.
         return Ok((user.status == UserStatus::Active).then_some(user.role));
     }
-    if bootstrap_admins(config, runtime)
-        .await?
-        .iter()
-        .any(|a| a == email)
-    {
+    // Which bootstrap list is consulted follows the sign-in mode, because the
+    // two name different things: `[users].admins` holds mailboxes and
+    // `[users].wallets` holds keys, and checking a wallet key against the email
+    // list would be checking it against addresses it can never equal. `none`
+    // mode has no bootstrap list at all — its single local owner is not
+    // eligibility, it is the absence of the question.
+    let bootstrapped = match runtime.auth_mode() {
+        AuthMode::Email => bootstrap_admins(config, runtime).await?,
+        AuthMode::Wallet => wallet::manifest_wallets(runtime).await?,
+        AuthMode::None => Vec::new(),
+    };
+    if bootstrapped.iter().any(|a| a == email) {
         return Ok(Some(UserRole::Admin));
     }
     let invite = runtime.users().find_invite_by_email(id, email).await?;
@@ -310,6 +379,45 @@ async fn upsert_from_eligibility(
         invite.accepted_at_millis = Some(now);
         runtime.users().upsert_invite(id, &invite).await?;
     }
+    Ok(user)
+}
+
+/// The single user of a company that has no sign-in, materialized on first use.
+///
+/// `none` mode has no eligibility question to answer — there is no invite list,
+/// no bootstrap list, and no second person to admit — so this deliberately does
+/// **not** go through [`eligibility`]. It is the one place a user record is
+/// created without anyone proving anything, and it can be, because the mode's
+/// premise is that whoever reaches this host is its owner.
+///
+/// Idempotent: the record is keyed by [`LoginIdentity::Local`], so every request
+/// after the first is a read. It is minted as an `Admin` because the person at
+/// the machine owns the company, and there is nobody for a lesser role to be
+/// distinguished from.
+pub(crate) async fn local_owner_record(
+    runtime: &CompanyRuntime,
+) -> Result<UserRecord, OpenCompanyError> {
+    let id = runtime.id();
+    let key = LoginIdentity::Local.key();
+    if let Some(user) = runtime.users().find_user_by_email(id, &key).await? {
+        return Ok(user);
+    }
+    let now = now_millis();
+    let user = UserRecord {
+        id: generate_id(),
+        email: key,
+        display_name: None,
+        role: UserRole::Admin,
+        status: UserStatus::Active,
+        // No password and no way to set one: `auth/password` refuses outside
+        // email mode, and there is no login for a password to guard.
+        password_hash: None,
+        must_change_password: false,
+        created_at_millis: now,
+        last_seen_at_millis: Some(now),
+        updated_at_millis: now,
+    };
+    runtime.users().upsert_user(id, &user).await?;
     Ok(user)
 }
 
@@ -433,8 +541,11 @@ async fn request_code(
     State(state): State<AppState>,
     Json(body): Json<RequestCode>,
 ) -> Result<Json<RequestCodeResult>, Response> {
-    let email = normalize_email(&body.email);
     let runtime = company.runtime.clone();
+    if let Some(refusal) = wrong_mode_for_email(&runtime) {
+        return Err(refusal);
+    }
+    let email = normalize_email(&body.email);
     let now = now_millis();
 
     let eligible = eligibility(state.config(), &runtime, &email, now)
@@ -605,6 +716,9 @@ async fn verify_code(
     Json(body): Json<VerifyCode>,
 ) -> Result<Response, Response> {
     let runtime = company.runtime.clone();
+    if let Some(refusal) = wrong_mode_for_email(&runtime) {
+        return Err(refusal);
+    }
     let now = now_millis();
     // Single use is the store's guarantee, not a check here: `consume` matches
     // and marks atomically, so two requests racing on one link cannot both win.
@@ -680,7 +794,12 @@ async fn hub_providers(
     // honest button to offer. Refusing here — rather than at redemption — is
     // the difference between a console that says "sign in with a link" and one
     // that sends someone through Google to be turned away on return.
-    if state.hub_identity().is_none() {
+    // A hub sign-in resolves to an email address and applies this company's
+    // email roster, so it is a variety of email sign-in and belongs to that mode
+    // alone. Offering the buttons in wallet or none mode would send someone
+    // through Google to be refused on return — the same thing the two guards
+    // below refuse to do for their own reasons.
+    if !company.runtime.auth_mode().uses_email() || state.hub_identity().is_none() {
         return Json(HubProvidersResult {
             providers: Vec::new(),
         });
@@ -743,6 +862,9 @@ async fn hub_sign_in(
     Json(body): Json<HubToken>,
 ) -> Result<Response, Response> {
     let runtime = company.runtime.clone();
+    if let Some(refusal) = wrong_mode_for_email(&runtime) {
+        return Err(refusal);
+    }
 
     // Refuse before going anywhere when this host has no hub to ask. Accepting
     // the token on trust would make an unverifiable JWT a bearer credential.
@@ -801,6 +923,9 @@ async fn login_password(
     Json(body): Json<LoginPassword>,
 ) -> Result<Response, Response> {
     let runtime = company.runtime.clone();
+    if let Some(refusal) = wrong_mode_for_email(&runtime) {
+        return Err(refusal);
+    }
     let email = normalize_email(&body.email);
     let now = now_millis();
 
@@ -843,6 +968,13 @@ async fn logout(
     headers: HeaderMap,
 ) -> Result<Response, Response> {
     let runtime = company.runtime.clone();
+    // Nothing to revoke where nothing was minted. A `none`-mode principal is
+    // resolved from the request, not from a stored session, so "log out" has no
+    // meaning there and quietly succeeding would tell the console it had signed
+    // someone out when the very next request is authenticated again.
+    if let Some(refusal) = wrong_mode_for_login(&runtime) {
+        return Err(refusal);
+    }
     let insecure = !state.config().host_base_url().starts_with("https://");
     let Some(name) = cookie::session_cookie_name(runtime.id()) else {
         return Err(no_session());
@@ -898,6 +1030,12 @@ async fn set_password(
     Json(body): Json<SetPassword>,
 ) -> Result<Json<MeResult>, Response> {
     let runtime = company.runtime.clone();
+    // A password is an alternative to a mailbox round trip, so it only exists
+    // where the mailbox does. In wallet mode the key is the credential; in
+    // `none` mode there is nobody to distinguish from anybody.
+    if let Some(refusal) = wrong_mode_for_email(&runtime) {
+        return Err(refusal);
+    }
     let Some(principal) = current_user(&headers, &state, runtime.id()).await else {
         return Err(no_session());
     };
@@ -938,6 +1076,134 @@ async fn set_password(
         }
     }
     Ok(Json(me_result(runtime.id(), &user)))
+}
+
+// ---------------------------------------------------------------------------
+// Wallet sign-in
+// ---------------------------------------------------------------------------
+
+/// `POST …/auth/wallet/challenge` — mint a nonce for a wallet to sign.
+///
+/// Always `200` with a challenge, for every syntactically valid address — the
+/// generic-failure rule, one step earlier than the magic link needs it. A route
+/// that answered "no challenge for you" would be a membership oracle for the
+/// company's wallet roster, and a wallet address is public, so an attacker
+/// probing one has nothing to lose.
+///
+/// An **ineligible** address gets a challenge that is never persisted. It is
+/// well-formed, it is signable, and answering it fails with the same
+/// `invalid_login` a bad signature gets. That also keeps an anonymous caller
+/// from filling the code table by naming addresses at random.
+async fn wallet_challenge(
+    company: PublicCompany,
+    State(state): State<AppState>,
+    Json(body): Json<wallet::ChallengeRequest>,
+) -> Result<Json<wallet::ChallengeResult>, Response> {
+    let runtime = company.runtime.clone();
+    if let Some(refusal) = wrong_mode_for_wallet(&runtime) {
+        return Err(refusal);
+    }
+    let now = now_millis();
+
+    // A malformed address cannot be told apart from an unknown one: both get a
+    // challenge shaped exactly like a real one, minted against the address as
+    // the caller typed it.
+    let Some(address) = wallet::parse_wallet_address(&body.address) else {
+        return Ok(Json(wallet::unpersisted_challenge(
+            runtime.id(),
+            &normalize_wallet(&body.address),
+            now,
+        )));
+    };
+
+    let identity = LoginIdentity::Wallet(address.clone()).key();
+    let eligible = eligibility(state.config(), &runtime, &identity, now)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
+    if eligible.is_none() {
+        return Ok(Json(wallet::unpersisted_challenge(
+            runtime.id(),
+            &address,
+            now,
+        )));
+    }
+
+    wallet::issue_challenge(&runtime, &token::OsTokens, &address, now)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError(e).into_response())
+}
+
+/// `POST …/auth/wallet/verify` — answer a challenge and receive a session.
+///
+/// The same three calls the magic-link path makes once identity is settled —
+/// [`eligibility`], [`upsert_from_eligibility`], [`mint_session`] — so first
+/// sign-in and Nth sign-in are one code path and a wallet gets no privilege a
+/// mailed link would not have given the same person.
+async fn wallet_verify(
+    company: PublicCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<wallet::VerifyRequest>,
+) -> Result<Response, Response> {
+    let runtime = company.runtime.clone();
+    if let Some(refusal) = wrong_mode_for_wallet(&runtime) {
+        return Err(refusal);
+    }
+    let now = now_millis();
+
+    let Some(address) = wallet::verify_challenge(&runtime, &body, now).await else {
+        return Err(invalid_login());
+    };
+
+    // The address comes from the challenge record, never from this request, so
+    // eligibility is re-checked against the wallet that actually signed.
+    let identity = LoginIdentity::Wallet(address).key();
+    let Some(role) = eligibility(state.config(), &runtime, &identity, now)
+        .await
+        .map_err(|e| ApiError(e).into_response())?
+    else {
+        // Eligibility can lapse between the challenge and the answer.
+        return Err(invalid_login());
+    };
+    let user = upsert_from_eligibility(&runtime, &identity, role, now)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
+    mint_session(&state, &runtime, &user, &headers).await
+}
+
+// ---------------------------------------------------------------------------
+// What this company's sign-in screen looks like
+// ---------------------------------------------------------------------------
+
+/// What the console needs before it can draw a sign-in screen.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthConfigResult {
+    /// `email` | `wallet` | `none`.
+    mode: &'static str,
+    /// Whether a password may be offered alongside the magic-link form. Only
+    /// ever true in `email` mode.
+    passwords: bool,
+}
+
+/// `GET …/auth/config` — the sign-in mode this company uses.
+///
+/// Unauthenticated by construction, like every other login route: the console
+/// asks this *before* anyone has a credential, because it cannot draw the screen
+/// otherwise. Publishing the mode discloses nothing about who is on the roster —
+/// it is a property of the deployment, and a caller can already infer it from
+/// which routes answer.
+///
+/// The console must branch on this rather than on which routes 404, so that a
+/// company with no sign-in renders "open the desktop app" instead of an email
+/// box that can never work.
+async fn auth_config(company: PublicCompany) -> Json<AuthConfigResult> {
+    let mode = company.runtime.auth_mode();
+    Json(AuthConfigResult {
+        mode: mode.as_str(),
+        passwords: mode.uses_email(),
+    })
 }
 
 /// The user behind this request's session cookie, if any.

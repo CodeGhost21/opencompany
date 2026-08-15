@@ -167,10 +167,63 @@ pub async fn resolve_principal(
     state: &AppState,
     company: Option<&CompanyId>,
 ) -> Result<GqlAuth, Unauthorized> {
+    if let Some(owner) = local_owner(state, company).await {
+        return Ok(GqlAuth::User(owner));
+    }
     if let Some(user) = resolve_session(headers, state, company).await {
         return Ok(GqlAuth::User(user));
     }
     resolve_claims(headers, state)
+}
+
+/// The implicit owner of a company whose [`AuthMode`] is `None`, if that is what
+/// this request addresses.
+///
+/// `None` mode is the packaged desktop app: a loopback host, one person, no
+/// sign-in. There is no credential to present, so the principal is not resolved
+/// *from* the request at all — everything that reaches this company is that one
+/// person, by configuration.
+///
+/// It is still a real [`UserRecord`], materialized on first use, rather than a
+/// principal invented per request. Chat attribution, task assignment, the audit
+/// trail and the admin surfaces all key off
+/// [`UserRecord::id`](crate::ports::UserRecord), and a synthetic id that no store
+/// row backs would come apart at the first one of them that looked the user up.
+///
+/// This is checked **before** the session and bearer paths, and that order is
+/// the point: in `none` mode there is no session to find and no bearer to
+/// verify, so falling through would produce an unauthenticated request against a
+/// host whose whole premise is that its only caller is its owner.
+async fn local_owner(state: &AppState, company: Option<&CompanyId>) -> Option<UserPrincipal> {
+    // With no addressed company (the GraphQL handler, whose company argument is
+    // in the request body) fall back to the sole registered one. A `none`-mode
+    // host serves exactly one company — that is what the desktop app is — so
+    // there is no second candidate to guess between.
+    let runtime = match company {
+        Some(id) => state.registry().get(id)?,
+        None => state.registry().sole()?,
+    };
+    if runtime.auth_mode().has_login() {
+        return None;
+    }
+    let user = crate::server::users::routes::local_owner_record(&runtime)
+        .await
+        .ok()?;
+    Some(UserPrincipal {
+        company: runtime.id().clone(),
+        user_id: user.id,
+        email: user.email,
+        role: user.role,
+        // No admin can set a temporary password here — there is no admin but
+        // this person, and no password at all.
+        must_change_password: false,
+        // No session was presented and none exists, so there is nothing for
+        // logout to revoke. The logout route refuses in this mode rather than
+        // pretending, which is why an empty hash cannot silently match a real
+        // session: no lookup is ever made with it.
+        session_token_hash: String::new(),
+        credential: crate::ports::SessionKind::Browser,
+    })
 }
 
 /// Resolves a session — from either carrier — to a live user, or `None`.

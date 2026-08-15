@@ -1,0 +1,497 @@
+//! End-to-end tests for the three sign-in modes.
+//!
+//! The mode is configuration, and configuration that silently does not take
+//! effect is the failure this file exists to prevent. Three properties matter
+//! more than the happy paths:
+//!
+//! 1. **A mode's routes are the only ones that answer.** A wallet company must
+//!    not also accept a magic link, or the roster has a second door nobody
+//!    configured. A `none` company must not accept either.
+//! 2. **`none` really admits somebody.** A mode that turns the login off and
+//!    then leaves every request unauthenticated is not "no sign-in", it is a
+//!    bricked console — and it would look identical from the outside.
+//! 3. **A wallet signature is checked against the challenge the host issued**,
+//!    not against anything the caller supplied.
+
+use std::sync::Arc;
+
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode};
+use ed25519_dalek::{Signer as _, SigningKey};
+use tower::ServiceExt;
+
+use crate::app::config::AuthMode;
+use crate::company::CompanyManifest;
+use crate::ports::CompanyStore;
+use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::runtime::RuntimeBuilder;
+use crate::server::router;
+use crate::{AppConfig, AppState};
+
+fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("oc-authmode-")
+        .tempdir()
+        .expect("tempdir")
+}
+
+/// A wallet keypair, from a fixed seed so a failure is reproducible.
+fn wallet(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
+}
+
+fn address(key: &SigningKey) -> String {
+    bs58::encode(key.verifying_key().to_bytes()).into_string()
+}
+
+/// Builds a host serving one company in `mode`, bootstrapping `bootstrap` as an
+/// admin through whichever manifest list that mode reads.
+async fn state_in_mode(
+    home: &std::path::Path,
+    mode: AuthMode,
+    bootstrap: Option<&str>,
+) -> AppState {
+    let toml_src = match (mode, bootstrap) {
+        (AuthMode::Email, Some(who)) => {
+            format!("[company]\nname = \"Acme\"\n[users]\nmode = \"email\"\nadmins = [\"{who}\"]\n")
+        }
+        (AuthMode::Wallet, Some(who)) => {
+            format!(
+                "[company]\nname = \"Acme\"\n[users]\nmode = \"wallet\"\nwallets = [\"{who}\"]\n"
+            )
+        }
+        (mode, _) => format!(
+            "[company]\nname = \"Acme\"\n[users]\nmode = \"{}\"\n",
+            mode.as_str()
+        ),
+    };
+    let manifest: CompanyManifest = toml::from_str(&toml_src).expect("valid manifest");
+    assert!(
+        manifest.validate().is_empty(),
+        "the test manifest must be valid: {:?}",
+        manifest.validate()
+    );
+
+    let store = crate::store::FsCompanyStore::new(home.to_path_buf());
+    let id = CompanyId::new("acme");
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    state.registry().insert(id, Arc::new(runtime));
+    state
+}
+
+fn post(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn get(uri: &str) -> Request<Body> {
+    Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+async fn body_json(response: axum::response::Response) -> serde_json::Value {
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// What the console is told
+// ---------------------------------------------------------------------------
+
+/// The console cannot draw a sign-in screen without this, and it must be able to
+/// ask before it has any credential.
+#[tokio::test]
+async fn auth_config_publishes_the_mode_to_an_anonymous_caller() {
+    for (mode, passwords) in [
+        (AuthMode::Email, true),
+        (AuthMode::Wallet, false),
+        (AuthMode::None, false),
+    ] {
+        let dir = home();
+        let state = state_in_mode(dir.path(), mode, None).await;
+        let response = router(state)
+            .oneshot(get("/api/v1/company/auth/config"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{mode}");
+        let body = body_json(response).await;
+        assert_eq!(body["mode"], mode.as_str(), "{mode}");
+        assert_eq!(body["passwords"], passwords, "{mode}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One mode, one door
+// ---------------------------------------------------------------------------
+
+/// A wallet company has no magic link, no password login, and no hub buttons.
+/// Each would be a second way onto the roster that nobody configured.
+#[tokio::test]
+async fn a_wallet_company_refuses_every_email_route() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::Wallet, None).await;
+    let app = router(state);
+
+    for request in [
+        post(
+            "/api/v1/company/auth/request",
+            serde_json::json!({"email": "ada@example.com"}),
+        ),
+        post(
+            "/api/v1/company/auth/verify",
+            serde_json::json!({"code": "x"}),
+        ),
+        post(
+            "/api/v1/company/auth/login",
+            serde_json::json!({"email": "ada@example.com", "password": "hunter2hunter2"}),
+        ),
+    ] {
+        let uri = request.uri().to_string();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{uri}");
+        let body = body_json(response).await;
+        assert_eq!(body["code"], "auth_mode", "{uri}");
+        // The refusal names the mode, so a console that got here can correct
+        // itself rather than telling somebody their address was wrong.
+        assert_eq!(body["mode"], "wallet", "{uri}");
+    }
+
+    // No ecosystem buttons either — a hub sign-in resolves to an email address
+    // and would apply an email roster this company does not have.
+    let response = router(state_in_mode(dir.path(), AuthMode::Wallet, None).await)
+        .oneshot(get("/api/v1/company/auth/hub"))
+        .await
+        .unwrap();
+    assert_eq!(
+        body_json(response).await["providers"],
+        serde_json::json!([])
+    );
+}
+
+/// An email company has no wallet door.
+#[tokio::test]
+async fn an_email_company_refuses_the_wallet_routes() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::Email, None).await;
+    let response = router(state)
+        .oneshot(post(
+            "/api/v1/company/auth/wallet/challenge",
+            serde_json::json!({"address": address(&wallet(1))}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(body_json(response).await["mode"], "email");
+}
+
+// ---------------------------------------------------------------------------
+// Wallet sign-in
+// ---------------------------------------------------------------------------
+
+/// The whole flow: challenge, sign, session. The signature is produced by a real
+/// Ed25519 key over the exact bytes the host handed back, which is what a
+/// browser wallet does.
+#[tokio::test]
+async fn a_bootstrapped_wallet_signs_in() {
+    let dir = home();
+    let key = wallet(3);
+    let addr = address(&key);
+    let app = router(state_in_mode(dir.path(), AuthMode::Wallet, Some(&addr)).await);
+
+    let challenge = body_json(
+        app.clone()
+            .oneshot(post(
+                "/api/v1/company/auth/wallet/challenge",
+                serde_json::json!({"address": addr}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let message = challenge["message"].as_str().unwrap();
+    // The layout is the host's and is versioned by its first line; a console
+    // must sign it verbatim rather than rebuilding it.
+    assert!(
+        message.starts_with("opencompany-wallet-login-v1\nacme\n"),
+        "{message}"
+    );
+    assert!(message.contains(&addr), "the address is bound: {message}");
+
+    let signature = bs58::encode(key.sign(message.as_bytes()).to_bytes()).into_string();
+    let response = app
+        .oneshot(post(
+            "/api/v1/company/auth/wallet/verify",
+            serde_json::json!({"nonce": challenge["nonce"], "signature": signature}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        set_cookie.contains("oc_session_acme=") && set_cookie.contains("HttpOnly"),
+        "a wallet sign-in mints the same ordinary session a link does: {set_cookie}"
+    );
+    let me = body_json(response).await;
+    // The identity is stored scheme-prefixed, so it can never collide with an
+    // email in the same column.
+    assert_eq!(me["email"], format!("wallet:{addr}"));
+    assert_eq!(me["role"], "admin");
+}
+
+/// A nonce is good exactly once. The store consumes it atomically, so a captured
+/// request cannot be replayed.
+#[tokio::test]
+async fn a_challenge_cannot_be_answered_twice() {
+    let dir = home();
+    let key = wallet(4);
+    let addr = address(&key);
+    let app = router(state_in_mode(dir.path(), AuthMode::Wallet, Some(&addr)).await);
+
+    let challenge = body_json(
+        app.clone()
+            .oneshot(post(
+                "/api/v1/company/auth/wallet/challenge",
+                serde_json::json!({"address": addr}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let signature = bs58::encode(
+        key.sign(challenge["message"].as_str().unwrap().as_bytes())
+            .to_bytes(),
+    )
+    .into_string();
+    let answer = serde_json::json!({"nonce": challenge["nonce"], "signature": signature});
+
+    let first = app
+        .clone()
+        .oneshot(post("/api/v1/company/auth/wallet/verify", answer.clone()))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let replay = app
+        .oneshot(post("/api/v1/company/auth/wallet/verify", answer))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(replay).await["code"], "invalid_login");
+}
+
+/// A wallet that is not on the roster gets a challenge shaped exactly like a
+/// real one — the route must not be a membership oracle — and it verifies as
+/// nothing.
+#[tokio::test]
+async fn an_uninvited_wallet_gets_a_challenge_that_does_not_work() {
+    let dir = home();
+    let invited = wallet(5);
+    let stranger = wallet(6);
+    let app = router(state_in_mode(dir.path(), AuthMode::Wallet, Some(&address(&invited))).await);
+
+    let challenge = body_json(
+        app.clone()
+            .oneshot(post(
+                "/api/v1/company/auth/wallet/challenge",
+                serde_json::json!({"address": address(&stranger)}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    // Indistinguishable from an invited wallet's challenge.
+    assert!(challenge["nonce"].as_str().is_some_and(|n| !n.is_empty()));
+    assert!(
+        challenge["message"]
+            .as_str()
+            .unwrap()
+            .contains(&address(&stranger))
+    );
+
+    let signature = bs58::encode(
+        stranger
+            .sign(challenge["message"].as_str().unwrap().as_bytes())
+            .to_bytes(),
+    )
+    .into_string();
+    let response = app
+        .oneshot(post(
+            "/api/v1/company/auth/wallet/verify",
+            serde_json::json!({"nonce": challenge["nonce"], "signature": signature}),
+        ))
+        .await
+        .unwrap();
+    // The same failure a forged signature gets. Nothing distinguishes "not on
+    // the roster" from "that is not your key".
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(body_json(response).await["code"], "invalid_login");
+}
+
+/// The address is taken from the stored challenge, never from the request, so a
+/// wallet cannot answer a challenge issued to another one.
+#[tokio::test]
+async fn another_wallets_signature_does_not_answer_the_challenge() {
+    let dir = home();
+    let invited = wallet(7);
+    let impostor = wallet(8);
+    let addr = address(&invited);
+    let app = router(state_in_mode(dir.path(), AuthMode::Wallet, Some(&addr)).await);
+
+    let challenge = body_json(
+        app.clone()
+            .oneshot(post(
+                "/api/v1/company/auth/wallet/challenge",
+                serde_json::json!({"address": addr}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    // A perfectly valid signature — over the right bytes, by the wrong key.
+    let signature = bs58::encode(
+        impostor
+            .sign(challenge["message"].as_str().unwrap().as_bytes())
+            .to_bytes(),
+    )
+    .into_string();
+
+    let response = app
+        .oneshot(post(
+            "/api/v1/company/auth/wallet/verify",
+            serde_json::json!({"nonce": challenge["nonce"], "signature": signature}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// No sign-in at all
+// ---------------------------------------------------------------------------
+
+/// The point of the mode: a request carrying no credential is the owner. If this
+/// failed, `none` would not be "no sign-in", it would be a console nobody can
+/// use — and the two look identical from outside.
+#[tokio::test]
+async fn none_mode_serves_the_local_owner_with_no_credential() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let response = router(state)
+        .oneshot(get("/api/v1/company/auth/me"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let me = body_json(response).await;
+    assert_eq!(me["email"], "local:owner");
+    // The person at the machine owns the company; there is nobody for a lesser
+    // role to be distinguished from.
+    assert_eq!(me["role"], "admin");
+}
+
+/// The owner is one durable record, not a principal invented per request —
+/// chat attribution and the task board key off the user id.
+#[tokio::test]
+async fn the_local_owner_is_the_same_person_on_every_request() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let app = router(state);
+
+    let first = body_json(
+        app.clone()
+            .oneshot(get("/api/v1/company/auth/me"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let second = body_json(app.oneshot(get("/api/v1/company/auth/me")).await.unwrap()).await;
+    assert_eq!(first["id"], second["id"]);
+    assert!(first["id"].as_str().is_some_and(|id| !id.is_empty()));
+}
+
+/// `none` cannot add users. An invite would grant an account nobody could ever
+/// reach, because there is no sign-in to reach it through.
+#[tokio::test]
+async fn none_mode_admits_nobody_else() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let app = router(state);
+
+    let response = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/company/users/invites",
+            serde_json::json!({"email": "ada@example.com", "role": "member"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = body_json(response).await;
+    assert_eq!(body["code"], "auth_mode");
+    assert_eq!(body["mode"], "none");
+
+    // And no login route to reach such an account through, had one existed.
+    for request in [
+        post(
+            "/api/v1/company/auth/request",
+            serde_json::json!({"email": "ada@example.com"}),
+        ),
+        post(
+            "/api/v1/company/auth/wallet/challenge",
+            serde_json::json!({"address": address(&wallet(9))}),
+        ),
+        post("/api/v1/company/auth/logout", serde_json::json!({})),
+    ] {
+        let uri = request.uri().to_string();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{uri}");
+    }
+}
+
+/// The host's own answer beats the manifest's. A packaged desktop build and a
+/// hosting platform both need to guarantee a mode whatever a company says.
+#[tokio::test]
+async fn the_host_override_beats_the_manifest() {
+    let dir = home();
+    let manifest: CompanyManifest =
+        toml::from_str("[company]\nname = \"Acme\"\n[users]\nmode = \"email\"\n").unwrap();
+    let runtime = RuntimeBuilder::new(dir.path().to_path_buf(), manifest)
+        .with_id(CompanyId::new("acme"))
+        .with_auth_mode_override(Some(AuthMode::None))
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(runtime.auth_mode(), AuthMode::None);
+}

@@ -22,10 +22,12 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::app::config::AuthMode;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::{
-    InviteRecord, UserRecord, UserRole, UserStatus, generate_id, normalize_email, now_millis,
+    InviteRecord, LoginIdentity, UserRecord, UserRole, UserStatus, decode_wallet_address,
+    generate_id, normalize_email, normalize_wallet, now_millis,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::UserPrincipal;
@@ -59,6 +61,20 @@ pub fn router() -> Router<AppState> {
             "/users/{user_id}/sessions",
             delete(revoke_sessions),
         ))
+}
+
+/// Refuses a user-administration route on a company that has no sign-in.
+///
+/// `none` mode admits exactly one person — whoever is at the machine — and has
+/// no way to tell a second one apart. Every route that would add, re-role,
+/// suspend or re-credential somebody is therefore refused outright rather than
+/// left to write records that can never be reached. Listing stays available:
+/// showing the one local owner is honest, and an empty screen would not be.
+///
+/// `Option`, not `Result<(), Response>`, for the reason given on
+/// [`wrong_mode_for_email`](crate::server::users::routes::wrong_mode_for_email).
+fn wrong_mode_for_admin(runtime: &CompanyRuntime) -> Option<Response> {
+    crate::server::users::routes::wrong_mode_for_login(runtime)
 }
 
 /// `403` for an authenticated non-admin.
@@ -188,11 +204,58 @@ async fn list_invites(
     Ok(Json(invites))
 }
 
-#[derive(Debug, Deserialize)]
+/// Who to invite.
+///
+/// The identifier field follows the company's [`AuthMode`]: `email` in email
+/// mode, `wallet` in wallet mode. Two named fields rather than one polymorphic
+/// one, because they are normalized by different rules — an address is
+/// lowercased, a base58 key must not be — and a single field would have to
+/// guess which rule applies to what was typed.
+#[derive(Debug, Default, Deserialize)]
 struct InviteBody {
+    #[serde(default)]
     email: String,
     #[serde(default)]
+    wallet: String,
+    #[serde(default)]
     role: UserRole,
+}
+
+impl InviteBody {
+    /// The [`LoginIdentity`] key this invite grants, validated for `mode`.
+    ///
+    /// The error is prosumer-facing and safe to render: this route is
+    /// admin-authenticated and the caller supplied the value, so unlike the
+    /// login routes there is nothing here they could learn from a specific
+    /// message that they did not already know.
+    fn identity(&self, mode: AuthMode) -> Result<String, OpenCompanyError> {
+        match mode {
+            AuthMode::Email => {
+                let email = normalize_email(&self.email);
+                if email.is_empty() || !email.contains('@') {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "that doesn't look like an email address".to_string(),
+                    ));
+                }
+                Ok(LoginIdentity::Email(email).key())
+            }
+            AuthMode::Wallet => {
+                let wallet = normalize_wallet(&self.wallet);
+                // Decoded, not merely non-empty: an address that cannot be
+                // decoded can never verify a signature, so accepting it would
+                // write a grant that is unusable by construction and looks live
+                // on the roster.
+                decode_wallet_address(&wallet)?;
+                Ok(LoginIdentity::Wallet(wallet).key())
+            }
+            // Unreachable — the route refuses before asking — but answered
+            // rather than panicked, so a later caller cannot turn a missed guard
+            // into a crash.
+            AuthMode::None => Err(OpenCompanyError::InvalidRequest(
+                "this company has no sign-in, so nobody can be invited".to_string(),
+            )),
+        }
+    }
 }
 
 /// What actually happened to the invite mail (issue #584).
@@ -212,6 +275,10 @@ enum InviteDelivery {
     NoTransport,
     /// A transport was wired and refused the message.
     Failed,
+    /// This identity has no mailbox to write to — a wallet invite. Not a
+    /// failure and not a missing transport: there was never a message to send,
+    /// and the console says so rather than implying an outage.
+    NoMailbox,
 }
 
 /// The invite, plus what happened to the mail.
@@ -244,6 +311,12 @@ async fn send_invite_mail(
     invite: &InviteRecord,
     inviter: &str,
 ) -> InviteDelivery {
+    // A wallet identity has no mailbox. Asked of the identity rather than of the
+    // mode, so this cannot be reached with an address that only looks like one:
+    // `LoginIdentity::mailbox` is `None` for everything that is not an email.
+    if LoginIdentity::parse(&invite.email).mailbox().is_none() {
+        return InviteDelivery::NoMailbox;
+    }
     if !mail_transport_wired(state) {
         return InviteDelivery::NoTransport;
     }
@@ -312,30 +385,34 @@ async fn invite(
     Json(body): Json<InviteBody>,
 ) -> Result<Json<InviteResult>, Response> {
     let runtime = company.runtime.clone();
-    let admin = require_admin(&headers, &state, &runtime).await?;
-    let email = normalize_email(&body.email);
-    if email.is_empty() || !email.contains('@') {
-        return Err(ApiError(OpenCompanyError::InvalidRequest(
-            "that doesn't look like an email address".to_string(),
-        ))
-        .into_response());
+    // Refused before authenticating the caller is checked, because the answer
+    // does not depend on who is asking: a company with no sign-in has no second
+    // person to admit, and an invite would grant an account nobody could ever
+    // reach. See `AuthMode::None`.
+    if let Some(refusal) = wrong_mode_for_admin(&runtime) {
+        return Err(refusal);
     }
+    let admin = require_admin(&headers, &state, &runtime).await?;
+    let identity = body
+        .identity(runtime.auth_mode())
+        .map_err(|e| ApiError(e).into_response())?;
     let now = now_millis();
     if runtime
         .users()
-        .find_user_by_email(runtime.id(), &email)
+        .find_user_by_email(runtime.id(), &identity)
         .await
         .map_err(|e| ApiError(e).into_response())?
         .is_some()
     {
         return Err(ApiError(OpenCompanyError::Conflict(format!(
-            "{email} is already a member"
+            "{} is already a member",
+            LoginIdentity::parse(&identity).label()
         )))
         .into_response());
     }
     let mut record = InviteRecord {
         id: generate_id(),
-        email,
+        email: identity,
         role: body.role,
         invited_by: admin.user_id.clone(),
         created_at_millis: now,
@@ -397,6 +474,9 @@ async fn revoke_invite(
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, Response> {
     let runtime = company.runtime.clone();
+    if let Some(refusal) = wrong_mode_for_admin(&runtime) {
+        return Err(refusal);
+    }
     require_admin(&headers, &state, &runtime).await?;
     let invite_id = params.get("invite_id").cloned().unwrap_or_default();
     // A bootstrapped admin has no stored invite; revoking it would be a lie,
@@ -445,6 +525,9 @@ async fn update_user(
     Json(body): Json<UpdateUser>,
 ) -> Result<Json<UserSummary>, Response> {
     let runtime = company.runtime.clone();
+    if let Some(refusal) = wrong_mode_for_admin(&runtime) {
+        return Err(refusal);
+    }
     require_admin(&headers, &state, &runtime).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
     let mut user = load_user(&runtime, &user_id).await?;
@@ -505,6 +588,13 @@ async fn reset_password(
     Json(body): Json<ResetPassword>,
 ) -> Result<Json<UserSummary>, Response> {
     let runtime = company.runtime.clone();
+    // A password is an alternative to a mailbox round trip, so it exists only
+    // where the mailbox does. Issuing one in wallet mode would create a
+    // credential no route accepts; in `none` mode there is nobody to issue it
+    // to.
+    if let Some(refusal) = crate::server::users::routes::wrong_mode_for_email(&runtime) {
+        return Err(refusal);
+    }
     require_admin(&headers, &state, &runtime).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
     let mut user = load_user(&runtime, &user_id).await?;
@@ -542,6 +632,12 @@ async fn revoke_sessions(
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, Response> {
     let runtime = company.runtime.clone();
+    // Nothing to revoke: a `none`-mode principal is resolved from configuration
+    // on every request, so there is no session whose deletion would sign anyone
+    // out. Succeeding would report a lever that does not exist.
+    if let Some(refusal) = wrong_mode_for_admin(&runtime) {
+        return Err(refusal);
+    }
     require_admin(&headers, &state, &runtime).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
     let user = load_user(&runtime, &user_id).await?;
