@@ -235,13 +235,22 @@ for the others:
    that lands `none` mode on a routable bind some other way.
 3. **Per request, proxy-forwarding headers.** `local_owner` also refuses
    `X-Forwarded-For`, `X-Forwarded-Host`, RFC 7239 `Forwarded`, or `X-Real-IP`
-   (not RFC 7239, but a common `nginx` recipe sets it). This is the
-   gate the peer check cannot be: a same-host reverse proxy connects to a
+   (not RFC 7239, but a common `nginx` recipe sets it). This is the gate the
+   peer check cannot be: a same-host reverse proxy connects to a
    loopback-bound listener over loopback too, so the peer this process
    observes always reads as loopback no matter where the proxy's own caller
-   was. An *undeclared* proxy in front of an otherwise-correctly-loopback-bound
-   host — the likeliest way to end up exposed by accident, since gate 1 never
-   ran against it — is exactly what this catches.
+   was. An *undeclared* proxy that forwards one of these four headers — the
+   default behavior of every common reverse proxy — is what this catches.
+
+   **What it does not catch:** a proxy specifically configured to strip all
+   four before forwarding is indistinguishable, by header content, from no
+   proxy at all. Detecting that case needs a trusted-proxy boundary (a
+   configured allow-list of proxy peers whose headers are trusted, and a
+   refusal of anyone else's) — a real feature, not a one-line addition, and
+   not implemented here. This gate's actual guarantee is narrower than "no
+   proxy can bypass it": it catches every reverse proxy using its own
+   defaults, and does not catch one an operator has deliberately hardened
+   against detection.
 
 When neither of the per-request signals is available (an embedded caller with
 no real socket and nothing forwarding for it, or a test), neither refuses on
