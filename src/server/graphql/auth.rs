@@ -199,7 +199,22 @@ pub async fn resolve_principal(
 /// the point: in `none` mode there is no session to find and no bearer to
 /// verify, so falling through would produce an unauthenticated request against a
 /// host whose whole premise is that its only caller is its owner.
-async fn local_owner(state: &AppState, company: Option<&CompanyId>) -> Option<UserPrincipal> {
+///
+/// `peer` is a second gate, independent of the bind-time refusal
+/// ([`serve_on`](crate::server::routes::serve_on)): that refusal is a
+/// deployment-time statement about the *configured* bind, and does not cover
+/// every way a request could still reach here from somewhere the operator did
+/// not intend — a bug in a future registration path, for one. When the caller
+/// can name the request's TCP peer, a non-loopback one is refused here too,
+/// regardless of what the bind guard already decided. When it cannot (an
+/// embedded caller with no real socket, or a test), this does not itself
+/// refuse — the bind-time guard is still the one that ran, and this is
+/// additive to it, not a replacement.
+pub(crate) async fn local_owner(
+    state: &AppState,
+    company: Option<&CompanyId>,
+    peer: Option<std::net::SocketAddr>,
+) -> Option<UserPrincipal> {
     // With no addressed company (the GraphQL handler, whose company argument is
     // in the request body) fall back to the sole registered one. A `none`-mode
     // host serves exactly one company — that is what the desktop app is — so
@@ -211,9 +226,33 @@ async fn local_owner(state: &AppState, company: Option<&CompanyId>) -> Option<Us
     if runtime.auth_mode().has_login() {
         return None;
     }
-    let user = crate::server::users::routes::local_owner_record(&runtime)
-        .await
-        .ok()?;
+    if let Some(peer) = peer
+        && !peer.ip().is_loopback()
+    {
+        tracing::warn!(
+            company = %runtime.id(),
+            peer = %peer,
+            "refused to resolve the none-mode local owner for a non-loopback peer"
+        );
+        return None;
+    }
+    let user = match crate::server::users::routes::local_owner_record(&runtime).await {
+        Ok(user) => user,
+        Err(error) => {
+            // Swallowed to `None` rather than propagated — `local_owner` composes
+            // with `resolve_session` and `resolve_claims` as three strategies
+            // that each degrade to "try the next one", not three that can fail
+            // the request outright. But silent is not the same as safe: without
+            // this, a store outage here reads identically to "not `none` mode"
+            // and an operator has nothing to distinguish them by.
+            tracing::warn!(
+                company = %runtime.id(),
+                %error,
+                "could not materialize the none-mode local owner"
+            );
+            return None;
+        }
+    };
     Some(UserPrincipal {
         company: runtime.id().clone(),
         user_id: user.id,
