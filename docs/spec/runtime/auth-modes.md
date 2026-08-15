@@ -229,7 +229,8 @@ for the others:
    This catches a directly reachable socket, e.g. a future registration path
    that lands `none` mode on a routable bind some other way.
 3. **Per request, proxy-forwarding headers.** `local_owner` also refuses
-   `X-Forwarded-For`, `X-Forwarded-Host`, or RFC 7239 `Forwarded`. This is the
+   `X-Forwarded-For`, `X-Forwarded-Host`, RFC 7239 `Forwarded`, or `X-Real-IP`
+   (not RFC 7239, but a common `nginx` recipe sets it). This is the
    gate the peer check cannot be: a same-host reverse proxy connects to a
    loopback-bound listener over loopback too, so the peer this process
    observes always reads as loopback no matter where the proxy's own caller
