@@ -8,7 +8,7 @@
 //! it; both surfaces call through it instead of each keeping their own copy of
 //! the filter + projection logic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
@@ -25,6 +25,11 @@ use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 /// admits both spellings for the General desk so a transcript is never split
 /// across the two ids depending on which one happened to write it (issue #65).
 pub const MAIN_THREAD_ID: &str = "main";
+
+/// The largest message page either history surface may materialize. Keeping
+/// the limit beside the shared reader prevents a new caller from turning its
+/// `Vec` reservation back into an allocation controlled by the request.
+pub const CHAT_HISTORY_PAGE_LIMIT: usize = 200;
 
 /// Does this stored chat id mean the General desk?
 ///
@@ -260,15 +265,14 @@ fn reaction_actor_key(by: &Option<Actor>) -> String {
 /// route's explicit `on` flag idempotent — and a row that ends up `off` is
 /// dropped entirely rather than kept as a zero. Order is first-set order, so a
 /// message's chips do not reshuffle between reads.
-fn fold_reactions(
-    stored: &[StoredEvent],
-    viewer: &Viewer,
-    authors: &HashMap<String, String>,
-) -> HashMap<String, Vec<ReactionView>> {
+struct ReactionFold {
     // (message, actor, emoji) → (position among first-seen keys, currently on).
-    let mut state: HashMap<(u64, String, String), (usize, bool)> = HashMap::new();
-    let mut seen = 0usize;
-    for event in stored {
+    state: HashMap<(u64, String, String), (usize, bool)>,
+    seen: usize,
+}
+
+impl ReactionFold {
+    fn observe(&mut self, event: &StoredEvent, wanted: Option<&HashSet<u64>>) {
         let CompanyEvent::ReactionToggled {
             message_seq,
             emoji,
@@ -276,46 +280,72 @@ fn fold_reactions(
             by,
         } = &event.event
         else {
-            continue;
+            return;
         };
+        if wanted.is_some_and(|ids| !ids.contains(&message_seq.value())) {
+            return;
+        }
         let key = (message_seq.value(), reaction_actor_key(by), emoji.clone());
-        match state.get_mut(&key) {
+        match self.state.get_mut(&key) {
             Some(slot) => slot.1 = *on,
             None => {
-                state.insert(key, (seen, *on));
-                seen += 1;
+                self.state.insert(key, (self.seen, *on));
+                self.seen += 1;
             }
         }
     }
 
-    let mut rows: Vec<(usize, u64, String, String)> = state
-        .into_iter()
-        .filter(|(_, (_, on))| *on)
-        .map(|((message, actor, emoji), (order, _))| (order, message, actor, emoji))
-        .collect();
-    rows.sort_unstable();
+    fn finish(
+        self,
+        viewer: &Viewer,
+        authors: &HashMap<String, String>,
+    ) -> HashMap<String, Vec<ReactionView>> {
+        let mut rows: Vec<(usize, u64, String, String)> = self
+            .state
+            .into_iter()
+            .filter(|(_, (_, on))| *on)
+            .map(|((message, actor, emoji), (order, _))| (order, message, actor, emoji))
+            .collect();
+        rows.sort_unstable();
 
-    let mut out: HashMap<String, Vec<ReactionView>> = HashMap::new();
-    for (_, message, actor, emoji) in rows {
-        let (by_label, mine) = match actor.strip_prefix("user:") {
-            Some(user_id) => (
-                authors
-                    .get(user_id)
-                    .cloned()
-                    .unwrap_or_else(|| "someone".to_string()),
-                *viewer == Viewer::User(user_id.to_string()),
-            ),
-            None => ("operator".to_string(), matches!(viewer, Viewer::Operator)),
-        };
-        out.entry(message.to_string())
-            .or_default()
-            .push(ReactionView {
-                emoji,
-                by_label,
-                mine,
-            });
+        let mut out: HashMap<String, Vec<ReactionView>> = HashMap::new();
+        for (_, message, actor, emoji) in rows {
+            let (by_label, mine) = match actor.strip_prefix("user:") {
+                Some(user_id) => (
+                    authors
+                        .get(user_id)
+                        .cloned()
+                        .unwrap_or_else(|| "someone".to_string()),
+                    *viewer == Viewer::User(user_id.to_string()),
+                ),
+                None => ("operator".to_string(), matches!(viewer, Viewer::Operator)),
+            };
+            out.entry(message.to_string())
+                .or_default()
+                .push(ReactionView {
+                    emoji,
+                    by_label,
+                    mine,
+                });
+        }
+        out
     }
-    out
+}
+
+#[cfg(test)]
+fn fold_reactions(
+    stored: &[StoredEvent],
+    viewer: &Viewer,
+    authors: &HashMap<String, String>,
+) -> HashMap<String, Vec<ReactionView>> {
+    let mut fold = ReactionFold {
+        state: HashMap::new(),
+        seen: 0,
+    };
+    for event in stored {
+        fold.observe(event, None);
+    }
+    fold.finish(viewer, authors)
 }
 
 impl MessageView {
@@ -459,8 +489,7 @@ pub async fn author_labels(
 ///
 /// `before_seq` is an opaque EventLog cursor (a sequence position); only
 /// messages before it are considered. `first` caps how many of the remaining,
-/// most-recent messages come back. Returns the page plus the total count of
-/// matching messages (before the `first` cap, after the `before_seq` cut).
+/// most-recent messages come back.
 ///
 /// Shared by the GraphQL `Chat.history` resolver and the REST
 /// `GET .../chat/history` route so the two can never disagree about what a
@@ -472,38 +501,131 @@ pub async fn history_for_desk(
     viewer: &Viewer,
     before_seq: Option<u64>,
     first: usize,
-) -> Result<(Vec<MessageView>, i32), OpenCompanyError> {
-    let stored = runtime
-        .events()
-        .read_from(runtime.id(), EventSeq::new(0), usize::MAX)
-        .await?;
-    // One roster read per history, not one per message: the scan above is
-    // already O(log), and an N+1 on top of it would be worse.
-    let authors = author_labels(runtime).await?;
-    // Issue #364: reactions ride the same full-log read the messages do — a
-    // second pass over a list already in memory, not a second query. Folded
-    // before the messages are consumed, and attached only to messages this desk
-    // owns, so a reaction can no more cross a desk boundary than the message it
-    // is about can.
-    let mut reactions = fold_reactions(&stored, viewer, &authors);
+) -> Result<Vec<MessageView>, OpenCompanyError> {
+    // A page is events rather than messages: a busy company can put unrelated
+    // events between two chat turns. Walking backward keeps the newest `first`
+    // transcript entries without ever materialising that unrelated journal.
+    const EVENT_PAGE: usize = 512;
 
-    let mut messages: Vec<MessageView> = stored
-        .into_iter()
-        .filter(|event| owns(desk_id, desk_name, &event.event))
-        .filter(|event| before_seq.is_none_or(|before| event.seq.value() < before))
-        .map(|event| MessageView::project(event, viewer, &authors))
-        .map(|mut view| {
-            view.reactions = reactions.remove(&view.id).unwrap_or_default();
-            view
-        })
-        .collect();
-
-    let total = messages.len() as i32;
-    // Keep the most recent `first`, still in chronological order.
-    if messages.len() > first {
-        messages.drain(0..messages.len() - first);
+    // A zero-sized GraphQL page is a valid request, and the REST limit can be
+    // clamped to zero. It must not touch the journal merely to construct an
+    // empty response.
+    let first = first.min(CHAT_HISTORY_PAGE_LIMIT);
+    if first == 0 {
+        return Ok(Vec::new());
     }
-    Ok((messages, total))
+
+    // One roster read per history, not one per message.
+    let authors = author_labels(runtime).await?;
+    let mut cursor = before_seq.map(EventSeq::new);
+    let mut messages = Vec::with_capacity(first);
+    while messages.len() < first {
+        let page = runtime
+            .events()
+            .read_before(runtime.id(), cursor, EVENT_PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|event| event.seq);
+        for event in page {
+            if owns(desk_id, desk_name, &event.event) {
+                messages.push(MessageView::project(event, viewer, &authors));
+                if messages.len() == first {
+                    break;
+                }
+            }
+        }
+    }
+
+    // `read_before` supplies each page newest-first, as does `messages` above.
+    // Restore chronological order for the renderer before attaching reactions.
+    messages.reverse();
+
+    // Reactions necessarily follow their message. Once the displayed window is
+    // known, fold only toggles that could affect one of its messages, streaming
+    // forward from the window's oldest id through the current tail. The cursor
+    // limits *messages*, not the reaction snapshot: a later toggle still
+    // changes the state displayed on an older message.
+    let wanted: HashSet<u64> = messages
+        .iter()
+        .filter_map(|message| message.id.parse::<u64>().ok())
+        .collect();
+    if let Some(oldest) = wanted.iter().min().copied() {
+        let mut next = oldest.saturating_add(1);
+        let mut fold = ReactionFold {
+            state: HashMap::new(),
+            seen: 0,
+        };
+        loop {
+            let page = runtime
+                .events()
+                .read_from(runtime.id(), EventSeq::new(next), EVENT_PAGE)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            for event in &page {
+                fold.observe(event, Some(&wanted));
+            }
+            next = page
+                .last()
+                .map(|event| event.seq.value().saturating_add(1))
+                .unwrap_or(next);
+            if page.len() < EVENT_PAGE {
+                break;
+            }
+        }
+        let mut reactions = fold.finish(viewer, &authors);
+        for message in &mut messages {
+            message.reactions = reactions.remove(&message.id).unwrap_or_default();
+        }
+    }
+    Ok(messages)
+}
+
+/// Counts a desk's messages before a cursor without materialising them.
+///
+/// GraphQL's [`Page`](crate::server::graphql::pagination::Page) exposes an
+/// unpaginated `total`, while the REST transcript endpoint deliberately does
+/// not. Keep that potentially full journal walk out of [`history_for_desk`],
+/// so bounded transcript readers stop as soon as their requested window is
+/// complete.
+pub async fn history_total_for_desk(
+    runtime: &CompanyRuntime,
+    desk_id: &str,
+    desk_name: &str,
+    before_seq: Option<u64>,
+) -> Result<i32, OpenCompanyError> {
+    const EVENT_PAGE: usize = 512;
+
+    let mut next = EventSeq::new(0);
+    let mut total = 0i32;
+    loop {
+        let page = runtime
+            .events()
+            .read_from(runtime.id(), next, EVENT_PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        for event in &page {
+            if before_seq.is_some_and(|before| event.seq.value() >= before) {
+                return Ok(total);
+            }
+            if owns(desk_id, desk_name, &event.event) {
+                total = total.saturating_add(1);
+            }
+        }
+        let Some(last) = page.last() else {
+            break;
+        };
+        next = EventSeq::new(last.seq.value().saturating_add(1));
+        if page.len() < EVENT_PAGE {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]

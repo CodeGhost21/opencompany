@@ -468,11 +468,20 @@ export class OpenCompanyClient {
    * A desk's persisted transcript (issue #65), so the console can rehydrate a
    * thread on login/reload instead of always starting empty. `desk` is the
    * thread id (as passed to {@link chat}); omitted reads the operator/General
-   * line. Hosts that don't expose `.../chat/history` yet return 404 — callers
-   * fall back to an empty transcript.
+   * line. `before` is an exclusive message-id cursor and `limit` bounds one
+   * page; callers decide whether an unavailable route is an empty transcript
+   * or an error they need to surface.
    */
-  getChatHistory(desk?: string | null, company?: string | null): Promise<ChatHistoryMessageDto[]> {
-    const qs = desk ? `?desk=${encodeURIComponent(desk)}` : "";
+  getChatHistory(
+    desk?: string | null,
+    company?: string | null,
+    options?: { before?: string; limit?: number },
+  ): Promise<ChatHistoryMessageDto[]> {
+    const query = new URLSearchParams();
+    if (desk) query.set("desk", desk);
+    if (options?.before) query.set("before", options.before);
+    if (options?.limit !== undefined) query.set("limit", String(options.limit));
+    const qs = query.size > 0 ? `?${query}` : "";
     return this.request<ChatHistoryMessageDto[]>(
       "GET",
       `${this.scope(company)}/chat/history${qs}`,
