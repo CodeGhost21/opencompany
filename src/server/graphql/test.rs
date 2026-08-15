@@ -488,14 +488,55 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .iter()
         .map(|m| m["text"].as_str().unwrap())
         .collect();
-    assert!(
-        texts.contains(&"console default-thread id"),
-        "the newest matching message is the one page returns: {texts:?}"
+    assert_eq!(
+        texts,
+        vec!["console default-thread id"],
+        "the page must contain only the newest matching message"
     );
     assert_eq!(
         value["data"]["company"]["chat"]["history"]["total"], 2,
         "the GraphQL page keeps its unpaginated total without making the REST reader scan it"
     );
+}
+
+/// A GraphQL caller controls `first`, but a history page must have the same
+/// hard ceiling as REST so a huge integer cannot become a huge Vec reservation.
+#[tokio::test]
+async fn chat_history_clamps_an_oversized_page_request() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    for i in 0..201 {
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::AgentReply {
+                    parent: None,
+                    task_id: None,
+                    chat_id: "General".to_string(),
+                    agent_id: "maya".to_string(),
+                    text: format!("message {i}"),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 2147483647) { total items { text } } } } }"}"#,
+    )
+    .await;
+    let items = value["data"]["company"]["chat"]["history"]["items"]
+        .as_array()
+        .unwrap();
+    assert_eq!(items.len(), 200, "the requested page is capped");
+    assert_eq!(items[0]["text"], "message 1");
+    assert_eq!(items[199]["text"], "message 200");
+    assert_eq!(value["data"]["company"]["chat"]["history"]["total"], 201);
 }
 
 /// Issue #246 + #65: the card a reply opened is projected on **both** history

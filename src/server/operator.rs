@@ -35,7 +35,9 @@ use crate::ports::types::{
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
-use crate::server::chat_history::{MessageView, ReactionView, Viewer, history_for_desk};
+use crate::server::chat_history::{
+    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, history_for_desk,
+};
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
 use crate::server::ops::language::{self, DEFAULT_DESK};
@@ -1551,12 +1553,6 @@ impl From<MessageView> for ChatHistoryMessageDto {
     }
 }
 
-/// How many messages `GET .../chat/history` returns. Generous enough to
-/// hydrate a console thread on load (issue #65) while still bounding the
-/// response on a very long transcript. REST callers can request a smaller
-/// page or walk backwards with `?before=<oldest-id>`.
-const CHAT_HISTORY_LIMIT: usize = 200;
-
 /// Resolves a `?desk=` selector to the `(id, name)` pair `history_for_desk`
 /// filters on.
 ///
@@ -1617,8 +1613,8 @@ async fn chat_history_response(
         .map_err(|e| ApiError(e).into_response())?;
     let limit = query
         .limit
-        .unwrap_or(CHAT_HISTORY_LIMIT)
-        .min(CHAT_HISTORY_LIMIT);
+        .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
+        .min(CHAT_HISTORY_PAGE_LIMIT);
     let messages = history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
         .await
         .map_err(|e| ApiError(e).into_response())?;

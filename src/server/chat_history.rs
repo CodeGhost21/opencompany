@@ -26,6 +26,11 @@ use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 /// across the two ids depending on which one happened to write it (issue #65).
 pub const MAIN_THREAD_ID: &str = "main";
 
+/// The largest message page either history surface may materialize. Keeping
+/// the limit beside the shared reader prevents a new caller from turning its
+/// `Vec` reservation back into an allocation controlled by the request.
+pub const CHAT_HISTORY_PAGE_LIMIT: usize = 200;
+
 /// Does this stored chat id mean the General desk?
 ///
 /// **Four spellings, one desk.** The console addresses its default thread as
@@ -505,6 +510,7 @@ pub async fn history_for_desk(
     // A zero-sized GraphQL page is a valid request, and the REST limit can be
     // clamped to zero. It must not touch the journal merely to construct an
     // empty response.
+    let first = first.min(CHAT_HISTORY_PAGE_LIMIT);
     if first == 0 {
         return Ok(Vec::new());
     }
