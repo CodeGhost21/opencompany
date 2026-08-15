@@ -248,8 +248,7 @@ impl LoginIdentity {
         // `local:owner@example.com`, granting local-owner semantics to an
         // email address.
         if let Some(address) = key.strip_prefix(WALLET_PREFIX)
-            && !address.is_empty()
-            && bs58::decode(address).into_vec().is_ok()
+            && decode_wallet_address(address).is_ok()
         {
             return Self::Wallet(address.to_string());
         }
