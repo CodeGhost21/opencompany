@@ -301,6 +301,22 @@ pub const COMPOSIO_EXECUTE: &str = "composio_execute";
 /// silently stopped reaching the catalogue lookup it claimed to cover.
 pub(crate) const COMPOSIO_ACTION_KEY: &str = "tool";
 
+/// The shell tool, classified by the command it was handed rather than by this
+/// name (issue #875).
+pub const SHELL: &str = "shell";
+
+/// The argument key [`SHELL`] carries the command line under.
+///
+/// A required parameter of the vendored tool's schema, so a call that omits it
+/// could not have run anyway; a call this cannot read stays gated.
+pub(crate) const SHELL_COMMAND_KEY: &str = "command";
+
+/// The optional argument the model may use to declare what its own command
+/// does. Read **escalate-only**, exactly as upstream reads it: a self-declared
+/// class may raise the requirement, never lower it. A model that could talk its
+/// way down a tier by labelling `rm -rf` a read would be the whole gate.
+pub(crate) const SHELL_CATEGORY_KEY: &str = "category";
+
 /// The outward-fetch tool a standing grant may be scoped to a host on (#673).
 ///
 /// Only this one of the three web tools. `http_request` and `curl` can mutate,
@@ -695,6 +711,12 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
     if name == WEB_FETCH {
         return web_fetch_consequence(args);
     }
+    // Issue #875: the third. `shell` is the tool an agent reaches for to look
+    // at its own workspace, and classifying the NAME made a `grep` cost an
+    // operator the same interruption as `rm -rf /`.
+    if name == SHELL {
+        return shell_consequence(args);
+    }
     match DECLARED.iter().find(|d| d.tool == name) {
         Some(found) => Consequence {
             group: found.group,
@@ -1019,6 +1041,88 @@ fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
             None => Standing::PerCall,
         },
     }
+}
+
+/// The consequence of running one shell command (issue #875).
+///
+/// ## Why the command and not the tool name
+///
+/// `shell` is how an agent looks at its own workspace. Classifying the name
+/// meant `grep -c foo *.log` and `rm -rf /` were the same input to this
+/// function, so an agent that investigates by grepping bought the operator an
+/// approval card per command — under `supervised` and under `auto`, whose whole
+/// contract is that it stops only before what leaves the company or spends
+/// money. A `grep` in the agent's own workspace does neither.
+///
+/// ## Where the read/act answer comes from
+///
+/// The vendored runtime's own classifier, [`SecurityPolicy::classify_command`],
+/// which OpenHuman gates its `ShellTool` with on the desktop product. It splits
+/// the command into unquoted segments, classifies each against a curated
+/// safe-read allowlist, and takes the **maximum** — so `grep x && rm -rf /` is
+/// `Destructive`, not `Read` — then lifts anything with a redirect or `tee` to
+/// `Write`. Anything it does not recognise is `Write`, which is the cautious
+/// direction.
+///
+/// Reused rather than restated. A second list here would be a second thing to
+/// keep current, and the moment the two disagreed the safer one would not
+/// reliably be ours.
+///
+/// ## Only `Read` is downgraded
+///
+/// Every other class keeps exactly today's verdict — `Reach::Consequence` and
+/// `Standing::PerCall`, so it parks under `supervised` and `auto` and can hold
+/// no standing grant. A build without the harness feature has no classifier
+/// linked in and gates everything, the same seam the Composio catalogue
+/// straddles and answered the same way.
+fn shell_consequence(args: &serde_json::Value) -> Consequence {
+    let gated = Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: Standing::PerCall,
+    };
+    let Some(command) = args.get(SHELL_COMMAND_KEY).and_then(|v| v.as_str()) else {
+        // The tool's own schema requires it, so this is a call that could not
+        // have run. Gate it rather than guess.
+        return gated;
+    };
+    let declared = args.get(SHELL_CATEGORY_KEY).and_then(|v| v.as_str());
+    if shell_command_is_read(command, declared) {
+        // A read of the agent's own workspace changes nothing, reaches nobody
+        // and is billed for nothing — the shape `glob` and `grep` (the tools)
+        // have carried since #462.
+        return Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::Nothing,
+            standing: Standing::PerCall,
+        };
+    }
+    gated
+}
+
+/// Is this command provably read-only, according to the vendored runtime's own
+/// classifier? A self-declared `category` may only escalate.
+#[cfg(feature = "openhuman")]
+fn shell_command_is_read(command: &str, declared: Option<&str>) -> bool {
+    use openhuman_core::openhuman::security::{CommandClass, SecurityPolicy};
+
+    // `classify_command` is a pure function of the command text — it reads no
+    // field of the policy it hangs off — so the default instance is the whole
+    // configuration this needs. The tier question is answered above this layer,
+    // by the `Reach` this returns.
+    let policy = SecurityPolicy::default();
+    let mut class = policy.classify_command(command);
+    if let Some(declared) = declared.and_then(SecurityPolicy::parse_declared_class) {
+        class = class.max(declared);
+    }
+    matches!(class, CommandClass::Read)
+}
+
+/// Without the harness feature the classifier is not linked in, so nothing here
+/// can tell a read from an act — and the cautious answer is that it is an act.
+#[cfg(not(feature = "openhuman"))]
+fn shell_command_is_read(_command: &str, _declared: Option<&str>) -> bool {
+    false
 }
 
 pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String> {
@@ -2408,5 +2512,132 @@ mod tests {
              words in {LANGUAGE_TS}",
             collisions.join("; ")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #875: `shell`, classified by the command it was handed
+    // -----------------------------------------------------------------------
+
+    fn shell(command: &str) -> Consequence {
+        consequence_of(SHELL, &json!({ SHELL_COMMAND_KEY: command }))
+    }
+
+    /// The complaint this issue is about: an agent looking at its own workspace
+    /// paid an approval per command. These are the exact shapes an operator was
+    /// approving on staging.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_read_of_the_agents_own_workspace_runs_unattended() {
+        for command in [
+            "grep -l -i \"resets\\|forgot\" session_raw/*.jsonl",
+            "grep -c -i plus session_raw/*.jsonl",
+            "find . -maxdepth 4 -type d",
+            "cat notes.md",
+            "ls -la",
+            "wc -l src/main.rs",
+        ] {
+            let c = shell(command);
+            assert_eq!(
+                c.reach,
+                Reach::Nothing,
+                "`{command}` reads and changes nothing"
+            );
+            assert!(
+                !c.reach.parks_under_supervision(),
+                "`{command}` must not park under any acting tier"
+            );
+        }
+    }
+
+    /// Everything that is not provably a read keeps exactly the verdict it had
+    /// before this issue: it parks, and it can hold no standing grant.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn anything_that_acts_still_parks() {
+        for command in [
+            "rm -rf /",
+            "curl https://example.com",
+            "npm install -g something",
+            "echo hi > file.txt",
+            "git push origin main",
+            "chmod 777 /etc/passwd",
+        ] {
+            let c = shell(command);
+            assert_eq!(c.reach, Reach::Consequence, "`{command}` acts");
+            assert_eq!(
+                c.standing,
+                Standing::PerCall,
+                "`{command}` may hold no standing grant"
+            );
+            assert!(
+                c.parks_under_auto(),
+                "`{command}` must still park under auto"
+            );
+        }
+    }
+
+    /// The classifier takes the maximum across segments, so a read cannot carry
+    /// an act through on its coat-tails. This is the property that makes
+    /// downgrading reads safe at all.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_read_chained_to_an_act_is_an_act() {
+        for command in [
+            "grep -r foo . && rm -rf /tmp/x",
+            "ls; curl https://example.com",
+            "cat a.txt | tee b.txt",
+            "find . -type f > listing.txt",
+        ] {
+            assert_eq!(
+                shell(command).reach,
+                Reach::Consequence,
+                "`{command}` contains an act and must park"
+            );
+        }
+    }
+
+    /// The model's own label may raise the requirement and never lower it.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_declared_category_escalates_only() {
+        // A read the model calls destructive parks…
+        let escalated = consequence_of(
+            SHELL,
+            &json!({ SHELL_COMMAND_KEY: "ls -la", SHELL_CATEGORY_KEY: "destructive" }),
+        );
+        assert_eq!(escalated.reach, Reach::Consequence);
+
+        // …and an act the model calls a read does not stop parking.
+        let attempted_downgrade = consequence_of(
+            SHELL,
+            &json!({ SHELL_COMMAND_KEY: "rm -rf /", SHELL_CATEGORY_KEY: "read" }),
+        );
+        assert_eq!(attempted_downgrade.reach, Reach::Consequence);
+    }
+
+    /// A call this cannot read is gated. The tool's schema requires `command`,
+    /// so every one of these is a call that could not have run — and none of
+    /// them is a reason to guess.
+    #[test]
+    fn an_unreadable_shell_call_is_gated() {
+        for args in [
+            json!({}),
+            json!({ SHELL_COMMAND_KEY: 7 }),
+            json!({ SHELL_COMMAND_KEY: null }),
+            json!(null),
+            json!("ls"),
+        ] {
+            let c = consequence_of(SHELL, &args);
+            assert_eq!(c.reach, Reach::Consequence, "{args}");
+            assert!(c.parks_under_auto(), "{args}");
+        }
+    }
+
+    /// The name-level declaration is untouched: every reader that asks about
+    /// `shell` without arguments — the permissions list, the console labels,
+    /// the coverage test — still sees the gated answer.
+    #[test]
+    fn the_declaration_still_reads_as_gated_without_arguments() {
+        assert_eq!(c(SHELL).reach, Reach::Consequence);
     }
 }
