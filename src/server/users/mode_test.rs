@@ -452,6 +452,55 @@ async fn inviting_a_wallet_reports_no_mailbox_delivery() {
     assert_eq!(body["email"], format!("wallet:{invitee_addr}"));
 }
 
+/// An invite naming the field the company's mode does not read is refused
+/// rather than silently ignored — an admin who fills in the wrong field, or
+/// both, must not believe they invited something they did not.
+#[tokio::test]
+async fn inviting_with_the_wrong_identity_field_is_refused() {
+    let dir = home();
+    let admin_key = wallet(13);
+    let admin_addr = address(&admin_key);
+    let app = router(state_in_mode(dir.path(), AuthMode::Wallet, Some(&admin_addr)).await);
+
+    let challenge = body_json(
+        app.clone()
+            .oneshot(post(
+                "/api/v1/company/auth/wallet/challenge",
+                serde_json::json!({"address": admin_addr}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let signature = bs58::encode(
+        admin_key
+            .sign(challenge["message"].as_str().unwrap().as_bytes())
+            .to_bytes(),
+    )
+    .into_string();
+    let verify = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/company/auth/wallet/verify",
+            serde_json::json!({"nonce": challenge["nonce"], "signature": signature}),
+        ))
+        .await
+        .unwrap();
+    let cookie = session_cookie(&verify);
+
+    // An `email` field on a wallet company is refused, whether or not `wallet`
+    // is also set.
+    let response = app
+        .oneshot(post_with_cookie(
+            "/api/v1/company/users/invites",
+            serde_json::json!({"email": "bob@example.com"}),
+            &cookie,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
 /// A wallet that is not on the roster gets a challenge shaped exactly like a
 /// real one — the route must not be a membership oracle — and it verifies as
 /// nothing.
