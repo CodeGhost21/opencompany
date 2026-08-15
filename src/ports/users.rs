@@ -210,10 +210,13 @@ const LOCAL_OWNER: &str = "owner";
 /// | `wallet` | `wallet:` + base58 Ed25519 public key | `wallet:7xKX…` |
 /// | `none` | `local:owner` | `local:owner` |
 ///
-/// The prefixes are what make this safe to store in one column. An address
-/// normalized by [`normalize_email`] is lowercase and cannot begin with a
-/// scheme this type would parse, and a base58 alphabet excludes `:` — so no
-/// wallet can pose as a mailbox and no mailbox as a wallet.
+/// The prefixes are what make this safe to store in one column, but a prefix
+/// alone is not: `wallet:ada@example.com` and `local:owner@example.com` are
+/// both keys [`normalize_email`] can produce, since it only lowercases and
+/// trims. [`Self::parse`] therefore trusts a prefix only when the remainder is
+/// actually of that scheme — a valid base58 string for `wallet:`, and exactly
+/// `owner` for `local:` — so an email that happens to start with one of these
+/// words still parses back as the email it is.
 ///
 /// Normalization differs by scheme and that difference is load-bearing:
 /// [`normalize_email`] lowercases, and lowercasing a base58 address would
