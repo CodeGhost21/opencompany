@@ -160,9 +160,10 @@ async fn list_users(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
 ) -> Result<Json<Vec<UserSummary>>, Response> {
     let runtime = company.runtime.clone();
-    require_admin(&headers, &state, &runtime).await?;
+    require_admin(&headers, &state, &runtime, peer).await?;
     let users = runtime
         .users()
         .list_users(runtime.id())
@@ -176,9 +177,10 @@ async fn list_invites(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
 ) -> Result<Json<Vec<InviteRecord>>, Response> {
     let runtime = company.runtime.clone();
-    require_admin(&headers, &state, &runtime).await?;
+    require_admin(&headers, &state, &runtime, peer).await?;
     let now = now_millis();
     let mut invites = runtime
         .users()
@@ -396,6 +398,7 @@ async fn invite(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<InviteBody>,
 ) -> Result<Json<InviteResult>, Response> {
     let runtime = company.runtime.clone();
@@ -406,7 +409,7 @@ async fn invite(
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
         return Err(refusal);
     }
-    let admin = require_admin(&headers, &state, &runtime).await?;
+    let admin = require_admin(&headers, &state, &runtime, peer).await?;
     let identity = body
         .identity(runtime.auth_mode())
         .map_err(|e| ApiError(e).into_response())?;
@@ -485,13 +488,14 @@ async fn revoke_invite(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, Response> {
     let runtime = company.runtime.clone();
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
         return Err(refusal);
     }
-    require_admin(&headers, &state, &runtime).await?;
+    require_admin(&headers, &state, &runtime, peer).await?;
     let invite_id = params.get("invite_id").cloned().unwrap_or_default();
     // A bootstrapped admin has no stored invite; revoking it would be a lie,
     // since its source would re-grant on the next login. The two sources are
@@ -535,6 +539,7 @@ async fn update_user(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<UpdateUser>,
 ) -> Result<Json<UserSummary>, Response> {
@@ -542,7 +547,7 @@ async fn update_user(
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
         return Err(refusal);
     }
-    require_admin(&headers, &state, &runtime).await?;
+    require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
     let mut user = load_user(&runtime, &user_id).await?;
 
@@ -598,6 +603,7 @@ async fn reset_password(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
     Json(body): Json<ResetPassword>,
 ) -> Result<Json<UserSummary>, Response> {
@@ -609,7 +615,7 @@ async fn reset_password(
     if let Some(refusal) = crate::server::users::routes::wrong_mode_for_email(&runtime) {
         return Err(refusal);
     }
-    require_admin(&headers, &state, &runtime).await?;
+    require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
     let mut user = load_user(&runtime, &user_id).await?;
 
@@ -643,6 +649,7 @@ async fn revoke_sessions(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, Response> {
     let runtime = company.runtime.clone();
@@ -652,7 +659,7 @@ async fn revoke_sessions(
     if let Some(refusal) = wrong_mode_for_admin(&runtime) {
         return Err(refusal);
     }
-    require_admin(&headers, &state, &runtime).await?;
+    require_admin(&headers, &state, &runtime, peer).await?;
     let user_id = params.get("user_id").cloned().unwrap_or_default();
     let user = load_user(&runtime, &user_id).await?;
     let revoked = runtime
