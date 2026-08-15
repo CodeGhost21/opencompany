@@ -311,6 +311,71 @@ async fn a_challenge_cannot_be_answered_twice() {
     assert_eq!(body_json(replay).await["code"], "invalid_login");
 }
 
+/// Requesting a second challenge for the same wallet invalidates the first: the
+/// route must not accumulate one durable `LoginCodeRecord` per request, which
+/// would let an unauthenticated caller who keeps naming an eligible wallet grow
+/// the challenge table without bound.
+#[tokio::test]
+async fn a_second_challenge_for_the_same_wallet_invalidates_the_first() {
+    let dir = home();
+    let key = wallet(9);
+    let addr = address(&key);
+    let app = router(state_in_mode(dir.path(), AuthMode::Wallet, Some(&addr)).await);
+
+    let first = body_json(
+        app.clone()
+            .oneshot(post(
+                "/api/v1/company/auth/wallet/challenge",
+                serde_json::json!({"address": addr}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let second = body_json(
+        app.clone()
+            .oneshot(post(
+                "/api/v1/company/auth/wallet/challenge",
+                serde_json::json!({"address": addr}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    // The first nonce no longer redeems, because issuing the second deleted it
+    // rather than leaving both live.
+    let stale_signature = bs58::encode(
+        key.sign(first["message"].as_str().unwrap().as_bytes())
+            .to_bytes(),
+    )
+    .into_string();
+    let stale = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/company/auth/wallet/verify",
+            serde_json::json!({"nonce": first["nonce"], "signature": stale_signature}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+
+    // The second, current nonce still works.
+    let fresh_signature = bs58::encode(
+        key.sign(second["message"].as_str().unwrap().as_bytes())
+            .to_bytes(),
+    )
+    .into_string();
+    let fresh = app
+        .oneshot(post(
+            "/api/v1/company/auth/wallet/verify",
+            serde_json::json!({"nonce": second["nonce"], "signature": fresh_signature}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::OK);
+}
+
 /// A wallet that is not on the roster gets a challenge shaped exactly like a
 /// real one — the route must not be a membership oracle — and it verifies as
 /// nothing.
