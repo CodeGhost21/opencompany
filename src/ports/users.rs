@@ -429,15 +429,16 @@ mod test {
             LoginIdentity::Email("ada@example.com".into())
         );
 
-        let wallet = LoginIdentity::Wallet("7xKXtg2C".into());
-        assert_eq!(wallet.key(), "wallet:7xKXtg2C");
+        let address = bs58::encode([7u8; 32]).into_string();
+        let wallet = LoginIdentity::Wallet(address.clone());
+        assert_eq!(wallet.key(), format!("wallet:{address}"));
         assert_eq!(LoginIdentity::parse(&wallet.key()), wallet);
 
         assert_eq!(LoginIdentity::Local.key(), "local:owner");
         assert_eq!(LoginIdentity::parse("local:owner"), LoginIdentity::Local);
 
         // No key parses as two things.
-        assert_ne!(LoginIdentity::parse("wallet:7xKXtg2C"), email);
+        assert_ne!(LoginIdentity::parse(&format!("wallet:{address}")), email);
     }
 
     /// Every record written before wallet and local identities existed holds a
