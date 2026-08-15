@@ -1125,6 +1125,144 @@ impl crate::ports::read_state::ReadStateStore for FsOps {
 }
 
 // ---------------------------------------------------------------------------
+// NotificationStore
+// ---------------------------------------------------------------------------
+
+/// One per-person read marker. Kept in its own document rather than as a field
+/// on the notification, because read state is per person (#749) — a flag on the
+/// shared record would mark it read for everyone the moment one admin opened it.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct StoredNotifRead {
+    user_id: String,
+    notification_id: String,
+    read_at: u64,
+}
+
+#[async_trait]
+impl crate::ports::notifications::NotificationStore for FsOps {
+    async fn append(
+        &self,
+        company: &CompanyId,
+        notification: &crate::ports::notifications::Notification,
+    ) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.notifications_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut rows = load_json_vec::<crate::ports::notifications::Notification>(&path).await?;
+        // Idempotent by id (first write wins): a retried or replayed append must
+        // not duplicate the feed. Matches the sqlite primary key and the mongo
+        // unique index, so all three backends agree.
+        if !rows.iter().any(|n| n.id == notification.id) {
+            rows.push(notification.clone());
+            write_atomic(&path, &serde_json::to_string(&rows)?).await?;
+        }
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::notifications::NotificationView>> {
+        let bundle = self.bundle(company);
+        let records = load_json_vec::<crate::ports::notifications::Notification>(
+            &bundle.notifications_json(),
+        )
+        .await?;
+        let reads = load_json_vec::<StoredNotifRead>(&bundle.notification_reads_json()).await?;
+        // This person's markers, indexed once, so the join is linear rather than
+        // O(records × markers) — mirrors the map the mongo backend builds.
+        let mine: std::collections::HashMap<&str, u64> = reads
+            .iter()
+            .filter(|r| r.user_id == user)
+            .map(|r| (r.notification_id.as_str(), r.read_at))
+            .collect();
+        let mut out: Vec<_> = records
+            .into_iter()
+            .map(|n| {
+                let read_at = mine.get(n.id.as_str()).copied();
+                crate::ports::notifications::NotificationView {
+                    notification: n,
+                    read_at,
+                }
+            })
+            .collect();
+        // Newest first, ties broken by id descending — the order the trait
+        // documents, not each backend's insertion order.
+        out.sort_by(|a, b| {
+            b.notification
+                .created_at
+                .cmp(&a.notification.created_at)
+                .then_with(|| b.notification.id.cmp(&a.notification.id))
+        });
+        Ok(out)
+    }
+
+    async fn mark_read(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        ids: Option<&[String]>,
+    ) -> Result<u64> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let records = load_json_vec::<crate::ports::notifications::Notification>(
+            &bundle.notifications_json(),
+        )
+        .await?;
+        let path = bundle.notification_reads_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut reads = load_json_vec::<StoredNotifRead>(&path).await?;
+        // Which notifications to mark: the named ids that actually exist, or
+        // every notification when `None`.
+        let targets: Vec<&str> = match ids {
+            Some(ids) => records
+                .iter()
+                .filter(|n| ids.iter().any(|i| i == &n.id))
+                .map(|n| n.id.as_str())
+                .collect(),
+            None => records.iter().map(|n| n.id.as_str()).collect(),
+        };
+        let now = crate::ports::now_millis();
+        let mut changed = false;
+        for id in targets {
+            // A latch: only stamp a marker that is not already there, so the
+            // original `read_at` survives a re-mark.
+            let already = reads
+                .iter()
+                .any(|r| r.user_id == user && r.notification_id == id);
+            if !already {
+                reads.push(StoredNotifRead {
+                    user_id: user.to_string(),
+                    notification_id: id.to_string(),
+                    read_at: now,
+                });
+                changed = true;
+            }
+        }
+        // Only rewrite the marker file when a marker was actually added, so a
+        // repeated mark-all is a pure read rather than a rewrite of the whole
+        // file for no change.
+        if changed {
+            write_atomic(&path, &serde_json::to_string(&reads)?).await?;
+        }
+        // Still-unread count for this person: records with no marker of theirs.
+        let unread = records
+            .iter()
+            .filter(|n| {
+                !reads
+                    .iter()
+                    .any(|r| r.user_id == user && r.notification_id == n.id)
+            })
+            .count() as u64;
+        Ok(unread)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
@@ -2208,6 +2346,13 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_read_state_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_notification_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_notification_store(Arc::new(FsOps::new(&root))).await;
     }
 
     #[tokio::test]

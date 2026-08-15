@@ -199,6 +199,28 @@ CREATE TABLE IF NOT EXISTS channel_read_state (
     last_read_ms INTEGER NOT NULL,
     PRIMARY KEY (company_id, user_id, channel_id)
 );
+CREATE TABLE IF NOT EXISTS notifications (
+    company_id   TEXT NOT NULL,
+    id           TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id   TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    created_ms   INTEGER NOT NULL,
+    PRIMARY KEY (company_id, id)
+);
+-- Backs the documented newest-first feed (`NotificationStore::list`):
+-- `WHERE company_id = ? ORDER BY created_ms DESC, id DESC`, so a company's feed
+-- reads straight off the index instead of sorting at read time.
+CREATE INDEX IF NOT EXISTS notifications_feed
+    ON notifications (company_id, created_ms DESC, id DESC);
+CREATE TABLE IF NOT EXISTS notification_reads (
+    company_id      TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    notification_id TEXT NOT NULL,
+    read_ms         INTEGER NOT NULL,
+    PRIMARY KEY (company_id, user_id, notification_id)
+);
 CREATE TABLE IF NOT EXISTS workspace_nodes (
     company_id TEXT NOT NULL,
     id         TEXT NOT NULL,
@@ -2518,6 +2540,152 @@ impl crate::ports::read_state::ReadStateStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// NotificationStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::notifications::NotificationStore for SqliteStore {
+    async fn append(
+        &self,
+        company: &CompanyId,
+        notification: &crate::ports::notifications::Notification,
+    ) -> Result<()> {
+        let conn = self.conn();
+        // `INSERT OR IGNORE` makes append idempotent by id (first write wins): a
+        // retried or replayed append is a no-op on the primary key rather than an
+        // error, matching the fs and mongo backends.
+        conn.execute(
+            "INSERT OR IGNORE INTO notifications \
+                 (company_id, id, kind, subject_kind, subject_id, title, created_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                company.as_ref(),
+                notification.id.as_str(),
+                notification.kind.as_str(),
+                notification.subject.kind.as_str(),
+                notification.subject.id.as_str(),
+                notification.title.as_str(),
+                notification.created_at as i64,
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::notifications::NotificationView>> {
+        let conn = self.conn();
+        // Read state is projected per person with a LEFT JOIN: a notification
+        // with no marker of this user's comes back with a NULL `read_ms`.
+        let mut stmt = conn
+            .prepare(
+                "SELECT n.id, n.kind, n.subject_kind, n.subject_id, n.title, n.created_ms, \
+                        r.read_ms \
+                 FROM notifications n \
+                 LEFT JOIN notification_reads r \
+                     ON r.company_id = n.company_id \
+                    AND r.notification_id = n.id \
+                    AND r.user_id = ?2 \
+                 WHERE n.company_id = ?1 \
+                 ORDER BY n.created_ms DESC, n.id DESC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), user], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                ))
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, kind, subject_kind, subject_id, title, created_ms, read_ms) =
+                row.map_err(sql_err)?;
+            let subject_kind = crate::ports::notifications::SubjectKind::from_token(&subject_kind)
+                .ok_or_else(|| {
+                    crate::error::OpenCompanyError::Store(format!(
+                        "notification {id} has an unknown subject kind {subject_kind:?}"
+                    ))
+                })?;
+            out.push(crate::ports::notifications::NotificationView {
+                notification: crate::ports::notifications::Notification {
+                    id,
+                    kind,
+                    subject: crate::ports::notifications::Subject {
+                        kind: subject_kind,
+                        id: subject_id,
+                    },
+                    created_at: created_ms as u64,
+                    title,
+                },
+                read_at: read_ms.map(|v| v as u64),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn mark_read(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        ids: Option<&[String]>,
+    ) -> Result<u64> {
+        let conn = self.conn();
+        let now = crate::ports::now_millis() as i64;
+        // `INSERT OR IGNORE` is the latch: a PK conflict on an already-read row
+        // is skipped, so the original `read_ms` survives a re-mark. Only ids
+        // that name an existing notification in this company are inserted.
+        match ids {
+            Some(ids) => {
+                for id in ids {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO notification_reads \
+                             (company_id, user_id, notification_id, read_ms) \
+                         SELECT ?1, ?2, ?3, ?4 \
+                         WHERE EXISTS \
+                             (SELECT 1 FROM notifications WHERE company_id = ?1 AND id = ?3)",
+                        params![company.as_ref(), user, id.as_str(), now],
+                    )
+                    .map_err(sql_err)?;
+                }
+            }
+            None => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO notification_reads \
+                         (company_id, user_id, notification_id, read_ms) \
+                     SELECT ?1, ?2, id, ?3 FROM notifications WHERE company_id = ?1",
+                    params![company.as_ref(), user, now],
+                )
+                .map_err(sql_err)?;
+            }
+        }
+        let unread: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM notifications n \
+                 WHERE n.company_id = ?1 \
+                   AND NOT EXISTS \
+                       (SELECT 1 FROM notification_reads r \
+                        WHERE r.company_id = n.company_id \
+                          AND r.notification_id = n.id \
+                          AND r.user_id = ?2)",
+                params![company.as_ref(), user],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(unread as u64)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
@@ -3380,6 +3548,11 @@ mod test {
     #[tokio::test]
     async fn conformance_read_state_store() {
         conformance::assert_read_state_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_notification_store() {
+        conformance::assert_notification_store(store()).await;
     }
 
     #[tokio::test]
