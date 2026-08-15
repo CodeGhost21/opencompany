@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{OpenCompanyError, Result};
-use crate::ports::decode_wallet_address;
+use crate::ports::{decode_wallet_address, normalize_email};
 
 use super::types::{
     AUTH_MODES, BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, GATEABLE_NAMESPACES,
