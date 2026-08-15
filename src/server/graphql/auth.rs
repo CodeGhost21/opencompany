@@ -271,8 +271,10 @@ pub(crate) enum LocalOwnerOutcome {
 ///   reverse proxy connects to a loopback-bound listener over loopback too, so
 ///   the peer it presents always reads as loopback regardless of where the
 ///   original client actually was. An *undeclared* proxy in front of an
-///   otherwise-correctly-loopback-bound host is the likeliest way to end up
-///   here by accident, and this is the one of the three gates that catches it.
+///   otherwise-correctly-loopback-bound host, using its own defaults, is what
+///   this catches — a proxy specifically configured to strip all four headers
+///   is indistinguishable from no proxy at all by header content alone, and
+///   detecting that needs a trusted-proxy boundary this does not implement.
 ///
 /// When neither signal is present (an embedded caller with no real socket and
 /// no forwarding in front of it, or a test), neither refuses on its own — the
