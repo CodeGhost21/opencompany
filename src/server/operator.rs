@@ -1748,7 +1748,9 @@ async fn react_to_message(
     seq: String,
     body: ReactionBody,
 ) -> Result<StatusCode, Response> {
-    let by = chat_actor(headers, state, company).await?;
+    // No connect info here — same as `history_viewer`. See `chat_actor`'s doc
+    // comment.
+    let by = chat_actor(headers, state, company, None).await?;
     let message_seq = parse_message_id(&seq).map_err(IntoResponse::into_response)?;
     validate_emoji(&body.emoji).map_err(IntoResponse::into_response)?;
     // The target must be a message. Without this the route would happily hang a
