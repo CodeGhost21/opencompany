@@ -196,13 +196,40 @@ pub async fn resolve_principal(
     company: Option<&CompanyId>,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<GqlAuth, Unauthorized> {
-    if let Some(owner) = local_owner(state, company, peer, headers).await {
-        return Ok(GqlAuth::User(owner));
+    match local_owner(state, company, peer, headers).await {
+        LocalOwnerOutcome::Owner(owner) => return Ok(GqlAuth::User(owner)),
+        // The addressed company *is* `none`-mode, and one of the two
+        // request-shape gates refused it — a non-loopback peer or a
+        // proxy-forwarding header. Falling through to a session or a bearer
+        // here would make those gates decorative: a `none`-mode company's
+        // whole contract is "local-only", and a platform bearer arriving from
+        // exactly the request shape that contract exists to refuse is
+        // anomalous by definition, not a legitimate hosted operation this
+        // path needs to keep working. Refuse outright instead of degrading.
+        LocalOwnerOutcome::GatesRefused => return Err(Unauthorized),
+        // Either this company has a real sign-in (the ordinary case), or it
+        // could not be resolved at all — nothing about `none` mode applies,
+        // so the session and bearer paths are exactly as before.
+        LocalOwnerOutcome::NotApplicable => {}
     }
     if let Some(user) = resolve_session(headers, state, company).await {
         return Ok(GqlAuth::User(user));
     }
     resolve_claims(headers, state)
+}
+
+/// What [`local_owner`] found out about the addressed company.
+pub(crate) enum LocalOwnerOutcome {
+    /// The company is `none`-mode and every gate passed: this is the request.
+    Owner(UserPrincipal),
+    /// The company is `none`-mode, but the peer or a forwarding header
+    /// refused it. Distinct from [`Self::NotApplicable`] so the caller can
+    /// refuse the request outright rather than degrade to a weaker check —
+    /// see [`resolve_principal`].
+    GatesRefused,
+    /// The company has a real sign-in, or could not be resolved at all.
+    /// `none` mode's local-owner question does not apply either way.
+    NotApplicable,
 }
 
 /// The implicit owner of a company whose [`AuthMode`] is `None`, if that is what
