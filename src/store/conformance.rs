@@ -463,6 +463,57 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
     assert_eq!(tail[0].seq, EventSeq::new(3));
 }
 
+/// `read_before` returns a bounded, newest-first page before an exclusive
+/// cursor. This is the primitive transcript pagination uses, so every durable
+/// EventLog backend must exercise its production query/stream implementation.
+pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
+    let id = CompanyId::new("history-page");
+    let mut seqs = Vec::new();
+    for text in ["zero", "one", "two", "three"] {
+        seqs.push(
+            events
+                .append(
+                    &id,
+                    CompanyEvent::OperatorMessage {
+                        parent: None,
+                        text: text.to_string(),
+                        by: None,
+                        chat: None,
+                    },
+                )
+                .await
+                .unwrap(),
+        );
+    }
+
+    let tail = events.read_before(&id, None, 2).await.unwrap();
+    assert_eq!(
+        tail.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![seqs[3], seqs[2]],
+        "the tail page must be newest-first"
+    );
+
+    let before = events.read_before(&id, Some(seqs[3]), 2).await.unwrap();
+    assert_eq!(
+        before.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![seqs[2], seqs[1]],
+        "the cursor is exclusive and the limit is enforced"
+    );
+
+    assert!(
+        events
+            .read_before(&id, Some(seqs[0]), 2)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing precedes the first event"
+    );
+    assert!(
+        events.read_before(&id, None, 0).await.unwrap().is_empty(),
+        "a zero limit never reads a page"
+    );
+}
+
 /// Asserts the [`EventLog`] retention contract (issue #275): the default
 /// policy is inert, permanent kinds survive any policy, sequences are never
 /// renumbered or reused, and a pruned log still reads and appends correctly.
