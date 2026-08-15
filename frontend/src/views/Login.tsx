@@ -478,7 +478,7 @@ export function Login({
         </Card>
         ) : null}
 
-        {authConfig.mode === "email" ? (
+        {authConfig.mode === "email" && authConfig.passwords ? (
         <div className="mt-4 text-center">
           <Button
             variant="link"
