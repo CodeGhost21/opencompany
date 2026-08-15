@@ -1419,14 +1419,18 @@ async fn chat_actor(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Option<Actor>, Response> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
-    // No connect info threaded through here, same as `current_user` — this
-    // helper's callers were not carrying it before this change, so `none`
-    // mode's local owner still resolves through the bind-time guard alone on
-    // this path. See `local_owner`'s doc comment for the peer gate this omits.
-    let auth = resolve_principal(headers, state, Some(company), None)
+    // `headers` reaches `local_owner`'s proxy-forwarding-header gate on every
+    // call site below, including the two that pass `peer: None` — that gate
+    // needs no connect info. `peer` reaches its loopback-peer gate too, but
+    // only where the caller can actually name one: `operator_chat` and
+    // `operator_chat_single` (direct handlers, wired below); `history_viewer`
+    // and `react_to_message` are helpers nested a layer deeper and still pass
+    // `None`, relying on the header gate and the bind-time guard alone.
+    let auth = resolve_principal(headers, state, Some(company), peer)
         .await
         .map_err(|_| unauthorized_response())?;
     if let Some(resp) = authorize_address(state, &auth, company) {
