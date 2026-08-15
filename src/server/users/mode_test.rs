@@ -609,9 +609,10 @@ async fn none_mode_serves_the_local_owner_with_no_credential() {
     assert_eq!(me["role"], "admin");
 }
 
-/// `none` mode's local-owner resolution is peer-gated wherever connect info is
-/// wired (`CompanyAuth`, the GraphQL handler), as a second, independent check
-/// alongside the bind-time refusal — see
+/// `none` mode's local-owner resolution is peer-gated everywhere `MaybePeer`
+/// reaches a handler — `CompanyAuth`, the GraphQL handler, and every REST route
+/// that resolves a principal through `current_user` or `chat_actor` — as a
+/// second, independent check alongside the bind-time refusal, see
 /// `crate::server::graphql::auth::local_owner`. A loopback peer, or no peer at
 /// all (an embedded caller or a router exercised directly, as this test itself
 /// does for everything else), still resolves the owner; a non-loopback peer
