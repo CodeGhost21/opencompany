@@ -155,6 +155,7 @@ pub(crate) async fn issue_challenge(
     now: u64,
 ) -> Result<ChallengeResult, OpenCompanyError> {
     let nonce = token::mint_login_code(src);
+    let identity = LoginIdentity::Wallet(address.to_string()).key();
     let record = LoginCodeRecord {
         id: generate_id(),
         // Only the hash is persisted, exactly as for a magic link. The nonce is
@@ -162,11 +163,19 @@ pub(crate) async fn issue_challenge(
         // dump of this table must still not let anyone answer a live challenge
         // for a wallet whose owner is midway through signing one.
         code_hash: challenge_hash(&nonce),
-        email: LoginIdentity::Wallet(address.to_string()).key(),
+        email: identity.clone(),
         created_at_millis: now,
         expires_at_millis: now + CHALLENGE_TTL_MILLIS,
         consumed_at_millis: None,
     };
+    // One live challenge per wallet, exactly as the magic link keeps one live
+    // code per address: issuing a new one invalidates the last, so a repeated
+    // `challenge` request cannot accumulate unbounded rows for a wallet an
+    // attacker keeps naming.
+    runtime
+        .login_codes()
+        .delete_for_email(runtime.id(), &identity)
+        .await?;
     runtime.login_codes().create(runtime.id(), &record).await?;
     Ok(ChallengeResult {
         message: challenge_message(runtime.id(), address, &nonce, now),
