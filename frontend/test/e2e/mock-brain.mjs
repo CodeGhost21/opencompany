@@ -130,6 +130,36 @@ const MARKER = "__MOCK_LLM__";
 /** Prefix of the "call exactly this tool" directive, followed by a JSON object. */
 const TOOL_CALL_DIRECTIVE = "__MOCK_TOOL_CALL__";
 
+/**
+ * "Take this long to answer", followed by milliseconds — e.g.
+ * `__MOCK_SLOW_MS__ 1500` (issue #863).
+ *
+ * Every other reply here is immediate, which is the right default and also why
+ * a whole class of behaviour was untestable: a workflow whose nodes each answer
+ * in a millisecond finishes before a spec can observe the run in flight at all.
+ * A spec that needs to watch a run WHILE it walks the graph — the live canvas —
+ * puts this in the run request, and the agent nodes downstream inherit it.
+ *
+ * Read off the message text rather than an environment variable on purpose: the
+ * mock brain is started once for the whole suite by `playwright.config.ts`, so
+ * an env knob would be a property of the lane and not of the spec that needs it.
+ */
+const SLOW_DIRECTIVE = "__MOCK_SLOW_MS__";
+
+/** Milliseconds the reply should be held back, read off the directive above. */
+function slowMillis(messages) {
+  for (const message of messages) {
+    const content = typeof message?.content === "string" ? message.content : "";
+    const at = content.indexOf(SLOW_DIRECTIVE);
+    if (at === -1) continue;
+    const ms = Number.parseInt(content.slice(at + SLOW_DIRECTIVE.length).trim(), 10);
+    // A cap, because this runs inside a suite with real timeouts: a typo'd
+    // directive must slow one reply down, never wedge the lane.
+    if (Number.isFinite(ms) && ms > 0) return Math.min(ms, 10_000);
+  }
+  return 0;
+}
+
 /** The cue that makes the orchestrator open exactly one board card. */
 const SPAWN_DIRECTIVE = "SPAWNONE";
 
@@ -634,6 +664,13 @@ const server = createServer((request, response) => {
         return;
       }
       if (path.endsWith("/chat/completions")) {
+        // Issue #863: hold the reply back when the prompt asks for it, so a
+        // spec can watch a workflow run while it is still walking the graph.
+        const held = slowMillis(Array.isArray(body?.messages) ? body.messages : []);
+        if (held > 0) {
+          setTimeout(() => sendJson(response, 200, chatCompletion(body)), held);
+          return;
+        }
         sendJson(response, 200, chatCompletion(body));
       } else if (path.endsWith("/embeddings")) {
         sendJson(response, 200, embeddings(body));

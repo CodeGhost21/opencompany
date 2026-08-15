@@ -156,6 +156,91 @@ describe("foldLiveRun reports running from node-started frames", () => {
   });
 });
 
+/**
+ * Issue #863: a console that did not see the run start.
+ *
+ * The frame window only holds what arrived since this console connected, so a
+ * run already walking when the tab was opened — a cron fire, a run started from
+ * chat, a reload, an `EventSource` reconnect — has no `workflow_run_started` in
+ * it. The fold used to return `null` there, which painted NOTHING for the whole
+ * run: not a partial trail, nothing. The host serves that run on
+ * `…/workflows/runs` with `running: true` and the nodes it has finished, and
+ * that read is what the fold now adopts.
+ */
+describe("foldLiveRun joins a run it did not see start", () => {
+  const seed = (runId: string, states: Record<string, "ok" | "error" | "running">) => ({
+    runId,
+    states,
+    elapsed: { ceo: 12 },
+    scheduled: false,
+  });
+
+  it("paints nothing without a seed — the regression #863 reports", () => {
+    // No start frame in the window: every later frame is stranded behind the
+    // one thing the fold used to need.
+    expect(foldLiveRun([nodeStarted("r1", "ceo")], "greet", GRAPH)).toBeNull();
+  });
+
+  it("adopts the host's in-flight run and keeps its recorded trail", () => {
+    const live = foldLiveRun([], "greet", GRAPH, seed("r1", { ceo: "ok" }));
+    expect(live?.runId).toBe("r1");
+    expect(live?.active).toBe(true);
+    expect(live?.states.ceo).toBe("ok");
+    expect(live?.elapsed.ceo).toBe(12);
+    // Still seeded from the graph, so the trigger reads as fired.
+    expect(live?.states.start).toBe("ok");
+  });
+
+  it("keeps painting from the frames that arrive after it joins", () => {
+    const live = foldLiveRun(
+      [nodeStarted("r1", "done"), nodeFinished("r1", "done", "ok")],
+      "greet",
+      GRAPH,
+      seed("r1", { ceo: "ok" }),
+    );
+    expect(live?.states).toMatchObject({ start: "ok", ceo: "ok", done: "ok" });
+  });
+
+  it("settles when the run it adopted finishes", () => {
+    const live = foldLiveRun(
+      [nodeStarted("r1", "done"), finished("r1")],
+      "greet",
+      GRAPH,
+      seed("r1", { ceo: "ok" }),
+    );
+    expect(live?.active).toBe(false);
+    // The orphan sweep applies to an adopted run exactly as it does to a
+    // watched one: `done` started and never finished.
+    expect(live?.states.done).toBeUndefined();
+    expect(live?.states.ceo).toBe("ok");
+  });
+
+  it("ignores frames belonging to another run while it is adopted", () => {
+    const live = foldLiveRun(
+      [nodeStarted("r2", "done"), finished("r2")],
+      "greet",
+      GRAPH,
+      seed("r1", { ceo: "ok" }),
+    );
+    expect(live?.active).toBe(true);
+    expect(live?.states.done).toBeUndefined();
+  });
+
+  it("a live start frame outranks the seed — a rerun supersedes the run before", () => {
+    const live = foldLiveRun(
+      [start("r2"), nodeStarted("r2", "ceo")],
+      "greet",
+      GRAPH,
+      seed("r1", { ceo: "ok", done: "ok" }),
+    );
+    expect(live?.runId).toBe("r2");
+    // The older run's finished nodes are gone: this is a different run, and
+    // carrying its predecessor's marks over would be a lie about this one.
+    expect(live?.states.done).toBeUndefined();
+    expect(live?.states.ceo).toBe("running");
+  });
+});
+
 describe("workflow_node_started routing", () => {
   function subscribers() {
     return {
