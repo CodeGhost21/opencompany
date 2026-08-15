@@ -611,6 +611,50 @@ async fn none_mode_serves_the_local_owner_with_no_credential() {
     assert_eq!(me["role"], "admin");
 }
 
+/// `none` mode's local-owner resolution is peer-gated wherever connect info is
+/// wired (`CompanyAuth`, the GraphQL handler), as a second, independent check
+/// alongside the bind-time refusal — see
+/// `crate::server::graphql::auth::local_owner`. A loopback peer, or no peer at
+/// all (an embedded caller or a router exercised directly, as this test itself
+/// does for everything else), still resolves the owner; a non-loopback peer
+/// does not, even though the same company would otherwise admit it.
+#[tokio::test]
+async fn none_mode_local_owner_resolution_refuses_a_non_loopback_peer() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let app = router(state);
+
+    // No peer info at all — an embedded caller, or this very test harness for
+    // any route it does not explicitly wire below. Still resolves: this is not
+    // itself a refusal, only a positive non-loopback finding is.
+    let no_peer = app
+        .clone()
+        .oneshot(get("/api/v1/company/feedback"))
+        .await
+        .unwrap();
+    assert_eq!(no_peer.status(), StatusCode::OK);
+
+    // A loopback peer resolves the owner.
+    let mut loopback_req = get("/api/v1/company/feedback");
+    loopback_req.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:54321".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let loopback = app.clone().oneshot(loopback_req).await.unwrap();
+    assert_eq!(loopback.status(), StatusCode::OK);
+
+    // A non-loopback peer does not, even for the same company and route.
+    let mut remote_req = get("/api/v1/company/feedback");
+    remote_req.extensions_mut().insert(ConnectInfo(
+        "203.0.113.7:54321".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let remote = app.oneshot(remote_req).await.unwrap();
+    assert_eq!(
+        remote.status(),
+        StatusCode::UNAUTHORIZED,
+        "a non-loopback peer must not resolve the none-mode local owner"
+    );
+}
+
 /// The owner is one durable record, not a principal invented per request —
 /// chat attribution and the task board key off the user id.
 #[tokio::test]
