@@ -184,36 +184,50 @@ pub async fn list_transactions(
         .get("/v1/reporting/transactions", &query)
         .await
         .map_err(explain_unavailable_window)?;
-    Ok(body
+    let rows = body
         .get("transaction_details")
         .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .map(|row| {
-                    let info = row.get("transaction_info");
-                    let payer = row.get("payer_info");
-                    Transaction {
-                        id: text(info, "transaction_id").unwrap_or_default(),
-                        date: text(info, "transaction_initiation_date").unwrap_or_default(),
-                        amount: text(info.and_then(|i| i.get("transaction_amount")), "value")
-                            .unwrap_or_else(|| "0.00".to_string()),
-                        currency_code: text(
-                            info.and_then(|i| i.get("transaction_amount")),
-                            "currency_code",
-                        )
-                        .unwrap_or_default(),
-                        status: text(info, "transaction_status").unwrap_or_default(),
-                        counterparty: text(
-                            payer.and_then(|p| p.get("payer_name")),
-                            "alternate_full_name",
-                        )
-                        .or_else(|| text(payer, "email_address")),
-                        note: text(info, "transaction_note"),
-                    }
-                })
-                .collect()
+        .ok_or_else(|| {
+            // A successful empty array means no transactions. A missing array
+            // means the response shape changed, and reporting the latter as an
+            // empty history would be a confident lie about money.
+            tracing::warn!(
+                body = %body.to_string().chars().take(200).collect::<String>(),
+                "[paypal] reply carried no `transaction_details` array"
+            );
+            OpenCompanyError::Paypal {
+                status: 0,
+                code: "unexpected_response".to_string(),
+                message: "PayPal's reply carried no `transaction_details` array. The reply is in the host log."
+                    .to_string(),
+            }
+        })?;
+
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let info = row.get("transaction_info");
+            let payer = row.get("payer_info");
+            Transaction {
+                id: text(info, "transaction_id").unwrap_or_default(),
+                date: text(info, "transaction_initiation_date").unwrap_or_default(),
+                amount: text(info.and_then(|i| i.get("transaction_amount")), "value")
+                    .unwrap_or_else(|| "0.00".to_string()),
+                currency_code: text(
+                    info.and_then(|i| i.get("transaction_amount")),
+                    "currency_code",
+                )
+                .unwrap_or_default(),
+                status: text(info, "transaction_status").unwrap_or_default(),
+                counterparty: text(
+                    payer.and_then(|p| p.get("payer_name")),
+                    "alternate_full_name",
+                )
+                .or_else(|| text(payer, "email_address")),
+                note: text(info, "transaction_note"),
+            }
         })
-        .unwrap_or_default())
+        .collect())
 }
 
 #[cfg(test)]
@@ -299,8 +313,8 @@ mod tests {
     async fn a_reply_without_a_balances_array_is_an_error_not_an_empty_wallet() {
         // An account always has balances, so a reply without them is a broken
         // integration — reporting "no funds" would be a confident lie about
-        // money. (A transaction query is the opposite case; see
-        // `list_transactions`.)
+        // money. The transaction query follows the same rule: an empty array
+        // is a real empty history, but a missing array is not.
         let (client, server) = stub_client(r#"{"name":"INTERNAL","debug_id":"x"}"#).await;
         let err = get_wallet_balance(&client)
             .await
@@ -309,6 +323,23 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("balances"), "{rendered}");
         // And the body itself is logged, not relayed into the transcript.
+        assert!(!rendered.contains("debug_id"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_without_transaction_details_is_an_error_not_an_empty_history() {
+        let (client, server) = stub_client(r#"{"name":"INTERNAL","debug_id":"x"}"#).await;
+        let err = list_transactions(
+            &client,
+            "2026-08-01T00:00:00Z",
+            "2026-08-02T00:00:00Z",
+            None,
+        )
+        .await
+        .expect_err("a missing array is an error");
+        server.abort();
+        let rendered = err.to_string();
+        assert!(rendered.contains("transaction_details"), "{rendered}");
         assert!(!rendered.contains("debug_id"), "{rendered}");
     }
 

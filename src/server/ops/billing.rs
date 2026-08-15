@@ -353,7 +353,7 @@ mod tests {
         use crate::ports::types::CompanyRecord;
 
         let id = CompanyId::new("acme");
-        let manifest: crate::company::CompanyManifest = toml::from_str(
+        let manifest: crate::company::CompanyManifest = ::toml::from_str(
             "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
         )
         .expect("manifest");
@@ -422,7 +422,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_saved_credential_is_reported_as_configured_and_never_returned() {
-        let home = tempfile::tempdir().expect("tempdir");
+        let home = ::tempfile::tempdir().expect("tempdir");
         let state = state_with_company(home.path()).await;
         let admin = crate::server::test_support::seed_admin(&state, "acme").await;
 
@@ -479,7 +479,7 @@ mod tests {
         // The route is named `…/key`, which reads as if it clears only the API
         // key — leaving a webhook credential behind would keep the endpoint
         // live while the UI reported the integration as cleared.
-        let home = tempfile::tempdir().expect("tempdir");
+        let home = ::tempfile::tempdir().expect("tempdir");
         let state = state_with_company(home.path()).await;
         let admin = crate::server::test_support::seed_admin(&state, "acme").await;
 
@@ -517,7 +517,7 @@ mod tests {
     async fn paypal_clears_its_environment_so_a_reconnect_starts_at_sandbox() {
         // Inheriting `live` from a previous account is the failure worth
         // preventing here: the next connection would read real money.
-        let home = tempfile::tempdir().expect("tempdir");
+        let home = ::tempfile::tempdir().expect("tempdir");
         let state = state_with_company(home.path()).await;
         let admin = crate::server::test_support::seed_admin(&state, "acme").await;
 
@@ -567,7 +567,7 @@ mod tests {
         // `PUT` here would point the company's invoicing at a Chargebee site
         // they control, and one who could `DELETE` could silently stop every
         // payment notification.
-        let home = tempfile::tempdir().expect("tempdir");
+        let home = ::tempfile::tempdir().expect("tempdir");
         let state = state_with_company(home.path()).await;
         let member = crate::server::test_support::seed_session(
             &state,
