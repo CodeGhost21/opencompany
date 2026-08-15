@@ -13,8 +13,10 @@ This is distinct from, and weaker than, the machine credentials in
 Everything below describes the default `email` mode. A company may instead sign
 people in with a **wallet**, or have **no sign-in at all** — see
 [Sign-in modes](auth-modes.md), which covers the choice, where it is configured,
-and what changes under each. The roster, sessions, invites, revocation and the
-rules on this page are shared by every mode; only the proof of identity differs.
+and what changes under each. The roster, sessions, invites, and revocation on
+this page are shared by `email` and `wallet`; only the proof of identity
+differs between them. `none` mode has none of this — no invite flow, no session,
+no roster beyond its single implicit local owner.
 
 | Concern | Answer |
 |---|---|
