@@ -208,8 +208,22 @@ impl Serving {
 }
 
 /// Serves on a listener the caller already bound.
+///
+/// Wired with the connecting peer's socket address (`ConnectInfo`), not just
+/// the router: `none` mode's local-owner resolution
+/// ([`local_owner`](crate::server::graphql::auth::local_owner)) checks it as a
+/// second, independent gate alongside the bind-time refusal — a reverse proxy
+/// terminating a routable connection and forwarding to this loopback-bound
+/// listener over `127.0.0.1` still leaves the peer this process sees as
+/// loopback, so this alone cannot catch that case, but it does catch any other
+/// path that ends up with `none` mode live on a socket actually reachable from
+/// off-box.
 pub async fn serve_on(listener: TcpListener, state: AppState) -> Result<()> {
-    axum::serve(listener, router(state)).await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
