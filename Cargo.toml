@@ -126,7 +126,7 @@ url = "2"
 # objects — so a company's workflows run on it without booting any OpenHuman
 # global `Config`/registry. Only links under the `openhuman` feature; the
 # `[patch.crates-io]` entry below already redirects it at the vendored copy
-# (`vendor/openhuman/vendor/tinyflows`, 0.6.x — 0.5.x before the #499 pin bump).
+# (`vendor/openhuman/vendor/tinyflows`, 0.8.x — 0.6.x before the #840 resync).
 # The requirement below tracks that major-for-0.x move because a `[patch]`
 # replaces the crate's SOURCE, not the version requirement it has to satisfy, so
 # a stale `0.5` fails resolution outright rather than quietly building the old
@@ -134,7 +134,7 @@ url = "2"
 # `vendor/tinyagents`, so this adds no new lockstep.
 # We deliberately do NOT enable openhuman's own `flows` feature: that drags in
 # rhai + the builder tools, defeating the point of running tinyflows directly.
-tinyflows = { version = "0.6", optional = true }
+tinyflows = { version = "0.8", optional = true }
 
 # Issue #105: attribute-tolerant `<tool_call>` tag normalization in the harness
 # tool dispatcher. The staging model emits `<tool_call id="…">…</tool_call>`
@@ -406,7 +406,6 @@ tinycortex = { path = "vendor/openhuman/vendor/tinycortex" }
 # OpenHuman consumes the implementation by path. Keep both on one checkout so
 # their public trait identities remain identical.
 tinycortex-api = { path = "vendor/openhuman/vendor/tinycortex/api" }
-tinyjuice = { path = "vendor/openhuman/vendor/tinyjuice" }
 tinychannels = { path = "vendor/openhuman/vendor/tinychannels" }
 tinyplace = { path = "vendor/openhuman/vendor/tinyplace/sdk/rust" }
 # Arrived with the #499 pin bump, and is NOT a submodule — openhuman vendors it
