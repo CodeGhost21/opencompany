@@ -84,7 +84,7 @@ pub struct DesktopConfig {
 /// A running local OpenCompany API. Dropping it aborts the loopback server.
 pub struct DesktopRuntime {
     config: DesktopConfig,
-    server: JoinHandle<std::io::Result<()>>,
+    server: JoinHandle<Result<()>>,
 }
 
 impl DesktopRuntime {
