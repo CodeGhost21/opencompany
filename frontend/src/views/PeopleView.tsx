@@ -141,7 +141,10 @@ export function PeopleView({ client, company }: Props) {
    */
   async function inviteAndReport(email: string, role: UserRole) {
     try {
-      const result = await sendInvite(client, company, email, role);
+      // This view's dialog collects only an email address — it has no wallet
+      // input — so it only ever invites in email mode, exactly as before
+      // `mode` became a required argument.
+      const result = await sendInvite(client, company, email, role, "email");
       await load();
       if (result.delivery === "sent") {
         toast.success(`Invited ${email}`, {
