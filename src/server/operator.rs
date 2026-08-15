@@ -1461,10 +1461,11 @@ async fn operator_chat(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatResponse>, Response> {
     let company = CompanyId::new(&id);
-    let by = chat_actor(&headers, &state, &company).await?;
+    let by = chat_actor(&headers, &state, &company, peer).await?;
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     chat_and_emit(&state, &company, runtime, message, by)
         .await
