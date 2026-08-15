@@ -236,20 +236,31 @@ impl LoginIdentity {
     /// wallet and local identities existed holds — so this is the whole
     /// migration.
     pub fn parse(key: &str) -> Self {
-        if let Some(address) = key.strip_prefix(WALLET_PREFIX) {
-            Self::Wallet(address.to_string())
-        } else if key.strip_prefix(LOCAL_PREFIX).is_some() {
-            Self::Local
-        } else {
-            Self::Email(key.to_string())
+        // Both prefixes are checked for an *exact* scheme before being trusted,
+        // not merely a string prefix: `normalize_email` only lowercases and
+        // trims, so `wallet:ada@example.com` and `local:owner@example.com` are
+        // both keys a real invite can normalize an email address into. Without
+        // this, they would misparse as a wallet or the local owner instead of
+        // the email they are — silently breaking mail delivery and, for
+        // `local:owner@example.com`, granting local-owner semantics to an
+        // email address.
+        if let Some(address) = key.strip_prefix(WALLET_PREFIX)
+            && !address.is_empty()
+            && bs58::decode(address).into_vec().is_ok()
+        {
+            return Self::Wallet(address.to_string());
         }
+        if key.strip_prefix(LOCAL_PREFIX) == Some(LOCAL_OWNER) {
+            return Self::Local;
+        }
+        Self::Email(key.to_string())
     }
 
     /// The normalized storage/lookup key for this identity.
     pub fn key(&self) -> String {
         match self {
             Self::Email(address) => normalize_email(address),
-            Self::Wallet(address) => format!("{WALLET_PREFIX}{}", address.trim()),
+            Self::Wallet(address) => format!("{WALLET_PREFIX}{}", normalize_wallet(address)),
             Self::Local => format!("{LOCAL_PREFIX}{LOCAL_OWNER}"),
         }
     }
