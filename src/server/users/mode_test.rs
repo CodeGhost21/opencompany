@@ -27,6 +27,8 @@ use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::RuntimeBuilder;
 use crate::server::router;
+use crate::server::users::token;
+use crate::server::users::wallet::{self, VerifyRequest};
 use crate::{AppConfig, AppState};
 
 fn home() -> tempfile::TempDir {
