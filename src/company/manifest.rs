@@ -650,6 +650,28 @@ mod tests {
         assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
     }
 
+    /// `normalize_email` only lowercases and trims, so an `[users].admins`
+    /// entry with no `@` can still be a normalized key — including one that
+    /// collides with the `local:owner` scheme `LoginIdentity::parse` reserves
+    /// for the `none`-mode owner. Caught here, before a bootstrapped user is
+    /// ever stored under that exact key.
+    #[test]
+    fn a_bootstrap_admin_that_is_not_an_email_address_is_rejected() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n[users]\nmode = \"email\"\nadmins = [\"Local:Owner\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("`[users].admins`")),
+            "{problems:?}"
+        );
+
+        let manifest = parse(
+            "[company]\nname = \"X\"\n[users]\nmode = \"email\"\nadmins = [\"ada@example.com\"]\n",
+        );
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
     #[test]
     fn bare_agents_toml_is_valid() {
         let manifest = parse(
