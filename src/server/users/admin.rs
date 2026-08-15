@@ -235,14 +235,12 @@ impl InviteBody {
         match mode {
             AuthMode::Email if !self.wallet.trim().is_empty() => {
                 Err(OpenCompanyError::InvalidRequest(
-                    "this company signs in by email, not wallet — leave `wallet` empty"
-                        .to_string(),
+                    "this company signs in by email, not wallet — leave `wallet` empty".to_string(),
                 ))
             }
             AuthMode::Wallet if !self.email.trim().is_empty() => {
                 Err(OpenCompanyError::InvalidRequest(
-                    "this company signs in by wallet, not email — leave `email` empty"
-                        .to_string(),
+                    "this company signs in by wallet, not email — leave `email` empty".to_string(),
                 ))
             }
             AuthMode::Email => {
