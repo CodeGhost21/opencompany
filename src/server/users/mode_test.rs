@@ -335,7 +335,7 @@ async fn a_challenge_cannot_be_answered_twice() {
 /// would let an unauthenticated caller who keeps naming an eligible wallet grow
 /// the challenge table without bound.
 #[tokio::test]
-async fn a_second_challenge_for_the_same_wallet_invalidates_the_first() {
+async fn a_second_challenge_inside_the_throttle_window_does_not_invalidate_the_first() {
     let dir = home();
     let key = wallet(9);
     let addr = address(&key);
@@ -362,37 +362,81 @@ async fn a_second_challenge_for_the_same_wallet_invalidates_the_first() {
     )
     .await;
 
-    // The first nonce no longer redeems, because issuing the second deleted it
-    // rather than leaving both live.
-    let stale_signature = bs58::encode(
+    // The second request landed inside the throttle window, so it answered
+    // with a decoy rather than replacing the pending challenge — the first
+    // nonce is still exactly what the owner should sign.
+    let first_signature = bs58::encode(
         key.sign(first["message"].as_str().unwrap().as_bytes())
             .to_bytes(),
     )
     .into_string();
-    let stale = app
+    let answered = app
         .clone()
         .oneshot(post(
             "/api/v1/company/auth/wallet/verify",
-            serde_json::json!({"nonce": first["nonce"], "signature": stale_signature}),
+            serde_json::json!({"nonce": first["nonce"], "signature": first_signature}),
         ))
         .await
         .unwrap();
-    assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        answered.status(),
+        StatusCode::OK,
+        "a throttled replacement must not invalidate the pending challenge"
+    );
 
-    // The second, current nonce still works.
-    let fresh_signature = bs58::encode(
+    // The decoy the second request returned is not a real challenge — it was
+    // never persisted — so signing it answers nothing.
+    let decoy_signature = bs58::encode(
         key.sign(second["message"].as_str().unwrap().as_bytes())
             .to_bytes(),
     )
     .into_string();
-    let fresh = app
+    let decoy_answer = app
         .oneshot(post(
             "/api/v1/company/auth/wallet/verify",
-            serde_json::json!({"nonce": second["nonce"], "signature": fresh_signature}),
+            serde_json::json!({"nonce": second["nonce"], "signature": decoy_signature}),
         ))
         .await
         .unwrap();
-    assert_eq!(fresh.status(), StatusCode::OK);
+    assert_eq!(decoy_answer.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Once the throttle window has passed, a replacement challenge really does
+/// invalidate the one it replaces — the throttle is a delay, not a
+/// prohibition, so the roster's own admin still gets a working "one live
+/// challenge" invariant once the window clears.
+#[tokio::test]
+async fn a_challenge_replaces_the_previous_one_once_the_throttle_window_passes() {
+    let dir = home();
+    let key = wallet(14);
+    let addr = address(&key);
+    let state = state_in_mode(dir.path(), AuthMode::Wallet, Some(&addr)).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    let t0 = 1_000_000_u64;
+    let first = wallet::issue_challenge(&runtime, &token::OsTokens, &addr, t0)
+        .await
+        .unwrap();
+    let t1 = t0 + wallet::CHALLENGE_RESEND_INTERVAL_MILLIS + 1;
+    let second = wallet::issue_challenge(&runtime, &token::OsTokens, &addr, t1)
+        .await
+        .unwrap();
+    assert_ne!(first.nonce, second.nonce);
+
+    let stale_body = VerifyRequest {
+        nonce: first.nonce,
+        signature: bs58::encode(key.sign(first.message.as_bytes()).to_bytes()).into_string(),
+    };
+    assert!(
+        wallet::verify_challenge(&runtime, &stale_body, t1).await.is_none(),
+        "the replaced challenge must no longer redeem"
+    );
+
+    let fresh_body = VerifyRequest {
+        nonce: second.nonce,
+        signature: bs58::encode(key.sign(second.message.as_bytes()).to_bytes()).into_string(),
+    };
+    assert!(wallet::verify_challenge(&runtime, &fresh_body, t1).await.is_some());
 }
 
 /// Inviting a wallet identity has no mailbox to write to, and the invite route
