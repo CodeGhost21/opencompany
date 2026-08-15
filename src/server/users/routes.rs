@@ -1209,12 +1209,20 @@ async fn auth_config(company: PublicCompany) -> Json<AuthConfigResult> {
 }
 
 /// The user behind this request's session cookie, if any.
+///
+/// Not wired with the request's TCP peer — unlike
+/// [`CompanyAuth`](crate::server::platform_auth::CompanyAuth) and the GraphQL
+/// handler's own resolution, its callers here are narrower REST routes that
+/// were not carrying connect info before this change, so `none` mode's local
+/// owner still resolves through the bind-time guard alone on this path, exactly
+/// as it did before. See [`local_owner`](crate::server::graphql::auth::local_owner)
+/// for the peer gate this does not apply here.
 pub(crate) async fn current_user(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
 ) -> Option<UserPrincipal> {
-    match resolve_principal(headers, state, Some(company)).await {
+    match resolve_principal(headers, state, Some(company), None).await {
         Ok(GqlAuth::User(user)) => Some(user),
         _ => None,
     }
