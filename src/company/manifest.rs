@@ -411,6 +411,26 @@ impl CompanyManifest {
             }
         }
 
+        // An admin entry is bootstrapped by comparing its normalized form
+        // against the identity a login route resolves — the same normalization
+        // `LoginIdentity::parse` has to disambiguate from the `wallet:` and
+        // `local:` schemes sharing this column. An entry that does not survive
+        // normalization as a real mailbox (missing `@`) is not merely useless,
+        // it can normalize to `local:owner` — `normalize_email` only lowercases
+        // and trims — and a bootstrapped user stored under that exact key would
+        // misparse as the `none`-mode local owner identity rather than the
+        // email admin it was meant to be. Caught here so it never reaches a
+        // running company.
+        for admin in &self.users.admins {
+            let normalized = normalize_email(admin);
+            if normalized.is_empty() || !normalized.contains('@') {
+                problems.push(format!(
+                    "`[users].admins` has an invalid entry: `{admin}` does not look like an \
+                     email address"
+                ));
+            }
+        }
+
         match mode {
             "email" if !self.users.wallets.is_empty() => problems.push(
                 "`[users].wallets` is only read when `[users].mode` is `wallet`, so these addresses grant nothing. Set the mode, or list the people in `admins` instead."
