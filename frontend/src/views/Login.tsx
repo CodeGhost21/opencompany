@@ -1,14 +1,19 @@
 import { useEffect, useState } from "react";
-import { ArrowRight, Building2, Loader2, MailCheck } from "lucide-react";
+import { ArrowRight, Building2, Loader2, MailCheck, Monitor, Wallet } from "lucide-react";
 
 import {
+  fetchAuthConfig,
   fetchHubProviders,
   loginWithPassword,
   requestCode,
+  requestWalletChallenge,
   verifyCode,
+  verifyWalletSignature,
+  type AuthConfig,
   type HubProvider,
   type Me,
 } from "@/api/auth";
+import { connectWallet, hasWallet, NoWalletError, signMessage } from "@/lib/wallet";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -57,6 +62,15 @@ interface Props {
 type Mode = "link" | "password";
 
 /**
+ * What the host says before anything has been fetched.
+ *
+ * `email` because that is what every company did before the mode was
+ * configurable, so an older host — which has no `/auth/config` route — renders
+ * exactly the screen it always did.
+ */
+const ASSUMED_CONFIG: AuthConfig = { mode: "email", passwords: true };
+
+/**
  * The sign-in view: magic link by default, password for anyone who set one.
  *
  * Two rules this view must not break:
@@ -88,6 +102,14 @@ export function Login({
    * not an error worth showing anyone.
    */
   const [hubProviders, setHubProviders] = useState<HubProvider[]>([]);
+  /**
+   * How this company signs people in.
+   *
+   * Asked of the host, never inferred from which routes fail: a wallet company
+   * and a misconfigured email company both refuse `auth/request`, and only one
+   * of them should be offered a wallet button.
+   */
+  const [authConfig, setAuthConfig] = useState<AuthConfig>(ASSUMED_CONFIG);
   const [email, setEmail] = useState(suggestedEmail ?? "");
   // The suggestion usually arrives *after* this mounts. A relaunch restores the
   // embedded connection from its remembered profile immediately, while the
@@ -107,6 +129,20 @@ export function Login({
   const [sent, setSent] = useState(false);
   // Only ever set on a host with no mail transport (local dev).
   const [devCode, setDevCode] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAuthConfig(client, company)
+      .then((config) => {
+        if (!cancelled) setAuthConfig(config);
+      })
+      .catch(() => {
+        // `fetchAuthConfig` already falls back to email; this is belt and braces.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, company]);
 
   useEffect(() => {
     let cancelled = false;
@@ -165,6 +201,29 @@ export function Login({
     }
   }
 
+  /**
+   * Connect, sign the host's challenge, and exchange it for a session.
+   *
+   * The message is signed exactly as the host sent it. Nothing here inspects or
+   * rebuilds it: the layout is the host's, versioned by its first line, and a
+   * console that assembled its own would silently stop verifying the day the
+   * host changed it.
+   */
+  async function signInWithWallet() {
+    setBusy(true);
+    setError(null);
+    try {
+      const address = await connectWallet();
+      const challenge = await requestWalletChallenge(client, company, address);
+      const signature = await signMessage(challenge.message);
+      onSignedIn(await verifyWalletSignature(client, company, challenge.nonce, signature));
+    } catch (err) {
+      setError(friendly(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="min-h-svh bg-background">
       <header className="flex items-center justify-between border-b px-6 py-4">
@@ -186,14 +245,80 @@ export function Login({
 
         <div className="mb-6 space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">
-            Sign in{companyName ? ` to ${companyName}` : ""}
+            {authConfig.mode === "none" ? "" : "Sign in"}
+            {companyName ? (authConfig.mode === "none" ? companyName : ` to ${companyName}`) : ""}
           </h1>
-          <p className="text-sm text-muted-foreground">
-            {mode === "link"
-              ? "We'll email you a link. No password needed."
-              : "Use the password you set for this company."}
-          </p>
+          <p className="text-sm text-muted-foreground">{subtitle(authConfig, mode)}</p>
         </div>
+
+        {/*
+          A company with no sign-in. Reaching this screen at all means the
+          console could not authenticate — on a `none`-mode host every request
+          is already the owner's, so the ordinary path never renders this view.
+          What is left is a genuine misconfiguration: something is addressing a
+          desktop company from somewhere that is not the desktop. Say that,
+          rather than offering a form whose every field is refused.
+        */}
+        {authConfig.mode === "none" ? (
+          <Card className="space-y-3 p-6">
+            <div className="flex items-start gap-3">
+              <Monitor className="mt-0.5 size-5 shrink-0 text-primary" />
+              <div className="space-y-1">
+                <p className="text-sm font-medium">There is no sign-in here</p>
+                <p className="text-sm text-muted-foreground">
+                  This company is used from the OpenCompany app on the computer
+                  it runs on. It admits one person — whoever is at that machine —
+                  and has no accounts to sign in with.
+                </p>
+              </div>
+            </div>
+            {error ? (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {/*
+          Wallet sign-in. One button, because there is nothing to type: the
+          address comes from the wallet, and typing one you do not hold proves
+          nothing anyway.
+        */}
+        {authConfig.mode === "wallet" ? (
+          <Card className="space-y-4 p-6">
+            {hasWallet() ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Your wallet will be asked to sign a one-time message. It is a
+                  signature, not a transaction — nothing is sent and nothing is
+                  spent.
+                </p>
+                <Button className="w-full" onClick={signInWithWallet} disabled={busy}>
+                  {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                  <Wallet className="mr-2 size-4" />
+                  Continue with wallet
+                </Button>
+              </>
+            ) : (
+              <div className="flex items-start gap-3">
+                <Wallet className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">No wallet found</p>
+                  <p className="text-sm text-muted-foreground">
+                    This company signs people in with a Solana wallet. Install one
+                    in this browser, then reload.
+                  </p>
+                </div>
+              </div>
+            )}
+            {error ? (
+              <Alert variant="destructive">
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            ) : null}
+          </Card>
+        ) : null}
 
         {/*
           Ecosystem sign-in, above the form because it is the path most people
@@ -204,7 +329,7 @@ export function Login({
           hub's OAuth start is a top-level navigation, and the browser must own
           it so the provider's own domain appears in the address bar.
         */}
-        {hubProviders.length > 0 && (
+        {authConfig.mode === "email" && hubProviders.length > 0 && (
           <div className="mb-6 space-y-3">
             <div className="grid gap-2">
               {hubProviders.map((provider) => (
@@ -248,6 +373,7 @@ export function Login({
           </div>
         )}
 
+        {authConfig.mode === "email" ? (
         <Card className="p-6">
           {sent && mode === "link" ? (
             <div className="space-y-4">
@@ -350,7 +476,9 @@ export function Login({
             </form>
           )}
         </Card>
+        ) : null}
 
+        {authConfig.mode === "email" ? (
         <div className="mt-4 text-center">
           <Button
             variant="link"
@@ -364,8 +492,9 @@ export function Login({
             {mode === "link" ? "Use a password instead" : "Email me a link instead"}
           </Button>
         </div>
+        ) : null}
 
-        {mode === "password" ? (
+        {authConfig.mode === "email" && mode === "password" ? (
           <p className="mt-2 text-center text-xs text-muted-foreground">
             Forgot it? Sign in with a link, then set a new password.
           </p>
@@ -373,6 +502,15 @@ export function Login({
       </main>
     </div>
   );
+}
+
+/** One line under the heading, saying what this company will actually ask for. */
+function subtitle(config: AuthConfig, mode: Mode): string {
+  if (config.mode === "none") return "";
+  if (config.mode === "wallet") return "Prove you hold the wallet. Nothing is emailed.";
+  return mode === "link"
+    ? "We\'ll email you a link. No password needed."
+    : "Use the password you set for this company.";
 }
 
 /**
@@ -383,7 +521,15 @@ export function Login({
  * here for the same reason it is vague there.
  */
 function friendly(err: unknown): string {
+  if (err instanceof NoWalletError) {
+    return "No wallet found in this browser. Install one, then reload.";
+  }
   if (err instanceof ApiError) {
+    if (err.code === "auth_mode") {
+      // The console asked for a sign-in this company does not have. Almost
+      // always a stale tab against a host whose mode changed under it.
+      return `${err.message}. Reload to see the right sign-in.`;
+    }
     if (err.code === "invalid_login") {
       return "That didn't work. Check the address and password, or sign in with a link.";
     }
