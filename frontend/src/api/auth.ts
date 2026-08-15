@@ -321,7 +321,7 @@ export async function invite(
   company: string | null,
   identifier: string,
   role: UserRole,
-  mode: AuthMode = "email",
+  mode: AuthMode,
 ): Promise<Invite & { delivery: InviteDelivery }> {
   // Which field carries the identifier follows the company's mode, because the
   // server normalizes them by different rules: an address is lowercased, a
