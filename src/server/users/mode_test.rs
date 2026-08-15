@@ -674,6 +674,56 @@ async fn none_mode_auth_me_refuses_a_non_loopback_peer() {
     );
 }
 
+/// A valid platform bearer is not a way past the peer/header gates on a
+/// `none`-mode company: falling through to it once `local_owner` refuses
+/// would make the gates decorative, since a bearer is just another credential
+/// a remote caller could hold. The identical bearer must keep working
+/// normally on an `email`-mode company — the refusal is specific to `none`
+/// mode's local-only contract, not a blanket rule against platform auth.
+#[tokio::test]
+async fn none_mode_refuses_a_platform_bearer_from_a_non_loopback_peer() {
+    use crate::server::platform_auth::{PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier};
+
+    let secret = "top-secret";
+    let verifier = std::sync::Arc::new(UnsignedTenantVerifier::new(secret));
+    let token = UnsignedTenantVerifier::tenant_token(&PlatformClaims {
+        tenant: "tenant:acme".to_string(),
+        scopes: std::collections::HashSet::from(["platform".to_string()]),
+        companies: None,
+    });
+    let remote = ConnectInfo("203.0.113.7:1".parse::<std::net::SocketAddr>().unwrap());
+    let auth_header = format!("Bearer {token}");
+
+    let dir = home();
+    let none_state = state_in_mode(dir.path(), AuthMode::None, None)
+        .await
+        .with_platform_auth(PlatformAuthConfig::new(verifier.clone()));
+    let mut none_req = get("/api/v1/company/feedback");
+    none_req.extensions_mut().insert(remote);
+    none_req
+        .headers_mut()
+        .insert("authorization", auth_header.parse().unwrap());
+    let none_response = router(none_state).oneshot(none_req).await.unwrap();
+    assert_eq!(
+        none_response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a platform bearer must not stand in for the local owner on a none-mode company"
+    );
+
+    // The same bearer, unchanged, still works on an ordinary email-mode
+    // company — this isn't a blanket refusal of platform auth.
+    let email_state = state_in_mode(dir.path(), AuthMode::Email, None)
+        .await
+        .with_platform_auth(PlatformAuthConfig::new(verifier));
+    let mut email_req = get("/api/v1/company/feedback");
+    email_req.extensions_mut().insert(remote);
+    email_req
+        .headers_mut()
+        .insert("authorization", auth_header.parse().unwrap());
+    let email_response = router(email_state).oneshot(email_req).await.unwrap();
+    assert_eq!(email_response.status(), StatusCode::OK);
+}
+
 /// A same-host reverse proxy connects to a loopback-bound listener over
 /// loopback too, so the peer this process sees always reads as loopback
 /// regardless of where the proxy's own caller actually was — the peer check
