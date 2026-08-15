@@ -430,7 +430,9 @@ async fn a_challenge_replaces_the_previous_one_once_the_throttle_window_passes()
         signature: bs58::encode(key.sign(first.message.as_bytes()).to_bytes()).into_string(),
     };
     assert!(
-        wallet::verify_challenge(&runtime, &stale_body, t1).await.is_none(),
+        wallet::verify_challenge(&runtime, &stale_body, t1)
+            .await
+            .is_none(),
         "the replaced challenge must no longer redeem"
     );
 
@@ -438,7 +440,11 @@ async fn a_challenge_replaces_the_previous_one_once_the_throttle_window_passes()
         nonce: second.nonce,
         signature: bs58::encode(key.sign(second.message.as_bytes()).to_bytes()).into_string(),
     };
-    assert!(wallet::verify_challenge(&runtime, &fresh_body, t1).await.is_some());
+    assert!(
+        wallet::verify_challenge(&runtime, &fresh_body, t1)
+            .await
+            .is_some()
+    );
 }
 
 /// Inviting a wallet identity has no mailbox to write to, and the invite route
@@ -728,7 +734,9 @@ async fn none_mode_auth_me_refuses_a_non_loopback_peer() {
 /// mode's local-only contract, not a blanket rule against platform auth.
 #[tokio::test]
 async fn none_mode_refuses_a_platform_bearer_from_a_non_loopback_peer() {
-    use crate::server::platform_auth::{PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier};
+    use crate::server::platform_auth::{
+        PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier,
+    };
 
     let secret = "top-secret";
     let verifier = std::sync::Arc::new(UnsignedTenantVerifier::new(secret));
