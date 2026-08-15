@@ -4056,6 +4056,13 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_event_read_before() {
+        let Some(s) = store().await else { return };
+        conformance::assert_event_read_before(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
     async fn conformance_event_retention() {
         let Some(s) = store().await else { return };
         conformance::assert_event_retention(s.clone()).await;

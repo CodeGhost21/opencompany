@@ -653,32 +653,45 @@ impl EventLog for SqliteStore {
             ),
         };
         let mut stmt = conn.prepare(sql).map_err(sql_err)?;
-        let rows = match cursor {
-            Some(cursor) => stmt.query_map(params![id.as_ref(), cursor, sql_limit(limit)], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            }),
-            None => stmt.query_map(params![id.as_ref(), sql_limit(limit)], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            }),
-        }
-        .map_err(sql_err)?;
         let mut out = Vec::new();
-        for row in rows {
-            let (seq, event_json, at_ms) = row.map_err(sql_err)?;
-            out.push(StoredEvent {
-                seq: EventSeq::new(seq as u64),
-                company: id.clone(),
-                event: serde_json::from_str(&event_json)?,
-                at_millis: at_ms as u64,
-            });
+        if let Some(cursor) = cursor {
+            let rows = stmt
+                .query_map(params![id.as_ref(), cursor, sql_limit(limit)], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(sql_err)?;
+            for row in rows {
+                let (seq, event_json, at_ms) = row.map_err(sql_err)?;
+                out.push(StoredEvent {
+                    seq: EventSeq::new(seq as u64),
+                    company: id.clone(),
+                    event: serde_json::from_str(&event_json)?,
+                    at_millis: at_ms as u64,
+                });
+            }
+        } else {
+            let rows = stmt
+                .query_map(params![id.as_ref(), sql_limit(limit)], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(sql_err)?;
+            for row in rows {
+                let (seq, event_json, at_ms) = row.map_err(sql_err)?;
+                out.push(StoredEvent {
+                    seq: EventSeq::new(seq as u64),
+                    company: id.clone(),
+                    event: serde_json::from_str(&event_json)?,
+                    at_millis: at_ms as u64,
+                });
+            }
         }
         Ok(out)
     }
@@ -3172,6 +3185,11 @@ mod test {
     async fn conformance_monotonic_event_seq() {
         let s = store();
         conformance::assert_monotonic_event_seq(s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_event_read_before() {
+        conformance::assert_event_read_before(store()).await;
     }
 
     #[tokio::test]

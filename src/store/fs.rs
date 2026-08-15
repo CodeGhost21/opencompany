@@ -927,7 +927,9 @@ impl EventLog for FsEventLog {
             Err(error) => return Err(io_err(&path, error)),
         };
         let mut lines = BufReader::new(file).lines();
-        let mut tail = VecDeque::with_capacity(limit);
+        // `usize::MAX` means an unlimited read for the EventLog port. Do not
+        // treat that sentinel as an allocation request before streaming lines.
+        let mut tail = VecDeque::new();
         while let Some(line) = lines
             .next_line()
             .await
@@ -1788,6 +1790,13 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_monotonic_event_seq(Arc::new(FsEventLog::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_event_read_before() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_event_read_before(Arc::new(FsEventLog::new(&root))).await;
     }
 
     #[tokio::test]
