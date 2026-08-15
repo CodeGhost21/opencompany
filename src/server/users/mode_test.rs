@@ -654,6 +654,26 @@ async fn none_mode_local_owner_resolution_refuses_a_non_loopback_peer() {
     );
 }
 
+/// The peer gate applies to `current_user`'s REST call sites too, not just
+/// `CompanyAuth`/GraphQL — `/auth/me` is the simplest of them.
+#[tokio::test]
+async fn none_mode_auth_me_refuses_a_non_loopback_peer() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let app = router(state);
+
+    let mut req = get("/api/v1/company/auth/me");
+    req.extensions_mut().insert(ConnectInfo(
+        "203.0.113.7:1".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a non-loopback peer must not resolve the none-mode local owner through /auth/me either"
+    );
+}
+
 /// A same-host reverse proxy connects to a loopback-bound listener over
 /// loopback too, so the peer this process sees always reads as loopback
 /// regardless of where the proxy's own caller actually was — the peer check
