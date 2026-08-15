@@ -110,8 +110,9 @@ pub(crate) async fn require_admin(
     headers: &HeaderMap,
     state: &AppState,
     runtime: &CompanyRuntime,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<UserPrincipal, Response> {
-    let principal = current_user(headers, state, runtime.id())
+    let principal = current_user(headers, state, runtime.id(), peer)
         .await
         .ok_or_else(unauthorized)?;
     if !principal.may_administer() {
