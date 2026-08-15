@@ -120,6 +120,27 @@ async fn body_json(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
+fn post_with_cookie(uri: &str, body: serde_json::Value, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("cookie", cookie)
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+/// Extracts the session cookie's `name=value` pair from a `Set-Cookie` header.
+fn session_cookie(response: &axum::response::Response) -> String {
+    let set = response
+        .headers()
+        .get("set-cookie")
+        .expect("a session response must set a cookie")
+        .to_str()
+        .unwrap();
+    set.split(';').next().unwrap().to_string()
+}
+
 // ---------------------------------------------------------------------------
 // What the console is told
 // ---------------------------------------------------------------------------
