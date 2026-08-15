@@ -229,7 +229,22 @@ impl InviteBody {
     /// login routes there is nothing here they could learn from a specific
     /// message that they did not already know.
     fn identity(&self, mode: AuthMode) -> Result<String, OpenCompanyError> {
+        // The field the mode does not read is refused rather than silently
+        // dropped: an admin who filled in both fields, or the one the company
+        // does not use, believes they invited something they did not.
         match mode {
+            AuthMode::Email if !self.wallet.trim().is_empty() => {
+                Err(OpenCompanyError::InvalidRequest(
+                    "this company signs in by email, not wallet — leave `wallet` empty"
+                        .to_string(),
+                ))
+            }
+            AuthMode::Wallet if !self.email.trim().is_empty() => {
+                Err(OpenCompanyError::InvalidRequest(
+                    "this company signs in by wallet, not email — leave `email` empty"
+                        .to_string(),
+                ))
+            }
             AuthMode::Email => {
                 let email = normalize_email(&self.email);
                 if email.is_empty() || !email.contains('@') {
