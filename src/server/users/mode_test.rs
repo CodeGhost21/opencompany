@@ -206,7 +206,7 @@ async fn a_wallet_company_refuses_every_email_route() {
 
     // No ecosystem buttons either — a hub sign-in resolves to an email address
     // and would apply an email roster this company does not have.
-    let response = router(state_in_mode(dir.path(), AuthMode::Wallet, None).await)
+    let response = app
         .oneshot(get("/api/v1/company/auth/hub"))
         .await
         .unwrap();
