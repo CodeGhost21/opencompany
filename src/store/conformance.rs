@@ -479,6 +479,7 @@ pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
                         text: text.to_string(),
                         by: None,
                         chat: None,
+                        deliverable: None,
                     },
                 )
                 .await
