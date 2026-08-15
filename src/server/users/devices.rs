@@ -162,9 +162,10 @@ async fn start_pairing(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
 ) -> Result<Json<PairingCode>, Response> {
     let runtime = company.runtime.clone();
-    let Some(principal) = current_user(&headers, &state, runtime.id()).await else {
+    let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
         return Err(no_session());
     };
 
@@ -274,9 +275,10 @@ async fn list_devices(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
 ) -> Result<Json<Vec<DeviceSummary>>, Response> {
     let runtime = company.runtime.clone();
-    let Some(principal) = current_user(&headers, &state, runtime.id()).await else {
+    let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
         return Err(no_session());
     };
     let sessions = runtime
@@ -313,10 +315,11 @@ async fn revoke_device(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(params): Path<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, Response> {
     let runtime = company.runtime.clone();
-    let Some(principal) = current_user(&headers, &state, runtime.id()).await else {
+    let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
         return Err(no_session());
     };
     let device_id = params.get("deviceId").cloned().unwrap_or_default();
