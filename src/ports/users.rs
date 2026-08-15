@@ -62,8 +62,18 @@ pub struct UserRecord {
     /// Stable id for the user within the company. Used as [`Actor::id`](crate::ports::types::Actor)
     /// when attributing this user's chat messages, so it must outlive the email.
     pub id: String,
-    /// The user's email address, already normalized by [`normalize_email`].
-    /// Unique within the company.
+    /// The user's **login identity key**, unique within the company.
+    ///
+    /// Named `email` because that is all it ever held before wallet and
+    /// device-only sign-in existed, and renaming it would rewrite the column in
+    /// three storage backends to say the same thing. What it holds is decided by
+    /// the company's [`AuthMode`](crate::app::config::AuthMode) and is always the
+    /// output of [`LoginIdentity::key`]: a normalized address in `email` mode,
+    /// `wallet:<base58>` in `wallet` mode, `local:owner` in `none` mode.
+    ///
+    /// Read it as [`Self::identity`] rather than as an address. In particular,
+    /// mail paths must go through [`LoginIdentity::mailbox`], which is `None`
+    /// for every identity that has no mailbox to send to.
     pub email: String,
     /// An optional human-readable name for the console to render.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,6 +111,18 @@ pub struct UserRecord {
     pub last_seen_at_millis: Option<u64>,
     /// Epoch-millis timestamp of the last update to this record.
     pub updated_at_millis: u64,
+}
+
+impl UserRecord {
+    /// How this user signs in, parsed from their [`Self::email`] key.
+    pub fn identity(&self) -> LoginIdentity {
+        LoginIdentity::parse(&self.email)
+    }
+
+    /// The mailbox this user can be written to, if they have one.
+    pub fn mailbox(&self) -> Option<String> {
+        self.identity().mailbox().map(str::to_string)
+    }
 }
 
 /// An admin's standing permission for one email address to join the company.
@@ -161,6 +183,139 @@ impl InviteRecord {
 /// and every lookup must go through this, or the uniqueness index is a lie.
 pub fn normalize_email(raw: &str) -> String {
     raw.trim().to_lowercase()
+}
+
+/// The scheme prefix marking a [`LoginIdentity::Wallet`] key.
+const WALLET_PREFIX: &str = "wallet:";
+
+/// The scheme prefix marking a [`LoginIdentity::Local`] key.
+const LOCAL_PREFIX: &str = "local:";
+
+/// The one local identity a `none`-mode company has.
+const LOCAL_OWNER: &str = "owner";
+
+/// How a person proves who they are, and therefore what
+/// [`UserRecord::email`] holds.
+///
+/// The stores treat that column as one opaque, unique-per-company identity key
+/// — every backend indexes it, the invite keyspace shares it, and suspension,
+/// session revocation and removal all key off the [`UserRecord::id`] it
+/// resolves to. Which *kind* of identity fills it is decided by the company's
+/// [`AuthMode`](crate::app::config::AuthMode), so the key carries its own
+/// scheme rather than leaving three keyspaces to collide:
+///
+/// | Mode | Key | Example |
+/// |---|---|---|
+/// | `email` | the address, verbatim | `ada@example.com` |
+/// | `wallet` | `wallet:` + base58 Ed25519 public key | `wallet:7xKX…` |
+/// | `none` | `local:owner` | `local:owner` |
+///
+/// The prefixes are what make this safe to store in one column. An address
+/// normalized by [`normalize_email`] is lowercase and cannot begin with a
+/// scheme this type would parse, and a base58 alphabet excludes `:` — so no
+/// wallet can pose as a mailbox and no mailbox as a wallet.
+///
+/// Normalization differs by scheme and that difference is load-bearing:
+/// [`normalize_email`] lowercases, and lowercasing a base58 address would
+/// silently map distinct wallets onto one key. Build the key through
+/// [`Self::key`] and nothing has to remember which rule applies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoginIdentity {
+    /// A mailbox, already normalized by [`normalize_email`].
+    Email(String),
+    /// A base58-encoded Ed25519 wallet public key, case preserved.
+    Wallet(String),
+    /// The single implicit owner of a company that has no login at all.
+    Local,
+}
+
+impl LoginIdentity {
+    /// Parses a stored [`UserRecord::email`] key back into its scheme.
+    ///
+    /// An unprefixed key is an email, which is what every record written before
+    /// wallet and local identities existed holds — so this is the whole
+    /// migration.
+    pub fn parse(key: &str) -> Self {
+        if let Some(address) = key.strip_prefix(WALLET_PREFIX) {
+            Self::Wallet(address.to_string())
+        } else if key.strip_prefix(LOCAL_PREFIX).is_some() {
+            Self::Local
+        } else {
+            Self::Email(key.to_string())
+        }
+    }
+
+    /// The normalized storage/lookup key for this identity.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Email(address) => normalize_email(address),
+            Self::Wallet(address) => format!("{WALLET_PREFIX}{}", address.trim()),
+            Self::Local => format!("{LOCAL_PREFIX}{LOCAL_OWNER}"),
+        }
+    }
+
+    /// The mailbox to send to, and `None` for every identity that has none.
+    ///
+    /// Mail paths must ask for an address through this rather than reading
+    /// [`UserRecord::email`] directly: the column is an identity key, and a
+    /// `wallet:7xKX…` handed to an SMTP transport is a bug that only shows up in
+    /// a bounce log.
+    pub fn mailbox(&self) -> Option<&str> {
+        match self {
+            Self::Email(address) => Some(address),
+            Self::Wallet(_) | Self::Local => None,
+        }
+    }
+
+    /// What the console shows for this identity: the address, the wallet, or a
+    /// fixed label for the local owner.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Email(address) => address.clone(),
+            Self::Wallet(address) => address.clone(),
+            Self::Local => "This device".to_string(),
+        }
+    }
+}
+
+/// Normalizes a wallet address into its canonical storage/lookup form.
+///
+/// Trims surrounding whitespace and **nothing else**. Base58 is case-sensitive,
+/// so unlike [`normalize_email`] this must not fold case: `7xKXtg2C` and
+/// `7XKXTG2C` decode to different keys, and treating them as one address would
+/// let a signature verified against one wallet mint a session for another.
+///
+/// This does not validate — see [`decode_wallet_address`].
+pub fn normalize_wallet(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
+/// Decodes a base58 wallet address into the 32-byte Ed25519 public key a
+/// signature is checked against.
+///
+/// The same function validates a manifest's `[users].wallets` entry and admits a
+/// sign-in attempt, so an address the manifest accepted can always be verified
+/// against — an operator learns about a typo from `opencompany check` rather
+/// than from a wallet that can never sign in.
+///
+/// The error text is deliberately prosumer-facing: it is rendered by manifest
+/// validation. It is *not* rendered on the login path, which answers every
+/// failure identically.
+pub fn decode_wallet_address(raw: &str) -> Result<[u8; 32]> {
+    use crate::error::OpenCompanyError;
+
+    let address = normalize_wallet(raw);
+    let bytes = bs58::decode(&address).into_vec().map_err(|_| {
+        OpenCompanyError::InvalidRequest(format!(
+            "`{address}` is not a base58 wallet address — expected a Solana-style public key"
+        ))
+    })?;
+    bytes.try_into().map_err(|bytes: Vec<u8>| {
+        OpenCompanyError::InvalidRequest(format!(
+            "`{address}` decodes to {} bytes, not the 32 an Ed25519 public key has",
+            bytes.len()
+        ))
+    })
 }
 
 /// The company's durable user directory. Company A's users MUST be invisible to
@@ -229,6 +384,86 @@ mod test {
     fn normalize_email_folds_case_and_trims() {
         assert_eq!(normalize_email("  Ada@Example.COM \n"), "ada@example.com");
         assert_eq!(normalize_email("ada@example.com"), "ada@example.com");
+    }
+
+    /// A base58 address is case-sensitive: two addresses differing only in case
+    /// are two different keys. Folding case the way an email is folded would map
+    /// them onto one identity, and a signature verified against one wallet would
+    /// mint a session for the other.
+    #[test]
+    fn normalize_wallet_trims_but_never_folds_case() {
+        assert_eq!(normalize_wallet("  7xKXtg2C  "), "7xKXtg2C");
+        assert_ne!(normalize_wallet("7xKXtg2C"), normalize_wallet("7xkxtg2c"));
+    }
+
+    /// The three identity keyspaces share one storage column, so they must be
+    /// mutually unparseable. An address normalized by `normalize_email` is
+    /// lowercase and cannot carry a scheme this parser recognizes, and base58
+    /// excludes `:`.
+    #[test]
+    fn login_identities_round_trip_and_stay_disjoint() {
+        let email = LoginIdentity::Email("Ada@Example.com".into());
+        assert_eq!(email.key(), "ada@example.com");
+        assert_eq!(
+            LoginIdentity::parse(&email.key()),
+            LoginIdentity::Email("ada@example.com".into())
+        );
+
+        let wallet = LoginIdentity::Wallet("7xKXtg2C".into());
+        assert_eq!(wallet.key(), "wallet:7xKXtg2C");
+        assert_eq!(LoginIdentity::parse(&wallet.key()), wallet);
+
+        assert_eq!(LoginIdentity::Local.key(), "local:owner");
+        assert_eq!(LoginIdentity::parse("local:owner"), LoginIdentity::Local);
+
+        // No key parses as two things.
+        assert_ne!(LoginIdentity::parse("wallet:7xKXtg2C"), email);
+    }
+
+    /// Every record written before wallet and local identities existed holds a
+    /// bare address, and must keep loading as one. This is the whole migration.
+    #[test]
+    fn an_unprefixed_key_is_an_email() {
+        assert_eq!(
+            LoginIdentity::parse("ada@example.com"),
+            LoginIdentity::Email("ada@example.com".into())
+        );
+    }
+
+    /// The guard that keeps `wallet:7xKX…` out of an SMTP envelope. Mail paths
+    /// ask for a mailbox rather than reading the column, so the absence of one
+    /// is a type, not a convention.
+    #[test]
+    fn only_an_email_identity_has_a_mailbox() {
+        assert_eq!(
+            LoginIdentity::Email("ada@example.com".into()).mailbox(),
+            Some("ada@example.com")
+        );
+        assert_eq!(LoginIdentity::Wallet("7xKXtg2C".into()).mailbox(), None);
+        assert_eq!(LoginIdentity::Local.mailbox(), None);
+    }
+
+    #[test]
+    fn wallet_addresses_decode_to_thirty_two_bytes() {
+        // A real Solana-style address: 32 bytes of base58.
+        let address = bs58::encode([7u8; 32]).into_string();
+        assert_eq!(decode_wallet_address(&address).unwrap(), [7u8; 32]);
+        // Whitespace is tolerated, since it is what a paste carries.
+        assert!(decode_wallet_address(&format!("  {address} ")).is_ok());
+    }
+
+    /// Both refusals are prosumer-facing: they are rendered by manifest
+    /// validation, where the reader is an operator who typed the thing.
+    #[test]
+    fn a_bad_wallet_address_says_what_is_wrong_with_it() {
+        // `0` is not in the base58 alphabet.
+        let err = decode_wallet_address("0OIl").unwrap_err().to_string();
+        assert!(err.contains("not a base58"), "{err}");
+
+        // Valid base58, wrong length — the mistake a truncated paste makes.
+        let short = bs58::encode([1u8; 16]).into_string();
+        let err = decode_wallet_address(&short).unwrap_err().to_string();
+        assert!(err.contains("16 bytes"), "{err}");
     }
 
     #[test]
