@@ -174,7 +174,7 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 | `POST …/auth/logout` | Revoke this session |
 | `GET …/users` | The roster (admin) |
 | `GET …/users/invites` | List outstanding invites (admin) |
-| `POST …/users/invites` | Invite an address, and mail them (admin). Answers `delivery: "sent" \| "no_transport" \| "failed"` alongside the invite |
+| `POST …/users/invites` | Invite an address, and mail them (admin). Answers `delivery: "sent" \| "no_transport" \| "failed" \| "no_mailbox"` alongside the invite — `no_mailbox` for a `wallet`-mode invite, which has no address to mail |
 | `DELETE …/users/invites/{id}` | Revoke an invite (admin) |
 | `PATCH …/users/{id}` | Role, status, display name (admin) |
 | `POST …/users/{id}/password` | Set a temporary password (admin) |
