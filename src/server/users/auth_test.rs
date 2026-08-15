@@ -516,7 +516,9 @@ async fn a_session_header_resolves_to_a_user_of_that_company() {
     let auth = resolve_principal(
         &headers_with_session_header("acme", &token),
         &state,
-        Some(&acme),, None)
+        Some(&acme),
+        None,
+    )
     .await
     .unwrap();
     match auth {
