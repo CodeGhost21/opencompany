@@ -679,6 +679,65 @@ async fn none_mode_local_owner_resolution_refuses_a_forwarded_request_even_from_
     );
 }
 
+/// A session minted while a company was `email` mode must not still
+/// authenticate after the company is rebuilt into `none` mode — nothing purges
+/// a company's session store on a manifest edit, so without this the peer and
+/// forwarding-header gates on `none` mode's implicit owner would be moot: a
+/// caller who already held (or stole) an old session could fall through to it
+/// instead.
+#[tokio::test]
+async fn a_session_from_before_a_mode_flip_does_not_survive_it() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::Email, Some("ada@example.com")).await;
+    let app = router(state.clone());
+
+    let requested = body_json(
+        app.clone()
+            .oneshot(post(
+                "/api/v1/company/auth/request",
+                serde_json::json!({"email": "ada@example.com"}),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let code = requested["devCode"]
+        .as_str()
+        .expect("a loopback host with no mail transport echoes the code");
+    let verify = app
+        .oneshot(post(
+            "/api/v1/company/auth/verify",
+            serde_json::json!({"code": code}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(verify.status(), StatusCode::OK);
+    let cookie = session_cookie(&verify);
+
+    // The manifest edit + rebuild a mode flip is: the same company id, now
+    // built with `[users].mode = "none"`. The session store is untouched.
+    let none_mode = state_in_mode(dir.path(), AuthMode::None, None).await;
+    state
+        .registry()
+        .insert(CompanyId::new("acme"), none_mode.registry().sole().unwrap());
+
+    // A non-loopback peer refuses the implicit local owner, so this exercises
+    // the fallback path — and the old session must not be what it falls
+    // through to.
+    let mut req = get("/api/v1/company/feedback");
+    req.extensions_mut().insert(ConnectInfo(
+        "203.0.113.9:1".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    req.headers_mut()
+        .insert("cookie", cookie.parse().unwrap());
+    let response = router(state).oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a session minted before the mode flip must not authenticate a none-mode company"
+    );
+}
+
 /// The owner is one durable record, not a principal invented per request —
 /// chat attribution and the task board key off the user id.
 #[tokio::test]
