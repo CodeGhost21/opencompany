@@ -10,12 +10,19 @@ This is distinct from, and weaker than, the machine credentials in
 
 ## The shape
 
+Everything below describes the default `email` mode. A company may instead sign
+people in with a **wallet**, or have **no sign-in at all** — see
+[Sign-in modes](auth-modes.md), which covers the choice, where it is configured,
+and what changes under each. The roster, sessions, invites, revocation and the
+rules on this page are shared by every mode; only the proof of identity differs.
+
 | Concern | Answer |
 |---|---|
 | Sign in | Magic link (256-bit token, 15-minute TTL, single use), **or** an optional password |
 | Session | Opaque 256-bit token in an `HttpOnly; SameSite=Lax; Path=/` cookie, 14-day absolute TTL |
 | Access | **Invite-only.** An uninvited address cannot log in |
 | Bootstrap | The manifest's `[users] admins` list |
+| Mode | `[users] mode` — `email` (default), `wallet`, or `none`. See [Sign-in modes](auth-modes.md) |
 | Roles | `admin` (may invite and administer) / `member` |
 
 An `admin` is also what the write plane means by authority over the company: the
@@ -152,12 +159,15 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 
 | Route | Purpose |
 |---|---|
+| `GET …/auth/config` | The sign-in mode this company uses, so the console knows which screen to draw |
 | `POST …/auth/request` | Mail a magic link. Always `{"sent": true}` |
 | `POST …/auth/verify` | Redeem a link → session cookie |
 | `POST …/auth/login` | Email + password → session cookie |
 | `GET …/auth/hub` | The ecosystem sign-in buttons this host can offer. `{"providers": []}` when it can offer none |
 | `POST …/auth/hub` | A platform token from the hub → session cookie |
 | `POST …/auth/password` | Set/replace your own password (needs a session) |
+| `POST …/auth/wallet/challenge` | Mint a nonce for a wallet to sign (`wallet` mode) |
+| `POST …/auth/wallet/verify` | Answer a challenge → session cookie (`wallet` mode) |
 | `GET …/auth/me` | Who this session belongs to |
 | `POST …/auth/logout` | Revoke this session |
 | `GET …/users` | The roster (admin) |
@@ -169,6 +179,11 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 | `DELETE …/users/{id}/sessions` | Sign a user out everywhere (admin) |
 
 ### Every login failure is identical
+
+A route a company's mode does not serve refuses with `409 auth_mode` rather
+than a 404, and names the mode — see
+[One mode, one door](auth-modes.md#one-mode-one-door) for why that does not
+breach the rule below.
 
 `auth/request` always returns `{"sent": true}`. `auth/verify` and `auth/login`
 always fail with one `401 invalid_login` — for unknown address, uninvited
