@@ -165,8 +165,26 @@ pub(crate) async fn issue_challenge(
     address: &str,
     now: u64,
 ) -> Result<ChallengeResult, OpenCompanyError> {
-    let nonce = token::mint_login_code(src);
     let identity = LoginIdentity::Wallet(address.to_string()).key();
+    // Throttled the same way `request_code` throttles a resend: checked
+    // before touching the store, and answered with a response indistinguishable
+    // from a fresh one, so the throttle itself cannot become a membership
+    // oracle. Unlike a magic link, there is no out-of-band copy to silently
+    // withhold — the caller needs a challenge payload back to sign — so the
+    // decoy path already built for an ineligible address serves the identical
+    // purpose here: a real nonce over the real layout that never redeems,
+    // leaving the pending challenge (and the owner's chance to answer it)
+    // untouched.
+    if let Some(previous) = runtime
+        .login_codes()
+        .latest_for_email(runtime.id(), &identity)
+        .await?
+        && previous.is_redeemable(now)
+        && now.saturating_sub(previous.created_at_millis) < CHALLENGE_RESEND_INTERVAL_MILLIS
+    {
+        return Ok(unpersisted_challenge(runtime.id(), src, address, now));
+    }
+    let nonce = token::mint_login_code(src);
     let record = LoginCodeRecord {
         id: generate_id(),
         // Only the hash is persisted, exactly as for a magic link. The nonce is
@@ -181,8 +199,8 @@ pub(crate) async fn issue_challenge(
     };
     // One live challenge per wallet, exactly as the magic link keeps one live
     // code per address: issuing a new one invalidates the last, so a repeated
-    // `challenge` request cannot accumulate unbounded rows for a wallet an
-    // attacker keeps naming.
+    // `challenge` request past the throttle window cannot accumulate unbounded
+    // rows for a wallet an attacker keeps naming.
     runtime
         .login_codes()
         .delete_for_email(runtime.id(), &identity)
