@@ -398,6 +398,18 @@ async fn authenticate_session(
     token: &str,
 ) -> Option<UserPrincipal> {
     let runtime = state.registry().get(&company)?;
+    // A `none`-mode company has no sign-in at all, so no session it mints
+    // should ever exist — but nothing purges a company's session store on a
+    // manifest edit that flips its mode, so a session minted while this
+    // company was `email` or `wallet` would otherwise still authenticate here
+    // after a rebuild into `none`. Refusing on the mode, not merely on the
+    // absence of a fresh session, is what makes `local_owner`'s peer and
+    // forwarding-header gates mean something: without this, declining to
+    // resolve the implicit local owner would still leave a stale session as a
+    // way past them for the same company.
+    if !runtime.auth_mode().has_login() {
+        return None;
+    }
     let token_hash = crate::server::users::token::sha256_hex(token);
     // Lookup is *by* hash and scoped to the company: a session minted for
     // another company simply is not in this partition.
