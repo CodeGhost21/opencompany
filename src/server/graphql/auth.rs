@@ -276,7 +276,15 @@ pub(crate) async fn local_owner(
         );
         return None;
     }
-    const FORWARDING_HEADERS: [&str; 3] = ["x-forwarded-for", "x-forwarded-host", "forwarded"];
+    const FORWARDING_HEADERS: [&str; 4] = [
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "forwarded",
+        // Not RFC 7239, but the header `nginx`'s own
+        // `proxy_set_header X-Real-IP $remote_addr` recipe sets, and common
+        // enough elsewhere that its absence would be a real gap.
+        "x-real-ip",
+    ];
     if let Some(name) = FORWARDING_HEADERS
         .iter()
         .find(|name| headers.contains_key(**name))
