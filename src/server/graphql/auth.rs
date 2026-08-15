@@ -224,20 +224,36 @@ pub async fn resolve_principal(
 /// verify, so falling through would produce an unauthenticated request against a
 /// host whose whole premise is that its only caller is its owner.
 ///
-/// `peer` is a second gate, independent of the bind-time refusal
-/// ([`serve_on`](crate::server::routes::serve_on)): that refusal is a
-/// deployment-time statement about the *configured* bind, and does not cover
-/// every way a request could still reach here from somewhere the operator did
-/// not intend — a bug in a future registration path, for one. When the caller
-/// can name the request's TCP peer, a non-loopback one is refused here too,
-/// regardless of what the bind guard already decided. When it cannot (an
-/// embedded caller with no real socket, or a test), this does not itself
-/// refuse — the bind-time guard is still the one that ran, and this is
-/// additive to it, not a replacement.
+/// `peer` and `headers` are two independent gates, on top of the bind-time
+/// refusal ([`serve_on`](crate::server::routes::serve_on)) that refuses to
+/// boot or provision a `none`-mode company on a routable bind. Neither
+/// substitutes for it — a deployment-time statement about the *configured*
+/// bind is the only one of the three that can refuse before a company is ever
+/// live — and neither substitutes for the other:
+///
+/// - **`peer`**, when the caller can name the request's TCP peer, refuses a
+///   non-loopback one. This catches a directly reachable socket — e.g. a bug
+///   in a future registration path that lands `none` mode on a routable bind
+///   without going through the guard above.
+/// - **`headers`** refuses a request carrying `X-Forwarded-For`,
+///   `X-Forwarded-Host`, or RFC 7239 `Forwarded`. Their presence means
+///   something in front of this process terminated a connection this process
+///   did not — which is exactly the case `peer` cannot see: a same-host
+///   reverse proxy connects to a loopback-bound listener over loopback too, so
+///   the peer it presents always reads as loopback regardless of where the
+///   original client actually was. An *undeclared* proxy in front of an
+///   otherwise-correctly-loopback-bound host is the likeliest way to end up
+///   here by accident, and this is the one of the three gates that catches it.
+///
+/// When neither signal is present (an embedded caller with no real socket and
+/// no forwarding in front of it, or a test), neither refuses on its own — the
+/// bind-time guard is still the one that ran, and both of these are additive
+/// to it, not a replacement.
 pub(crate) async fn local_owner(
     state: &AppState,
     company: Option<&CompanyId>,
     peer: Option<std::net::SocketAddr>,
+    headers: &HeaderMap,
 ) -> Option<UserPrincipal> {
     // With no addressed company (the GraphQL handler, whose company argument is
     // in the request body) fall back to the sole registered one. A `none`-mode
@@ -257,6 +273,19 @@ pub(crate) async fn local_owner(
             company = %runtime.id(),
             peer = %peer,
             "refused to resolve the none-mode local owner for a non-loopback peer"
+        );
+        return None;
+    }
+    const FORWARDING_HEADERS: [&str; 3] = ["x-forwarded-for", "x-forwarded-host", "forwarded"];
+    if let Some(name) = FORWARDING_HEADERS
+        .iter()
+        .find(|name| headers.contains_key(**name))
+    {
+        tracing::warn!(
+            company = %runtime.id(),
+            header = %name,
+            "refused to resolve the none-mode local owner for a request carrying a \
+             proxy-forwarding header"
         );
         return None;
     }
