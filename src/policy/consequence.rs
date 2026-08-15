@@ -1108,6 +1108,11 @@ fn composio_action_is_read(_slug: &str) -> bool {
 /// over-prompt. The coverage test is what stops a *registered* tool reaching
 /// this path at all.
 fn undeclared(name: &str) -> Consequence {
+    // `describe` is deliberately absent. This fallback is a courtesy for an
+    // unregistered read, not a second classifier to trust with an unreviewed
+    // capability: adding it would let an undeclared tool claim it only reads.
+    // Declare a known `describe_*` tool instead, as `describe_skill` does for
+    // issue #845, so its reach is an explicit policy decision.
     const READ_ONLY_PREFIXES: &[&str] = &[
         "read",
         "list",
