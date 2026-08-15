@@ -12,12 +12,19 @@ picks one of three modes, and the one it picks is the only one its host serves.
 `email` is the default and is exactly what every company did before this was
 configurable, so a manifest that names no mode is unaffected by this existing.
 
-Everything downstream of *identification* is shared. All three modes converge on
-the same `eligibility` → `upsert_from_eligibility` → `mint_session` path, the
-same `SessionRecord`, the same cookie, the same roster, the same revocation. Only
-the proof differs. That is deliberate: a second way in that also had a second
-session model would be two auth systems, and the weaker one would decide the
-security of the whole.
+Everything downstream of *identification* is shared between `email` and
+`wallet`. Both converge on the same `eligibility` → `upsert_from_eligibility` →
+`mint_session` path, the same `SessionRecord`, the same cookie, the same roster,
+the same revocation. Only the proof differs. That is deliberate: a second way in
+that also had a second session model would be two auth systems, and the weaker
+one would decide the security of the whole.
+
+`none` does not go through any of that — there is no sign-in proof to check, no
+session, no cookie, no invite, and no user-administration flow, because there is
+no second person to admit. It reuses the same [`UserRecord`](users.md) shape and
+the same audit identity model for its one implicit local owner, materialized on
+first request rather than through `eligibility`. See
+[`local_owner_record`](#one-identity-column).
 
 ## One mode, one door
 
