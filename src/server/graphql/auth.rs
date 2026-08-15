@@ -236,7 +236,9 @@ pub async fn resolve_principal(
 ///   in a future registration path that lands `none` mode on a routable bind
 ///   without going through the guard above.
 /// - **`headers`** refuses a request carrying `X-Forwarded-For`,
-///   `X-Forwarded-Host`, or RFC 7239 `Forwarded`. Their presence means
+///   `X-Forwarded-Host`, RFC 7239 `Forwarded`, or `X-Real-IP` (not RFC 7239,
+///   but the header `nginx`'s own `proxy_set_header X-Real-IP $remote_addr`
+///   recipe sets, and common enough elsewhere to matter). Their presence means
 ///   something in front of this process terminated a connection this process
 ///   did not — which is exactly the case `peer` cannot see: a same-host
 ///   reverse proxy connects to a loopback-bound listener over loopback too, so
