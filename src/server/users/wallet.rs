@@ -71,6 +71,17 @@ use crate::server::users::token::{self, TokenSource};
 /// arrives. Anything past a few minutes is a stalled flow, not a slow one.
 pub const CHALLENGE_TTL_MILLIS: u64 = 5 * 60 * 1000;
 
+/// How soon a wallet may be issued a *replacement* challenge.
+///
+/// A wallet address is public once it is on the roster, so without this an
+/// anonymous caller could hit `/auth/wallet/challenge` in a loop and
+/// invalidate the legitimate owner's pending challenge before they finish
+/// signing it — the owner's own signature would then fail as `invalid_login`,
+/// indistinguishable from a wrong one. Mirrors the magic-link path's
+/// `RESEND_INTERVAL_MILLIS`, shorter because this flow is answered by
+/// software in seconds rather than a human noticing a mailbox.
+pub const CHALLENGE_RESEND_INTERVAL_MILLIS: u64 = 30 * 1000;
+
 /// The domain-separation tag pinning the signed layout's version.
 pub const CHALLENGE_DOMAIN: &str = "opencompany-wallet-login-v1";
 
