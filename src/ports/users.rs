@@ -246,7 +246,12 @@ impl LoginIdentity {
         // this, they would misparse as a wallet or the local owner instead of
         // the email they are — silently breaking mail delivery and, for
         // `local:owner@example.com`, granting local-owner semantics to an
-        // email address.
+        // email address. The wallet remainder is checked with the same
+        // `decode_wallet_address` the login and invite routes use — not merely
+        // "is this base58" — so a short base58 string that happens to follow
+        // `wallet:` (which a base58-alphabet email local part could produce)
+        // does not misclassify as a wallet either; it has to actually be the
+        // 32 bytes an Ed25519 public key is.
         if let Some(address) = key.strip_prefix(WALLET_PREFIX)
             && decode_wallet_address(address).is_ok()
         {
