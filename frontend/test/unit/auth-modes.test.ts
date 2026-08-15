@@ -48,7 +48,7 @@ describe("invite", () => {
   it("sends an email address in email mode", async () => {
     const post = vi.fn().mockResolvedValue({});
     const c = { scopeFor: () => "/api/v1/company", post } as never;
-    await invite(c, null, "ada@example.com", "member");
+    await invite(c, null, "ada@example.com", "member", "email");
     expect(post).toHaveBeenCalledWith("/api/v1/company/users/invites", {
       email: "ada@example.com",
       role: "member",
