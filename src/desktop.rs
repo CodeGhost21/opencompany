@@ -236,6 +236,20 @@ async fn register(
         builder = builder.with_template_provenance(provenance);
     }
     let runtime = builder.build().await?;
+    // The same refusal `serve` applies at boot and provisioning: a `none`-mode
+    // company on a routable bind is an unauthenticated admin console. The
+    // desktop app always binds loopback (`start_local` below), so this is
+    // unreachable today — kept anyway so a future change to that bind cannot
+    // silently reintroduce the gap on this, the third company-registration
+    // path.
+    if !runtime.auth_mode().has_login() && !state.config().is_local_only() {
+        return Err(crate::OpenCompanyError::Config(format!(
+            "company `{}` is configured with `[users].mode = \"none\"`, which has no sign-in, \
+             but this host binds `{}` and would serve it to anyone who can reach that address.",
+            runtime.id().as_ref(),
+            state.config().bind,
+        )));
+    }
     state.registry().insert(id, std::sync::Arc::new(runtime));
     Ok(())
 }
