@@ -283,18 +283,26 @@ pub(crate) async fn local_owner(
     company: Option<&CompanyId>,
     peer: Option<std::net::SocketAddr>,
     headers: &HeaderMap,
-) -> Option<UserPrincipal> {
+) -> LocalOwnerOutcome {
     // With no addressed company (the GraphQL handler, whose company argument is
     // in the request body) fall back to the sole registered one. A `none`-mode
     // host serves exactly one company — that is what the desktop app is — so
     // there is no second candidate to guess between.
     let runtime = match company {
-        Some(id) => state.registry().get(id)?,
-        None => state.registry().sole()?,
+        Some(id) => state.registry().get(id),
+        None => state.registry().sole(),
+    };
+    let Some(runtime) = runtime else {
+        return LocalOwnerOutcome::NotApplicable;
     };
     if runtime.auth_mode().has_login() {
-        return None;
+        return LocalOwnerOutcome::NotApplicable;
     }
+    // Past this point the addressed company genuinely is `none`-mode, so
+    // every remaining exit refuses the request outright rather than
+    // degrading to a session or bearer check — see `resolve_principal`'s
+    // `GatesRefused` arm for why falling through would make these gates
+    // decorative.
     if let Some(peer) = peer
         && !peer.ip().is_loopback()
     {
@@ -303,7 +311,7 @@ pub(crate) async fn local_owner(
             peer = %peer,
             "refused to resolve the none-mode local owner for a non-loopback peer"
         );
-        return None;
+        return LocalOwnerOutcome::GatesRefused;
     }
     const FORWARDING_HEADERS: [&str; 4] = [
         "x-forwarded-for",
@@ -324,26 +332,24 @@ pub(crate) async fn local_owner(
             "refused to resolve the none-mode local owner for a request carrying a \
              proxy-forwarding header"
         );
-        return None;
+        return LocalOwnerOutcome::GatesRefused;
     }
     let user = match crate::server::users::routes::local_owner_record(&runtime).await {
         Ok(user) => user,
         Err(error) => {
-            // Swallowed to `None` rather than propagated — `local_owner` composes
-            // with `resolve_session` and `resolve_claims` as three strategies
-            // that each degrade to "try the next one", not three that can fail
-            // the request outright. But silent is not the same as safe: without
-            // this, a store outage here reads identically to "not `none` mode"
-            // and an operator has nothing to distinguish them by.
+            // Same refusal as the gates above, not a silent `NotApplicable` —
+            // a store outage while materializing the one identity `none` mode
+            // has must not read as "not `none` mode" and must not leave a
+            // bearer path to fall through to either.
             tracing::warn!(
                 company = %runtime.id(),
                 %error,
                 "could not materialize the none-mode local owner"
             );
-            return None;
+            return LocalOwnerOutcome::GatesRefused;
         }
     };
-    Some(UserPrincipal {
+    LocalOwnerOutcome::Owner(UserPrincipal {
         company: runtime.id().clone(),
         user_id: user.id,
         email: user.email,
