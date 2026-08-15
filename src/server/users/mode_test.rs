@@ -728,8 +728,7 @@ async fn a_session_from_before_a_mode_flip_does_not_survive_it() {
     req.extensions_mut().insert(ConnectInfo(
         "203.0.113.9:1".parse::<std::net::SocketAddr>().unwrap(),
     ));
-    req.headers_mut()
-        .insert("cookie", cookie.parse().unwrap());
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
     let response = router(state).oneshot(req).await.unwrap();
     assert_eq!(
         response.status(),
