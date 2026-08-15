@@ -966,6 +966,7 @@ async fn logout(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
 ) -> Result<Response, Response> {
     let runtime = company.runtime.clone();
     // Nothing to revoke where nothing was minted. A `none`-mode principal is
@@ -982,7 +983,7 @@ async fn logout(
 
     // Revoke server-side when the cookie names a real session; clearing the
     // cookie alone would leave a working token in whatever else holds it.
-    if let Some(user) = current_user(&headers, &state, runtime.id()).await
+    if let Some(user) = current_user(&headers, &state, runtime.id(), peer).await
         && let Ok(Some(session)) = runtime
             .sessions()
             .find_by_token_hash(runtime.id(), &user.session_token_hash)
@@ -1004,9 +1005,10 @@ async fn me(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
 ) -> Result<Json<MeResult>, Response> {
     let runtime = company.runtime.clone();
-    let Some(principal) = current_user(&headers, &state, runtime.id()).await else {
+    let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
         return Err(no_session());
     };
     let user = runtime
@@ -1027,6 +1029,7 @@ async fn set_password(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<SetPassword>,
 ) -> Result<Json<MeResult>, Response> {
     let runtime = company.runtime.clone();
@@ -1036,7 +1039,7 @@ async fn set_password(
     if let Some(refusal) = wrong_mode_for_email(&runtime) {
         return Err(refusal);
     }
-    let Some(principal) = current_user(&headers, &state, runtime.id()).await else {
+    let Some(principal) = current_user(&headers, &state, runtime.id(), peer).await else {
         return Err(no_session());
     };
     let mut user = runtime
