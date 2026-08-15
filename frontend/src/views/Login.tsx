@@ -144,6 +144,14 @@ export function Login({
     };
   }, [client, company]);
 
+  // The real config can arrive *after* someone has already switched into
+  // password mode off the optimistic `ASSUMED_CONFIG`. If it turns out this
+  // host does not offer passwords, password mode must not survive that —
+  // otherwise the form below stays open on a route that will refuse it.
+  useEffect(() => {
+    if (!authConfig.passwords && mode === "password") setMode("link");
+  }, [authConfig.passwords, mode]);
+
   useEffect(() => {
     let cancelled = false;
     fetchHubProviders(client, company)
