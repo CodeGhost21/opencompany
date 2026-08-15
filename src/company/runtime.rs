@@ -420,7 +420,7 @@ impl CompanyRuntime {
     /// Records how humans sign in to this company, resolved once by the
     /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the host override
     /// and the manifest's `[users].mode`.
-    pub fn set_auth_mode(&mut self, mode: AuthMode) {
+    pub(crate) fn set_auth_mode(&mut self, mode: AuthMode) {
         self.auth_mode = mode;
     }
 
