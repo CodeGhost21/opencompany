@@ -1144,6 +1144,33 @@ impl CompanyRuntime {
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
     }
 
+    /// How many **other** decisions the turn behind `id` is still blocked on
+    /// (issue #561).
+    ///
+    /// The console asks so it can say what is actually about to happen. Since
+    /// issue #469 a turn continues once, when the last decision it parked
+    /// lands — so approving one of four tells the operator's agent nothing yet,
+    /// and a confirmation reading "the agent is completing the action" is false
+    /// for three of those four clicks. It was measured false for minutes at a
+    /// time on staging, which is worse than silence: the operator waits for work
+    /// that no decision has released.
+    ///
+    /// `0` means this decision releases the turn (or the turn was never gated,
+    /// which continues on its own the same way).
+    ///
+    /// A **snapshot**, deliberately: the count is read after the verdict is
+    /// durable and before the follow-up cycle decrements it, so this approval is
+    /// still included and is subtracted here. A concurrent resolve on the same
+    /// turn can land between the read and the render, which makes the number
+    /// advisory — it is confirmation copy, not a control, and the continuation
+    /// itself is decided under the queue's own lock where no such race exists.
+    pub fn decisions_still_awaited(&self, id: &ApprovalId) -> usize {
+        let Some(turn) = self.journal.approval_cycle(id).flatten() else {
+            return 0;
+        };
+        self.continuations.outstanding(&turn).saturating_sub(1)
+    }
+
     /// Resolves a parked approval to an operator-amended effect
     /// (approve-with-edit): the operator's `amended_payload` is overlaid onto
     /// the parked effect, which is then executed. Runs a follow-up cycle so the
