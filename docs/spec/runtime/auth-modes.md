@@ -207,12 +207,40 @@ first of them that looked the user up. It is the one place a user is created
 without anyone proving anything, and it can be, because the mode's premise is
 that whoever reaches this host is its owner.
 
-**Boot refuses `none` on a routable bind.** A company with no sign-in on a host
+**Three independent gates, not one, keep `none` from being reachable from
+somewhere its operator did not intend.** A company with no sign-in on a host
 anyone can reach is an unauthenticated admin console, not a desktop app, and the
-contradiction is otherwise silent — the host does start and does serve. The check
-is `AppConfig::is_local_only()`, the same predicate that gates echoing a login
-code in a response, and a failure aborts boot exactly as a
-selected-but-unavailable storage backend does.
+contradiction is otherwise silent — the host does start and does serve. Each
+gate catches a different way that could happen, and none of them substitutes
+for the others:
+
+1. **Boot- and provision-time: `AppConfig::is_local_only()`.** The same
+   predicate that gates echoing a login code in a response. Refuses to boot,
+   or to provision via `POST /api/v1/companies`, a `none`-mode company whenever
+   the bind is not provably loopback — including a *declared* reverse proxy,
+   which sets `OPENCOMPANY_PUBLIC_URL` and so also fails this check. A failure
+   aborts exactly as a selected-but-unavailable storage backend does. This is
+   the only one of the three that can refuse before the company is ever live,
+   and the only one enforced at every runtime-registration path (boot, API
+   provisioning, and the desktop app's own loader).
+2. **Per request, the TCP peer.** `local_owner` (the resolver behind the
+   `none`-mode owner) refuses a non-loopback peer, when the serving path can
+   name one — every production listener can, via `axum::serve`'s connect info.
+   This catches a directly reachable socket, e.g. a future registration path
+   that lands `none` mode on a routable bind some other way.
+3. **Per request, proxy-forwarding headers.** `local_owner` also refuses
+   `X-Forwarded-For`, `X-Forwarded-Host`, or RFC 7239 `Forwarded`. This is the
+   gate the peer check cannot be: a same-host reverse proxy connects to a
+   loopback-bound listener over loopback too, so the peer this process
+   observes always reads as loopback no matter where the proxy's own caller
+   was. An *undeclared* proxy in front of an otherwise-correctly-loopback-bound
+   host — the likeliest way to end up exposed by accident, since gate 1 never
+   ran against it — is exactly what this catches.
+
+When neither of the per-request signals is available (an embedded caller with
+no real socket and nothing forwarding for it, or a test), neither refuses on
+its own — gate 1 is still the one that ran, and 2 and 3 are additive to it, not
+a replacement for it.
 
 ## What the console is told
 
