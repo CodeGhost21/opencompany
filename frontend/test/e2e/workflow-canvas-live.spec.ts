@@ -69,6 +69,24 @@ test.describe("workflow canvas during a live run", () => {
     };
   }
 
+  /** Starts a run and keeps its result, so a POST that fails says so.
+   *
+   * The specs here watch the canvas WHILE the run is open, so the promise
+   * cannot be awaited at the call site. Dropping it instead would turn a failed
+   * run into an unhandled rejection and leave the polling below reporting an
+   * empty canvas — a symptom of the failure rather than the failure. Await the
+   * returned promise once the canvas assertions are done. */
+  function startRun(request: APIRequestContext, id: string): Promise<void> {
+    return request
+      .post(`${COMPANY_SCOPE}/workflows/${id}/run`, {
+        data: { request: "draft something" },
+        timeout: 120_000,
+      })
+      .then(async (res) => {
+        expect(res.ok(), `run ${id}: ${res.status()} ${await res.text()}`).toBeTruthy();
+      });
+  }
+
   async function createWorkflow(request: APIRequestContext, id: string, steps: number) {
     const res = await request.post(`${COMPANY_SCOPE}/workflows`, {
       data: chain(id, `Live canvas ${id}`, steps),
@@ -121,10 +139,13 @@ test.describe("workflow canvas during a live run", () => {
 
       // Start the run from the host side so the click cannot be what paints:
       // the frames are, which is the claim.
-      void request.post(`${COMPANY_SCOPE}/workflows/${id}/run`, {
-        data: { request: "draft something" },
-        timeout: 120_000,
-      });
+      //
+      // NOT awaited here on purpose — the assertions below are about the canvas
+      // WHILE the run is open, and awaiting it first would leave nothing to
+      // watch. Its failure is kept rather than dropped: an unhandled rejection
+      // would otherwise strand the polling below on a run that never began, and
+      // report the empty canvas instead of the reason for it.
+      const run = startRun(request, id);
 
       // Mid-run, not after: a node marked while others are still unmarked is
       // exactly the trail the issue says is missing.
@@ -136,6 +157,7 @@ test.describe("workflow canvas during a live run", () => {
 
       const settled = await until(page, (m) => m["Done"] === "ok", 60_000);
       expect(settled["Step 0"], JSON.stringify(settled)).toBe("ok");
+      await run;
     } finally {
       await request.delete(`${COMPANY_SCOPE}/workflows/${id}`).catch(() => undefined);
     }
@@ -147,30 +169,34 @@ test.describe("workflow canvas during a live run", () => {
   }) => {
     test.setTimeout(120_000);
     const id = `e2e-863-late-${Date.now()}`;
-    await createWorkflow(request, id, 4);
+    // Six steps, so the run is still walking well after the console has loaded
+    // and there is a node that has NOT finished to contrast the trail against.
+    await createWorkflow(request, id, 6);
 
     try {
       // The run starts with NO console attached: this is the cron fire, the run
       // launched from chat, the reload, the reconnect.
-      const run = request.post(`${COMPANY_SCOPE}/workflows/${id}/run`, {
-        data: { request: "draft something" },
-        timeout: 120_000,
-      });
+      const run = startRun(request, id);
 
       // Join once the run is a couple of nodes in.
       await page.waitForTimeout(NODE_MS * 2);
       await page.goto(`/#/workflows/${id}`);
       await dismissTour(page);
 
-      const marks = await until(
-        page,
-        (m) => Object.values(m).some((s) => s === "ok" || s === "running"),
-        30_000,
-      );
+      // `Step 0` finished BEFORE this console existed, so no frame it will ever
+      // receive can mark it: the only way it can be painted is the adopted
+      // history. Pinned against a later node that has not finished yet, because
+      // asserting merely that *something* is painted would pass on the trigger
+      // alone — which `initialRunState` marks from the graph, seed or no seed.
+      const marks = await until(page, (m) => m["Step 0"] === "ok" && !m["Step 5"], 30_000);
       expect(
-        Object.values(marks).some((s) => s === "ok" || s === "running"),
-        `a console joining mid-run painted nothing; canvas showed ${JSON.stringify(marks)}`,
-      ).toBeTruthy();
+        marks,
+        `expected the pre-join trail to be painted; canvas showed ${JSON.stringify(marks)}`,
+      ).toMatchObject({ "Step 0": "ok" });
+      expect(
+        marks["Step 5"],
+        `Step 5 should not have finished this early; canvas showed ${JSON.stringify(marks)}`,
+      ).toBeUndefined();
 
       // And it keeps painting from the frames that arrive after it joined,
       // through to the end of the run.
