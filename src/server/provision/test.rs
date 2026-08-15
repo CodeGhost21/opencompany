@@ -42,6 +42,18 @@ fn platform_state(home: &std::path::Path, max_per_tenant: Option<usize>) -> AppS
         .with_quota(None, max_per_tenant)
 }
 
+/// A platform state bound to a routable address rather than loopback, for
+/// exercising the same none-mode refusal `serve --company` applies at boot.
+fn routable_platform_state(home: &std::path::Path) -> AppState {
+    let verifier = Arc::new(UnsignedTenantVerifier::new(PLATFORM_SECRET));
+    AppState::new(AppConfig {
+        bind: "0.0.0.0:8080".to_string(),
+        ..AppConfig::default()
+    })
+    .with_home(home.to_path_buf())
+    .with_platform_auth(PlatformAuthConfig::new(verifier))
+}
+
 /// A platform state in shared-single-DB mode for the workload tenant
 /// `namespace` (its `OPENCOMPANY_TENANT_ID`). The configured namespace — not the
 /// request's acting tenant — is authoritative for the id prefix and the
