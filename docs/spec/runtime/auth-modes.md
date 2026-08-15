@@ -103,7 +103,7 @@ Ed25519 over base58 — the Solana-style address space the company's own
 tiny.place identity already uses, verified by the same `economy::signer` code, so
 there is one answer to "does this signature verify" rather than two.
 
-```
+```text
 POST …/auth/wallet/challenge  {address}            → {nonce, message, expiresAtMillis}
 POST …/auth/wallet/verify     {nonce, signature}   → session cookie + the user
 ```
