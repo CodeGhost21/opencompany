@@ -656,6 +656,32 @@ async fn none_mode_local_owner_resolution_refuses_a_non_loopback_peer() {
     );
 }
 
+/// A same-host reverse proxy connects to a loopback-bound listener over
+/// loopback too, so the peer this process sees always reads as loopback
+/// regardless of where the proxy's own caller actually was — the peer check
+/// alone cannot see an undeclared proxy. A `Forwarded`/`X-Forwarded-*` header
+/// is the signal that one is there, and `local_owner` must refuse on it even
+/// when the peer itself looks perfectly local.
+#[tokio::test]
+async fn none_mode_local_owner_resolution_refuses_a_forwarded_request_even_from_a_loopback_peer() {
+    let dir = home();
+    let state = state_in_mode(dir.path(), AuthMode::None, None).await;
+    let app = router(state);
+
+    let mut req = get("/api/v1/company/feedback");
+    req.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:54321".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    req.headers_mut()
+        .insert("x-forwarded-for", "203.0.113.7".parse().unwrap());
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "a proxy-forwarding header must refuse the none-mode local owner even from a loopback peer"
+    );
+}
+
 /// The owner is one durable record, not a principal invented per request —
 /// chat attribution and the task board key off the user id.
 #[tokio::test]
