@@ -43,6 +43,7 @@ POST   …/skills/{slug}/install              install a registry/company skill
 POST   …/skills/{slug}/uninstall            uninstall a skill
 PUT    …/skills/{slug}                       enable / disable a skill
 POST   …/team                               add an operator-overlay teammate
+GET    …/tools/catalog                       everything this company can grant
 GET    …/team/{agentId}                      one agent in full (tier, tools, desks)
 PATCH  …/team/{agentId}                      edit an overlay teammate
 DELETE …/team/{agentId}                      remove an overlay teammate
