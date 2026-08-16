@@ -187,6 +187,12 @@ pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
 /// and/or a source directory), the agent's effective skill set is materialized
 /// and surfaced as three read tools plus a persona-prompt catalogue.
 ///
+/// `routed_context` are this agent's workspace documents, already selected by
+/// [`context_routing`](crate::company::context_routing) and read out of the
+/// store by the async caller. Passed in rather than fetched here for the same
+/// reason `skill_deltas` is: this function is synchronous and runs on every
+/// roster rebuild, while the `WorkspaceStore` is async.
+///
 /// `is_orchestrator` marks the company's orchestrator agent (issue #53): it
 /// additionally receives the delegating-orchestrator persona brief and the
 /// `query_company` / `spawn_task` / `delegate_to_desk` tools.
