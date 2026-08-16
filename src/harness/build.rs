@@ -170,20 +170,14 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// This is what makes the agent answer *as* the CEO of Acme rather than falling
 /// back to openhuman's own assistant identity — the harness passes it as the
 /// archetype body with the default identity section omitted.
+///
+/// Delegates to [`crate::company::prompt::persona_prompt`], which is compiled in
+/// every build. Kept as a re-export rather than inlined at the call sites so the
+/// harness's existing callers and tests keep one name for "the persona", and so
+/// the composition rules (including the operator's inline `prompt`) are exercised
+/// by the default-build test suite rather than only where this module links.
 pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
-    let mut prompt = format!(
-        "You are the {role} at {company}. Speak in the first person as this role.",
-        role = agent.role,
-        company = company_name,
-    );
-    if let Some(description) = agent.description.as_deref() {
-        let description = description.trim();
-        if !description.is_empty() {
-            prompt.push(' ');
-            prompt.push_str(description);
-        }
-    }
-    prompt
+    crate::company::prompt::persona_prompt(company_name, agent)
 }
 
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
