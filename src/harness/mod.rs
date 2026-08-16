@@ -2130,22 +2130,6 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
     hasher.finish()
 }
 
-/// A stable fingerprint of a company's operator budget-override set (issue
-/// #343), used to detect a cap set / changed / cleared / reset between
-/// [`HarnessPool::ensure`] calls. Mirrors [`overlay_fingerprint`]'s shape; a
-/// [`BudgetOverride`] holds no secret.
-///
-/// Two details carry weight:
-///
-/// - The set is **sorted by `agent_id`** first, because the write routes push
-///   and retain rather than maintain an order, and an order-sensitive hash would
-///   rebuild the roster (dropping live agent sessions) on a save that changed
-///   nothing an agent can observe.
-/// - The cap is hashed as an `Option` **discriminant plus `f64::to_bits`**, not
-///   through `PartialEq`. `f64` is not `Hash`, and going through bits is also
-///   what keeps `Some(0.0)` distinct from `None` in the hash — the very
-///   distinction the issue insists must not collapse. `to_bits` additionally
-///   makes the hash total over values `PartialEq` would call incomparable.
 /// The live overlay state one roster rebuild is resolved against.
 ///
 /// A struct rather than the tuple this used to be: it grew past the point where
