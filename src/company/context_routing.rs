@@ -7,14 +7,23 @@
 //! > something that role is being told to reason from. Route it deliberately,
 //! > and record why each exclusion is an exclusion.
 //!
-//! Two halves live here, and both are pure decisions over manifest data — no
-//! store, no I/O — so they are compiled and tested in every build even though
-//! the harness that spends the result is behind the `openhuman` feature:
+//! Three pieces live here, all compiled and tested in every build even though
+//! the harness that spends the result is behind the `openhuman` feature — the
+//! exclusions are controls, and a control deserves tests wherever it is defined:
 //!
 //! * [`routed_documents`] — the per-tier default table, and how an explicit
 //!   `context` key overrides it.
 //! * [`excluded_documents`] — the class-based exclusions, which are subtractive
 //!   and apply to defaults and explicit lists alike.
+//! * [`resolve_routed_documents`] — reads the selected notes out of a
+//!   [`WorkspaceStore`](crate::ports::WorkspaceStore), skipping any that do not
+//!   exist.
+//!
+//! **Not yet spent.** Carrying the resolved documents into the agent's system
+//! prompt is the remaining step: the agent build is synchronous, so they have to
+//! ride `HarnessDeps` the way `mcp_servers` and the skill deltas already do, and
+//! be appended via [`crate::company::prompt::context_section`]. Until then a
+//! `context` line selects documents that nothing reads.
 
 use crate::company::Agent;
 
