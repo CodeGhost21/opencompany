@@ -496,6 +496,36 @@ export function unpairConnection(id: ConnectionId): void {
   adoptCredential(id, { kind: "cookie" });
 }
 
+/**
+ * Records the session a cross-origin sign-in just returned.
+ *
+ * Called with the `session` from a {@link SignIn}, and it must be called or the
+ * sign-in is wasted: the host returns that token exactly once, keeps only its
+ * hash, and — because no cookie was set — the console has no other way to prove
+ * who it is. The symptom of forgetting is a login that appears to succeed and a
+ * console that is anonymous from the next request onward.
+ *
+ * Replaces the client, through `adoptCredential`, so every request after this
+ * carries the new session rather than the one it was constructed with.
+ */
+export function adoptSession(id: ConnectionId, session: string): void {
+  adoptCredential(id, { kind: "session", value: session });
+}
+
+/**
+ * Drops a carried session, locally.
+ *
+ * The counterpart of {@link adoptSession} for signing out. Revoking it
+ * server-side is `logout`'s job and happens first — clearing here alone would
+ * leave a live token on the host for the rest of its TTL, and clearing there
+ * alone would leave this client presenting a token that no longer works.
+ */
+export function clearSession(id: ConnectionId): void {
+  const existing = getConnection(id);
+  if (existing?.credential.kind !== "session") return;
+  adoptCredential(id, { kind: "cookie" });
+}
+
 export function removeConnection(id: ConnectionId): void {
   entries = entries.filter((e) => e.connection.id !== id);
   forgetProfile(id);
