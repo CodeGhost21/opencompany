@@ -394,6 +394,7 @@ function Console() {
       <ConnectionRail
         connections={connections}
         selected={active?.id ?? null}
+        hub={config.hub}
         onSelect={setSelected}
         onAdd={(baseUrl) => {
           const id = addConnection({ baseUrl });
@@ -410,7 +411,7 @@ function Console() {
         className="min-w-0 flex-1"
         style={
           {
-            "--oc-rail-inset": connectionRailVisible(connections.length)
+            "--oc-rail-inset": connectionRailVisible(connections.length, config.hub)
               ? CONNECTION_RAIL_WIDTH
               : "0px",
           } as CSSProperties
