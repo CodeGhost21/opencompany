@@ -1105,6 +1105,7 @@ impl HarnessPool {
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
+                && desk_fingerprints.get(&company.id) == Some(&desk_fp)
             {
                 return Ok(());
             }
