@@ -114,6 +114,10 @@ pub struct RunContext<'a> {
     pub notices: RunNotices,
     /// Where an agent node's board writes are recorded (issue #661 / M5).
     pub board: RunBoard,
+    /// Where an agent node records that it blocked on a human (issue #881).
+    pub blocks: RunBlocks,
+    /// Where an agent node records the approvals its turn parked (issue #880).
+    pub approvals: RunApprovals,
 }
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
@@ -166,6 +170,8 @@ pub async fn build_capabilities(
         dry_run,
         notices,
         board,
+        blocks,
+        approvals,
     } = run;
     let company = record.id.clone();
     // Issue #562: the tier actually in force — the operator's console override
@@ -336,6 +342,8 @@ pub async fn build_capabilities(
             run_request,
             notices,
             board,
+            blocks,
+            approvals,
             board_claim,
         ));
         (Arc::new(tools), Arc::new(http), state, Some(agent))
@@ -472,6 +480,10 @@ pub struct HarnessAgentRunner {
     notices: RunNotices,
     /// Where this node's board writes are recorded (issue #661 / M5).
     board: RunBoard,
+    /// Where this node records that it blocked on a human (issue #881).
+    blocks: RunBlocks,
+    /// Where this node records the approvals its turn parked (issue #880).
+    approvals: RunApprovals,
     /// The run's [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim)
     /// claim, taken once by [`build_capabilities`] and held for the whole run.
     ///
@@ -543,6 +555,106 @@ impl RunBoard {
     }
 }
 
+/// Where an agent node records that it **blocked** on a human (issue #881).
+///
+/// [`RunNotices`]' shape, beside it and for the structural reason spelled out
+/// there — and here that reason is not incidental, it is the bug. `run_agent`'s
+/// return value *becomes the node's output*, so a non-output fact riding it
+/// lands in the next node's `=items` binding. That is exactly how a gated
+/// `publish_artifact` came to hand the model's apology downstream: the node had
+/// nowhere but its output to say "I was blocked", so it said it there. The
+/// blockage goes sideways instead, and the node's output goes nowhere at all.
+///
+/// Cheap to clone; every clone appends to the same list, which is what lets a
+/// run's several agent nodes — including concurrent siblings — each contribute.
+#[derive(Clone, Default)]
+pub struct RunBlocks {
+    inner: Arc<std::sync::Mutex<Vec<crate::ports::WorkflowBlockedNode>>>,
+}
+
+impl RunBlocks {
+    /// Records that one node blocked.
+    pub fn push(&self, blocked: crate::ports::WorkflowBlockedNode) {
+        self.inner
+            .lock()
+            .expect("run blocks poisoned")
+            .push(blocked);
+    }
+
+    /// Takes everything recorded so far, leaving the collector empty.
+    pub fn take(&self) -> Vec<crate::ports::WorkflowBlockedNode> {
+        std::mem::take(&mut *self.inner.lock().expect("run blocks poisoned"))
+    }
+}
+
+/// Where an agent node records the approvals its turn **parked** (issue #880).
+///
+/// The third channel in the [`RunNotices`] / [`RunBoard`] family, for the same
+/// structural reason and one more: these rows are *receipts*, and a receipt has
+/// to survive the thing it is a receipt for. A card is durable the moment
+/// `park_and_journal` writes it, so the row must outlive the node — and outlive
+/// the run's failure too, which is why the collector is owned by the runner
+/// rather than by the capability bundle the engine future drops.
+///
+/// Cheap to clone; every clone appends to the same list.
+#[derive(Clone, Default)]
+pub struct RunApprovals {
+    inner: Arc<std::sync::Mutex<Vec<crate::ports::WorkflowRunApprovalRow>>>,
+}
+
+impl RunApprovals {
+    /// Records the rows one post-turn drain produced, in order.
+    pub fn extend(&self, rows: Vec<crate::ports::WorkflowRunApprovalRow>) {
+        if rows.is_empty() {
+            return;
+        }
+        self.inner
+            .lock()
+            .expect("run approvals poisoned")
+            .extend(rows);
+    }
+
+    /// Takes everything recorded so far, leaving the collector empty.
+    pub fn take(&self) -> Vec<crate::ports::WorkflowRunApprovalRow> {
+        std::mem::take(&mut *self.inner.lock().expect("run approvals poisoned"))
+    }
+}
+
+/// What one node's post-turn approval drain did (issue #881).
+///
+/// [`park_gated_calls`](HarnessAgentRunner::park_gated_calls) used to return
+/// `()`, so everything it learned died at its own log line — which is the whole
+/// of why a blocked node reported `ok`. This is that knowledge, handed back.
+///
+/// **Emptiness is the trigger.** A summary with no tools means the turn gated
+/// nothing and the node is ordinary; anything else means the node produced no
+/// deliverable and its branch must not continue. Keyed off the bare presence of
+/// gated calls rather than a guess about which of them "mattered" — the same
+/// bare-count trigger
+/// [`settled_run_status`](crate::harness::lifecycle::settled_run_status) uses,
+/// and for the same reason: the alternative is a heuristic about intent, or
+/// sniffing the model's prose for an apology.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ParkedCalls {
+    /// The tools whose calls were gated, deduplicated, in first-seen order.
+    pub tools: Vec<String>,
+    /// The approvals actually opened — what the operator can decide.
+    pub approval_ids: Vec<String>,
+    /// How many gated calls could not be parked at all: the park failed, or
+    /// this runtime has no approvals queue wired, or the call was in the excess
+    /// the drain discarded. **Nobody will be asked about these**, which is
+    /// strictly worse than being blocked on a card, and the node's diagnosis
+    /// says so separately.
+    pub unparkable: usize,
+}
+
+impl ParkedCalls {
+    /// Whether this turn gated anything at all — the block trigger.
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty() && self.unparkable == 0
+    }
+}
+
 impl HarnessAgentRunner {
     /// Builds a runner over an already-populated pool for `company`, carrying
     /// the run's id (issue #395) and the operator's run request (issue #154)
@@ -558,6 +670,8 @@ impl HarnessAgentRunner {
         run_request: Option<String>,
         notices: RunNotices,
         board: RunBoard,
+        blocks: RunBlocks,
+        approvals: RunApprovals,
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
     ) -> Self {
         Self {
@@ -570,6 +684,8 @@ impl HarnessAgentRunner {
             run_request,
             notices,
             board,
+            blocks,
+            approvals,
             board_claim,
         }
     }
@@ -733,7 +849,34 @@ impl HarnessAgentRunner {
     /// were sitting in the cycle's way. Now the claim's `Drop` takes them as the
     /// dropped future unwinds, so the entries never outlive the run and no
     /// other turn has to sweep up after it.
-    async fn park_gated_calls(&self) {
+    ///
+    /// # It returns what it learned (issues #881, #880)
+    ///
+    /// This used to return `()`, and every one of its three outcomes ended at a
+    /// `tracing` line. That is the whole mechanism behind #881: the one function
+    /// that knew a node's deliverable had been parked told nobody, so `run_agent`
+    /// returned `Ok` and the engine marked the node green. It now hands back a
+    /// [`ParkedCalls`] summary the caller turns into a blocked node, and files a
+    /// per-call [`WorkflowRunApprovalRow`](crate::ports::WorkflowRunApprovalRow)
+    /// receipt on [`RunApprovals`] for every one of the three outcomes —
+    /// including, especially, the two that failed.
+    ///
+    /// No differencing is needed to know which requests are "ours": the bucket
+    /// is already run-scoped ([`ApprovalScope::Run`], issue #439), so everything
+    /// the drain returns was queued by this run's own turn.
+    async fn park_gated_calls(&self, node_id: Option<&str>) -> ParkedCalls {
+        let mut summary = ParkedCalls::default();
+        let mut rows: Vec<crate::ports::WorkflowRunApprovalRow> = Vec::new();
+        let row = |tool: Option<String>,
+                   outcome: crate::ports::WorkflowApprovalOutcome,
+                   approval_id: Option<String>| {
+            crate::ports::WorkflowRunApprovalRow {
+                node_id: node_id.map(str::to_string),
+                tool,
+                outcome,
+                approval_id,
+            }
+        };
         let queue = &self.deps.approval_requests;
         // Issue #242's stamp. The `from` is now 0 because the scope *is* the
         // entitlement: every entry in this bucket was pushed by this run's own
@@ -752,7 +895,7 @@ impl HarnessAgentRunner {
         let discarded = drained.discarded;
         let requests = drained.requests;
         if requests.is_empty() {
-            return;
+            return summary;
         }
 
         // Issue #638: told to the operator, not only logged. Raised BEFORE the
@@ -775,6 +918,20 @@ impl HarnessAgentRunner {
                 "workflow agent node: more gated tool calls than one run may park; the excess \
                  was discarded"
             );
+            // Issue #880: a receipt per dropped call, with no tool name — the
+            // drain caps and drops in one step, so by the time the count is
+            // known the entries are gone. A row that says "one more was
+            // dropped" is honest; a tool guessed from the survivors would not
+            // be. These are the worst rows on the surface: nobody is being
+            // asked about these calls at all.
+            summary.unparkable += discarded;
+            for _ in 0..discarded {
+                rows.push(row(
+                    None,
+                    crate::ports::WorkflowApprovalOutcome::Discarded,
+                    None,
+                ));
+            }
         }
 
         let Some(parking) = self
@@ -792,10 +949,27 @@ impl HarnessAgentRunner {
                 "workflow agent node: gated tool calls could NOT be parked — this runtime has \
                  no approvals queue wired; the operator will not be asked about them"
             );
-            return;
+            // Issue #880: the loudest arm, and the one that had no record at
+            // all beyond the line above. Every request here is a call the
+            // operator will never see a card for, so each gets a receipt and
+            // each counts as unparkable — which is what makes the node's
+            // diagnosis say "could not be parked" rather than the much softer
+            // "waiting on approval".
+            summary.unparkable += requests.len();
+            for request in requests {
+                push_tool(&mut summary.tools, &request.tool);
+                rows.push(row(
+                    Some(request.tool.clone()),
+                    crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                    None,
+                ));
+            }
+            self.approvals.extend(rows);
+            return summary;
         };
 
         for request in requests {
+            push_tool(&mut summary.tools, &request.tool);
             // The delivery precedent: a workflow run has no board card behind it
             // and no conversation to raise the request in, so it is recorded
             // explicitly unlinked (#333) and stays Approvals-page-only (#379).
@@ -808,23 +982,56 @@ impl HarnessAgentRunner {
                 )
                 .await
             {
-                Ok(approval_id) => tracing::info!(
-                    company = %self.company,
-                    run_id = %self.run_id,
-                    tool = %request.tool,
-                    approval_id = %approval_id,
-                    "workflow agent node: parked a gated tool call for operator approval"
-                ),
-                Err(err) => tracing::error!(
-                    company = %self.company,
-                    run_id = %self.run_id,
-                    tool = %request.tool,
-                    %err,
-                    "workflow agent node: failed to park a gated tool call; the operator will \
-                     not be asked about it"
-                ),
+                Ok(approval_id) => {
+                    tracing::info!(
+                        company = %self.company,
+                        run_id = %self.run_id,
+                        tool = %request.tool,
+                        approval_id = %approval_id,
+                        "workflow agent node: parked a gated tool call for operator approval"
+                    );
+                    // Issue #881: the knowledge that used to die on the line
+                    // above. This id is what the node's block is decidable
+                    // through, and what the run's receipt names.
+                    summary.approval_ids.push(approval_id.to_string());
+                    rows.push(row(
+                        Some(request.tool.clone()),
+                        crate::ports::WorkflowApprovalOutcome::Parked,
+                        Some(approval_id.to_string()),
+                    ));
+                }
+                Err(err) => {
+                    tracing::error!(
+                        company = %self.company,
+                        run_id = %self.run_id,
+                        tool = %request.tool,
+                        %err,
+                        "workflow agent node: failed to park a gated tool call; the operator will \
+                         not be asked about it"
+                    );
+                    summary.unparkable += 1;
+                    rows.push(row(
+                        Some(request.tool.clone()),
+                        crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                        None,
+                    ));
+                }
             }
         }
+        self.approvals.extend(rows);
+        summary
+    }
+}
+
+/// Appends `tool` to a first-seen-ordered, deduplicated list.
+///
+/// A turn that calls the same gated tool three times should say the tool's name
+/// once — the count of *calls* is on the approval rows, and repeating the name
+/// in the blocked-node summary would only make the console's sentence read as
+/// though three different things were blocked.
+fn push_tool(tools: &mut Vec<String>, tool: &str) {
+    if !tools.iter().any(|seen| seen == tool) {
+        tools.push(tool.to_string());
     }
 }
 
@@ -845,6 +1052,17 @@ impl AgentRunner for HarnessAgentRunner {
         // input is appended under a labelled heading, then the #154 run topic.
         let instruction = append_upstream_input(&message_from_request(&request), &request);
         let message = compose_turn_message(&instruction, self.run_request.as_deref());
+        // Issue #881: which node this is. `translate` writes it in the
+        // first-class config layer beside `agent_ref` (config cannot shadow
+        // it), because the vendored `AgentRunner` boundary carries no node
+        // identity of its own. `None` for a hand-built request in a test, or a
+        // graph compiled before #881 — the block is then recorded at run level,
+        // which is the honest fallback rather than a name invented here.
+        let node_id = request
+            .get("node_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string);
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
@@ -891,23 +1109,123 @@ impl AgentRunner for HarnessAgentRunner {
             //
             // Inside the scope, so the drain reads this run's bucket rather than
             // whatever `Unscoped` happens to hold.
-            claim.scoped(Box::pin(self.park_gated_calls())).await;
+            //
+            // Issue #880: the receipts it files therefore survive a failed turn
+            // too. Only the #881 *block* below is gated on the turn having
+            // succeeded — a turn that genuinely errored is a failure, and
+            // reclassifying it as "blocked" would hide one behind an approval
+            // nobody has answered.
+            let parked = claim
+                .scoped(Box::pin(self.park_gated_calls(node_id.as_deref())))
+                .await;
             // Issue #661 (M5): likewise on both arms, and for the same reason. A
             // turn that failed after calling `spawn_task` had already been told the
             // card would be opened; refusing to drain would make that receipt false
             // and destroy the write when the scope ends.
             Box::pin(self.drain_board_writes()).await;
-            outcome
+            (outcome, parked)
         });
-        let outcome = self.board_claim.scoped(turn).await;
+        let (outcome, parked) = self.board_claim.scoped(turn).await;
         let outcome = outcome
             .map_err(|e| EngineError::Capability(format!("harness agent '{agent_ref}': {e}")))?;
+
+        // ── Issue #881: a node whose deliverable was parked is BLOCKED ───────
+        //
+        // The turn "succeeded" — the model was refused inside its own tool
+        // loop, wrote prose about it, and ended normally — so before this the
+        // node returned `Ok`, the engine recorded `Success`, the edge fired,
+        // and the `=items` binding delivered the apology to the next node as
+        // if it were the spec it was supposed to be. Every node green, nothing
+        // delivered.
+        //
+        // `Err` is the right channel and not merely a convenient one: `on_error`
+        // defaults to `"stop"` and `retry.max_attempts` to `1`, so the branch
+        // halts at this node with no retry re-running the turn. What it is NOT
+        // is a failure — `WorkflowRun` reclassifies the node's row to
+        // [`WorkflowNodeStatus::Blocked`](crate::ports::types::WorkflowNodeStatus)
+        // and settles the run without an error, exactly as `cancelled` keeps a
+        // deliberate stop out of the failure count.
+        //
+        // Deliberately NOT an engine pause. `NodeControl::Interrupt` discards
+        // the activation's state and re-runs the node from the top on resume —
+        // and an agent node is not re-enterable, so resuming would spend
+        // another whole inference turn, call the same gated tool, and park a
+        // NEW card. Approve → re-run → re-park, forever. The engine says so
+        // itself: `StopReason::Paused` maps to "resuming a paused agent is not
+        // supported yet".
+        if !parked.is_empty() {
+            self.blocks.push(crate::ports::WorkflowBlockedNode {
+                node_id: node_id.clone().unwrap_or_else(|| agent_ref.to_string()),
+                tools: parked.tools.clone(),
+                approval_ids: parked.approval_ids.clone(),
+                unparkable: parked.unparkable,
+            });
+            return Err(EngineError::Capability(blocked_diagnosis(
+                node_id.as_deref(),
+                agent_ref,
+                &parked,
+            )));
+        }
+
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
         // reply as `text` so a downstream `=item.text` binding resolves. A
         // workflow node carries no chat bubble, so the turn's steps are dropped
         // here (they surface only on operator/desk chat replies).
         Ok(json!({ "text": outcome.reply, "agent_ref": agent_ref }))
     }
+}
+
+/// The sentence a blocked node fails with (issue #881).
+///
+/// Modelled on the standard the `weekly-competitor-analysis` diagnosis set: name
+/// the node, the teammate, the tool(s), the policy surface, how many approvals
+/// are involved, and — the part an operator most needs — that the node produced
+/// no deliverable, so nothing downstream of it ran.
+///
+/// **"Waiting on N approvals" and "N calls could not be parked" are different
+/// sentences on purpose.** The second is strictly worse: there is no card, so
+/// there is nothing to approve and no way to unblock the node short of changing
+/// the policy and re-running. Collapsing them would tell an operator to go look
+/// at an Approvals page that has nothing on it.
+///
+/// Composed from the structural summary, never from a store's error text or the
+/// model's prose — this string reaches host logs.
+fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCalls) -> String {
+    let node = node_id.unwrap_or(agent_ref);
+    let tools = if parked.tools.is_empty() {
+        "a tool call".to_string()
+    } else {
+        parked
+            .tools
+            .iter()
+            .map(|t| format!("`{t}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let waiting = parked.approval_ids.len();
+    let mut what = Vec::new();
+    if waiting > 0 {
+        what.push(format!(
+            "{waiting} approval{} {} waiting for you",
+            if waiting == 1 { "" } else { "s" },
+            if waiting == 1 { "is" } else { "are" }
+        ));
+    }
+    if parked.unparkable > 0 {
+        what.push(format!(
+            "{} call{} could NOT be queued for approval at all, so nobody will be asked about \
+             {}",
+            parked.unparkable,
+            if parked.unparkable == 1 { "" } else { "s" },
+            if parked.unparkable == 1 { "it" } else { "them" }
+        ));
+    }
+    format!(
+        "workflow node '{node}' is blocked: {tools} needed approval before {agent_ref} could \
+         finish, so the node produced no deliverable and nothing after it ran. {}. Approving \
+         does not continue this run — decide the card, then run the workflow again.",
+        what.join("; ")
+    )
 }
 
 /// Extracts the turn message from an agent node's resolved config: the `prompt`
@@ -1248,6 +1566,8 @@ mod tests {
             None,
             notices.clone(),
             RunBoard::default(),
+            RunBlocks::default(),
+            RunApprovals::default(),
             board_claim,
         );
 
@@ -1273,7 +1593,7 @@ mod tests {
                 }
             })
             .await;
-        claim.scoped(runner.park_gated_calls()).await;
+        claim.scoped(runner.park_gated_calls(Some("work"))).await;
         (notices.take(), queue)
     }
 
@@ -1554,6 +1874,8 @@ mod tests {
                 dry_run: false,
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
+                blocks: Default::default(),
+                approvals: Default::default(),
             },
         )
         .await
@@ -1598,6 +1920,8 @@ mod tests {
                 dry_run: true,
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
+                blocks: Default::default(),
+                approvals: Default::default(),
             },
         )
         .await
@@ -1753,6 +2077,8 @@ mod tests {
                 dry_run: false, // live: the workspace mkdir runs
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
+                blocks: Default::default(),
+                approvals: Default::default(),
             },
         )
         .await
@@ -1804,6 +2130,8 @@ mod tests {
                 dry_run: true, // dry: no workspace mkdir at all
                 notices: RunNotices::default(),
                 board: RunBoard::default(),
+                blocks: Default::default(),
+                approvals: Default::default(),
             },
         )
         .await
