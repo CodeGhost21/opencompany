@@ -30,6 +30,7 @@ import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { restartTour } from "@/tour/state";
+import { preloadTour } from "@/tour/TourController";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
 interface Props {
@@ -134,6 +135,11 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             </div>
             <Button
               variant="outline"
+              // The tour's code is lazily loaded, so without this the download
+              // starts on the click and the button appears to do nothing until
+              // it lands. Pointing at it is intent enough to fetch.
+              onPointerEnter={preloadTour}
+              onFocus={preloadTour}
               onClick={() => {
                 restartTour(scope);
                 toast.success("Starting the product tour.");
