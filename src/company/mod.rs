@@ -131,7 +131,7 @@ pub(crate) use workflow_create::{
 #[cfg(feature = "openhuman")]
 pub(crate) use workflow_create::{
     courtesy_validate_draft, workflow_callable_tool_slugs, workflow_effective_tool_slugs,
-    workflow_granted_but_unwired_tool_slugs, workflow_graph_from_spec,
+    workflow_granted_but_unwired_tool_slugs, workflow_graph_from_spec, workflow_spec_from_graph,
 };
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 

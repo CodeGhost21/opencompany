@@ -488,6 +488,52 @@ pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWork
     })
 }
 
+/// The inverse of [`raw_workflow_from_spec`] at the parsed-graph layer (issue
+/// #840, PR-3): rebuilds a [`WorkflowGraphSpec`] from a persisted, validated
+/// [`WorkflowFile`]. The fix-from-run copilot needs the failing workflow's saved
+/// graph *as a spec* — both to hand the agent as evidence and to pin its identity
+/// through the correction — and the read path produces a `WorkflowFile`, so this
+/// is the one conversion between them.
+///
+/// `on_error`/`retry` have no field on [`WorkflowNodeSpec`] (the builder never
+/// authors them), so they are dropped: the copilot re-proposes the graph's nodes,
+/// and the host-owned id/name are what the fix path pins, not the engine policy.
+///
+/// Gated with the create-time copilot that is its only caller, the same footing
+/// as [`courtesy_validate_draft`] and [`workflow_graph_from_spec`].
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_spec_from_graph(file: WorkflowFile) -> WorkflowGraphSpec {
+    WorkflowGraphSpec {
+        id: file.id,
+        name: file.name,
+        description: file.description,
+        nodes: file
+            .nodes
+            .into_iter()
+            .map(|n| WorkflowNodeSpec {
+                id: n.id,
+                kind: n.kind.as_str().to_string(),
+                name: n.name,
+                summary: n.summary,
+                agent: n.agent,
+                schedule: n.schedule,
+                config: n.config,
+                requires_approval: n.requires_approval,
+                destination: n.destination,
+            })
+            .collect(),
+        edges: file
+            .edges
+            .into_iter()
+            .map(|e| WorkflowEdgeSpec {
+                from: e.from,
+                to: e.to,
+                label: e.label,
+            })
+            .collect(),
+    }
+}
+
 /// Runs the full author-time validation on a candidate graph **without
 /// persisting it** — the builder pass's courtesy check (issue #580), so a
 /// proposal that could never be created never reaches In Review.
