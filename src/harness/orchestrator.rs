@@ -3355,11 +3355,23 @@ impl Tool for RunWorkflowTool {
                         "pending_approvals": run.pending_approvals.len(),
                         // Issue #881: structural counts beside the prose, so a
                         // model reading only the JSON still learns the run
-                        // delivered nothing. Issue #880's is the *parked*
-                        // count — a receipt, never a "still outstanding"
-                        // snapshot.
+                        // delivered nothing.
                         "blocked_nodes": run.blocked_nodes.len(),
-                        "approvals_parked": run.approvals.len(),
+                        // Issue #900: `outcome == Parked` only, unlike
+                        // `WorkflowRun::approvals`'s own receipt semantics
+                        // (which deliberately count `ParkFailed` / `Discarded`
+                        // too — see that field's doc comment). This key has no
+                        // sibling field to carry the failure count the way the
+                        // console's prose does with "N calls could not be
+                        // queued", so a bare `approvals_parked` here has to
+                        // mean what its name says: cards actually sitting on
+                        // the Approvals page, not every receipt this run
+                        // filed.
+                        "approvals_parked": run
+                            .approvals
+                            .iter()
+                            .filter(|a| a.outcome == crate::ports::WorkflowApprovalOutcome::Parked)
+                            .count(),
                     }),
                     md,
                 ))
@@ -7042,12 +7054,23 @@ name = "Morning"
                 approval_ids: vec!["appr-1".to_string()],
                 unparkable: 0,
             }],
-            approvals: vec![crate::ports::WorkflowRunApprovalRow {
-                node_id: Some("worker".to_string()),
-                tool: Some("publish_artifact".to_string()),
-                outcome: crate::ports::WorkflowApprovalOutcome::Parked,
-                approval_id: Some("appr-1".to_string()),
-            }],
+            approvals: vec![
+                crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("worker".to_string()),
+                    tool: Some("publish_artifact".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                    approval_id: Some("appr-1".to_string()),
+                },
+                // Issue #900: a receipt for a call that did NOT land a card.
+                // `run.approvals.len()` would count this as a second "parked"
+                // approval; the JSON's `approvals_parked` must not.
+                crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("worker".to_string()),
+                    tool: Some("publish_artifact".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                    approval_id: None,
+                },
+            ],
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7094,9 +7117,12 @@ name = "Morning"
             payload.get("blocked_nodes").and_then(Value::as_u64),
             Some(1)
         );
+        // Issue #900: two receipts on this run (one parked, one that failed to
+        // park), and the JSON count must name only the decidable one.
         assert_eq!(
             payload.get("approvals_parked").and_then(Value::as_u64),
-            Some(1)
+            Some(1),
+            "approvals_parked must exclude the ParkFailed receipt: {payload}"
         );
     }
 
