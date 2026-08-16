@@ -1138,7 +1138,14 @@ impl HarnessPool {
         // resolves every agent's cap through `fresh_company.effective_budget`,
         // so installing the live set here is what carries a console budget edit
         // into the roster the very next turn runs on.
-        fresh_company.overlay_budgets = overlay_budgets;
+        fresh_company.overlay_budgets = overlay.budgets;
+        // The desk axis gets the same treatment, and needs it for the same
+        // reason: `build_roster` resolves every teammate's grants through
+        // `fresh_company.agent_desk_tools`, so the live desk set, seating and
+        // ceilings have to be the ones installed here.
+        fresh_company.overlay_desks = overlay.desks;
+        fresh_company.overlay_desk_members = overlay.desk_members;
+        fresh_company.overlay_desk_tools = overlay.desk_tools;
         // Issue #562: same treatment for the policy override — `build_roster`
         // resolves the tier through `fresh_company.effective_policy`, so installing
         // the live value here is what carries a console tier change into the roster
