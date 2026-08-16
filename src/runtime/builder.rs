@@ -190,7 +190,13 @@ pub(crate) fn agent_scoped_grants(
 }
 
 /// Whether the company allow-list covers an agent-requested grant glob.
-fn allow_covers(allow: &[String], tool: &str) -> bool {
+///
+/// `pub(crate)` so the tool catalog (`crate::company::tool_catalog`) can answer
+/// "does this company grant that?" with the *same* matcher the roster build
+/// uses. A catalog doing its own matching would be free to advertise a grant the
+/// gate does not honour — precisely the disagreement between what the console
+/// shows and what an agent can actually do that the catalog exists to end.
+pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     let literal = tool.strip_suffix('*').unwrap_or(tool);
     allow.iter().any(|grant| grant_matches(grant, literal))
 }
