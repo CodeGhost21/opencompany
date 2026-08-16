@@ -42,6 +42,18 @@ fn platform_state(home: &std::path::Path, max_per_tenant: Option<usize>) -> AppS
         .with_quota(None, max_per_tenant)
 }
 
+/// A platform state bound to a routable address rather than loopback, for
+/// exercising the same none-mode refusal `serve --company` applies at boot.
+fn routable_platform_state(home: &std::path::Path) -> AppState {
+    let verifier = Arc::new(UnsignedTenantVerifier::new(PLATFORM_SECRET));
+    AppState::new(AppConfig {
+        bind: "0.0.0.0:8080".to_string(),
+        ..AppConfig::default()
+    })
+    .with_home(home.to_path_buf())
+    .with_platform_auth(PlatformAuthConfig::new(verifier))
+}
+
 /// A platform state in shared-single-DB mode for the workload tenant
 /// `namespace` (its `OPENCOMPANY_TENANT_ID`). The configured namespace — not the
 /// request's acting tenant — is authoritative for the id prefix and the
@@ -160,6 +172,37 @@ async fn provision_then_list_then_status() {
         .unwrap();
     assert_eq!(status.status(), StatusCode::OK);
     assert_eq!(json_body(status).await["id"], "acme");
+}
+
+/// The same refusal boot applies to a `none`-mode company on a routable bind:
+/// a company with no sign-in reachable from anywhere is an unauthenticated
+/// admin console. A tenant's manifest can request `[users].mode = "none"`, but
+/// this host must not silently serve it, regardless of which path created the
+/// runtime.
+#[tokio::test]
+async fn provisioning_a_none_mode_company_on_a_routable_bind_is_refused() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = routable_platform_state(&home);
+    let app = router(state);
+
+    let toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[users]\nmode = \"none\"\n";
+    let response = app
+        .clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), toml))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["code"], "auth_mode_none_not_allowed");
+
+    // Refused, so nothing was registered.
+    let response = app
+        .clone()
+        .oneshot(get_req("/api/v1/companies/acme", Some(PLATFORM_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

@@ -78,6 +78,8 @@ Supporting docs:
   lands
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,
   sessions, invites, and chat attribution
+- [auth-modes.md](auth-modes.md) — the configured sign-in mode: `email`,
+  `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
 
 ## Responsibilities
 

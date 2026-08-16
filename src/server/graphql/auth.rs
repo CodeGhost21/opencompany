@@ -34,12 +34,36 @@
 //! need the header form.
 
 use async_graphql::ErrorExtensions;
+use axum::extract::FromRequestParts;
 use axum::http::HeaderMap;
+use axum::http::request::Parts;
 
 use crate::AppState;
 use crate::ports::types::CompanyId;
 use crate::ports::{UserRole, UserStatus};
 use crate::server::platform_auth::{PlatformClaims, bearer};
+
+/// The request's TCP peer, when [`axum::serve`] was wired with
+/// `into_make_service_with_connect_info` — `None` otherwise (an embedded
+/// caller with no real socket, or a test exercising a router directly). Unlike
+/// [`axum::extract::ConnectInfo`], never fails to extract: a handler naming
+/// this as a parameter works identically whether connect info is wired or not,
+/// which is what lets [`local_owner`]'s peer gate be additive rather than a
+/// hard requirement on every caller.
+pub(crate) struct MaybePeer(pub(crate) Option<std::net::SocketAddr>);
+
+impl<S: Send + Sync> FromRequestParts<S> for MaybePeer {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(MaybePeer(
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|info| info.0),
+        ))
+    }
+}
 
 /// A human collaborator, authenticated by a session cookie.
 ///
@@ -159,6 +183,10 @@ pub fn resolve_claims(headers: &HeaderMap, state: &AppState) -> Result<GqlAuth, 
 /// failing the request: a stale cookie must not brick an operator sharing the
 /// origin.
 ///
+/// `peer` is the request's TCP peer, when the caller can name one — see
+/// [`local_owner`] for why it matters and why its absence is not itself a
+/// refusal.
+///
 /// **This is the only function that can produce a human principal**, and every
 /// route meaning to serve people must resolve through it rather than
 /// [`resolve_claims`].
@@ -166,11 +194,178 @@ pub async fn resolve_principal(
     headers: &HeaderMap,
     state: &AppState,
     company: Option<&CompanyId>,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<GqlAuth, Unauthorized> {
+    match local_owner(state, company, peer, headers).await {
+        LocalOwnerOutcome::Owner(owner) => return Ok(GqlAuth::User(owner)),
+        // The addressed company *is* `none`-mode, and one of the two
+        // request-shape gates refused it — a non-loopback peer or a
+        // proxy-forwarding header. Falling through to a session or a bearer
+        // here would make those gates decorative: a `none`-mode company's
+        // whole contract is "local-only", and a platform bearer arriving from
+        // exactly the request shape that contract exists to refuse is
+        // anomalous by definition, not a legitimate hosted operation this
+        // path needs to keep working. Refuse outright instead of degrading.
+        LocalOwnerOutcome::GatesRefused => return Err(Unauthorized),
+        // Either this company has a real sign-in (the ordinary case), or it
+        // could not be resolved at all — nothing about `none` mode applies,
+        // so the session and bearer paths are exactly as before.
+        LocalOwnerOutcome::NotApplicable => {}
+    }
     if let Some(user) = resolve_session(headers, state, company).await {
         return Ok(GqlAuth::User(user));
     }
     resolve_claims(headers, state)
+}
+
+/// What [`local_owner`] found out about the addressed company.
+pub(crate) enum LocalOwnerOutcome {
+    /// The company is `none`-mode and every gate passed: this is the request.
+    Owner(UserPrincipal),
+    /// The company is `none`-mode, but the peer or a forwarding header
+    /// refused it. Distinct from [`Self::NotApplicable`] so the caller can
+    /// refuse the request outright rather than degrade to a weaker check —
+    /// see [`resolve_principal`].
+    GatesRefused,
+    /// The company has a real sign-in, or could not be resolved at all.
+    /// `none` mode's local-owner question does not apply either way.
+    NotApplicable,
+}
+
+/// The implicit owner of a company whose [`AuthMode`] is `None`, if that is what
+/// this request addresses.
+///
+/// `None` mode is the packaged desktop app: a loopback host, one person, no
+/// sign-in. There is no credential to present, so the principal is not resolved
+/// *from* the request at all — everything that reaches this company is that one
+/// person, by configuration.
+///
+/// It is still a real [`UserRecord`], materialized on first use, rather than a
+/// principal invented per request. Chat attribution, task assignment, the audit
+/// trail and the admin surfaces all key off
+/// [`UserRecord::id`](crate::ports::UserRecord), and a synthetic id that no store
+/// row backs would come apart at the first one of them that looked the user up.
+///
+/// This is checked **before** the session and bearer paths, and that order is
+/// the point: in `none` mode there is no session to find and no bearer to
+/// verify, so falling through would produce an unauthenticated request against a
+/// host whose whole premise is that its only caller is its owner.
+///
+/// `peer` and `headers` are two independent gates, on top of the bind-time
+/// refusal ([`serve_on`](crate::server::routes::serve_on)) that refuses to
+/// boot or provision a `none`-mode company on a routable bind. Neither
+/// substitutes for it — a deployment-time statement about the *configured*
+/// bind is the only one of the three that can refuse before a company is ever
+/// live — and neither substitutes for the other:
+///
+/// - **`peer`**, when the caller can name the request's TCP peer, refuses a
+///   non-loopback one. This catches a directly reachable socket — e.g. a bug
+///   in a future registration path that lands `none` mode on a routable bind
+///   without going through the guard above.
+/// - **`headers`** refuses a request carrying `X-Forwarded-For`,
+///   `X-Forwarded-Host`, RFC 7239 `Forwarded`, or `X-Real-IP` (not RFC 7239,
+///   but the header `nginx`'s own `proxy_set_header X-Real-IP $remote_addr`
+///   recipe sets, and common enough elsewhere to matter). Their presence means
+///   something in front of this process terminated a connection this process
+///   did not — which is exactly the case `peer` cannot see: a same-host
+///   reverse proxy connects to a loopback-bound listener over loopback too, so
+///   the peer it presents always reads as loopback regardless of where the
+///   original client actually was. An *undeclared* proxy in front of an
+///   otherwise-correctly-loopback-bound host, using its own defaults, is what
+///   this catches — a proxy specifically configured to strip all four headers
+///   is indistinguishable from no proxy at all by header content alone, and
+///   detecting that needs a trusted-proxy boundary this does not implement.
+///
+/// When neither signal is present (an embedded caller with no real socket and
+/// no forwarding in front of it, or a test), neither refuses on its own — the
+/// bind-time guard is still the one that ran, and both of these are additive
+/// to it, not a replacement.
+pub(crate) async fn local_owner(
+    state: &AppState,
+    company: Option<&CompanyId>,
+    peer: Option<std::net::SocketAddr>,
+    headers: &HeaderMap,
+) -> LocalOwnerOutcome {
+    // With no addressed company (the GraphQL handler, whose company argument is
+    // in the request body) fall back to the sole registered one. A `none`-mode
+    // host serves exactly one company — that is what the desktop app is — so
+    // there is no second candidate to guess between.
+    let runtime = match company {
+        Some(id) => state.registry().get(id),
+        None => state.registry().sole(),
+    };
+    let Some(runtime) = runtime else {
+        return LocalOwnerOutcome::NotApplicable;
+    };
+    if runtime.auth_mode().has_login() {
+        return LocalOwnerOutcome::NotApplicable;
+    }
+    // Past this point the addressed company genuinely is `none`-mode, so
+    // every remaining exit refuses the request outright rather than
+    // degrading to a session or bearer check — see `resolve_principal`'s
+    // `GatesRefused` arm for why falling through would make these gates
+    // decorative.
+    if let Some(peer) = peer
+        && !peer.ip().is_loopback()
+    {
+        tracing::warn!(
+            company = %runtime.id(),
+            peer = %peer,
+            "refused to resolve the none-mode local owner for a non-loopback peer"
+        );
+        return LocalOwnerOutcome::GatesRefused;
+    }
+    const FORWARDING_HEADERS: [&str; 4] = [
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "forwarded",
+        // Not RFC 7239, but the header `nginx`'s own
+        // `proxy_set_header X-Real-IP $remote_addr` recipe sets, and common
+        // enough elsewhere that its absence would be a real gap.
+        "x-real-ip",
+    ];
+    if let Some(name) = FORWARDING_HEADERS
+        .iter()
+        .find(|name| headers.contains_key(**name))
+    {
+        tracing::warn!(
+            company = %runtime.id(),
+            header = %name,
+            "refused to resolve the none-mode local owner for a request carrying a \
+             proxy-forwarding header"
+        );
+        return LocalOwnerOutcome::GatesRefused;
+    }
+    let user = match crate::server::users::routes::local_owner_record(&runtime).await {
+        Ok(user) => user,
+        Err(error) => {
+            // Same refusal as the gates above, not a silent `NotApplicable` —
+            // a store outage while materializing the one identity `none` mode
+            // has must not read as "not `none` mode" and must not leave a
+            // bearer path to fall through to either.
+            tracing::warn!(
+                company = %runtime.id(),
+                %error,
+                "could not materialize the none-mode local owner"
+            );
+            return LocalOwnerOutcome::GatesRefused;
+        }
+    };
+    LocalOwnerOutcome::Owner(UserPrincipal {
+        company: runtime.id().clone(),
+        user_id: user.id,
+        email: user.email,
+        role: user.role,
+        // No admin can set a temporary password here — there is no admin but
+        // this person, and no password at all.
+        must_change_password: false,
+        // No session was presented and none exists, so there is nothing for
+        // logout to revoke. The logout route refuses in this mode rather than
+        // pretending, which is why an empty hash cannot silently match a real
+        // session: no lookup is ever made with it.
+        session_token_hash: String::new(),
+        credential: crate::ports::SessionKind::Browser,
+    })
 }
 
 /// Resolves a session — from either carrier — to a live user, or `None`.
@@ -248,6 +443,18 @@ async fn authenticate_session(
     token: &str,
 ) -> Option<UserPrincipal> {
     let runtime = state.registry().get(&company)?;
+    // A `none`-mode company has no sign-in at all, so no session it mints
+    // should ever exist — but nothing purges a company's session store on a
+    // manifest edit that flips its mode, so a session minted while this
+    // company was `email` or `wallet` would otherwise still authenticate here
+    // after a rebuild into `none`. Refusing on the mode, not merely on the
+    // absence of a fresh session, is what makes `local_owner`'s peer and
+    // forwarding-header gates mean something: without this, declining to
+    // resolve the implicit local owner would still leave a stale session as a
+    // way past them for the same company.
+    if !runtime.auth_mode().has_login() {
+        return None;
+    }
     let token_hash = crate::server::users::token::sha256_hex(token);
     // Lookup is *by* hash and scoped to the company: a session minted for
     // another company simply is not in this partition.

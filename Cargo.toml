@@ -224,13 +224,21 @@ mail-parser = { version = "0.11", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 webpki-roots = { version = "1", optional = true }
 
-# Offline crypto for the tiny.place economy identity. All three are optional and
-# only link under the `tinyplace` feature; the default build pulls none of them.
+# Offline Ed25519 + base58. Not optional, because wallet sign-in
+# (`[users].mode = "wallet"`) is one of the three answers a company may configure
+# for how humans authenticate, and it verifies an Ed25519 signature over a
+# base58 address. Behind a feature, a shipped binary would parse
+# `mode = "wallet"`, report it on `/auth/config`, and then be unable to check a
+# single signature — a configuration the build silently does not implement.
+#
+# The tiny.place economy identity uses the same three for the same reason a
+# second implementation was never wanted: one signer, one base58 handling.
 # `rand_core`'s `getrandom` feature provides `OsRng` for seed generation; we call
-# `SigningKey::from_bytes` so dalek's own `rand_core` feature stays off.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
-bs58 = { version = "0.5", default-features = false, features = ["std"], optional = true }
-rand_core = { version = "0.6", default-features = false, features = ["getrandom"], optional = true }
+# `SigningKey::from_bytes` so dalek's own `rand_core` feature stays off. All
+# three are pure Rust with no native dependency.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+bs58 = { version = "0.5", default-features = false, features = ["std"] }
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 
 [features]
 # `oauth` ships in the standard build: the connection write routes
@@ -313,8 +321,7 @@ medulla = ["dep:reqwest"]
 # features share one reviewed signing implementation instead of growing a
 # second one, which is the outcome worth avoiding: two curves, or two base58
 # key parsers, is how a signature check comes to differ between two callers.
-identity = ["dep:ed25519-dalek", "dep:bs58", "dep:rand_core"]
-tinyplace = ["identity", "dep:reqwest"]
+tinyplace = ["dep:reqwest"]
 # The Agent Client Protocol: the `/acp` endpoint's session/permission surface
 # and the `RunTurn` implementation over an ACP agent.
 #
@@ -328,7 +335,7 @@ acp = ["openhuman"]
 # Dispatch folds an ACP turn into a `TurnOutcome`, which lives behind
 # `openhuman` along with the `RunTurn` seam it satisfies, and drives it over the
 # `AcpAgent` port from `acp`.
-runner = ["identity", "acp"]
+runner = ["acp"]
 # Real HTTP POST webhook delivery + HMAC-SHA256 signing. The `WebhookSink` trait,
 # the offline `RecordingWebhookSink`, and the deterministic default signer
 # compile without this; only `HttpWebhookSink`/`HmacSha256Signer` are gated here.

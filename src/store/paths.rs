@@ -517,9 +517,8 @@ fn restrict_dir(_dir: &Path) -> Result<()> {
 ///
 /// Used for identity key material (`keys/agent.ed25519`, and the runner's own
 /// key). A no-op on non-unix targets, which rely on directory isolation
-/// instead. Gated to its consumers — the `identity` signer — so the default
-/// build has no dead code.
-#[cfg(all(unix, feature = "identity"))]
+/// instead.
+#[cfg(unix)]
 pub(crate) fn restrict_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -530,7 +529,7 @@ pub(crate) fn restrict_file(path: &Path) -> Result<()> {
     })
 }
 
-#[cfg(all(not(unix), feature = "identity"))]
+#[cfg(not(unix))]
 pub(crate) fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }
