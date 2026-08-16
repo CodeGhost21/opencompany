@@ -1097,6 +1097,42 @@ mod tests {
         assert!(spec.modules.contains(&"server"));
     }
 
+    /// A host with nothing to open is the only one the wizard is for.
+    #[test]
+    fn spec_reports_setup_incomplete_for_an_empty_unstamped_host() {
+        let spec = AppState::new(AppConfig::default()).spec();
+
+        assert!(
+            !spec.setup_complete,
+            "no stamp and no companies is exactly the first-run case"
+        );
+    }
+
+    /// Regression: `serve --company <dir>` predates the setup flow, so every
+    /// existing deployment has companies and no `setup_completed_at`. Reporting
+    /// the raw stamp here sent all of them into the wizard on the next console
+    /// load — and, because the wizard replaces the console outright, left the
+    /// end-to-end suite waiting on selectors that would never appear until the
+    /// job timed out.
+    #[tokio::test]
+    async fn spec_reports_setup_complete_once_a_company_is_registered() {
+        let state = AppState::new(AppConfig::default());
+        assert!(!state.spec().setup_complete, "precondition: empty registry");
+
+        register_test_company(&state).await;
+
+        assert!(
+            state.spec().setup_complete,
+            "a host already serving a company needs no first-run wizard, \
+             whether or not setup is what put the company there"
+        );
+        assert!(
+            !state.setup_complete(),
+            "the raw stamp must stay false: `authorize` reads it, and an \
+             unstamped host with companies still authorizes through its admin"
+        );
+    }
+
     #[cfg(feature = "mcp")]
     #[test]
     fn parked_oauth_flow_is_single_use() {
