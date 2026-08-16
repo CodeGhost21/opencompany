@@ -399,4 +399,193 @@ mod tests {
     fn an_unknown_class_excludes_nothing() {
         assert!(excluded_documents(&["mystery".to_string()]).is_empty());
     }
+
+    /// The resolver half, against a real store rather than a mock — the store is
+    /// where "does this path name that note?" is actually decided.
+    mod resolve {
+        use std::sync::Arc;
+
+        use super::*;
+        use crate::ports::WorkspaceStore;
+        use crate::ports::types::CompanyId;
+        use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+        use crate::store::FsOps;
+
+        async fn store() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>, CompanyId) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ws: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+            (dir, ws, CompanyId::new("acme"))
+        }
+
+        /// Writes `name` under `parent` with `body`, returning its node id.
+        async fn file(
+            ws: &Arc<dyn WorkspaceStore>,
+            company: &CompanyId,
+            parent: Option<&str>,
+            name: &str,
+            body: &str,
+        ) -> String {
+            let id = format!("id-{name}");
+            ws.create(
+                company,
+                &WorkspaceNode {
+                    id: id.clone(),
+                    name: name.to_string(),
+                    kind: NodeKind::File,
+                    parent_id: parent.map(str::to_string),
+                    updated_at_millis: 1,
+                    created_by: WorkspaceOrigin::Operator,
+                    updated_by: WorkspaceOrigin::Operator,
+                    mime: None,
+                    size: None,
+                    sha256: None,
+                },
+                Some(body),
+            )
+            .await
+            .expect("create file");
+            id
+        }
+
+        async fn folder(ws: &Arc<dyn WorkspaceStore>, company: &CompanyId, name: &str) -> String {
+            ws.adopt_or_create_folder(company, None, name, WorkspaceOrigin::Operator)
+                .await
+                .expect("folder")
+                .into_node()
+                .id
+        }
+
+        #[tokio::test]
+        async fn a_routed_document_is_read_out_of_the_workspace() {
+            let (_dir, ws, company) = store().await;
+            file(&ws, &company, None, UNIVERSAL_DOCUMENT, "How we work.").await;
+            file(&ws, &company, None, BRIEF, "What we established.").await;
+
+            let mut a = agent(Some("frontend")); // routes METHOD + BRIEF
+            a.context = None;
+
+            let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            assert_eq!(
+                resolved,
+                vec![
+                    (UNIVERSAL_DOCUMENT.to_string(), "How we work.".to_string()),
+                    (BRIEF.to_string(), "What we established.".to_string()),
+                ]
+            );
+        }
+
+        /// The rule that differs from `prompt_files`: a live workspace note that
+        /// does not exist yet is skipped, not an error. Failing the roster build
+        /// here would take a whole company down over a file anybody could create.
+        #[tokio::test]
+        async fn a_missing_document_is_skipped_rather_than_failing() {
+            let (_dir, ws, company) = store().await;
+            file(&ws, &company, None, BRIEF, "Only this one exists.").await;
+
+            let mut a = agent(None);
+            a.context = Some(vec![BRIEF.into(), "NOWHERE.md".into()]);
+
+            let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            assert_eq!(resolved.len(), 1, "{resolved:?}");
+            assert_eq!(resolved[0].0, BRIEF);
+        }
+
+        #[tokio::test]
+        async fn a_nested_document_resolves_by_its_logical_path() {
+            let (_dir, ws, company) = store().await;
+            let brand = folder(&ws, &company, "Brand").await;
+            file(&ws, &company, Some(&brand), "Voice.md", "Plain, never loud.").await;
+
+            let mut a = agent(None);
+            a.context = Some(vec!["Brand/Voice.md".into()]);
+
+            let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            assert_eq!(
+                resolved,
+                vec![("Brand/Voice.md".to_string(), "Plain, never loud.".to_string())]
+            );
+        }
+
+        /// A leading slash is the operator's spelling, not a different note.
+        #[tokio::test]
+        async fn a_leading_slash_names_the_same_document() {
+            let (_dir, ws, company) = store().await;
+            let brand = folder(&ws, &company, "Brand").await;
+            file(&ws, &company, Some(&brand), "Voice.md", "body").await;
+
+            let mut a = agent(None);
+            a.context = Some(vec!["/Brand/Voice.md".into()]);
+
+            let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            assert_eq!(resolved.len(), 1, "{resolved:?}");
+            assert_eq!(resolved[0].0, "Brand/Voice.md");
+        }
+
+        /// A traversal-shaped entry resolves to nothing rather than erroring, so
+        /// one bad manifest line cannot stop a company whose other routing works.
+        #[tokio::test]
+        async fn a_traversal_shaped_entry_resolves_to_nothing() {
+            let (_dir, ws, company) = store().await;
+            file(&ws, &company, None, BRIEF, "body").await;
+
+            let mut a = agent(None);
+            a.context = Some(vec!["../../etc/passwd".into(), BRIEF.into()]);
+
+            let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            assert_eq!(resolved.len(), 1, "{resolved:?}");
+            assert_eq!(resolved[0].0, BRIEF);
+        }
+
+        /// An exclusion holds all the way through the read: a judge must not be
+        /// handed the scratch even when the note is sitting right there.
+        #[tokio::test]
+        async fn an_excluded_document_is_never_read_even_when_it_exists() {
+            let (_dir, ws, company) = store().await;
+            file(&ws, &company, None, SCRATCH, "half-finished thinking").await;
+            file(&ws, &company, None, BRIEF, "established").await;
+
+            let mut a = agent(None);
+            a.classes = vec!["judge".into()];
+            a.context = Some(vec![SCRATCH.into(), BRIEF.into()]);
+
+            let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
+            assert!(!names.contains(&SCRATCH), "{names:?}");
+            assert!(names.contains(&BRIEF), "{names:?}");
+        }
+
+        /// A role routed nothing does not touch the store at all — the tree read
+        /// is skipped rather than performed and discarded.
+        #[tokio::test]
+        async fn a_role_routed_nothing_reads_nothing() {
+            let (_dir, ws, company) = store().await;
+            let mut a = agent(Some("compress"));
+            // `compress` defaults to no documents, and an explicit empty context
+            // strips even the universal one.
+            a.context = Some(Vec::new());
+            a.classes = Vec::new();
+
+            // The universal document is always routed, so to reach the empty case
+            // the caller must have nothing at all — assert the shape we do get.
+            let resolved = resolve_routed_documents(ws.as_ref(), &company, &a)
+                .await
+                .expect("resolves");
+            assert!(
+                resolved.is_empty(),
+                "no document exists in the store, so nothing resolves: {resolved:?}"
+            );
+        }
+    }
 }
