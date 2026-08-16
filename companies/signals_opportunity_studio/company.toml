@@ -10,7 +10,7 @@
 #   * reasoning → the brain clusters pain, ranks opportunities, drafts the digest
 #   * cadence  → [[schedule]] entries drive the weekly scan/rank/report loop
 #
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`,
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]

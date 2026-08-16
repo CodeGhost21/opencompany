@@ -9,7 +9,7 @@
 #   * `workflows/committed.toml`, a source-defined workflow the console must
 #     refuse to edit or delete — see `frontend/test/e2e/workflow-edit-delete.spec.ts`.
 #
-# Every [[agent]] becomes one live openhuman agent when built with the
+# Every `agents/<id>.toml` becomes one live openhuman agent when built with the
 # `openhuman` feature and an inference credential is present. Without a
 # credential the same company still boots on the offline echo brain — which is
 # all the load check needs.

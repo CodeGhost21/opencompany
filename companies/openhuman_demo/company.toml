@@ -1,6 +1,6 @@
 # A minimal company for the embedded OpenHuman harness (issue #9).
 #
-# Every [[agent]] becomes one live openhuman agent, wired with memory, an
+# Every `agents/<id>.toml` becomes one live openhuman agent, wired with memory, an
 # approval policy, and the hosted inference provider. Run it with the harness
 # brain by setting an inference credential in the environment:
 #
