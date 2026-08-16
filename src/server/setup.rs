@@ -403,7 +403,11 @@ fn synthetic_manifest() -> crate::company::CompanyManifest {
 
 /// Builds the wizard payload from the live configuration.
 fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompanyError> {
-    let dir = state.home();
+    // `config_root`, not `home`: this is where startup resolves
+    // `setup_completed_at` and every other `config.toml` key from, and the two
+    // can diverge on a deployment with an explicit `--home` — see
+    // `AppState::config_root`'s doc.
+    let dir = state.config_root();
     let file = ConfigFile::load(dir)?;
 
     // Resolution needs a manifest for the `[brain]`/`[users]` layer, and this is
