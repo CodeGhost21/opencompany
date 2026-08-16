@@ -401,10 +401,7 @@ mod tests {
             let problems = problems_of(
                 load_agents(dir.path()).unwrap_err_or_else_panic(&format!("{escape} is refused")),
             );
-            assert!(
-                problems[0].contains("outside"),
-                "{escape} → {problems:?}"
-            );
+            assert!(problems[0].contains("outside"), "{escape} → {problems:?}");
         }
     }
 
@@ -452,7 +449,10 @@ classes = ["judge", "evidence"]
             agent.prompt.as_deref(),
             Some("Be specific about what would change your mind.")
         );
-        assert_eq!(agent.context.as_deref(), Some(&["GOAL.md".to_string(), "CLAIMS.md".to_string()][..]));
+        assert_eq!(
+            agent.context.as_deref(),
+            Some(&["GOAL.md".to_string(), "CLAIMS.md".to_string()][..])
+        );
         assert_eq!(agent.classes, ["judge", "evidence"]);
     }
 

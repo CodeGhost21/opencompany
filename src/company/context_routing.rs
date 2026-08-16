@@ -203,7 +203,10 @@ mod tests {
             routed_documents(&agent(Some("frontend"))),
             [UNIVERSAL_DOCUMENT, BRIEF]
         );
-        assert_eq!(routed_documents(&agent(Some("compress"))), [UNIVERSAL_DOCUMENT]);
+        assert_eq!(
+            routed_documents(&agent(Some("compress"))),
+            [UNIVERSAL_DOCUMENT]
+        );
         assert_eq!(
             routed_documents(&agent(Some("subconscious"))),
             [UNIVERSAL_DOCUMENT]
@@ -287,7 +290,12 @@ mod tests {
     fn several_classes_all_apply() {
         let mut a = agent(None);
         a.classes = vec!["judge".into(), "evidence".into(), "directive".into()];
-        a.context = Some(vec![SCRATCH.into(), BOARD.into(), CLAIMS.into(), BRIEF.into()]);
+        a.context = Some(vec![
+            SCRATCH.into(),
+            BOARD.into(),
+            CLAIMS.into(),
+            BRIEF.into(),
+        ]);
         assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
     }
 
@@ -304,11 +312,7 @@ mod tests {
     #[test]
     fn a_document_listed_twice_is_routed_once() {
         let mut a = agent(None);
-        a.context = Some(vec![
-            UNIVERSAL_DOCUMENT.into(),
-            BRIEF.into(),
-            BRIEF.into(),
-        ]);
+        a.context = Some(vec![UNIVERSAL_DOCUMENT.into(), BRIEF.into(), BRIEF.into()]);
         assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
     }
 

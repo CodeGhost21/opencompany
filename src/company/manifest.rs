@@ -207,7 +207,11 @@ impl CompanyManifest {
             // lost. See `PROMPT_CLASSES`.
             for class in &agent.classes {
                 if !PROMPT_CLASSES.contains(&class.as_str()) {
-                    problems.push(one_of(&format!("{label} `classes` entry"), &PROMPT_CLASSES, class));
+                    problems.push(one_of(
+                        &format!("{label} `classes` entry"),
+                        &PROMPT_CLASSES,
+                        class,
+                    ));
                 }
             }
         }
@@ -667,10 +671,7 @@ mod tests {
         let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
         let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["ceo", "writer"]);
-        assert_eq!(
-            super::super::orchestrator_id(&manifest.agents),
-            Some("ceo")
-        );
+        assert_eq!(super::super::orchestrator_id(&manifest.agents), Some("ceo"));
     }
 
     /// Declaring both forms is refused rather than resolved by precedence:

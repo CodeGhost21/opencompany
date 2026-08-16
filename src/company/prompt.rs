@@ -192,7 +192,10 @@ mod tests {
 
         let prompt = persona_prompt("Acme", &a);
         // The identity framing survives — that is the whole reason this appends.
-        assert!(prompt.contains("You are the Copywriter at Acme"), "{prompt}");
+        assert!(
+            prompt.contains("You are the Copywriter at Acme"),
+            "{prompt}"
+        );
         assert!(prompt.contains("Write ads."), "{prompt}");
         assert!(prompt.contains("Write in the brand's voice."), "{prompt}");
         // And the operator's instruction comes last, where it is not buried.
@@ -206,7 +209,10 @@ mod tests {
     fn a_blank_inline_prompt_adds_nothing() {
         let mut a = agent("Copywriter");
         a.prompt = Some("   \n  ".into());
-        assert_eq!(persona_prompt("Acme", &a), persona_prompt("Acme", &agent("Copywriter")));
+        assert_eq!(
+            persona_prompt("Acme", &a),
+            persona_prompt("Acme", &agent("Copywriter"))
+        );
     }
 
     #[test]
@@ -308,6 +314,9 @@ mod tests {
             "two budget-sized documents must not buy two budgets"
         );
         // The second document is past the budget, so its heading never appears.
-        assert!(!section.contains("### two.md"), "section rendered past budget");
+        assert!(
+            !section.contains("### two.md"),
+            "section rendered past budget"
+        );
     }
 }

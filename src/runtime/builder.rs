@@ -324,9 +324,7 @@ fn carry_desk_tool_overrides(
             .map(|desk| desk.tools.clone())
     };
     held.iter()
-        .filter(|(desk_id, _)| {
-            seed_tools(previous_seed, desk_id) == seed_tools(next_seed, desk_id)
-        })
+        .filter(|(desk_id, _)| seed_tools(previous_seed, desk_id) == seed_tools(next_seed, desk_id))
         .map(|(desk_id, ceiling)| (desk_id.clone(), ceiling.clone()))
         .collect()
 }
@@ -3076,9 +3074,15 @@ mod test {
         fn a_desk_can_never_widen_past_the_company_grant() {
             // `search` is deliberately not in the company allow-list, and `*`
             // never confers it.
-            assert_eq!(scope(&["docs.*"], &[&["search", "shell"]], &[]), Vec::<String>::new());
+            assert_eq!(
+                scope(&["docs.*"], &[&["search", "shell"]], &[]),
+                Vec::<String>::new()
+            );
             // Nor can the agent reach past a desk that did not grant it.
-            assert_eq!(scope(&["*"], &[&["docs.*"]], &["shell"]), Vec::<String>::new());
+            assert_eq!(
+                scope(&["*"], &[&["docs.*"]], &["shell"]),
+                Vec::<String>::new()
+            );
         }
 
         /// Adding the desk level must not disturb the two-level answer for a
@@ -3133,7 +3137,10 @@ mod test {
         fn an_unchanged_seed_carries_the_override() {
             let seed = [desk("finance", &["docs.*"])];
             let carried = carry_desk_tool_overrides(&seed, &seed, &held(&[("finance", &["web"])]));
-            assert_eq!(carried.get("finance").map(Vec::as_slice), Some(&["web".to_string()][..]));
+            assert_eq!(
+                carried.get("finance").map(Vec::as_slice),
+                Some(&["web".to_string()][..])
+            );
         }
 
         /// The security property: version control narrowing a desk must not be
