@@ -374,6 +374,31 @@ pub struct Agent {
     /// than inferred from who happens to lead which desk.
     #[serde(default)]
     pub delegates_to: Vec<String>,
+    /// Workspace documents routed into this agent's system prompt.
+    ///
+    /// The manifest half of *context routing*
+    /// (`docs/spec/runtime/orchestration/alignment.md`): which working
+    /// documents this role is told to reason from. Context is authority, so it
+    /// is stated per role rather than given to everyone — and the exclusions
+    /// carry as much weight as the entries, because a role that weighs evidence
+    /// must not be handed unevidenced text beside it.
+    ///
+    /// Paths are relative to the company workspace root. A named document that
+    /// does not exist is skipped; one that is oversized or not valid UTF-8 is an
+    /// error, because silently dropping it yields a role whose prompt was
+    /// written around a document it never received.
+    ///
+    /// Empty (the default) is *not* the same as "route nothing": it means this
+    /// agent takes the per-tier default. A company that wants a role to receive
+    /// no working documents at all says so by listing only what it does want.
+    ///
+    /// **Inert until the routing layer lands.** The field is parsed and carried
+    /// so a manifest can declare its routing as data today; nothing consumes it
+    /// yet. It is declared now rather than later because `Agent` does not deny
+    /// unknown fields — a `context` key on an older binary is silently ignored,
+    /// which reads exactly like routing that works and does nothing.
+    #[serde(default)]
+    pub context: Vec<String>,
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,

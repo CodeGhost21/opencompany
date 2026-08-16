@@ -60,6 +60,31 @@ Medulla vocabulary is adopted unchanged where it appears; see
 | **Ledger** | The Company's money and usage journal: every payment in/out, token spend, signer used, engagement link. Append-only. |
 | **SIWX** | Per-action wallet-signature authentication used by tiny.place (no bearer tokens). |
 
+## Orchestration terms
+
+How a many-agent Company converges. See
+[runtime/orchestration/](runtime/orchestration/README.md).
+
+> **Naming.** **Ledger** unqualified always means the money and usage journal
+> above. The orchestration files below are **derived ledgers** and MUST always
+> be named with their qualifier — *demand ledger*, *claim ledger* — in both
+> prose and code. An unqualified "the ledger" in an orchestration context is a
+> defect.
+
+| Term | Meaning |
+| --- | --- |
+| **Derived ledger** | A Markdown file written by code, never by an agent, re-rendered whole from a directory of one-file-per-item on every relevant write. It cannot drift, because it is a projection rather than a summary somebody maintains. |
+| **Claim ledger** | The derived ledger of `claim` blocks: one statement each, with its conditions, whether it holds here, and how well it is established. What closes a Demand. |
+| **Claim** | One statement the Company holds to be true, with `status` recording how well: `verified`, `sourced`, `asserted`, `heuristic`. A claim citing a Demand id is what closes that Demand. |
+| **Demand** | A stated need: what is missing, what the asker would do with it, and what would show their current belief wrong. Stated by whoever is blocked, deduped against what the Company already knows, and closed only by a Claim that cites it. Replaces the board card as the work model. |
+| **Demand ledger** | The derived ledger of Demands. The Company's work model; the board columns are a projection of Demand state. |
+| **Brief** | The single budgeted document nearly every reasoning role is given, holding what the Company established, ruled out, and recalled. Exactly one writer. Internal-only. |
+| **Context routing** | The per-role decision about which workspace documents enter that role's system prompt. Context is authority; exclusions are deliberate. |
+| **Assertion board** | Where a Teammate tells the others something it cannot yet establish — a dead end, a lesson, a hunch. Never an input to a derived ledger. Distinct from the work board. |
+| **Attempt** | One try at a Demand. Followed by a concurrent evaluation fan-out, then a routing decision. |
+| **Verdict** | The judge's reading of how an Attempt was *conducted*: `Proceed`, `Steer`, `Restart`. Distinct from verification, which reads whether the result is *right* and alone can end the loop. |
+| **Directive** | An Operator instruction queued for a run already in flight. Delivered verbatim into the next Attempt, never blocking. Cannot force a restart or make unverified work count as answered. Internal-only. |
+
 ## Legacy / AVI term bridge
 
 The [vision doc](vision/README.md) predates this spec. Its terms map as:

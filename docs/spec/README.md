@@ -92,6 +92,13 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
+| [runtime/orchestration/README.md](runtime/orchestration/README.md) | Making a many-agent company converge: the three collapses, the three principles, phasing |
+| [runtime/orchestration/memory.md](runtime/orchestration/memory.md) | One memory contract: `MemoryProvider` replaces three ports, and the host decorator that keeps tenants apart |
+| [runtime/orchestration/alignment.md](runtime/orchestration/alignment.md) | Context routing, the budgeted brief, the derived ledgers, the assertion board |
+| [runtime/orchestration/demand-ledger.md](runtime/orchestration/demand-ledger.md) | The demand ledger as the work model (normative): dedup, closure by evidence, the column projection |
+| [runtime/orchestration/loop.md](runtime/orchestration/loop.md) | The attempt loop: the evaluation fan-out, judge vs verify, routing, and the mandatory parity sweep |
+| [runtime/orchestration/delegation.md](runtime/orchestration/delegation.md) | The join primitive, operator directives, and collapsing desks into workflows |
+| [runtime/orchestration/sandbox.md](runtime/orchestration/sandbox.md) | Containerised programming tools: posture, placement, the code library, checkpointing |
 | [runtime/api.md](runtime/api.md) | HTTP surface and auth model |
 | [runtime/config.md](runtime/config.md) | Configuration and the one-key story |
 | [runtime/repos.md](runtime/repos.md) | Bound repositories: mirror cache, credential handling, quota |

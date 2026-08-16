@@ -115,6 +115,7 @@ mod tests {
                 tier: None,
                 tools: vec![],
                 delegates_to: vec![],
+                context: vec![],
                 budget_usd_daily: None,
             },
             Agent {
@@ -124,6 +125,7 @@ mod tests {
                 tier: None,
                 tools: vec![],
                 delegates_to: vec![],
+                context: vec![],
                 budget_usd_daily: None,
             },
         ];
