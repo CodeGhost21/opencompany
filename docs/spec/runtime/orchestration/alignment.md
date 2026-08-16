@@ -318,9 +318,20 @@ closed by evidence. A board post is, permanently, somebody's opinion.
 
 Append-only JSONL, rendered to Markdown. One complete line written in a single
 call on an append handle is the entire concurrency story: concurrent posters
-interleave whole lines, never halves, so **no lock is required**. The kind is a
-closed set, and an unrecognised kind parses to the most conservative reading
-rather than being dropped — a typo must not lose the post or upgrade it.
+interleave whole lines, never halves, so **no lock is required** — but this
+holds only up to a bound, and the bound MUST be enforced, not assumed. A
+single `write(2)` (or platform equivalent) is only guaranteed atomic up to
+`PIPE_BUF` (4,096 bytes on every POSIX target this runs on today), and no
+such guarantee exists at all on a non-POSIX target. **A board post line MUST
+therefore be capped well under that bound** — 2,048 bytes is a safe margin —
+and a post that would exceed it MUST be refused at the tool boundary rather
+than written and risking a split write that interleaves with another
+poster's line. This is a size limit on one JSONL record, not a limit on what
+an agent can say: a post that does not fit is a sign it should have been a
+workspace note with the board carrying a pointer to it, not a reason to widen
+the bound. The kind is a closed set, and an unrecognised kind parses to the
+most conservative reading rather than being dropped — a typo must not lose
+the post or upgrade it.
 
 The rendered file MUST state its own status in its header: everything here is
 asserted, not established; treat a dead end as a reason not to repeat someone's
