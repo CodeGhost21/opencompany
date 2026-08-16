@@ -1216,6 +1216,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), policy_fp);
+        self.desk_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), desk_fp);
         Ok(())
     }
 
