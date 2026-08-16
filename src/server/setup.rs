@@ -565,7 +565,9 @@ async fn apply_inner(
     req: SetupRequest,
     env: &(dyn EnvSource + Sync),
 ) -> Result<AppliedDto, OpenCompanyError> {
-    let dir = state.home().to_path_buf();
+    // See `snapshot`'s comment: this must be the same root startup reads
+    // `config.toml` from, which is not always `state.home()`.
+    let dir = state.config_root().to_path_buf();
     let file = ConfigFile::load(&dir)?;
     let manifest = synthetic_manifest();
     let (_, prov) = resolve(env, file.as_ref(), &manifest)?;
