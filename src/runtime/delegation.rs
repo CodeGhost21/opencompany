@@ -98,6 +98,33 @@ pub trait RunTurn: Send + Sync {
 // callers (and its tests) keep using `desk_lead(...)` unchanged.
 pub(crate) use crate::runtime::delegation_tools::desk_lead;
 
+use crate::runtime::delegation_tools;
+
+/// One hand-off, resolved: everything
+/// [`run_hand_off`](DelegationRunner::run_hand_off) needs, and nothing about
+/// *which kind* it was (issue #884).
+///
+/// The two hand-off delegations differ only in how they get here — a desk key
+/// through [`desk_lead`], a roster id straight through
+/// [`CompanyRecord::resolve_roster_agent_id`] — and this is the type that makes
+/// that the *only* difference. A hand-off's card, its steer registration, its
+/// depth bound and its relayed reply are properties of handing work over, not
+/// of the namespace the target was named in.
+struct HandOff {
+    /// The roster id whose turn will run. Canonical, already validated.
+    member: String,
+    /// What that member is asked to do.
+    instruction: String,
+    /// What the hand-off is *called* on the operator's in-flight list: the desk
+    /// key for a desk hand-off, the teammate's id for a teammate one.
+    label: String,
+    /// What this hand-off pushes onto the delegation scope chain — a resolved
+    /// desk id, or a [`teammate_scope_key`](delegation_tools::teammate_scope_key)
+    /// for the teammate form. The chain's length is the delegation depth and its
+    /// contents are what the cycle guards compare against.
+    scope_key: String,
+}
+
 /// The prompt for the CEO-relay hand-back turn: the operator's original message
 /// plus each teammate's reply, framed so the orchestrator relays the answer back
 /// as its own single, coherent response and does not delegate again.
@@ -1146,19 +1173,19 @@ impl<'a> DelegationRunner<'a> {
         let mut drained = Drained::default();
         for delegation in self.queue.drain(self.max_delegations) {
             if hand_offs == HandOffs::Drop
-                && let Delegation::DelegateToDesk { desk, .. } = &delegation
+                && let Some(target) = hand_off_target_of(&delegation)
             {
                 tracing::debug!(
                     company = %self.company,
-                    desk = %desk,
+                    target = %target,
                     "[delegation] dropped a hand-off queued by the relay turn: a relay may only \
                      relay"
                 );
                 continue;
             }
             // Captured before the delegation is consumed, so a cancellation can
-            // be reported against the desk it was aimed at (issue #176).
-            let target = desk_of(&delegation).map(str::to_string);
+            // be reported against whoever it was aimed at (issues #176, #884).
+            let target = hand_off_target_of(&delegation).map(str::to_string);
             let out = self.run_delegation(delegation, chat_id, ctx).await?;
             if out.cancelled
                 && let Some(desk) = target
@@ -1220,7 +1247,7 @@ impl<'a> DelegationRunner<'a> {
         // what cannot be trusted: a refused hand-off is precisely the case where
         // the reply claimed work had changed hands and the board showed
         // otherwise.
-        for desk in self.queue.drain_refusals(self.max_delegations) {
+        for target in self.queue.drain_refusals(self.max_delegations) {
             tracing::warn!(
                 task_id = %card.id,
                 delegator = %delegator,
@@ -1230,9 +1257,12 @@ impl<'a> DelegationRunner<'a> {
                 card.note.as_deref(),
                 delegator,
                 &undeliverable_handoff(
-                    &desk,
+                    &target,
                     delegator,
-                    "it is not a desk this company can hand work to",
+                    // Kind-agnostic since #884: this list holds both refused desk
+                    // keys and refused teammate ids, and the refusal that
+                    // recorded them is not carried through the queue.
+                    "it is not somewhere this company can hand work to",
                 ),
             ));
         }
@@ -1253,6 +1283,13 @@ impl<'a> DelegationRunner<'a> {
             // second resolution inside `run_delegation` yields the same member.
             let lead = match &delegation {
                 Delegation::DelegateToDesk { desk, .. } => desk_lead(self.record, desk),
+                // Issue #884: resolved directly, with no desk in between — which
+                // is the point. `resolve_roster_agent_id` is pure over the same
+                // record, so the second resolution inside `run_delegation`
+                // yields the same member, exactly as `desk_lead` does above.
+                Delegation::DelegateToTeammate { teammate, .. } => {
+                    self.record.resolve_roster_agent_id(teammate)
+                }
                 _ => None,
             };
             let Some(member) = lead else {
@@ -1264,23 +1301,32 @@ impl<'a> DelegationRunner<'a> {
                 // nothing on the board connecting the two. Record the
                 // undeliverable hand-off on the card so the operator reads the
                 // fact instead of inferring it from an absence. Every other
-                // delegation kind carries no desk and is unaffected.
-                let desk = desk_of(&delegation).map(str::to_string);
+                // delegation kind carries no target and is unaffected.
+                //
+                // The cause is written per kind (issue #884): "that desk has no
+                // lead" and "that teammate is not on the roster" are different
+                // facts, and an operator reading the card is the one who has to
+                // act on whichever it was.
+                let undeliverable = hand_off_target_of(&delegation).map(|target| {
+                    let cause = match delegation {
+                        Delegation::DelegateToTeammate { .. } => {
+                            "no teammate with that id is on the roster"
+                        }
+                        _ => "no desk with that id has a lead on the roster",
+                    };
+                    (target.to_string(), cause)
+                });
                 // `false`: a dispatched card's drain has no operator message and
                 // therefore no chat-handler card to defer to. It opens no card
                 // of its own regardless — `for_task` is set, which
                 // `open_work_card` refuses on first.
                 self.run_delegation(delegation, None, MessageContext::default())
                     .await?;
-                if let Some(desk) = desk {
+                if let Some((target, cause)) = undeliverable {
                     card.note = Some(append_note(
                         card.note.as_deref(),
                         delegator,
-                        &undeliverable_handoff(
-                            &desk,
-                            delegator,
-                            "no desk with that id has a lead on the roster",
-                        ),
+                        &undeliverable_handoff(&target, delegator, cause),
                     ));
                 }
                 continue;
@@ -1337,6 +1383,230 @@ impl<'a> DelegationRunner<'a> {
             }
         }
         Ok(handoff)
+    }
+
+    /// Runs one hand-off: the delegate's turn, the card that tracks it, the
+    /// steer registration that lets an operator cancel it, the nested drain of
+    /// whatever it hands on in turn, and the [`DeskReply`] the relay folds into
+    /// the operator's answer.
+    ///
+    /// Shared verbatim by both hand-off kinds (issue #884). The two arms above
+    /// differ only in how they resolve a target to a roster member and what they
+    /// push onto the scope chain; everything a hand-off *is* — tracked, steerable,
+    /// depth-bounded, relayed — must be identical for both, and the only way to
+    /// keep it identical is for there to be one copy of it.
+    async fn run_hand_off(
+        &self,
+        hand_off: HandOff,
+        chat_id: Option<&str>,
+        ctx: MessageContext,
+    ) -> Result<DelegationOutcome> {
+        let HandOff {
+            member,
+            instruction,
+            label,
+            scope_key,
+        } = hand_off;
+        // Issue #442, path two: the card is opened HERE, before the desk
+        // lead runs, as a consequence of work being handed off — not
+        // because the model reached for `spawn_task` instead of this
+        // tool. `spawn_task` and `delegate_to_desk` were both described
+        // to the model as delegation and only one of them touched the
+        // board, so a hand-off produced a real deliverable and left
+        // nothing behind. Both now do.
+        //
+        // Nothing is opened when the drain is already running inside a
+        // dispatched card (that card *is* the tracking, and #204 hands it
+        // over to this delegate below), when the REST chat handler
+        // already carded the operator message this hand-off came out of
+        // (issue #463), or when the instruction is not a piece of work —
+        // see `is_trackable_work`.
+        let mut card = self
+            .open_hand_off_work_card(&member, &instruction, chat_id, ctx)
+            .await?;
+        // Register the delegated turn so an operator can CANCEL it
+        // mid-flight (cancel-only in v1 — pause/redirect are rejected at
+        // the route). RAII guard deregisters on every exit path.
+        let guard = self.steer.register(
+            self.company,
+            InflightEntry {
+                key: generate_id(),
+                task_id: None,
+                kind: InflightKind::Delegation,
+                title: label,
+                agent_id: member.clone(),
+                started_at_millis: now_millis(),
+                pending_action: None,
+            },
+        );
+        let control = guard.control().clone();
+        // Issue #176: enter this hand-off's scope BEFORE the member's
+        // turn runs, so a hand-off the member itself calls is validated
+        // at the depth it is actually running at — and against a chain
+        // that already contains this one, which is what makes A→B→A a
+        // detectable cycle. The guard pops on every exit path below,
+        // including the `?`s and the cancellation return.
+        //
+        // A RESOLVED identity, never the key the model typed: the chain
+        // is compared by identity, and "Content desk" and "content" are
+        // the same desk. Issue #884 namespaces the teammate form
+        // (`agent:<id>`, see `teammate_scope_key`) so the desk guard and
+        // the teammate guard cannot read each other's entries.
+        let _scope = self.queue.enter_scope(scope_key);
+        // Issue #465, same sampling as the direct-answer path: a desk
+        // delegation whose first call parks has produced nothing to
+        // review either.
+        let approvals_before = self.approvals_queued();
+        // Issue #176, the same before/after shape: a hand-off the
+        // MEMBER's tool refused must be attributed to the member, not
+        // swept up with whatever its delegator left unread.
+        let refusals_before = self.queue.refusals_queued();
+        let outcome = self
+            .run_turn
+            .run_steered(
+                self.company,
+                &member,
+                &instruction,
+                &control,
+                chat_id,
+                // Issue #242: when this drain is running inside a
+                // dispatched card, the delegate's turn is part of that
+                // card's attempt — its steps and its spend belong to the
+                // same run. `None` for a chat-path delegation.
+                self.run_sink.clone(),
+            )
+            .await?;
+        let parked = self.approvals_queued().saturating_sub(approvals_before);
+        // A cancel issued mid-flight discards the delegated reply —
+        // nothing is relayed. Flagged as a cancellation so a caller that
+        // has to explain the empty result can name the cause instead of
+        // guessing at it (issue #213 review).
+        if matches!(control.take(), Some(SteerAction::Cancel)) {
+            // Anything the cancelled member queued before it was stopped
+            // is dropped with it (issue #176). The outer drain already
+            // moved its own items into a local vector, so the queue holds
+            // nothing but this member's pushes; leaving them would run
+            // them under the NEXT sibling hand-off's scope, attributing
+            // one member's work to another.
+            self.queue.clear();
+            // The card this hand-off opened outlives the cancellation:
+            // settling it returns it to To-do with the cancellation on
+            // its note, so an operator sees the work was asked for and
+            // stopped rather than the card vanishing with the reply.
+            if let Some(card) = card.as_mut() {
+                self.settle_work_card(
+                    card,
+                    &member,
+                    TaskRunEnd::Cancelled,
+                    parked,
+                    "the run was cancelled mid-flight",
+                )
+                .await?;
+            }
+            return Ok(DelegationOutcome {
+                cancelled: true,
+                spawned_task: card.map(|c| c.id),
+                ..DelegationOutcome::default()
+            });
+        }
+        // A hand-off the member's own tool REFUSED never becomes a
+        // `Delegation`, so it is read separately — and read here, before
+        // the nested drain, because that drain runs turns of its own
+        // which can push refusals a further level down.
+        let refused = self
+            .queue
+            .drain_refusals_after(refusals_before, self.max_delegations);
+        // Issue #176: run whatever the MEMBER queued during its own turn,
+        // one level deeper, before the card is settled.
+        //
+        // This is the half without which the whole feature is a receipt
+        // for work that never happens (#453's failure, one level down):
+        // the member's tool told it the hand-off "will be answered this
+        // turn", and if nobody drains here the delegation is destroyed by
+        // the next `clear()` with the member none the wiser.
+        //
+        // `Box::pin` is mandatory, not stylistic — this is async
+        // recursion (`run_delegation` → `drain_and_execute` →
+        // `run_delegation`) and an unboxed cycle is an
+        // infinitely-sized future the compiler rejects. It also keeps the
+        // stack flat, which this repo has been bitten by before.
+        //
+        // Bounded by construction: each level pushes onto the scope chain
+        // and `push_within_cap` refuses past `max_delegation_depth`,
+        // which validation caps at 4.
+        //
+        // `ctx` is threaded through unchanged. `carded_by_handler` and
+        // `answering` are properties of the OPERATOR's message, and they
+        // stay true at every depth — a question the operator asked is
+        // still a question three desks down, and must still mint no card.
+        let nested = Box::pin(self.drain_and_execute(chat_id, ctx, HandOffs::Run)).await?;
+        // Fold the nested answers INTO this member's reply rather than
+        // giving each level its own relay turn. The top-level CEO-relay
+        // already synthesises every desk reply into one coherent answer
+        // for the operator, so a per-level relay would only multiply
+        // turns to reach the same text. Steps ride along the same way, so
+        // the operator's timeline shows the deeper member working.
+        let mut reply = outcome.reply;
+        let mut steps = outcome.steps;
+        for deeper in nested.desk_replies {
+            reply.push_str(&format!(
+                "\n\n{} (delegated by {member}) replied:\n{}",
+                deeper.member, deeper.reply
+            ));
+            steps.extend(deeper.steps);
+        }
+        // A cancelled nested run folds in as a cancellation, NEVER as a
+        // reply: the member said it was handing that slice on, and an
+        // answer that silently omits the branch is the confident
+        // falsehood the delegation stack exists to prevent.
+        for target in nested.cancelled_desks {
+            reply.push_str(&format!(
+                "\n\n({target} was handed a slice of this by {member}, but that run \
+                 was cancelled before it replied)"
+            ));
+        }
+        // A hand-off the member's OWN tool refused — an unknown desk, one
+        // outside its allowlist, or one that would loop — never becomes a
+        // `Delegation`, so without this the only record is the tool
+        // result the member is free to describe however it likes. Folding
+        // it into the reply puts it on the card note and in front of the
+        // operator, the same independence #272 gave the delegator's
+        // refusals.
+        for target in refused {
+            reply.push_str(&format!(
+                "\n\n({member} tried to hand a slice of this to {target}, but that \
+                 hand-off was refused and did not happen)"
+            ));
+        }
+        if let Some(card) = card.as_mut() {
+            self.settle_work_card(card, &member, TaskRunEnd::Completed, parked, &reply)
+                .await?;
+        }
+        // Hand the teammate's answer back to RELAY through a second
+        // orchestrator turn (the CEO-relay hand-back). Their steps ride
+        // along and get folded onto the relayed operator bubble.
+        Ok(DelegationOutcome {
+            bubble: None,
+            // Not a board write; see `DelegationOutcome::assigned`.
+            assigned: false,
+            desk_reply: Some(DeskReply {
+                member,
+                reply,
+                steps,
+            }),
+            cancelled: false,
+            // Issue #442: the hand-off's own card, reported the same way
+            // a `spawn_task` reports its card — so the operator bubble
+            // says a card was opened whichever hand-off the orchestrator
+            // chose. This is the field the console's "Card opened" chip
+            // renders from.
+            //
+            // First-wins across the nested drain too (issue #176): this
+            // hand-off's own card predates anything the member opened one
+            // level down, so it stays the reported one; a card the member
+            // opened is reported only when this hand-off opened none.
+            spawned_task: card.map(|c| c.id).or(nested.spawned_task),
+        })
     }
 
     /// Opens the board card that tracks a piece of work, **before** the turn
@@ -1796,210 +2066,62 @@ impl<'a> DelegationRunner<'a> {
                     );
                     return Ok(DelegationOutcome::default());
                 };
-                // Issue #442, path two: the card is opened HERE, before the desk
-                // lead runs, as a consequence of work being handed off — not
-                // because the model reached for `spawn_task` instead of this
-                // tool. `spawn_task` and `delegate_to_desk` were both described
-                // to the model as delegation and only one of them touched the
-                // board, so a hand-off produced a real deliverable and left
-                // nothing behind. Both now do.
-                //
-                // Nothing is opened when the drain is already running inside a
-                // dispatched card (that card *is* the tracking, and #204 hands it
-                // over to this delegate below), when the REST chat handler
-                // already carded the operator message this hand-off came out of
-                // (issue #463), or when the instruction is not a piece of work —
-                // see `is_trackable_work`.
-                let mut card = self
-                    .open_hand_off_work_card(&member, &instruction, chat_id, ctx)
-                    .await?;
-                // Register the delegated turn so an operator can CANCEL it
-                // mid-flight (cancel-only in v1 — pause/redirect are rejected at
-                // the route). RAII guard deregisters on every exit path.
-                let guard = self.steer.register(
-                    self.company,
-                    InflightEntry {
-                        key: generate_id(),
-                        task_id: None,
-                        kind: InflightKind::Delegation,
-                        title: desk.clone(),
-                        agent_id: member.clone(),
-                        started_at_millis: now_millis(),
-                        pending_action: None,
-                    },
-                );
-                let control = guard.control().clone();
-                // Issue #176: enter this hand-off's scope BEFORE the member's
-                // turn runs, so a `delegate_to_desk` the member itself calls is
-                // validated at the depth it is actually running at — and against
-                // a chain that already contains this desk, which is what makes
-                // A→B→A a detectable cycle. The guard pops on every exit path
-                // below, including the `?`s and the cancellation return.
-                //
-                // The RESOLVED id, not the key the model typed: the chain is
-                // compared by identity, and "Content desk" and "content" are the
-                // same desk. An unresolvable key cannot reach here — `desk_lead`
-                // above returned `Some` — so the fallback is unreachable and
-                // merely avoids a panic if that ever stops holding.
-                let scoped_desk = self
+                let scope_key = self
                     .record
                     .resolve_desk_id(&desk)
                     .unwrap_or_else(|| desk.clone());
-                let _scope = self.queue.enter_scope(scoped_desk);
-                // Issue #465, same sampling as the direct-answer path: a desk
-                // delegation whose first call parks has produced nothing to
-                // review either.
-                let approvals_before = self.approvals_queued();
-                // Issue #176, the same before/after shape: a hand-off the
-                // MEMBER's tool refused must be attributed to the member, not
-                // swept up with whatever its delegator left unread.
-                let refusals_before = self.queue.refusals_queued();
-                let outcome = self
-                    .run_turn
-                    .run_steered(
-                        self.company,
-                        &member,
-                        &instruction,
-                        &control,
-                        chat_id,
-                        // Issue #242: when this drain is running inside a
-                        // dispatched card, the delegate's turn is part of that
-                        // card's attempt — its steps and its spend belong to the
-                        // same run. `None` for a chat-path delegation.
-                        self.run_sink.clone(),
-                    )
-                    .await?;
-                let parked = self.approvals_queued().saturating_sub(approvals_before);
-                // A cancel issued mid-flight discards the delegated reply —
-                // nothing is relayed. Flagged as a cancellation so a caller that
-                // has to explain the empty result can name the cause instead of
-                // guessing at it (issue #213 review).
-                if matches!(control.take(), Some(SteerAction::Cancel)) {
-                    // Anything the cancelled member queued before it was stopped
-                    // is dropped with it (issue #176). The outer drain already
-                    // moved its own items into a local vector, so the queue holds
-                    // nothing but this member's pushes; leaving them would run
-                    // them under the NEXT sibling hand-off's scope, attributing
-                    // one member's work to another.
-                    self.queue.clear();
-                    // The card this hand-off opened outlives the cancellation:
-                    // settling it returns it to To-do with the cancellation on
-                    // its note, so an operator sees the work was asked for and
-                    // stopped rather than the card vanishing with the reply.
-                    if let Some(card) = card.as_mut() {
-                        self.settle_work_card(
-                            card,
-                            &member,
-                            TaskRunEnd::Cancelled,
-                            parked,
-                            "the run was cancelled mid-flight",
-                        )
-                        .await?;
-                    }
-                    return Ok(DelegationOutcome {
-                        cancelled: true,
-                        spawned_task: card.map(|c| c.id),
-                        ..DelegationOutcome::default()
-                    });
-                }
-                // A hand-off the member's own tool REFUSED never becomes a
-                // `Delegation`, so it is read separately — and read here, before
-                // the nested drain, because that drain runs turns of its own
-                // which can push refusals a further level down.
-                let refused = self
-                    .queue
-                    .drain_refusals_after(refusals_before, self.max_delegations);
-                // Issue #176: run whatever the MEMBER queued during its own turn,
-                // one level deeper, before the card is settled.
-                //
-                // This is the half without which the whole feature is a receipt
-                // for work that never happens (#453's failure, one level down):
-                // the member's tool told it the hand-off "will be answered this
-                // turn", and if nobody drains here the delegation is destroyed by
-                // the next `clear()` with the member none the wiser.
-                //
-                // `Box::pin` is mandatory, not stylistic — this is async
-                // recursion (`run_delegation` → `drain_and_execute` →
-                // `run_delegation`) and an unboxed cycle is an
-                // infinitely-sized future the compiler rejects. It also keeps the
-                // stack flat, which this repo has been bitten by before.
-                //
-                // Bounded by construction: each level pushes onto the scope chain
-                // and `push_within_cap` refuses past `max_delegation_depth`,
-                // which validation caps at 4.
-                //
-                // `ctx` is threaded through unchanged. `carded_by_handler` and
-                // `answering` are properties of the OPERATOR's message, and they
-                // stay true at every depth — a question the operator asked is
-                // still a question three desks down, and must still mint no card.
-                let nested = Box::pin(self.drain_and_execute(chat_id, ctx, HandOffs::Run)).await?;
-                // Fold the nested answers INTO this member's reply rather than
-                // giving each level its own relay turn. The top-level CEO-relay
-                // already synthesises every desk reply into one coherent answer
-                // for the operator, so a per-level relay would only multiply
-                // turns to reach the same text. Steps ride along the same way, so
-                // the operator's timeline shows the deeper member working.
-                let mut reply = outcome.reply;
-                let mut steps = outcome.steps;
-                for deeper in nested.desk_replies {
-                    reply.push_str(&format!(
-                        "\n\n{} (delegated by {member}) replied:\n{}",
-                        deeper.member, deeper.reply
-                    ));
-                    steps.extend(deeper.steps);
-                }
-                // A cancelled nested run folds in as a cancellation, NEVER as a
-                // reply: the member said it was handing that slice on, and an
-                // answer that silently omits the branch is the confident
-                // falsehood the delegation stack exists to prevent.
-                for desk in nested.cancelled_desks {
-                    reply.push_str(&format!(
-                        "\n\n(the {desk} desk was handed a slice of this by {member}, but that run \
-                         was cancelled before it replied)"
-                    ));
-                }
-                // A hand-off the member's OWN tool refused — an unknown desk, one
-                // outside its allowlist, or one that would loop — never becomes a
-                // `Delegation`, so without this the only record is the tool
-                // result the member is free to describe however it likes. Folding
-                // it into the reply puts it on the card note and in front of the
-                // operator, the same independence #272 gave the delegator's
-                // refusals.
-                for desk in refused {
-                    reply.push_str(&format!(
-                        "\n\n({member} tried to hand a slice of this to the {desk} desk, but that \
-                         hand-off was refused and did not happen)"
-                    ));
-                }
-                if let Some(card) = card.as_mut() {
-                    self.settle_work_card(card, &member, TaskRunEnd::Completed, parked, &reply)
-                        .await?;
-                }
-                // Hand the teammate's answer back to RELAY through a second
-                // orchestrator turn (the CEO-relay hand-back). Their steps ride
-                // along and get folded onto the relayed operator bubble.
-                Ok(DelegationOutcome {
-                    bubble: None,
-                    // Not a board write; see `DelegationOutcome::assigned`.
-                    assigned: false,
-                    desk_reply: Some(DeskReply {
+                // `Box::pin` on the same reasoning as the nested drain inside:
+                // `run_delegation` → `run_hand_off` → `drain_and_execute` →
+                // `run_delegation` is an async cycle, and the hand-off body is
+                // by far the largest state in it. The cycle is already broken by
+                // the box on the nested drain, so this one is not what makes it
+                // compile — it is what keeps a recursive hand-off's frame off
+                // the stack, which this repo has been bitten by before.
+                Box::pin(self.run_hand_off(
+                    HandOff {
                         member,
-                        reply,
-                        steps,
-                    }),
-                    cancelled: false,
-                    // Issue #442: the hand-off's own card, reported the same way
-                    // a `spawn_task` reports its card — so the operator bubble
-                    // says a card was opened whichever hand-off the orchestrator
-                    // chose. This is the field the console's "Card opened" chip
-                    // renders from.
-                    //
-                    // First-wins across the nested drain too (issue #176): this
-                    // hand-off's own card predates anything the member opened one
-                    // level down, so it stays the reported one; a card the member
-                    // opened is reported only when this hand-off opened none.
-                    spawned_task: card.map(|c| c.id).or(nested.spawned_task),
-                })
+                        instruction,
+                        label: desk,
+                        scope_key,
+                    },
+                    chat_id,
+                    ctx,
+                ))
+                .await
+            }
+            // Issue #884, D1: the same hand-off, resolved straight to a named
+            // teammate instead of through a desk to whoever leads it. Everything
+            // downstream — the card, the steer guard, the depth chain, the
+            // `DeskReply` the relay folds in — is the desk path's, verbatim.
+            Delegation::DelegateToTeammate {
+                teammate,
+                instruction,
+            } => {
+                let Some(member) = self.record.resolve_roster_agent_id(&teammate) else {
+                    // The mirror of the desk arm's warning, and reachable for the
+                    // same narrow reason: the tool grounds the target before
+                    // queuing, so this is a teammate removed from the roster
+                    // between the call and the drain.
+                    tracing::warn!(
+                        company = %self.company,
+                        teammate = %teammate,
+                        "[delegation] hand-off could not be delivered: no teammate with that id is \
+                         on the roster"
+                    );
+                    return Ok(DelegationOutcome::default());
+                };
+                let scope_key = delegation_tools::teammate_scope_key(&member);
+                Box::pin(self.run_hand_off(
+                    HandOff {
+                        label: member.clone(),
+                        member,
+                        instruction,
+                        scope_key,
+                    },
+                    chat_id,
+                    ctx,
+                ))
+                .await
             }
             // ── Issue #186 part b: orchestrator lifecycle authority ─────────
             //
@@ -2206,8 +2328,24 @@ fn kind_label(delegation: &Delegation) -> &'static str {
     match delegation {
         Delegation::SpawnTask { .. } => "spawn_task",
         Delegation::DelegateToDesk { .. } => "delegate_to_desk",
+        Delegation::DelegateToTeammate { .. } => "delegate_to_teammate",
         Delegation::AssignTask { .. } => "assign_task",
         Delegation::ReviewTask { .. } => "review_task",
+    }
+}
+
+/// What a hand-off was aimed at — a desk key or a teammate id — or `None` for
+/// every delegation that is not a hand-off (issue #884).
+///
+/// [`desk_of`] deliberately stays desk-only: its callers write "hand-off to the
+/// \"{desk}\" desk" onto a card, and calling a person a desk there would be a
+/// worse record than none. This is the kind-agnostic companion, for the places
+/// that only need a label to attribute a cancellation to.
+fn hand_off_target_of(delegation: &Delegation) -> Option<&str> {
+    match delegation {
+        Delegation::DelegateToDesk { desk, .. } => Some(desk),
+        Delegation::DelegateToTeammate { teammate, .. } => Some(teammate),
+        _ => None,
     }
 }
 
@@ -2216,7 +2354,8 @@ fn kind_label(delegation: &Delegation) -> &'static str {
 /// [`Delegation::DelegateToDesk`].
 fn instruction_of(delegation: &Delegation) -> &str {
     match delegation {
-        Delegation::DelegateToDesk { instruction, .. } => instruction,
+        Delegation::DelegateToDesk { instruction, .. }
+        | Delegation::DelegateToTeammate { instruction, .. } => instruction,
         _ => "",
     }
 }
@@ -2237,11 +2376,14 @@ fn desk_of(delegation: &Delegation) -> Option<&str> {
 /// Written in the delegator's voice, like every other note this seam appends,
 /// and deliberately explicit about the two facts an operator otherwise has to
 /// infer: nothing was handed off, and the card is still theirs. Names only the
-/// desk key, the cause, and the delegator — no instruction text, no delegate
+/// target key, the cause, and the delegator — no instruction text, no delegate
 /// output.
-fn undeliverable_handoff(desk: &str, delegator: &str, cause: &str) -> String {
+///
+/// `target` names a desk **or** a teammate since #884, so the sentence no longer
+/// calls it a desk; the `cause` its callers pass is what says which it was.
+fn undeliverable_handoff(target: &str, delegator: &str, cause: &str) -> String {
     format!(
-        "hand-off to the \"{desk}\" desk was not delivered — {cause}. Nothing was delegated; this \
+        "hand-off to \"{target}\" was not delivered — {cause}. Nothing was delegated; this \
 card is still with {delegator}."
     )
 }
