@@ -120,15 +120,16 @@ The credential is resolved over **three** tiers, and the toolbelt gates on all
 three (`composio::resolve_credential`, the seam issue #586 established): the BYO
 override, then the company's own TinyHumans key, then this instance's platform
 identity. On a hosted tenant nobody pastes a BYO token — the third tier answers,
-the tools wire up, and the agents call them successfully. The one-tier probe
-reported `false` throughout.
+and the tools wire up and are ready to attempt calls. Credential resolution
+proves bearer presence, not that a later call succeeds — that is the probe's
+job (above), a separate axis. The one-tier probe reported `false` throughout.
 
 So the route now sends **both**, answering two different questions:
 
 | Field | Question | Shape |
 | --- | --- | --- |
 | `composioTokenConfigured` | did *this company* paste a BYO token? | boolean, unchanged meaning |
-| `composioCredentialSource` | which tier does the credential resolve from? | the same `attested` / `company` / `static` / `none` tiers above, from the resolver itself |
+| `composioCredentialSource` | which Composio credential tier resolves? | `attested` for the projected platform identity, `company` for the company's TinyHumans key, `static` for a BYO or static instance key, and `none` when no credential resolves |
 
 Three properties are load-bearing:
 
