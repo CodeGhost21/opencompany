@@ -75,9 +75,22 @@ whole design:
 - Neither side writes what the other writes, so **neither needs a lock**, and
   the one number they share is owned by the side that advances it.
 
+The writer split removes the reader/writer race, not the writer/writer one.
+**Appends to the queue MUST be serialized through one designated append
+path** — a single host-side operator-directive service, or an equivalent
+`O_APPEND`-with-single-writer guarantee — so two host processes never
+interleave partial writes into the same file. This is narrower than a lock:
+it is a rule about how many writers the queue is allowed to have, enforced by
+only ever running one.
+
 **A directive's id is its line number.** Not a stored field. So a line the
 reader cannot parse is skipped **and still counted** — a torn append costs one
-directive rather than the alignment of every later one.
+directive rather than the alignment of every later one. Before appending, the
+writer MUST check whether the current final line is a complete, parseable
+record; an incomplete trailing record from a prior crash MUST be truncated
+back to the last complete newline before the new append lands, so a torn
+write from one crash cannot merge with the next directive and corrupt two
+line numbers instead of costing one.
 
 The cursor MUST be written staged-and-renamed, so a torn cursor reads as zero
 rather than as a garbage offset.
