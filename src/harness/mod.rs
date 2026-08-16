@@ -2247,6 +2247,38 @@ pub(crate) struct EffectiveOverlay {
     pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
 }
 
+/// Fingerprints the routed workspace documents a roster's personas are built
+/// from — **over their bodies**, not their names.
+///
+/// Hashing the content is the whole point. The routing table is manifest data
+/// and does not move when an operator edits a note, so a name-only hash would
+/// leave the edit invisible: the persona is assembled once per roster, and the
+/// fast path would keep serving a prompt quoting the old text until the process
+/// restarted. That is precisely the staleness the routing layer exists to avoid.
+///
+/// Sorted by agent id before hashing, for the reason [`budget_fingerprint`]
+/// documents — a `HashMap` has no order, and an order-sensitive hash would drop
+/// every live agent session on a rebuild that changed nothing.
+fn routed_context_fingerprint(routed: &HashMap<String, Vec<(String, String)>>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut ordered: Vec<(&String, &Vec<(String, String)>)> = routed.iter().collect();
+    ordered.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut hasher = DefaultHasher::new();
+    ordered.len().hash(&mut hasher);
+    for (agent_id, documents) in ordered {
+        agent_id.hash(&mut hasher);
+        documents.len().hash(&mut hasher);
+        for (path, body) in documents {
+            path.hash(&mut hasher);
+            body.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 /// Fingerprints the desk scoping a roster's grants are resolved through: which
 /// desks exist, who sits on them, and what each one's tool ceiling is.
 ///
