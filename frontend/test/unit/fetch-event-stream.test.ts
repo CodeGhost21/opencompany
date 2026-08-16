@@ -48,7 +48,7 @@ afterEach(() => {
 
 describe("the fetch event stream", () => {
   it("carries the credential EventSource could not", async () => {
-    const fetchMock = vi.fn(async () => streamOf([]));
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => streamOf([]));
     vi.stubGlobal("fetch", fetchMock);
 
     new BrowserTransport().subscribe(
