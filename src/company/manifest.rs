@@ -1408,11 +1408,19 @@ mod tests {
         // not kernel code. This guards that the shipped manifest keeps passing
         // the same lint `opencompany check` runs — unique agent ids, priced +
         // described `[place].skills`, a `[policy]`, and a stated `human_role`.
+        // The company *directory*, not its `company.toml`: this template's
+        // roster lives in `agents/*.toml`, and loading the file alone would
+        // leave `manifest.agents` empty — making every roster assertion below
+        // pass by having nothing to check.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("companies/signals_opportunity_studio/company.toml");
-        let manifest = CompanyManifest::from_file(&path).expect("template manifest is valid");
+            .join("companies/signals_opportunity_studio");
+        let manifest = CompanyManifest::from_path(&path).expect("template manifest is valid");
 
         assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+        assert!(
+            !manifest.agents.is_empty(),
+            "the roster must actually load, or the assertions below check nothing"
+        );
         assert!(
             manifest.company.human_role.is_some(),
             "the template must name what the human keeps"
