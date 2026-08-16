@@ -24,6 +24,7 @@ use tinyagents::{Result as TaResult, TinyAgentsError};
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::types::CompanyId;
+use tempfile;
 
 // ---------------------------------------------------------------------------
 // A scripted model
@@ -573,10 +574,10 @@ impl crate::ports::SecretStore for BrokenSecrets {
 
 /// The instance identity a hosted pod carries. Built directly, so the matrix
 /// never touches the process environment.
-fn platform_identity() -> Arc<crate::company::TinyhumansTokenSource> {
-    Arc::new(crate::company::TinyhumansTokenSource::projected_file(
-        "/var/run/secrets/tinyhumans.ai/token",
-    ))
+fn platform_identity(
+    path: impl Into<std::path::PathBuf>,
+) -> Arc<crate::company::TinyhumansTokenSource> {
+    Arc::new(crate::company::TinyhumansTokenSource::projected_file(path))
 }
 
 /// The hosted shape, which is the whole of issue #886: **no** BYO
@@ -591,6 +592,15 @@ async fn a_hosted_tenant_with_no_pasted_token_still_has_a_composio_credential() 
     let company = CompanyId::new("acme");
     let secrets = MemSecrets::default();
 
+    // Create a temp file with a test token so the projected_file source has
+    // a path that exists, matching the pattern used in server/ops/composio.rs.
+    let token_dir = tempfile::Builder::new()
+        .prefix("oc-harness-test-")
+        .tempdir()
+        .expect("tempdir");
+    let token_path = token_dir.path().join("token");
+    std::fs::write(&token_path, "test-tinyhumans-token").expect("write token");
+
     // The one-tier probe the field used to be. Kept in the assertion because it
     // is the contradiction the issue reported, not merely a historical note.
     assert!(
@@ -600,7 +610,8 @@ async fn a_hosted_tenant_with_no_pasted_token_still_has_a_composio_credential() 
         "nobody pastes a BYO token on a hosted tenant"
     );
     assert!(
-        composio_credential_configured(&company, &secrets, Some(platform_identity())).await,
+        composio_credential_configured(&company, &secrets, Some(platform_identity(&token_path)))
+            .await,
         "the platform identity is a Composio credential — it is what wires the tools"
     );
 }
@@ -611,6 +622,15 @@ async fn a_hosted_tenant_with_no_pasted_token_still_has_a_composio_credential() 
 async fn the_credential_probe_walks_every_tier() {
     let company = CompanyId::new("acme");
     let secrets = MemSecrets::default();
+
+    // Create a temp file with a test token so the projected_file source has
+    // a path that exists, matching the pattern used in server/ops/composio.rs.
+    let token_dir = tempfile::Builder::new()
+        .prefix("oc-harness-test-")
+        .tempdir()
+        .expect("tempdir");
+    let token_path = token_dir.path().join("token");
+    std::fs::write(&token_path, "test-tinyhumans-token").expect("write token");
 
     // Nothing stored, no instance identity — the only shape that is really
     // credential-less.
@@ -631,7 +651,12 @@ async fn the_credential_probe_walks_every_tier() {
 
     // An unreadable store fails closed rather than aborting the pass.
     assert!(
-        !composio_credential_configured(&company, &BrokenSecrets, Some(platform_identity())).await
+        !composio_credential_configured(
+            &company,
+            &BrokenSecrets,
+            Some(platform_identity(&token_path))
+        )
+        .await
     );
 }
 
@@ -647,9 +672,19 @@ async fn a_hosted_tenant_stops_being_told_no_composio_account_can_be_reached() {
     let company = CompanyId::new("acme");
     let secrets = MemSecrets::default();
 
+    // Create a temp file with a test token so the projected_file source has
+    // a path that exists, matching the pattern used in server/ops/composio.rs.
+    let token_dir = tempfile::Builder::new()
+        .prefix("oc-harness-test-")
+        .tempdir()
+        .expect("tempdir");
+    let token_path = token_dir.path().join("token");
+    std::fs::write(&token_path, "test-tinyhumans-token").expect("write token");
+
     let mut e = evidence();
     e.composio_credential =
-        composio_credential_configured(&company, &secrets, Some(platform_identity())).await;
+        composio_credential_configured(&company, &secrets, Some(platform_identity(&token_path)))
+            .await;
 
     // A provider that IS connected through Composio is satisfied.
     assert_eq!(verify_composio(&e, "notion").0, PrereqStatus::Satisfied);
