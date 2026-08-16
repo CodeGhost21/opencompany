@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Real Estate Company harness.
-# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`,
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
