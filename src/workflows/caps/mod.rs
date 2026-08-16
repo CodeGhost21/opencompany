@@ -894,9 +894,6 @@ impl HarnessAgentRunner {
         let notice = drained.overflow_notice();
         let discarded = drained.discarded;
         let requests = drained.requests;
-        if requests.is_empty() {
-            return summary;
-        }
 
         // Issue #638: told to the operator, not only logged. Raised BEFORE the
         // parking guard below, and that ordering is a fix in itself — the guard
@@ -932,6 +929,15 @@ impl HarnessAgentRunner {
                     None,
                 ));
             }
+        }
+        if requests.is_empty() {
+            // Issue #900: this used to return before the discarded handling
+            // above ran, so a drain that discarded every request and parked
+            // none filed no receipt at all — `summary.unparkable` stayed 0 and
+            // the node read as clean. The discard bookkeeping now happens
+            // first; this only has to flush what it recorded.
+            self.approvals.extend(rows);
+            return summary;
         }
 
         let Some(parking) = self
