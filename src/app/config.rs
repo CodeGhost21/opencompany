@@ -1778,7 +1778,9 @@ mod test {
     }
 
     /// The write is atomic via a same-directory temp file and `rename`. Nothing
-    /// may be left behind for the next boot (or the next write) to trip over.
+    /// may be left behind for the next boot (or the next write) to trip over —
+    /// checked by name pattern rather than the old fixed `config.toml.tmp`,
+    /// since the temp name is now made unique per call.
     #[test]
     fn writing_leaves_no_temp_file_behind() {
         let dir = write_dir("tmp");
@@ -1787,7 +1789,68 @@ mod test {
             &[("bind", ConfigValue::Str("0.0.0.0:9000".into()))],
         )
         .unwrap();
-        assert!(!dir.path().join(format!("{CONFIG_FILE}.tmp")).exists());
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "left behind: {leftover:?}");
+    }
+
+    /// Two writers racing the same directory must not clobber each other: each
+    /// call's edits land, and neither call's temp file collides with the
+    /// other's — the bug CodeRabbit flagged on #908 (`config.rs:549`).
+    #[test]
+    fn concurrent_writes_to_the_same_directory_do_not_clobber_each_other() {
+        let dir = write_dir("concurrent");
+        let path = dir.path().to_path_buf();
+
+        let a = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                for i in 0..25 {
+                    write_config_toml(
+                        &path,
+                        &[("bind", ConfigValue::Str(format!("0.0.0.0:{}", 9000 + i)))],
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        let b = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                for i in 0..25 {
+                    write_config_toml(
+                        &path,
+                        &[("public_url", ConfigValue::Str(format!("https://h{i}.example")))],
+                    )
+                    .unwrap();
+                }
+            }
+        });
+        a.join().unwrap();
+        b.join().unwrap();
+
+        // Both threads' edits target different keys, so a clobbered write would
+        // show up as one key or the other missing from the final file — not as
+        // a torn/unparseable file, which `ConfigFile::load` would already catch.
+        let file = ConfigFile::load(&path).unwrap().unwrap();
+        assert!(file.bind.is_some(), "the bind writer's edits went missing");
+        assert!(
+            file.public_url.is_some(),
+            "the public_url writer's edits went missing"
+        );
+
+        // No stray temp file from either racer.
+        let leftover: Vec<_> = std::fs::read_dir(&path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "left behind: {leftover:?}");
     }
 
     /// Setup completion is recorded in the file, so "has this instance been set
