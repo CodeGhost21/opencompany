@@ -1907,9 +1907,17 @@ pub(crate) fn workflow_readiness(spec: &WorkflowGraphSpec) -> (bool, Vec<String>
             (advisories.is_empty(), advisories)
         }
         // A spec the fix path accepted always translates (courtesy validation ran
-        // at propose time); if one somehow does not, stay silent rather than
-        // block — readiness never stops a save.
-        Err(_) => (true, Vec::new()),
+        // at propose time), so this should be unreachable in practice. It stays
+        // non-blocking either way — readiness never stops a save — but `ok: true`
+        // here would read as "checked, no advisories" when the check could not
+        // even run; say so instead of claiming a clean bill it never gave.
+        Err(_) => (
+            false,
+            vec![
+                "readiness could not be determined — the corrected graph did not translate"
+                    .to_string(),
+            ],
+        ),
     }
 }
 
