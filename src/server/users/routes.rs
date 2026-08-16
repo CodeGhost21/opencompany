@@ -496,7 +496,13 @@ pub(crate) async fn create_session(
     Ok(plaintext)
 }
 
-/// Mints a browser session for `user` and renders the `Set-Cookie` response.
+/// Mints a browser session for `user` and renders it in the carrier they asked
+/// for: a `Set-Cookie` by default, or the token in the body for a client that
+/// cannot receive a cookie at all (see [`cookie::SESSION_CARRIER_HEADER`]).
+///
+/// One choke point for every browser login path — magic link, password, hub and
+/// wallet — so a carrier is added once rather than four times, and no path can
+/// acquire one without the session-minting invariants in [`create_session`].
 async fn mint_session(
     state: &AppState,
     runtime: &CompanyRuntime,
@@ -506,6 +512,9 @@ async fn mint_session(
     let company = runtime.id();
     // A company whose id cannot safely name a cookie cannot hold a session;
     // refuse rather than emit a header its id could have chosen attributes for.
+    // Checked for both carriers, not just the cookie: `session_header_value`
+    // enforces the same rule, so failing here keeps the refusal in one place
+    // and keeps the two carriers addressable by exactly the same set of ids.
     let Some(name) = cookie::session_cookie_name(company) else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "this company's id cannot carry a session cookie".to_string(),
