@@ -499,6 +499,51 @@ async fn revert_config(company: AdminScopedCompany) -> Result<Json<MutationRespo
     }))
 }
 
+/// `POST …/inference/restart` — rebuild this company's runtime in place, now.
+///
+/// The action behind the console's "Restart required" notice. Saving inference
+/// already attempts this rebuild ([`set_config`]), so this route exists for the
+/// cases that attempt could not cover: a company that was already sitting in the
+/// restart-required state before #290 landed, one whose rebuild failed
+/// transiently, and one an operator arrives at without touching the form at all.
+/// Without it the notice is a dead end — it names a restart the operator of a
+/// hosted tenant has no way to perform, since the container is the unit of
+/// restart and the control plane has no button for it.
+///
+/// Requires authority over the company, like the save it mirrors: rebuilding
+/// swaps the brain every agent thinks with.
+///
+/// **Idempotent and safe to call when nothing is pending.** A rebuild of a
+/// company that is already live is a no-op from the operator's point of view —
+/// same journal, same parked approvals, same grants (see
+/// [`rebuild`](crate::runtime::rebuild)) — so this does not gate on
+/// `restart_required` first. Gating would introduce a race in which the check
+/// and the rebuild disagree, and would refuse the one case most worth allowing:
+/// an operator trying to recover a company whose state the console is reading
+/// wrongly.
+async fn restart_runtime(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let id = company.runtime.id().clone();
+    let successor = crate::runtime::rebuild_company(&state, &id)
+        .await
+        .map_err(ApiError)?;
+    // Read the status off the *successor*, never off the runtime we came in
+    // with: a rebuild that landed on the same brain must still report honestly
+    // rather than claim a success the runtime cannot back up.
+    let status = effective_status(successor.as_ref()).await?;
+    Ok(Json(MutationResponse {
+        note: if status.restart_required {
+            RESTART_NOTE
+        } else {
+            REBUILT_NOTE
+        }
+        .to_string(),
+        status,
+    }))
+}
+
 /// `POST …/inference/test` — a live one-message probe of the resolved provider.
 ///
 /// Gated on the `openhuman` feature (the HTTP provider lives there); without it
