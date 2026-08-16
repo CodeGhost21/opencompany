@@ -806,6 +806,15 @@ async fn run_workflow_inner(
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
+    // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
+    // via a `notices` sentence, not only via the node's own status — the
+    // per-node chip is easy to miss on a run that otherwise looks fine, and a
+    // continued run finishing "green" beside a blocked node is exactly that
+    // case. Same sentence, same source (`blocked_notice`), so the two arms
+    // cannot drift into disagreement about what a block reads as.
+    for b in &blocked_nodes {
+        notices.push(blocked_notice(b));
+    }
 
     Ok(WorkflowRun {
         output: outcome.output,

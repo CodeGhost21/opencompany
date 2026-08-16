@@ -137,10 +137,11 @@ fn record() -> CompanyRecord {
     }
 }
 
-/// Runs the two-agent pipeline against `turns`, returning the settled run, the
-/// journal, and the full transcript of what the model was sent.
-async fn run_pipeline(
+/// Runs `graph` against `turns`, returning the settled run, the journal, and
+/// the full transcript of what the model was sent.
+async fn run_pipeline_over(
     dir: &std::path::Path,
+    graph: &str,
     turns: Vec<Turn>,
 ) -> (WorkflowRun, Arc<RuntimeJournal>, String) {
     let (base_url, script) = spawn_script_recording(turns).await;
@@ -149,7 +150,7 @@ async fn run_pipeline(
     let pool = Arc::new(HarnessPool::new());
     pool.ensure(&record, &deps).await.expect("roster builds");
 
-    let file = parse_workflow(&pipeline_graph()).expect("graph parses");
+    let file = parse_workflow(graph).expect("graph parses");
     let run = super::runner::run_workflow(
         pool,
         deps,
@@ -164,6 +165,15 @@ async fn run_pipeline(
     let seen = script.seen.lock().unwrap().clone();
     let transcript = serde_json::to_string(&seen).expect("serialize the requests");
     (run, journal, transcript)
+}
+
+/// Runs the two-agent pipeline against `turns`, returning the settled run, the
+/// journal, and the full transcript of what the model was sent.
+async fn run_pipeline(
+    dir: &std::path::Path,
+    turns: Vec<Turn>,
+) -> (WorkflowRun, Arc<RuntimeJournal>, String) {
+    run_pipeline_over(dir, &pipeline_graph(), turns).await
 }
 
 /// The headline (issue #881). Four claims, and the third is the one that
@@ -296,6 +306,121 @@ async fn a_node_that_parks_nothing_still_reports_ok_and_its_branch_continues() {
     assert!(run.approvals.is_empty());
     assert!(run.pending_approvals.is_empty());
     assert!(journal.pending().is_empty());
+}
+
+/// `work`, same as [`pipeline_graph`], but marked `on_error = "continue"`: the
+/// author has asked the branch to survive a failing node rather than halt it.
+fn pipeline_graph_continues_past_a_block() -> String {
+    format!(
+        r#"
+id = "pipeline"
+name = "Pipeline"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "work"
+kind = "agent"
+name = "Work"
+summary = "Write the quarterly spec."
+agent = "ceo"
+on_error = "continue"
+[[node]]
+id = "next"
+kind = "agent"
+name = "Next"
+summary = "{DOWNSTREAM_INSTRUCTION}"
+agent = "ceo"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "work"
+[[edge]]
+from = "work"
+to = "next"
+[[edge]]
+from = "next"
+to = "done"
+"#
+    )
+}
+
+/// Issue #900 (tinysweeper `missing-test`): the halt-path headline test above
+/// pins `reclassify_blocked` as called from [`blocked_run`], but the run
+/// function calls it a **second** time — at the "reached the end normally" arm
+/// — for exactly this case: an author who wrote `on_error = "continue"` (or
+/// `"route"`) asked the block not to halt the branch. Nothing before this test
+/// proved that second call site actually ran, so a regression there (an errant
+/// early return, a condition that skipped the reclassify call) would silently
+/// go back to reporting an unparkable turn's apology as node `ok` — the exact
+/// #881 bug, just reachable only through `on_error = continue` instead of the
+/// default.
+#[tokio::test]
+async fn a_blocked_node_under_on_error_continue_still_reports_blocked_and_lets_the_branch_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (run, _journal, transcript) = run_pipeline_over(
+        dir.path(),
+        &pipeline_graph_continues_past_a_block(),
+        vec![
+            Turn::Call {
+                tool: "shell",
+                args: json!({ "command": "write-spec" }),
+            },
+            Turn::Say("The spec is in my sandbox but the hand-off is blocked again."),
+            Turn::Say("Published."),
+        ],
+    )
+    .await;
+
+    // `on_error = continue` means the branch survives the block — unlike the
+    // halt-path headline test above, `next` DOES run.
+    assert!(
+        transcript.contains(DOWNSTREAM_INSTRUCTION),
+        "on_error=continue must let the branch past a blocked node run: {transcript}"
+    );
+    assert!(
+        run.nodes
+            .iter()
+            .any(|n| n.node_id == "next" && n.status == WorkflowNodeStatus::Ok),
+        "the downstream node must have a settled row too: {:?}",
+        run.nodes
+    );
+
+    // But the run-level truth must not get lost on the way: `work` is still
+    // reported as blocked, never `ok` and never a plain `error` that would
+    // hide the block behind an unremarkable failure.
+    let work = run
+        .nodes
+        .iter()
+        .find(|n| n.node_id == "work")
+        .expect("the blocked node still reports a row");
+    assert_eq!(work.status, WorkflowNodeStatus::Blocked, "{:?}", run.nodes);
+    assert_eq!(run.blocked_nodes.len(), 1, "{:?}", run.blocked_nodes);
+    assert_eq!(run.blocked_nodes[0].node_id, "work");
+
+    // …and `reclassify_blocked`'s union into `pending_approvals` runs on this
+    // arm too, not only on the halt arm `blocked_run` covers.
+    assert!(
+        run.pending_approvals.contains(&"work".to_string()),
+        "{:?}",
+        run.pending_approvals
+    );
+    assert_eq!(run.approvals.len(), 1, "{:?}", run.approvals);
+    assert_eq!(run.approvals[0].outcome, WorkflowApprovalOutcome::Parked);
+
+    // Issue #900: the continued arm tells the operator what blocked via a
+    // notice too — not only via the (easy to miss) node chip — same as the
+    // halt arm does.
+    assert!(
+        run.notices.iter().any(|n| n.contains("parked 1 approval")),
+        "a continued run must still say what blocked, in the same words the \
+         halted arm uses: {:?}",
+        run.notices
+    );
 }
 
 /// Issue #880's regression, reproducing the audit exactly.
