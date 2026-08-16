@@ -267,9 +267,9 @@ impl ChatModel<()> for NativeCopilotModel {
             }
             .to_string(),
         );
-        if let Some(usage) = self.usage {
-            response.usage = Some(usage);
-            response.message.usage = Some(usage);
+        if let Some(usage) = self.usage.as_ref() {
+            response.usage = Some(*usage);
+            response.message.usage = Some(*usage);
         }
         if self.charged_usd > 0.0 {
             response.raw = Some(json!({
