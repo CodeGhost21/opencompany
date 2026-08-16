@@ -2660,4 +2660,18 @@ mod tests {
     fn the_declaration_still_reads_as_gated_without_arguments() {
         assert_eq!(c(SHELL).reach, Reach::Consequence);
     }
+
+    /// Without the harness feature there is no classifier, and the fallback
+    /// answers "act" for everything. Nothing pinned that: the gated-call test
+    /// above passes only malformed arguments, which return before
+    /// `shell_command_is_read` is ever reached, so the fallback could regress to
+    /// permissive and every default-feature lane would stay green. A command
+    /// that IS a read under the classifier is the case that separates them.
+    #[test]
+    #[cfg(not(feature = "openhuman"))]
+    fn a_read_command_still_parks_when_no_classifier_is_linked_in() {
+        let c = consequence_of(SHELL, &json!({ SHELL_COMMAND_KEY: "ls -la" }));
+        assert_eq!(c.reach, Reach::Consequence);
+        assert!(c.parks_under_auto());
+    }
 }
