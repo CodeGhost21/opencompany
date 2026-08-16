@@ -69,7 +69,7 @@ export function Stepper({ steps, current, onSelect, className }: StepperProps) {
               <span
                 aria-hidden
                 className={cn(
-                  "flex size-5 shrink-0 items-center justify-center rounded-full border text-[10px] font-medium",
+                  "flex size-5 shrink-0 items-center justify-center rounded-full border text-3xs font-medium",
                   done && "border-primary bg-primary text-primary-foreground",
                   active && "border-primary text-primary",
                   !done && !active && "border-border",
