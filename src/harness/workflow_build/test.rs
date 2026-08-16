@@ -10,19 +10,28 @@
 //! row settles, and that an operator's move wins — are properties of the whole
 //! pass.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use serde_json::json;
-use tinyagents::harness::model::{ChatModel, ModelResponse};
+use serde_json::{Value, json};
+use tinyagents::harness::model::{ChatModel, ModelProfile, ModelResponse};
+use tinyagents::harness::tool::ToolCall;
+use tinyagents::harness::usage::Usage;
 use tinyagents::{Result as TaResult, TinyAgentsError};
 
+use super::agent::copilot_persona;
+use super::tools::{
+    AcceptedCell, CheckWorkflowTool, CopilotContext, DiagCell, ListEffectiveToolsTool,
+    ProposeWorkflowTool,
+};
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::runs::{NewRun, RunStatus};
 use crate::ports::types::CompanyId;
 use crate::ports::{UsageMeter, UsageSample};
+use openhuman_core::openhuman::tools::traits::Tool;
 
 // ---------------------------------------------------------------------------
 // A scripted model
@@ -118,6 +127,191 @@ impl ChatModel<()> for ScriptedModel {
 impl HarnessModel for ScriptedModel {
     fn telemetry_provider_id(&self) -> String {
         "managed".to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A native tool-calling model — the create-time copilot's agent path (issue #840)
+// ---------------------------------------------------------------------------
+
+/// One scripted turn of the native model: a text reply and/or a batch of tool
+/// calls. A step with `calls` continues the agent's turn (the loop runs the
+/// tools and asks again); a step with no calls ends it.
+struct NativeStep {
+    text: String,
+    calls: Vec<(String, Value)>,
+}
+
+impl NativeStep {
+    /// A turn that calls one tool with the given arguments.
+    fn call(tool: &str, args: Value) -> Self {
+        Self {
+            text: String::new(),
+            calls: vec![(tool.to_string(), args)],
+        }
+    }
+
+    /// A final turn: text, no tool calls — ends the agent's turn.
+    fn done(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            calls: Vec::new(),
+        }
+    }
+}
+
+/// A model that advertises NATIVE tool-calling and replays a script of turns —
+/// the shape openhuman's [`NativeToolDispatcher`] drives. Each `invoke` pops the
+/// next step and emits its `message.tool_calls`; once the script runs out it
+/// repeats the last step (a repeated tool-call step is how a cap-hit is
+/// exercised). Optionally carries per-call `usage` + backend-charged USD (stashed
+/// in `raw` under `openhuman_usage_meta`, exactly as the managed backend does) so
+/// the metering path is testable.
+struct NativeCopilotModel {
+    steps: StdMutex<VecDeque<NativeStep>>,
+    /// The last step, repeated once the script is exhausted (drives cap-hits).
+    repeat: StdMutex<NativeStep>,
+    calls: AtomicUsize,
+    usage: Option<Usage>,
+    charged_usd: f64,
+    profile: ModelProfile,
+}
+
+impl NativeCopilotModel {
+    fn scripting(steps: Vec<NativeStep>) -> Arc<Self> {
+        assert!(
+            !steps.is_empty(),
+            "a scripted model needs at least one step"
+        );
+        let deque: VecDeque<NativeStep> = steps.into();
+        // The tail step is what repeats when the script runs dry — clone its
+        // shape (text + calls) as the repeat template.
+        let last = deque.back().expect("non-empty");
+        let repeat = NativeStep {
+            text: last.text.clone(),
+            calls: last.calls.clone(),
+        };
+        Arc::new(Self {
+            steps: StdMutex::new(deque),
+            repeat: StdMutex::new(repeat),
+            calls: AtomicUsize::new(0),
+            usage: None,
+            charged_usd: 0.0,
+            profile: ModelProfile {
+                tool_calling: true,
+                ..ModelProfile::default()
+            },
+        })
+    }
+
+    /// Attaches per-call token usage and a backend-charged USD amount to every
+    /// reply — the managed-backend metering signal.
+    fn with_charge(self: Arc<Self>, input: u64, output: u64, usd: f64) -> Arc<Self> {
+        // The model is built before it is shared; mutate through a fresh Arc.
+        let mut model = Arc::try_unwrap(self).ok().expect("uniquely held at setup");
+        model.usage = Some(Usage {
+            input_tokens: input,
+            output_tokens: output,
+            ..Usage::default()
+        });
+        model.charged_usd = usd;
+        Arc::new(model)
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn next_step(&self) -> NativeStep {
+        let mut steps = self.steps.lock().unwrap();
+        if let Some(step) = steps.pop_front() {
+            step
+        } else {
+            let repeat = self.repeat.lock().unwrap();
+            NativeStep {
+                text: repeat.text.clone(),
+                calls: repeat.calls.clone(),
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl ChatModel<()> for NativeCopilotModel {
+    fn profile(&self) -> Option<&ModelProfile> {
+        Some(&self.profile)
+    }
+
+    async fn invoke(&self, _state: &(), _request: ModelRequest) -> TaResult<ModelResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let step = self.next_step();
+        let tool_calls: Vec<ToolCall> = step
+            .calls
+            .iter()
+            .enumerate()
+            .map(|(idx, (name, args))| ToolCall {
+                id: format!("call-{idx}"),
+                name: name.clone(),
+                arguments: args.clone(),
+                invalid: None,
+            })
+            .collect();
+
+        let mut response = ModelResponse::assistant(step.text);
+        response.message.tool_calls = tool_calls.clone();
+        response.finish_reason = Some(
+            if tool_calls.is_empty() {
+                "stop"
+            } else {
+                "tool_calls"
+            }
+            .to_string(),
+        );
+        if let Some(usage) = self.usage.as_ref() {
+            response.usage = Some(*usage);
+            response.message.usage = Some(*usage);
+        }
+        if self.charged_usd > 0.0 {
+            response.raw = Some(json!({
+                "openhuman_usage_meta": { "charged_amount_usd": self.charged_usd, "context_window": 0 }
+            }));
+        }
+        Ok(response)
+    }
+}
+
+impl HarnessModel for NativeCopilotModel {
+    fn telemetry_provider_id(&self) -> String {
+        "managed".to_string()
+    }
+}
+
+/// A usage meter that keeps every recorded sample, so a test can assert what the
+/// copilot's turn metered (or that a zero-usage turn metered nothing).
+#[derive(Default)]
+struct RecordingUsageMeter {
+    samples: StdMutex<Vec<UsageSample>>,
+}
+
+impl RecordingUsageMeter {
+    fn samples(&self) -> Vec<UsageSample> {
+        self.samples.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl UsageMeter for RecordingUsageMeter {
+    async fn record(&self, _company: &CompanyId, sample: &UsageSample) -> crate::Result<()> {
+        self.samples.lock().unwrap().push(sample.clone());
+        Ok(())
+    }
+
+    async fn query(
+        &self,
+        _company: &CompanyId,
+        _since_millis: u64,
+    ) -> crate::Result<Vec<UsageSample>> {
+        Ok(self.samples())
     }
 }
 
@@ -229,6 +423,71 @@ fn the_outcome_resolves_graph_versus_not_automatable() {
         .unwrap()
         .into_outcome();
     assert!(matches!(empty, BuildOutcome::NotAutomatable(r) if !r.is_empty()));
+}
+
+/// Every way the copilot turn can end WITHOUT an accepted proposal maps to a
+/// distinct, non-empty operator reason. Exercised on the pure reason fn so the
+/// wording is pinned without constructing a `tokio` `Elapsed` or driving a real
+/// timeout — a regression in any arm's message fails here.
+#[test]
+fn the_not_automatable_reason_covers_every_turn_ending() {
+    // Timed out before proposing.
+    let timed = not_automatable_reason(&TurnEnd::TimedOut, &[]);
+    assert!(timed.contains("ran out of time"), "{timed}");
+
+    // The agent turn itself errored — the failure is carried through verbatim.
+    let errored =
+        not_automatable_reason(&TurnEnd::Errored("model backend exploded".to_string()), &[]);
+    assert!(errored.contains("could not complete"), "{errored}");
+    assert!(errored.contains("model backend exploded"), "{errored}");
+
+    // Hit the tool budget — names the step budget and carries the last gate tail.
+    let capped = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: "still trying".to_string(),
+            hit_cap: true,
+        },
+        &["binding `=input.foo` is unresolved".to_string()],
+    );
+    assert!(capped.contains("step budget"), "{capped}");
+    assert!(
+        capped.contains("binding `=input.foo` is unresolved"),
+        "{capped}"
+    );
+
+    // Gave up after a failing check/propose — names the gate sentences.
+    let gated = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: String::new(),
+            hit_cap: false,
+        },
+        &["the graph has no trigger node".to_string()],
+    );
+    assert!(
+        gated.contains("could not be drafted into one that would be accepted"),
+        "{gated}"
+    );
+    assert!(gated.contains("the graph has no trigger node"), "{gated}");
+
+    // Finished cleanly without proposing — the agent's own words are the reason.
+    let declined = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: "this is a one-off ask, not a recurring workflow".to_string(),
+            hit_cap: false,
+        },
+        &[],
+    );
+    assert_eq!(declined, "this is a one-off ask, not a recurring workflow");
+
+    // Finished silently — a truthful default rather than an empty reason.
+    let silent = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: String::new(),
+            hit_cap: false,
+        },
+        &[],
+    );
+    assert!(silent.contains("better done once"), "{silent}");
 }
 
 /// The host assigns a safe, unique id — slugged from the name, deduped, and
@@ -348,6 +607,87 @@ async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<Comp
         .await
         .expect("runtime");
     runtime.set_builder(Arc::new(WorkflowBuilder::new(model, "chat-v1")));
+    (home, Arc::new(runtime))
+}
+
+/// A [`HarnessDeps`] wiring the copilot agent onto `model` — everything else is
+/// inert fixture wiring reusing the runtime's own context/store. The copilot path
+/// reads only `provider`, `provider.profile()` and `model_override`; the rest is
+/// present to satisfy the struct.
+fn agent_deps(
+    runtime: &CompanyRuntime,
+    model: Arc<dyn HarnessModel>,
+) -> crate::harness::HarnessDeps {
+    crate::harness::HarnessDeps {
+        provider: model,
+        provider_slug: "managed".to_string(),
+        context: runtime.context.clone(),
+        store: runtime.store().clone(),
+        meter: None,
+        workspace_root: std::env::temp_dir(),
+        audit_root: std::env::temp_dir(),
+        model_override: None,
+        tasks: None,
+        artifacts: None,
+        skills: None,
+        skills_source_dir: None,
+        skills_registry: Arc::from([]),
+        mcp_servers: Vec::new(),
+        default_mcp_servers: Vec::new(),
+        facts: None,
+        events: None,
+        delegations: crate::harness::orchestrator::DelegationQueue::default(),
+        workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+        mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+        pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+        workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+        run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+        run_output_store: None,
+        workflow_revisions: None,
+        approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+        secrets: None,
+        web_allowed_domains: Vec::new(),
+        capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+        workflow_source_dir: None,
+        plan: None,
+        media: None,
+        composio: None,
+        search: None,
+        steer: crate::company::steer::InflightRegistry::default(),
+        run_supervisor: crate::runtime::RunSupervisor::default(),
+        delivery: None,
+        workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: crate::harness::repo::CheckoutLedger::default(),
+    }
+}
+
+/// A runtime wired for the create-time copilot AGENT path (issue #840): both a
+/// [`WorkflowBuilder`] (the route-gate + metering slug) and the
+/// [`HarnessDeps`](crate::harness::HarnessDeps) the agent is built from, over the
+/// same native `model`. An optional recording meter becomes `runtime.usage()`, so
+/// a test can read back what the turn metered.
+async fn runtime_with_agent(
+    model: Arc<NativeCopilotModel>,
+    meter: Option<Arc<RecordingUsageMeter>>,
+) -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+    let home = tempfile::Builder::new()
+        .prefix("opencompany-copilot-")
+        .tempdir()
+        .expect("tempdir");
+    let mut builder = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest())
+        .with_id(CompanyId::new("acme"));
+    if let Some(meter) = &meter {
+        builder = builder.with_usage(meter.clone() as Arc<dyn UsageMeter>);
+    }
+    let mut runtime = builder.build().await.expect("runtime");
+    let deps = agent_deps(&runtime, model.clone() as Arc<dyn HarnessModel>);
+    runtime.set_builder(Arc::new(WorkflowBuilder::new(
+        model as Arc<dyn HarnessModel>,
+        "chat-v1",
+    )));
+    runtime.set_workflow_harness_deps(deps);
     (home, Arc::new(runtime))
 }
 
@@ -738,13 +1078,328 @@ async fn seed_workflow(runtime: &Arc<CompanyRuntime>, id: &str, name: &str) {
     .expect("seed workflow");
 }
 
-/// The happy path: an operator's description drafts a graph, and the host owns
-/// the id, the display name and the approval gating — the model's choices for
-/// all three are overridden — while the schedule it authored survives. The
-/// drafted id/name dedup against a workflow that already exists.
+// ---------------------------------------------------------------------------
+// The three copilot tools — unit tier (issue #840)
+// ---------------------------------------------------------------------------
+
+/// Builds a shared [`CopilotContext`] over the fixture company for the tool unit
+/// tests: the gathered evidence, the operator's description, and explicit
+/// effective / granted-but-unwired slug sets.
+async fn copilot_ctx(
+    runtime: &Arc<CompanyRuntime>,
+    description: &str,
+    effective: &[&str],
+    unwired: &[&str],
+) -> Arc<CopilotContext> {
+    let company = gather_company_evidence(runtime).await.expect("evidence");
+    Arc::new(CopilotContext {
+        company,
+        description: description.to_string(),
+        effective_slugs: effective.iter().map(|s| s.to_string()).collect(),
+        unwired_slugs: unwired.iter().map(|s| s.to_string()).collect(),
+    })
+}
+
+/// A minimal runtime just to gather company evidence for the tool units — a plain
+/// tool-less model is fine, the tools never call it.
+async fn evidence_runtime() -> (tempfile::TempDir, Arc<CompanyRuntime>) {
+    runtime_with(ScriptedModel::replying(VALID_GRAPH)).await
+}
+
+/// `list_effective_tools` names the roster ids, each wired slug with its honest
+/// capability + required args, and the granted-but-unwired ones under a "do not
+/// author these" heading — PR-1's data, straight from the shared context.
 #[tokio::test]
-async fn a_description_drafts_a_graph_under_host_authority() {
-    let (_home, runtime) = runtime_with(ScriptedModel::replying(DESC_GRAPH)).await;
+async fn list_effective_tools_reports_roster_wired_and_unwired() {
+    let (_home, runtime) = evidence_runtime().await;
+    let ctx = copilot_ctx(&runtime, "do the thing", &["web_fetch"], &["csv_export"]).await;
+    let tool = ListEffectiveToolsTool::new(ctx);
+    let out = tool.execute(json!({})).await.expect("runs").text();
+
+    assert!(out.contains("`maya`"), "the roster id is named: {out}");
+    assert!(
+        out.contains("`web_fetch`"),
+        "the wired slug is named: {out}"
+    );
+    assert!(
+        out.contains("(args: url)"),
+        "web_fetch's required arg is named: {out}"
+    );
+    assert!(
+        out.contains("granted but not wired") || out.contains("not wired"),
+        "the unwired heading is present: {out}"
+    );
+    assert!(
+        out.contains("csv_export"),
+        "the unwired slug is named: {out}"
+    );
+}
+
+/// `check_workflow` surfaces `gates::failures`: it flags an agent step reading an
+/// upstream agent's output WITHOUT the `.json` envelope (resolves to null at run
+/// time), and an agent step whose instruction is a `=`-expression (runs empty),
+/// while a clean graph passes. Both problems it names are recorded for the
+/// caller's fallback reason.
+#[tokio::test]
+async fn check_workflow_flags_gate_failures_and_passes_a_clean_graph() {
+    let (_home, runtime) = evidence_runtime().await;
+    let diag: DiagCell = Arc::new(StdMutex::new(Vec::new()));
+    let ctx = copilot_ctx(&runtime, "summarize the week", &[], &[]).await;
+    let tool = CheckWorkflowTool::new(ctx, diag.clone());
+
+    // (1) An envelope-null binding: `b` reads `=nodes.a.item.summary` from agent
+    // `a`, whose output is enveloped — the `.json` is missing, so it resolves to
+    // null. `gates::failures` catches exactly this.
+    let envelope_null = json!({
+        "name": "Digest",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Start" },
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "maya" },
+            { "id": "b", "kind": "agent", "name": "Polish", "agent": "maya",
+              "config": { "input": "=nodes.a.item.summary" } }
+        ],
+        "edges": [{ "from": "t", "to": "a" }, { "from": "a", "to": "b" }]
+    });
+    let out = tool
+        .execute(json!({ "workflow": envelope_null }))
+        .await
+        .expect("runs")
+        .text();
+    assert!(
+        out.contains("null") && out.contains("json"),
+        "the envelope-null binding is flagged: {out}"
+    );
+    assert!(
+        !diag.lock().unwrap().is_empty(),
+        "the problems are recorded for the caller's fallback"
+    );
+
+    // (2) A prose-as-expression prompt: the instruction reads as a `=`-jq program
+    // and resolves to null, so the step runs with an empty prompt.
+    let prose_prompt = json!({
+        "name": "Digest",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Start" },
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "maya",
+              "config": { "prompt": "=Summarize the week and include the highlights" } }
+        ],
+        "edges": [{ "from": "t", "to": "a" }]
+    });
+    let out = tool
+        .execute(json!({ "workflow": prose_prompt }))
+        .await
+        .expect("runs")
+        .text();
+    assert!(
+        out.contains("empty prompt") || out.contains("resolves to null"),
+        "the prose-as-expression prompt is flagged: {out}"
+    );
+
+    // (3) A clean graph passes.
+    let clean = json!({
+        "name": "Digest",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Start" },
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "maya" }
+        ],
+        "edges": [{ "from": "t", "to": "a" }]
+    });
+    let out = tool
+        .execute(json!({ "workflow": clean }))
+        .await
+        .expect("runs")
+        .text();
+    assert!(out.contains("passes"), "a clean graph passes: {out}");
+    assert!(
+        diag.lock().unwrap().is_empty(),
+        "a passing check clears the recorded problems"
+    );
+}
+
+// NOTE ON SCOPE: the `gates::failures` "bad code language" arm is deliberately
+// NOT exercised here — OpenCompany's authoring model (`WorkflowNodeKind`) has no
+// `code` node kind, so a spec can never translate into a tinyflows `Code` node
+// through OC's create pipeline. The two reachable gate classes above
+// (envelope-null bindings, prose-as-expression prompts) prove `check_workflow`
+// runs `gates::failures` and surfaces its findings.
+
+/// `propose_workflow` accepts a good spec — running the SAME host authority the
+/// old inline path did (a host-minted id, name dedup, stripped approval gating) —
+/// and stashes `(summary, spec, notes)` in the shared cell.
+#[tokio::test]
+async fn propose_workflow_accepts_a_good_spec_under_host_authority() {
+    let (_home, runtime) = evidence_runtime().await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+    let ctx = copilot_ctx(&runtime, "email the weekly digest every Monday", &[], &[]).await;
+    let accepted: AcceptedCell = Arc::new(StdMutex::new(None));
+    let diag: DiagCell = Arc::new(StdMutex::new(Vec::new()));
+    let tool = ProposeWorkflowTool::new(ctx, accepted.clone(), diag.clone());
+
+    let good = json!({
+        "summary": "email the weekly digest",
+        "workflow": {
+            "name": "Weekly digest",
+            "description": "Draft and send the weekly digest.",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Every Monday", "schedule": "0 9 * * 1", "requires_approval": true },
+                { "id": "draft", "kind": "agent", "name": "Draft", "agent": "maya", "requires_approval": false }
+            ],
+            "edges": [{ "from": "start", "to": "draft" }]
+        }
+    });
+    let out = tool.execute(good).await.expect("runs").text();
+    assert!(
+        out.contains("Accepted"),
+        "the tool reports acceptance: {out}"
+    );
+
+    let proposal = accepted.lock().unwrap().take().expect("a proposal landed");
+    assert_eq!(proposal.summary, "email the weekly digest");
+    // The host mints the id and dedups it (+ the name) against the seed.
+    assert_eq!(proposal.spec.id, "weekly-digest-2");
+    assert_eq!(proposal.spec.name, "Weekly digest 2");
+    // Approval gating is the host's — both `true` and `false` are stripped.
+    assert!(
+        proposal
+            .spec
+            .nodes
+            .iter()
+            .all(|n| n.requires_approval.is_none())
+    );
+    // The schedule the model authored survives.
+    assert_eq!(
+        proposal.spec.nodes[0].schedule.as_deref(),
+        Some("0 9 * * 1")
+    );
+    assert!(diag.lock().unwrap().is_empty());
+}
+
+/// `propose_workflow` rejects via each of the three host gates — the node-kind
+/// refusal, `ground_and_validate` (an unknown agent), and `courtesy_validate_draft`
+/// (an ungranted `tool_call`) — never stashing a proposal, and recording the
+/// sentence for the caller's fallback.
+#[tokio::test]
+async fn propose_workflow_rejects_via_each_host_gate() {
+    let (_home, runtime) = evidence_runtime().await;
+
+    async fn propose(runtime: &Arc<CompanyRuntime>, description: &str, workflow: Value) -> String {
+        let ctx = copilot_ctx(runtime, description, &[], &[]).await;
+        let accepted: AcceptedCell = Arc::new(StdMutex::new(None));
+        let diag: DiagCell = Arc::new(StdMutex::new(Vec::new()));
+        let tool = ProposeWorkflowTool::new(ctx, accepted.clone(), diag.clone());
+        let out = tool
+            .execute(json!({ "summary": "x", "workflow": workflow }))
+            .await
+            .expect("runs")
+            .text();
+        assert!(
+            accepted.lock().unwrap().is_none(),
+            "a rejected proposal is never stashed"
+        );
+        assert!(
+            !diag.lock().unwrap().is_empty(),
+            "the gate sentence is recorded for the fallback"
+        );
+        out
+    }
+
+    // (1) Node-kind gate: `http_request` is outside DESCRIPTION_NODE_KINDS.
+    let out = propose(
+        &runtime,
+        "call a url",
+        json!({
+            "name": "Reach out",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                { "id": "call", "kind": "http_request", "name": "Call",
+                  "config": { "url": "http://x.example/y", "method": "GET" } }
+            ],
+            "edges": [{ "from": "start", "to": "call" }]
+        }),
+    )
+    .await;
+    assert!(
+        out.contains("http_request"),
+        "the kind gate names it: {out}"
+    );
+
+    // (2) Grounding gate: an `agent` node naming a teammate not on the roster.
+    let out = propose(
+        &runtime,
+        "do it",
+        json!({
+            "name": "Ghosted",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                { "id": "a", "kind": "agent", "name": "Do", "agent": "ghost" }
+            ],
+            "edges": [{ "from": "start", "to": "a" }]
+        }),
+    )
+    .await;
+    assert!(
+        out.contains("maya"),
+        "the grounding gate names the roster: {out}"
+    );
+
+    // (3) Courtesy gate: a `tool_call` whose namespace the fixture never granted
+    // (`code` — the manifest grants `docs`/`web`), refused by courtesy validation.
+    let out = propose(
+        &runtime,
+        "export the rows",
+        json!({
+            "name": "Exporter",
+            "nodes": [
+                { "id": "start", "kind": "trigger", "name": "Start" },
+                { "id": "exp", "kind": "tool_call", "name": "Export", "config": { "slug": "csv_export" } }
+            ],
+            "edges": [{ "from": "start", "to": "exp" }]
+        }),
+    )
+    .await;
+    assert!(
+        out.contains("does not grant") || out.contains("csv_export"),
+        "the courtesy gate refuses the ungranted tool: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The copilot agent — pass tier over the native tool-calling loop (issue #840)
+// ---------------------------------------------------------------------------
+
+/// A propose call carrying a valid graph, then a final reply — the happy path
+/// script.
+fn propose_step(summary: &str, workflow: Value) -> NativeStep {
+    NativeStep::call(
+        "propose_workflow",
+        json!({ "summary": summary, "workflow": workflow }),
+    )
+}
+
+/// The fixture's canonical good graph: a scheduled trigger → `maya` drafts.
+fn good_workflow() -> Value {
+    json!({
+        "name": "Weekly digest",
+        "description": "Draft and send the weekly digest.",
+        "nodes": [
+            { "id": "start", "kind": "trigger", "name": "Every Monday", "schedule": "0 9 * * 1", "requires_approval": true },
+            { "id": "draft", "kind": "agent", "name": "Draft", "agent": "maya", "requires_approval": false }
+        ],
+        "edges": [{ "from": "start", "to": "draft" }]
+    })
+}
+
+/// The happy path over the NATIVE dispatcher: the agent proposes a valid graph,
+/// the propose tool accepts it under host authority, and the caller returns
+/// `Graph` — with the host-minted (deduped) id/name, stripped approval gating,
+/// and the surviving schedule.
+#[tokio::test]
+async fn a_description_drafts_a_graph_via_the_agent() {
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("email the weekly digest", good_workflow()),
+        NativeStep::done("Proposed the weekly digest workflow for your review."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model.clone(), None).await;
     seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
 
     let outcome = draft_workflow_from_description(&runtime, "email the weekly digest every Monday")
@@ -754,108 +1409,238 @@ async fn a_description_drafts_a_graph_under_host_authority() {
         DescriptionDraftOutcome::Graph { summary, spec, .. } => (summary, spec),
         DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
     };
-    assert!(summary.contains("digest"));
-    // The host mints the id (ignoring the model's) and dedups it against the seed.
-    assert_eq!(spec.id, "weekly-digest-2");
-    // …and the display name, case-insensitively, the same way.
-    assert_eq!(spec.name, "Weekly digest 2");
-    // Approval gating is the host's: both the model's `true` and `false` are gone.
+    assert!(summary.contains("digest"), "summary: {summary}");
+    assert_eq!(spec.id, "weekly-digest-2", "host mints + dedups the id");
+    assert_eq!(spec.name, "Weekly digest 2", "host dedups the name");
     assert!(spec.nodes.iter().all(|n| n.requires_approval.is_none()));
-    // The schedule the model authored survives into the drafted spec.
     assert_eq!(spec.nodes[0].schedule.as_deref(), Some("0 9 * * 1"));
+    assert!(model.calls() >= 1, "the model ran at least once");
 }
 
-/// A not-automatable answer passes its reason straight through — the copilot
-/// never forces a workflow the model judged a one-off.
+/// The agent finishes without proposing — it judged the work a one-off — so the
+/// caller folds to not-automatable carrying the agent's own stated reason.
 #[tokio::test]
-async fn a_not_automatable_description_passes_the_reason_through() {
-    let reply = r#"{"automatable":false,"reason":"this only ever runs once"}"#;
-    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+async fn an_honest_decline_folds_to_not_automatable() {
+    let model = NativeCopilotModel::scripting(vec![NativeStep::done(
+        "This is a one-off task, better done once by hand than built into a reusable workflow.",
+    )]);
+    let (_home, runtime) = runtime_with_agent(model, None).await;
+
     let outcome = draft_workflow_from_description(&runtime, "do a one-off thing")
         .await
-        .unwrap();
+        .expect("the drafter runs");
     match outcome {
         DescriptionDraftOutcome::NotAutomatable(reason) => {
-            assert!(reason.contains("done once"), "reason: {reason}");
+            assert!(
+                reason.contains("one-off") || reason.contains("by hand"),
+                "reason: {reason}"
+            );
         }
         DescriptionDraftOutcome::Graph { .. } => panic!("expected not-automatable"),
     }
 }
 
-/// An unparseable model answer folds to not-automatable rather than a 500 — a
-/// graph guessed from prose is exactly the broken graph.
+/// A first propose that fails a host gate (a delivery request with no `output`
+/// node) comes back to the agent as gate sentences; its second propose adds the
+/// output node and is accepted — recovery inside one turn, ending in `Graph`.
 #[tokio::test]
-async fn an_unparseable_description_answer_is_not_automatable() {
-    let (_home, runtime) = runtime_with(ScriptedModel::replying("I'd just do this by hand.")).await;
-    let outcome = draft_workflow_from_description(&runtime, "x")
-        .await
-        .unwrap();
-    assert!(matches!(
-        outcome,
-        DescriptionDraftOutcome::NotAutomatable(_)
-    ));
+async fn the_agent_recovers_after_a_failing_propose() {
+    // No delivery node → the delivery gate fires for an "email me" request.
+    let bad = json!({
+        "name": "Digest",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Monday", "schedule": "0 9 * * 1" },
+            { "id": "a", "kind": "agent", "name": "Draft and email", "agent": "maya",
+              "summary": "email the digest to the owner" }
+        ],
+        "edges": [{ "from": "t", "to": "a" }]
+    });
+    let good = json!({
+        "name": "Digest",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Monday", "schedule": "0 9 * * 1" },
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "maya" },
+            { "id": "o", "kind": "output", "name": "Send", "destination": { "kind": "owner" } }
+        ],
+        "edges": [{ "from": "t", "to": "a" }, { "from": "a", "to": "o" }]
+    });
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("email the digest", bad),
+        propose_step("email the digest", good),
+        NativeStep::done("Fixed the delivery and proposed it."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model.clone(), None).await;
+
+    let outcome =
+        draft_workflow_from_description(&runtime, "email me the weekly digest every monday")
+            .await
+            .expect("the drafter runs");
+    assert!(
+        matches!(outcome, DescriptionDraftOutcome::Graph { .. }),
+        "the agent's corrected propose is accepted"
+    );
+    assert!(model.calls() >= 2, "the agent re-proposed after the gate");
 }
 
-/// A node kind outside `DESCRIPTION_NODE_KINDS` — one the copilot prompt never
-/// taught (`http_request`) — is refused by name before the courtesy pass, the
-/// same host-owns-the-vocabulary rule the card builder applies.
+/// A description that names a teammate by ROLE ("the writer") drafts with the
+/// host resolver's id rewrite and an operator-facing note explaining it — the
+/// note rides through to `DescriptionDraftOutcome::Graph`.
 #[tokio::test]
-async fn a_description_kind_outside_the_vocabulary_is_refused_by_name() {
-    let reply = r#"{"automatable":true,"summary":"call a url","workflow":{"name":"Reach out",
-        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
-                 {"id":"call","kind":"http_request","name":"Call",
-                  "config":{"url":"http://attacker.example/x","method":"GET"}}],
-        "edges":[{"from":"start","to":"call"}]}}"#;
-    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
-    let outcome = draft_workflow_from_description(&runtime, "call a url")
+async fn a_role_named_agent_resolves_with_a_note() {
+    let by_role = json!({
+        "name": "Draft",
+        "nodes": [
+            { "id": "t", "kind": "trigger", "name": "Start" },
+            { "id": "a", "kind": "agent", "name": "Write", "agent": "Writer" }
+        ],
+        "edges": [{ "from": "t", "to": "a" }]
+    });
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("draft an update", by_role),
+        NativeStep::done("Proposed it."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model, None).await;
+
+    let outcome = draft_workflow_from_description(&runtime, "have the writer draft an update")
         .await
-        .unwrap();
+        .expect("the drafter runs");
     match outcome {
-        DescriptionDraftOutcome::NotAutomatable(reason) => {
-            assert!(reason.contains("http_request"), "reason: {reason}");
+        DescriptionDraftOutcome::Graph { spec, notes, .. } => {
+            assert_eq!(spec.nodes[1].agent.as_deref(), Some("maya"));
+            assert!(notes.iter().any(|n| n.contains("maya")), "notes: {notes:?}");
         }
-        DescriptionDraftOutcome::Graph { .. } => panic!("http_request must be refused"),
+        DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
     }
 }
 
-/// A `tool_call` node whose slug the company grants drafts cleanly; one whose
-/// namespace is ungranted is refused with `validate_tool_call_node`'s own
-/// message, so the copilot's grounding and courtesy validation stay in lockstep.
-/// The fixture grants `web` (not `code`), so `web_fetch` passes and `csv_export`
-/// does not.
+/// An agent that keeps checking without ever proposing exhausts its
+/// tool-iteration budget, and the caller folds to not-automatable naming the step
+/// budget — never a silent empty graph. Each check is a DISTINCT call (a
+/// differently-named draft) so openhuman's identical-repeat loop guard does not
+/// stop the turn early; the run reaches `set_max_tool_iterations` instead.
 #[tokio::test]
-async fn a_granted_tool_call_drafts_and_an_ungranted_one_is_refused() {
-    let granted = r#"{"automatable":true,"summary":"fetch a page","workflow":{"name":"Fetcher",
-        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
-                 {"id":"fetch","kind":"tool_call","name":"Fetch",
-                  "config":{"slug":"web_fetch","args":{"url":"https://example.com"}}}],
-        "edges":[{"from":"start","to":"fetch"}]}}"#;
-    let (_h1, runtime) = runtime_with(ScriptedModel::replying(granted)).await;
-    let outcome = draft_workflow_from_description(&runtime, "fetch a page")
+async fn a_cap_hit_folds_to_not_automatable() {
+    let steps: Vec<NativeStep> = (0..10)
+        .map(|i| {
+            NativeStep::call(
+                "check_workflow",
+                json!({
+                    "workflow": {
+                        "name": format!("Draft {i}"),
+                        "nodes": [
+                            { "id": "t", "kind": "trigger", "name": "Start" },
+                            { "id": "a", "kind": "agent", "name": format!("Step {i}"), "agent": "maya" }
+                        ],
+                        "edges": [{ "from": "t", "to": "a" }]
+                    }
+                }),
+            )
+        })
+        .collect();
+    let model = NativeCopilotModel::scripting(steps);
+    let (_home, runtime) = runtime_with_agent(model, None).await;
+
+    let outcome = draft_workflow_from_description(&runtime, "email the weekly digest")
         .await
-        .unwrap();
+        .expect("the drafter runs");
     match outcome {
-        DescriptionDraftOutcome::Graph { spec, .. } => {
-            assert!(spec.nodes.iter().any(|n| n.kind == "tool_call"));
-        }
         DescriptionDraftOutcome::NotAutomatable(reason) => {
-            panic!("a granted tool_call must draft: {reason}")
+            assert!(reason.contains("step budget"), "reason: {reason}");
+        }
+        DescriptionDraftOutcome::Graph { .. } => panic!("a cap hit must not draft a graph"),
+    }
+}
+
+/// A zero-usage turn (the offline path — no tokens, no charge) meters nothing:
+/// `record_workflow_build_usage`'s zero guard means no sample reaches the meter.
+#[tokio::test]
+async fn a_zero_usage_turn_meters_nothing() {
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("digest", good_workflow()),
+        NativeStep::done("done"),
+    ]);
+    let meter = Arc::new(RecordingUsageMeter::default());
+    let (_home, runtime) = runtime_with_agent(model, Some(meter.clone())).await;
+
+    let outcome = draft_workflow_from_description(&runtime, "email the weekly digest")
+        .await
+        .expect("the drafter runs");
+    assert!(matches!(outcome, DescriptionDraftOutcome::Graph { .. }));
+    assert!(
+        meter.samples().is_empty(),
+        "a zero-usage turn records no sample"
+    );
+}
+
+/// A CHARGED turn records a usage sample carrying the backend-charged
+/// `cost_usd` — the load-bearing property of building the copilot as a real
+/// OpenHuman `Agent` (a token-only tinyflows runner would drop cost to zero).
+#[tokio::test]
+async fn a_charged_turn_records_cost_usd() {
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("digest", good_workflow()),
+        NativeStep::done("done"),
+    ])
+    .with_charge(120, 40, 0.0042);
+    let meter = Arc::new(RecordingUsageMeter::default());
+    let (_home, runtime) = runtime_with_agent(model, Some(meter.clone())).await;
+
+    let outcome = draft_workflow_from_description(&runtime, "email the weekly digest")
+        .await
+        .expect("the drafter runs");
+    assert!(matches!(outcome, DescriptionDraftOutcome::Graph { .. }));
+
+    let samples = meter.samples();
+    assert_eq!(
+        samples.len(),
+        1,
+        "one metered sample for the turn: {samples:?}"
+    );
+    assert!(
+        samples[0].cost_usd > 0.0,
+        "a charged turn pins a non-zero cost_usd: {:?}",
+        samples[0]
+    );
+    assert!(samples[0].input_tokens > 0, "the token counts survive too");
+}
+
+/// The copilot persona names ONLY node kinds inside `DESCRIPTION_NODE_KINDS` —
+/// the prompt↔gate coupling: a kind the prompt teaches that the propose gate does
+/// not accept (or vice versa) would silently leak. Backticked kinds are the
+/// prompt's node-kind references.
+#[test]
+fn the_persona_names_only_supported_node_kinds() {
+    let persona = copilot_persona();
+    // Every OC workflow node kind; any the persona backticks must be authorable.
+    let all_kinds = [
+        "trigger",
+        "agent",
+        "tool_call",
+        "http_request",
+        "condition",
+        "output",
+        "switch",
+        "merge",
+        "split_out",
+        "transform",
+        "output_parser",
+        "sub_workflow",
+    ];
+    for kind in all_kinds {
+        if persona.contains(&format!("`{kind}`")) {
+            assert!(
+                DESCRIPTION_NODE_KINDS.contains(&kind),
+                "the persona names node kind `{kind}`, which is NOT authorable \
+                 (DESCRIPTION_NODE_KINDS = {DESCRIPTION_NODE_KINDS:?})"
+            );
         }
     }
-
-    let ungranted = r#"{"automatable":true,"summary":"export rows","workflow":{"name":"Exporter",
-        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
-                 {"id":"exp","kind":"tool_call","name":"Export","config":{"slug":"csv_export"}}],
-        "edges":[{"from":"start","to":"exp"}]}}"#;
-    let (_h2, runtime2) = runtime_with(ScriptedModel::replying(ungranted)).await;
-    let outcome2 = draft_workflow_from_description(&runtime2, "export the rows")
-        .await
-        .unwrap();
-    match outcome2 {
-        DescriptionDraftOutcome::NotAutomatable(reason) => {
-            assert!(reason.contains("does not grant"), "reason: {reason}");
-        }
-        DescriptionDraftOutcome::Graph { .. } => panic!("an ungranted tool_call must be refused"),
+    // And every authorable kind IS present, so the contract is actually taught.
+    for kind in DESCRIPTION_NODE_KINDS {
+        assert!(
+            persona.contains(kind),
+            "the persona must name the authorable kind `{kind}`"
+        );
     }
 }
 
@@ -895,13 +1680,17 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
         prompt.contains("(args: url)"),
         "web_fetch's required arg is rendered: {prompt}"
     );
-    let system = description_system_prompt();
+    // Issue #840: the copilot's system prompt is the ported persona plus the
+    // shared graph contract. It names the three tools it drives, states the
+    // delivery invariant, shows an `output` node with a destination in the schema
+    // example, and carries the roster-copy rule and the SAFETY stance.
+    let system = copilot_persona();
     assert!(
-        system.contains("config.slug"),
-        "the copilot system prompt teaches the tool_call rule"
+        system.contains("list_effective_tools")
+            && system.contains("check_workflow")
+            && system.contains("propose_workflow"),
+        "the persona names its three tools: {system}"
     );
-    // Issue #813: the system prompt states the delivery invariant and shows an
-    // `output` node with a destination in the schema example.
     assert!(
         system.contains("an `agent` node cannot send"),
         "the delivery invariant is stated: {system}"
@@ -913,6 +1702,10 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
     assert!(
         system.contains("copied EXACTLY"),
         "the roster-copy rule is stated: {system}"
+    );
+    assert!(
+        system.contains("SAFETY"),
+        "the SAFETY stance is present: {system}"
     );
 }
 
@@ -1149,141 +1942,6 @@ fn the_wrong_but_real_arm_flags_the_unnamed_teammate() {
         &mut ok,
     );
     assert!(ok.is_empty(), "{ok:?}");
-}
-
-// ---------------------------------------------------------------------------
-// Grounding, gates & the retry loop (issue #813) — pass tier
-// ---------------------------------------------------------------------------
-
-/// A description that names a teammate by ROLE drafts a graph with the resolver's
-/// id rewrite and a note explaining it — one model call, no retry (the fixture
-/// roster has `maya`, role "Writer").
-#[tokio::test]
-async fn a_role_named_agent_is_resolved_end_to_end_with_a_note() {
-    let reply = r#"{"automatable":true,"summary":"draft it","workflow":{"name":"Draft",
-        "nodes":[{"id":"t","kind":"trigger","name":"Start"},
-                 {"id":"a","kind":"agent","name":"Write","agent":"Writer"}],
-        "edges":[{"from":"t","to":"a"}]}}"#;
-    let model = ScriptedModel::replying(reply);
-    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
-    let outcome = draft_workflow_from_description(&runtime, "have the writer draft an update")
-        .await
-        .unwrap();
-    match outcome {
-        DescriptionDraftOutcome::Graph { spec, notes, .. } => {
-            assert_eq!(spec.nodes[1].agent.as_deref(), Some("maya"));
-            assert!(notes.iter().any(|n| n.contains("maya")), "{notes:?}");
-        }
-        DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
-    }
-    assert_eq!(model.calls(), 1, "a clean resolve needs no retry");
-}
-
-/// An agent id that resolves to nothing folds — after one corrective retry — to
-/// not-automatable whose reason NAMES the roster (proving the silent fold is
-/// gone). Two model calls, both metered.
-#[tokio::test]
-async fn an_unresolvable_agent_folds_to_not_automatable_naming_the_roster() {
-    let reply = r#"{"automatable":true,"summary":"x","workflow":{"name":"Bad",
-        "nodes":[{"id":"t","kind":"trigger","name":"Start"},
-                 {"id":"a","kind":"agent","name":"Do","agent":"019fcbc3cb55-nope"}],
-        "edges":[{"from":"t","to":"a"}]}}"#;
-    let model = ScriptedModel::replying(reply);
-    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
-    let outcome = draft_workflow_from_description(&runtime, "do the thing")
-        .await
-        .unwrap();
-    match outcome {
-        DescriptionDraftOutcome::NotAutomatable(reason) => {
-            assert!(reason.contains("maya"), "the roster is named: {reason}");
-        }
-        DescriptionDraftOutcome::Graph { .. } => panic!("an unknown agent must not draft"),
-    }
-    assert_eq!(
-        model.calls(),
-        2,
-        "one draft, one corrective retry — both metered"
-    );
-}
-
-/// The draft→correct loop recovers: a first answer that fails the roster gate,
-/// then a good one, yields a graph — two model calls (both metered).
-#[tokio::test]
-async fn the_retry_recovers_from_a_correctable_first_answer() {
-    let bad = r#"{"automatable":true,"summary":"x","workflow":{"name":"Bad",
-        "nodes":[{"id":"t","kind":"trigger","name":"Start"},
-                 {"id":"a","kind":"agent","name":"Do","agent":"ghost"}],
-        "edges":[{"from":"t","to":"a"}]}}"#;
-    let good = r#"{"automatable":true,"summary":"fixed","workflow":{"name":"Good",
-        "nodes":[{"id":"t","kind":"trigger","name":"Start"},
-                 {"id":"a","kind":"agent","name":"Do","agent":"maya"}],
-        "edges":[{"from":"t","to":"a"}]}}"#;
-    let model = ScriptedModel::scripting(vec![bad.to_string(), good.to_string()]);
-    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
-    let outcome = draft_workflow_from_description(&runtime, "do the thing")
-        .await
-        .unwrap();
-    assert!(
-        matches!(outcome, DescriptionDraftOutcome::Graph { .. }),
-        "the retry recovers a correctable draft"
-    );
-    assert_eq!(
-        model.calls(),
-        2,
-        "one bad draft, one good retry — both metered"
-    );
-}
-
-/// The delivery gate is enforced end-to-end: an "email me" request whose draft
-/// tries to deliver from an agent summary (no output node) is refused, and — bad
-/// on both attempts — folds to not-automatable naming the missing output node.
-#[tokio::test]
-async fn the_delivery_gate_is_enforced_end_to_end() {
-    let reply = r#"{"automatable":true,"summary":"digest","workflow":{"name":"Digest",
-        "nodes":[{"id":"t","kind":"trigger","name":"Monday","schedule":"0 9 * * 1"},
-                 {"id":"a","kind":"agent","name":"Draft and email","agent":"maya",
-                  "summary":"email the digest to the owner"}],
-        "edges":[{"from":"t","to":"a"}]}}"#;
-    let model = ScriptedModel::replying(reply);
-    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
-    let outcome =
-        draft_workflow_from_description(&runtime, "email me the weekly digest every monday")
-            .await
-            .unwrap();
-    match outcome {
-        DescriptionDraftOutcome::NotAutomatable(reason) => {
-            assert!(
-                reason.contains("output"),
-                "names the missing output node: {reason}"
-            );
-        }
-        DescriptionDraftOutcome::Graph { .. } => {
-            panic!("a delivery with no output node must be refused")
-        }
-    }
-    assert_eq!(model.calls(), 2);
-}
-
-/// The same "email me" request draws no gate when the draft actually ends in an
-/// `output` node with a destination — the gate is about missing delivery, not
-/// about the word "email".
-#[tokio::test]
-async fn a_delivery_with_an_output_node_drafts_cleanly() {
-    let reply = r#"{"automatable":true,"summary":"digest","workflow":{"name":"Digest",
-        "nodes":[{"id":"t","kind":"trigger","name":"Monday","schedule":"0 9 * * 1"},
-                 {"id":"a","kind":"agent","name":"Draft","agent":"maya"},
-                 {"id":"o","kind":"output","name":"Send","destination":{"kind":"owner"}}],
-        "edges":[{"from":"t","to":"a"},{"from":"a","to":"o"}]}}"#;
-    let model = ScriptedModel::replying(reply);
-    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
-    let outcome = draft_workflow_from_description(&runtime, "email me the weekly digest")
-        .await
-        .unwrap();
-    assert!(
-        matches!(outcome, DescriptionDraftOutcome::Graph { .. }),
-        "a correct delivery graph drafts"
-    );
-    assert_eq!(model.calls(), 1, "a correct delivery graph needs no retry");
 }
 
 /// The card entering the pass is not the assignee's dispatch: no artifact, no
