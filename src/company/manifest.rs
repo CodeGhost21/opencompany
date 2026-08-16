@@ -9,10 +9,12 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{OpenCompanyError, Result};
+use crate::ports::{decode_wallet_address, normalize_email};
 
 use super::types::{
-    BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, GATEABLE_NAMESPACES, KNOWN_CHANNELS,
-    MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, TIERS, TOOL_PROVIDERS,
+    AUTH_MODES, BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, GATEABLE_NAMESPACES,
+    KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, TIERS,
+    TOOL_PROVIDERS,
 };
 
 /// The `delegates_to` entry that means "every desk this company has".
@@ -276,6 +278,8 @@ impl CompanyManifest {
             problems.push(one_of("`[brain].mode`", BRAIN_MODES, &self.brain.mode));
         }
 
+        problems.extend(self.validate_users());
+
         if !TOOL_PROVIDERS.contains(&self.tools.provider.as_str()) {
             problems.push(one_of(
                 "`[tools].provider`",
@@ -374,6 +378,74 @@ impl CompanyManifest {
                     schedule.cron
                 ));
             }
+        }
+
+        problems
+    }
+
+    /// Validates `[users]`: the sign-in mode, and the bootstrap list that mode
+    /// actually reads.
+    ///
+    /// Split out because the interesting failures are not malformed values but
+    /// **silently unread ones**. Each mode reads exactly one bootstrap list —
+    /// `admins` in `email`, `wallets` in `wallet`, neither in `none` — so a list
+    /// filled in under the wrong mode is not a harmless leftover: it is an
+    /// operator who believes they have granted someone access and has not, and
+    /// the symptom is an eligible-looking address that can never sign in.
+    fn validate_users(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        let mode = self.users.mode.as_str();
+        if !AUTH_MODES.contains(&mode) {
+            problems.push(one_of("`[users].mode`", AUTH_MODES, mode));
+            // Every check below is mode-dependent, and reporting them against a
+            // mode that does not exist would be noise on top of the real error.
+            return problems;
+        }
+
+        // Wallet addresses are checked with the same decoder the login route
+        // uses, so an address this accepts is one a signature can be verified
+        // against.
+        for address in &self.users.wallets {
+            if let Err(err) = decode_wallet_address(address) {
+                problems.push(format!("`[users].wallets` has an invalid entry: {err}"));
+            }
+        }
+
+        // An admin entry is bootstrapped by comparing its normalized form
+        // against the identity a login route resolves — the same normalization
+        // `LoginIdentity::parse` has to disambiguate from the `wallet:` and
+        // `local:` schemes sharing this column. An entry that does not survive
+        // normalization as a real mailbox (missing `@`) is not merely useless,
+        // it can normalize to `local:owner` — `normalize_email` only lowercases
+        // and trims — and a bootstrapped user stored under that exact key would
+        // misparse as the `none`-mode local owner identity rather than the
+        // email admin it was meant to be. Caught here so it never reaches a
+        // running company.
+        for admin in &self.users.admins {
+            let normalized = normalize_email(admin);
+            if normalized.is_empty() || !normalized.contains('@') {
+                problems.push(format!(
+                    "`[users].admins` has an invalid entry: `{admin}` does not look like an \
+                     email address"
+                ));
+            }
+        }
+
+        match mode {
+            "email" if !self.users.wallets.is_empty() => problems.push(
+                "`[users].wallets` is only read when `[users].mode` is `wallet`, so these addresses grant nothing. Set the mode, or list the people in `admins` instead."
+                    .into(),
+            ),
+            "wallet" if !self.users.admins.is_empty() => problems.push(
+                "`[users].admins` is only read when `[users].mode` is `email`, so these addresses grant nothing. Set the mode, or list the wallets in `wallets` instead."
+                    .into(),
+            ),
+            "none" if !self.users.admins.is_empty() || !self.users.wallets.is_empty() => problems
+                .push(
+                    "`[users].mode` is `none`, which has no sign-in and no way to add a second person, so `admins`/`wallets` grant nothing. Remove them, or choose `email` or `wallet`."
+                        .into(),
+                ),
+            _ => {}
         }
 
         problems
@@ -486,6 +558,118 @@ mod tests {
 
     fn parse(text: &str) -> CompanyManifest {
         toml::from_str(text).expect("valid toml")
+    }
+
+    /// A valid 32-byte base58 address, built rather than pasted so the test
+    /// cannot drift from what the decoder accepts.
+    fn wallet_address() -> String {
+        bs58::encode([9u8; 32]).into_string()
+    }
+
+    /// A manifest naming no `[users].mode` signs people in by email, exactly as
+    /// every manifest did before the key existed.
+    #[test]
+    fn users_mode_defaults_to_email() {
+        let manifest = parse("[company]\nname = \"X\"\n");
+        assert_eq!(manifest.users.mode, "email");
+        assert!(manifest.validate().is_empty());
+    }
+
+    #[test]
+    fn an_unknown_users_mode_is_named_in_prosumer_language() {
+        let manifest = parse("[company]\nname = \"X\"\n[users]\nmode = \"walet\"\n");
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("`[users].mode`") && p.contains("walet")),
+            "{problems:?}"
+        );
+    }
+
+    /// The interesting failure is not a malformed value but a **silently
+    /// unread** one: each mode reads exactly one bootstrap list, and filling in
+    /// the other is an operator who believes they granted access and has not.
+    #[test]
+    fn a_bootstrap_list_the_mode_never_reads_is_a_problem() {
+        let manifest = parse(&format!(
+            "[company]\nname = \"X\"\n[users]\nmode = \"email\"\nwallets = [\"{}\"]\n",
+            wallet_address()
+        ));
+        let problems = manifest.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("`[users].wallets`")),
+            "{problems:?}"
+        );
+
+        let manifest =
+            parse("[company]\nname = \"X\"\n[users]\nmode = \"wallet\"\nadmins = [\"a@b.com\"]\n");
+        assert!(
+            manifest
+                .validate()
+                .iter()
+                .any(|p| p.contains("`[users].admins`")),
+            "{:?}",
+            manifest.validate()
+        );
+    }
+
+    /// `none` reads neither list, because it admits nobody but the person at the
+    /// machine and has no way to add a second.
+    #[test]
+    fn none_mode_reads_no_bootstrap_list_at_all() {
+        let manifest =
+            parse("[company]\nname = \"X\"\n[users]\nmode = \"none\"\nadmins = [\"a@b.com\"]\n");
+        let problems = manifest.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("no sign-in")),
+            "{problems:?}"
+        );
+
+        // Naming no list is the correct `none` manifest, and validates clean.
+        let manifest = parse("[company]\nname = \"X\"\n[users]\nmode = \"none\"\n");
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
+    /// A wallet that cannot be decoded can never verify a signature, so it is
+    /// caught by `opencompany check` rather than by a person who cannot sign in.
+    #[test]
+    fn a_malformed_bootstrap_wallet_is_rejected() {
+        let manifest =
+            parse("[company]\nname = \"X\"\n[users]\nmode = \"wallet\"\nwallets = [\"0OIl\"]\n");
+        let problems = manifest.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("`[users].wallets`")),
+            "{problems:?}"
+        );
+
+        let manifest = parse(&format!(
+            "[company]\nname = \"X\"\n[users]\nmode = \"wallet\"\nwallets = [\"{}\"]\n",
+            wallet_address()
+        ));
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
+    /// `normalize_email` only lowercases and trims, so an `[users].admins`
+    /// entry with no `@` can still be a normalized key — including one that
+    /// collides with the `local:owner` scheme `LoginIdentity::parse` reserves
+    /// for the `none`-mode owner. Caught here, before a bootstrapped user is
+    /// ever stored under that exact key.
+    #[test]
+    fn a_bootstrap_admin_that_is_not_an_email_address_is_rejected() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n[users]\nmode = \"email\"\nadmins = [\"Local:Owner\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems.iter().any(|p| p.contains("`[users].admins`")),
+            "{problems:?}"
+        );
+
+        let manifest = parse(
+            "[company]\nname = \"X\"\n[users]\nmode = \"email\"\nadmins = [\"ada@example.com\"]\n",
+        );
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
     }
 
     #[test]

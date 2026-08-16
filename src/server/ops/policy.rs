@@ -252,9 +252,10 @@ async fn set_policy(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<SetPolicy>,
 ) -> Result<Json<PolicyDto>, Response> {
-    let admin = require_admin(&headers, &state, &company.runtime).await?;
+    let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
 
     if body.mode.is_none() && body.always_approve.is_none() {
         return Err(refusal(
@@ -326,8 +327,9 @@ async fn clear_policy(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
 ) -> Result<Json<PolicyDto>, Response> {
-    require_admin(&headers, &state, &company.runtime).await?;
+    require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;

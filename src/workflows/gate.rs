@@ -400,6 +400,11 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
         // decision belongs to the node they feed, which is classified above.
         | NodeKind::Condition
         | NodeKind::Dedup
+        | NodeKind::Spawn
+        | NodeKind::Scatter
+        | NodeKind::Gather
+        | NodeKind::Gate
+        | NodeKind::Void
         | NodeKind::Loop
         | NodeKind::Merge
         | NodeKind::OutputParser
@@ -607,6 +612,18 @@ description = "Runs Acme."
         }
     }
 
+    fn kind_node(id: &str, kind: NodeKind) -> Node {
+        Node {
+            id: id.to_string(),
+            kind,
+            type_version: 1,
+            name: String::new(),
+            config: json!({}),
+            ports: Vec::new(),
+            position: None,
+        }
+    }
+
     fn graph(nodes: Vec<Node>) -> WorkflowGraph {
         WorkflowGraph {
             id: Some("wf".to_string()),
@@ -730,6 +747,20 @@ description = "Runs Acme."
 
         assert!(gated.is_empty(), "{gated:?}");
         assert!(gate_ids(&g).is_empty());
+    }
+
+    #[test]
+    fn tinyflows_parallel_control_nodes_do_not_describe_outward_calls() {
+        for kind in [
+            NodeKind::Spawn,
+            NodeKind::Scatter,
+            NodeKind::Gather,
+            NodeKind::Gate,
+            NodeKind::Void,
+        ] {
+            let node = kind_node("control", kind.clone());
+            assert_eq!(call_of(&node), None, "{kind:?}");
+        }
     }
 
     /// `always_approve` outranks the tier, exactly as it does on the agent

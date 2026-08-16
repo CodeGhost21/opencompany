@@ -111,6 +111,7 @@ fn operator_request() -> CycleRequest {
             text: "hi".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }],
         event_seqs: Vec::new(),
         compressed_history: Vec::new(),
@@ -513,6 +514,7 @@ async fn e2e_inference_then_gated_send_dm_drives_a_channel_response() {
             text: "how are we doing".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -568,6 +570,7 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
             text: "file it".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();

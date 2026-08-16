@@ -84,7 +84,7 @@ pub struct DesktopConfig {
 /// A running local OpenCompany API. Dropping it aborts the loopback server.
 pub struct DesktopRuntime {
     config: DesktopConfig,
-    server: JoinHandle<std::io::Result<()>>,
+    server: JoinHandle<Result<()>>,
 }
 
 impl DesktopRuntime {
@@ -236,6 +236,20 @@ async fn register(
         builder = builder.with_template_provenance(provenance);
     }
     let runtime = builder.build().await?;
+    // The same refusal `serve` applies at boot and provisioning: a `none`-mode
+    // company on a routable bind is an unauthenticated admin console. The
+    // desktop app always binds loopback (`start_local` below), so this is
+    // unreachable today — kept anyway so a future change to that bind cannot
+    // silently reintroduce the gap on this, the third company-registration
+    // path.
+    if !runtime.auth_mode().has_login() && !state.config().is_local_only() {
+        return Err(crate::OpenCompanyError::Config(format!(
+            "company `{}` is configured with `[users].mode = \"none\"`, which has no sign-in, \
+             but this host binds `{}` and would serve it to anyone who can reach that address.",
+            runtime.id().as_ref(),
+            state.config().bind,
+        )));
+    }
     state.registry().insert(id, std::sync::Arc::new(runtime));
     Ok(())
 }
@@ -263,8 +277,13 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
         .registry()
         .insert(company_id.clone(), std::sync::Arc::new(runtime));
 
-    let app = crate::server::router(state);
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    // Through the one production serving path, not a bare `axum::serve` — this
+    // is where the `none`-mode local-owner peer and proxy-header gates are
+    // wired (see `serve_on`'s doc comment). Harmless today since this always
+    // binds loopback and nothing here sets `[users].mode = "none"`, but this
+    // function's name is the one someone will copy from, so it should not be
+    // the one place those guarantees are missing.
+    let server = tokio::spawn(crate::server::serve_on(listener, state));
     Ok(DesktopRuntime {
         config: DesktopConfig {
             api_url: format!("http://{address}"),

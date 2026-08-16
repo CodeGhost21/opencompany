@@ -2934,6 +2934,7 @@ description = "Runs Acme."
                     text: "status?".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -5501,6 +5502,7 @@ members = ["eng1", "eng2"]
                     text: "we should announce this".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -5559,6 +5561,7 @@ members = ["eng1", "eng2"]
                     text: "two things".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -5603,6 +5606,7 @@ members = ["eng1", "eng2"]
                     text: "status?".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -7732,6 +7736,7 @@ members = ["eng1", "eng2"]
                     text: "why is the site down?".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -7797,6 +7802,7 @@ members = ["eng1", "eng2"]
                     text: "handle it".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -7836,6 +7842,7 @@ members = ["eng1", "eng2"]
                     text: "status?".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )

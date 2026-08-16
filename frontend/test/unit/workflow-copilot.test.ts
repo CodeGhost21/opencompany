@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   composeCopilotMessage,
   copilotThreadId,
+  loadCopilotHistory,
   questionOf,
   type CopilotContext,
 } from "@/api/workflow-copilot";
@@ -45,6 +46,20 @@ describe("copilotThreadId", () => {
   /** The exact string `company::copilot::workflow_of_thread` parses. */
   it("is the prefix the host confines on", () => {
     expect(copilotThreadId("weekly_report")).toBe("workflow-copilot:weekly_report");
+  });
+});
+
+describe("loadCopilotHistory", () => {
+  it("distinguishes an unavailable transcript from an empty one", async () => {
+    const result = await loadCopilotHistory(
+      {
+        getChatHistory: vi.fn().mockRejectedValue(new Error("network unavailable")),
+      } as never,
+      "acme",
+      "weekly_report",
+    );
+
+    expect(result).toMatchObject({ ok: false, error: { message: "network unavailable" } });
   });
 });
 

@@ -368,6 +368,11 @@ pub async fn build_capabilities(
         // no company manifest can currently produce one (`NodeKind` has no
         // `memory` variant on our side).
         memory: None,
+        // New in tinyflows 0.8.0: `spawn` can hand work to a host `TaskRunner`.
+        // Keep `None` here so spawned work runs inline and emits an
+        // already-settled ticket for a downstream `gate`; real overlap belongs
+        // in the later concurrency adoption phase.
+        tasks: None,
     })
 }
 

@@ -208,8 +208,29 @@ impl Serving {
 }
 
 /// Serves on a listener the caller already bound.
+///
+/// The one production serving path — `bind`/`serve` and the desktop app's own
+/// [`start_local`](crate::desktop::start_local) both end up here, so there is
+/// one set of guarantees rather than one that only some servers get. Wired
+/// with the connecting peer's socket address (`ConnectInfo`), not just the
+/// router: `none` mode's local-owner resolution
+/// ([`local_owner`](crate::server::graphql::auth::local_owner)) checks it, and
+/// the request's proxy-forwarding headers, as two independent gates alongside
+/// the bind-time refusal a `none`-mode company on a routable bind already
+/// gets. See `local_owner`'s own doc comment for exactly what each of the
+/// three catches — briefly: the bind guard refuses a *declared* routable bind
+/// or a declared public URL before the company ever goes live; the peer check
+/// catches a directly reachable socket; the header check catches an
+/// *undeclared* reverse proxy in front of an otherwise-correctly-loopback-bound
+/// host, which the peer check cannot see (the proxy still connects over
+/// loopback, so the peer this process observes reads as loopback regardless of
+/// where its own caller actually was).
 pub async fn serve_on(listener: TcpListener, state: AppState) -> Result<()> {
-    axum::serve(listener, router(state)).await?;
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

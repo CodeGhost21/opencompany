@@ -118,11 +118,12 @@ impl QueryRoot {
 async fn graphql_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
+    auth::MaybePeer(peer): auth::MaybePeer,
     req: GraphQLRequest,
 ) -> GraphQLResponse {
     // `None`: the company a query addresses lives in the request body, which is
     // not available here, so a session cookie selects its own company by name.
-    let auth = match resolve_principal(&headers, &state, None).await {
+    let auth = match resolve_principal(&headers, &state, None, peer).await {
         Ok(auth) => auth,
         Err(_) => {
             let err = async_graphql::ServerError::new("unauthorized", None);
