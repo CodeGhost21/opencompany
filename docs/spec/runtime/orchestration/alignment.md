@@ -135,18 +135,33 @@ them is how a company comes to treat a year-old fact as a current finding.
 
 ### The budget, and where it is spent
 
-The brief MUST be held to a token budget (default 10,000).
+The brief MUST be held to a token budget (default 10,000). "Token" here is a
+provider-billed unit, not a Rust `char` or byte; the clamp below sizes on
+codepoints as a cheap, tokenizer-free upper bound (a token is never fewer
+codepoints than it is characters for the encodings in use), which is
+conservative — it may cut earlier than the true token budget requires, never
+later. A future revision MAY size against the actual provider tokenizer if
+the slack this leaves is measured to matter.
 
 The clamp MUST be applied **where the brief is spent** — at prompt assembly —
 and MUST NOT be applied by refusing the write. Refusing the write costs the
 company whatever the curator was about to record; clamping at assembly costs
 only the tail of one prompt. The clamp keeps the **leading** portion, because
-the file is written most-established-first, cuts on a character boundary, and
-appends a visible marker saying it was cut and to what budget.
+the file is written most-established-first, cuts on a UTF-8 character
+boundary (never splitting a codepoint), and appends a visible marker saying it
+was cut and to what budget.
 
-An unreadable brief measures as empty rather than erroring: the brief is
-context, and a company that cannot start because its summary file is corrupt has
-made a summary into a dependency.
+An unreadable brief — a missing file, or one that fails to parse as UTF-8 —
+measures as empty rather than erroring. This is a deliberate, narrow exception
+to the [routed-document hard-error rule](#failure-handling) above: every other
+routed document is authored by a person or an agent, so a corrupt one signals
+a bug worth surfacing loudly. `BRIEF.md` is instead **wholly machine-derived
+and machine-consumed** — no prompt is ever written around its absence the way
+a role's prompt is written around a named workspace document — so a corrupt
+brief is evidence of a curator bug, not of missing context a role expected.
+Treating it as empty and letting the next curator pass re-derive it keeps a
+transient corruption from becoming a company that cannot start; erroring here
+would make a summary into a dependency.
 
 ### Cadence
 
