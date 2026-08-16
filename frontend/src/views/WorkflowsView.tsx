@@ -213,6 +213,10 @@ export function WorkflowsView({
   const { resolvedTheme } = useTheme();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The current selection, readable inside async callbacks whose closure captured
+  // a stale `selectedId` (issue #840 PR-3: guards the copilot-fix race).
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = selectedId;
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingGraph, setLoadingGraph] = useState(false);
@@ -1037,6 +1041,16 @@ export function WorkflowsView({
           errorHint: run.error,
         });
         if (res.automatable && res.workflow) {
+          // The edit dialog binds to the SELECTED workflow's `graph` for its
+          // version token; if the operator changed selection while the fix was in
+          // flight, opening it now would write the correction of `run.workflowId`
+          // over a different workflow. Abandon rather than save the wrong one.
+          if (selectedIdRef.current !== run.workflowId) {
+            toast.message(
+              "Selection changed while the copilot was working — reopen Fix on that run to review its correction.",
+            );
+            return;
+          }
           setPrefilledDraft({
             summary: res.summary,
             workflow: res.workflow,
