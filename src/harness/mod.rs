@@ -921,6 +921,19 @@ pub struct HarnessPool {
     /// declare no ceilings keeps a stable fingerprint and never rebuilds on this
     /// axis.
     desk_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the routed workspace documents — hashed over
+    /// their **bodies**, not merely their names.
+    ///
+    /// A persona is assembled once per roster, so without this axis an operator
+    /// editing a routed note would leave every other fingerprint stable and the
+    /// fast path would keep serving a prompt quoting the old text until the
+    /// process restarted. Hashing the names alone would have exactly that bug,
+    /// since the routing table does not move when a document's contents do —
+    /// which is the whole reason the routing layer is worth having.
+    ///
+    /// A company with no workspace store wired, or whose roles route nothing,
+    /// keeps a stable fingerprint and never rebuilds on this axis.
+    context_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
     /// failure has already been reported (issue #449).
     ///
