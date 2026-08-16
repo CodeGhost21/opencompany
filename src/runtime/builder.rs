@@ -140,6 +140,55 @@ pub(crate) fn agent_effective_grants(allow: &[String], agent_tools: &[String]) -
     dedup(grants)
 }
 
+/// One agent's effective grants under the **three-level** narrowing
+/// `[tools].allow ∩ desk.tools ∩ [[agent]].tools`.
+///
+/// `desk_allows` is the `tools` ceiling of every desk this agent sits on — the
+/// effective membership (manifest desks plus console-added ones), not just the
+/// manifest's, so a teammate added to a desk through the console is scoped the
+/// same as one written into `company.toml`.
+///
+/// This is [`agent_effective_grants`] applied twice, deliberately rather than
+/// incidentally: narrowing is one operation, and expressing the desk level as a
+/// second application of it is what guarantees the middle level can only ever
+/// *remove* capability. There is no path through this function that returns a
+/// grant the company allow-list does not already cover.
+///
+/// # The union, and the sharp edge in it
+///
+/// Desks combine by **union**, because desk membership is additive: joining the
+/// growth desk is how a marketer gains the ad tools. Intersecting instead would
+/// make each additional desk silently revoke capability, so adding someone to a
+/// desk could break work they already did.
+///
+/// The edge that follows: a desk with an empty `tools` ceiling narrows nothing,
+/// so an agent on both a restricted desk and an unrestricted one ends up
+/// **unrestricted**. That is the honest consequence of "empty means no
+/// ceiling" plus union, and it is the safe direction — a company that means to
+/// restrict a teammate states the ceiling on every desk that teammate sits on,
+/// or states it on the teammate. It is *not* a hole in the company grant: the
+/// widest this can ever resolve to is `allow` itself.
+pub(crate) fn agent_scoped_grants(
+    allow: &[String],
+    desk_allows: &[&[String]],
+    agent_tools: &[String],
+) -> Vec<String> {
+    // No desk states a ceiling (the common case, and every pre-existing
+    // manifest) → the desk level is skipped entirely and this is exactly the
+    // two-level behaviour that shipped before desks could scope anything.
+    let ceiling: Vec<String> = if desk_allows.iter().all(|desk| desk.is_empty()) {
+        allow.to_vec()
+    } else {
+        dedup(
+            desk_allows
+                .iter()
+                .flat_map(|desk| agent_effective_grants(allow, desk))
+                .collect(),
+        )
+    };
+    agent_effective_grants(&ceiling, agent_tools)
+}
+
 /// Whether the company allow-list covers an agent-requested grant glob.
 fn allow_covers(allow: &[String], tool: &str) -> bool {
     let literal = tool.strip_suffix('*').unwrap_or(tool);
