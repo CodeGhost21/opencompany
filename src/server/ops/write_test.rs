@@ -8775,6 +8775,8 @@ async fn the_run_history_carries_a_runs_board_rows() {
                 title: Some("Reply to the auditor".into()),
                 assignee: None,
             }],
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         },
         // A second run that touched no card, so the omission is asserted on a
         // real row rather than on an absence that could be the fold failing.
@@ -8788,6 +8790,8 @@ async fn the_run_history_carries_a_runs_board_rows() {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         },
     ] {
         runtime.events().append(&company, event).await.unwrap();

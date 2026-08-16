@@ -931,6 +931,8 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             cancelled,
             notices,
             board,
+            blocked_nodes,
+            approvals,
         } => {
             let mut o = envelope("workflow_run_finished");
             o["workflowId"] = json!(workflow_id);
@@ -970,6 +972,18 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // the moment it settles, rather than only on the next history read.
             if !board.is_empty() {
                 o["board"] = json!(board);
+            }
+            // Issues #881 / #880: the same presence-check discipline again, and
+            // projected for the same reason `deliveries` is — a console
+            // watching a run live must not be told it finished cleanly while
+            // the history it reloads a moment later says it blocked. Both rows
+            // are structural by construction (node ids, tool names, approval
+            // ids), so this arm forwards no payload it has to choose to scrub.
+            if !blocked_nodes.is_empty() {
+                o["blockedNodes"] = json!(blocked_nodes);
+            }
+            if !approvals.is_empty() {
+                o["approvals"] = json!(approvals);
             }
             o
         }
@@ -5575,6 +5589,8 @@ mod test {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }))
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["type"], "workflow_run_finished");
@@ -5619,6 +5635,8 @@ mod test {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }))
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["error"], "no inference source for agent node `worker`");
@@ -5732,6 +5750,8 @@ mod test {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }))
         .expect("projected");
         assert_eq!(with_id["runId"], "run-9");
@@ -5746,6 +5766,8 @@ mod test {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }))
         .expect("projected");
         assert!(legacy.get("runId").is_none(), "{legacy}");

@@ -1144,6 +1144,19 @@ struct RunWorkflowResponse {
     /// run that touched no card.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     board: Vec<crate::ports::WorkflowRunBoardRow>,
+    /// The nodes this run blocked on a human (issue #881).
+    ///
+    /// The same rows `GET …/workflows/runs` returns and the same rows the
+    /// `WorkflowRunFinished` event carries — one shape across all three, so a
+    /// console reads a blocked run identically whether it awaited it or found
+    /// it in the history. Omitted when empty, so a run that blocked on nobody
+    /// is byte-unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
+    /// The approvals this run parked (issue #880) — what it opened, not what
+    /// is still outstanding.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
 }
 
 /// The `detach: true` response (issue #383): the run's id, handed back before
@@ -1170,7 +1183,11 @@ struct DetachedRunResponse {
 /// always returned, `202 Accepted` for a run that has been accepted and started
 /// but has not finished — which is precisely what `202` means.
 enum RunWorkflowOk {
-    Settled(RunWorkflowResponse),
+    /// Boxed: the settled body is far wider than the detached one (it carries
+    /// the run's output, node trail, deliveries, board rows and — since #881 /
+    /// #880 — its blocked nodes and parked-approval receipts), and holding it
+    /// inline made the 202 path pay that width too.
+    Settled(Box<RunWorkflowResponse>),
     Detached(DetachedRunResponse),
 }
 
@@ -1326,7 +1343,7 @@ async fn run_workflow(
     // aborted — the run's outcome was never journaled, so there is nothing
     // truthful to hand back and this is a genuine 500 rather than a run result.
     match handle.await {
-        Ok(Ok(run)) => Ok(RunWorkflowOk::Settled(RunWorkflowResponse {
+        Ok(Ok(run)) => Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
             output: run.output,
             pending_approvals: run.pending_approvals,
             deliveries: run.deliveries,
@@ -1342,7 +1359,13 @@ async fn run_workflow(
             // that pressed Run learns what the run did to the board without a
             // second read of the history.
             board: run.board,
-        })),
+            // Issues #881 / #880: likewise. An operator who pressed Run and
+            // watched eight green nodes come back is exactly the reader these
+            // two exist for — the run drawer is where they first learn the
+            // pipeline delivered nothing and why.
+            blocked_nodes: run.blocked_nodes,
+            approvals: run.approvals,
+        }))),
         Ok(Err(err)) => Err(ApiError(err).into_response()),
         Err(join) => {
             tracing::error!(
@@ -1852,6 +1875,27 @@ struct WorkflowRunOutcome {
     /// Omitted when empty, like `notices` — which is nearly every run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     board: Vec<crate::ports::WorkflowRunBoardRow>,
+    /// The nodes this run blocked on a human (issue #881) — one row per node
+    /// whose agent turn had a tool call parked, so it produced no deliverable
+    /// and nothing after it ran.
+    ///
+    /// Projected **verbatim** from the port row, like `board` and `deliveries`
+    /// above: it is already camelCase and already structural, and a second
+    /// transcription is only a place for the two shapes to drift.
+    ///
+    /// This is what stops a blocked run reading as a clean one. Its nodes'
+    /// rows arrive relabelled too — see the settle arm in [`list_runs`], which
+    /// flips each blocked node's journaled `error` status to `blocked`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
+    /// The approvals this run parked (issue #880) — a receipt of what it
+    /// opened, the failed parks included.
+    ///
+    /// Named for what the run *parked*, never for what is still outstanding: a
+    /// receipt cannot go stale, whereas a settle-time "still waiting on N"
+    /// count becomes a fresh lie the moment somebody approves one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
 }
 
 /// One node's outcome inside a run (issue #371).
@@ -1975,6 +2019,11 @@ async fn list_runs(
                     // even one whose nodes have already opened cards. The rows
                     // arrive with the settle below.
                     board: Vec::new(),
+                    // Issues #881 / #880: same — only a finish carries these.
+                    // A run in flight has blocked on nobody *yet*, and any
+                    // approval it has already parked is listed once it settles.
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
                 });
             }
             CompanyEvent::WorkflowNodeFinished {
@@ -2008,6 +2057,8 @@ async fn list_runs(
                 cancelled,
                 notices,
                 board,
+                blocked_nodes,
+                approvals,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -2027,6 +2078,18 @@ async fn list_runs(
                     entry.cancelled = cancelled;
                     entry.notices = notices;
                     entry.board = board;
+                    // Issue #881: the node rows for this run were folded from
+                    // `WorkflowNodeFinished` events the engine wrote, and the
+                    // engine reported a blocked node as `error` — honestly, in
+                    // its own terms: the capability really did return an error,
+                    // which is what halted the branch. The finish is the first
+                    // point that knows *why*, so the relabelling happens here,
+                    // on the read, rather than by rewriting the durable node
+                    // rows. Same host-side reclassification the run record
+                    // itself performs; see `workflows::runner`.
+                    relabel_blocked(&mut entry.nodes, &blocked_nodes);
+                    entry.blocked_nodes = blocked_nodes;
+                    entry.approvals = approvals;
                     continue;
                 }
                 // …else stand alone. Two ways to get here, both legitimate: a
@@ -2049,6 +2112,12 @@ async fn list_runs(
                     cancelled,
                     notices,
                     board,
+                    // No start row means no node rows either, so there is
+                    // nothing here to relabel — the blocked list is still
+                    // carried, because it is the only thing that tells this
+                    // orphaned row apart from a clean finish.
+                    blocked_nodes,
+                    approvals,
                 });
             }
             _ => {}
@@ -2061,6 +2130,26 @@ async fn list_runs(
     runs.reverse();
     runs.truncate(limit);
     Ok(Json(runs))
+}
+
+/// Relabels a run's node rows for the nodes it blocked on a human (issue #881).
+///
+/// The read-side half of the host reclassification. `WorkflowNodeFinished` is
+/// written live, node by node, long before anything knows the run stopped for an
+/// approval rather than a fault — so the durable row says `error` and stays that
+/// way. Fixing it up here, against the finish's own blocked list, is what keeps
+/// the history panel's node chips agreeing with the run's terminal reading; the
+/// alternative is a run that says "blocked" beside a node chip that says
+/// "failed".
+fn relabel_blocked(nodes: &mut [WorkflowRunNode], blocked: &[crate::ports::WorkflowBlockedNode]) {
+    if blocked.is_empty() {
+        return;
+    }
+    for node in nodes.iter_mut() {
+        if blocked.iter().any(|b| b.node_id == node.node_id) {
+            node.status = WorkflowNodeStatus::Blocked;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2598,6 +2687,8 @@ mod tests {
                 title: None,
                 assignee: Some("ceo".into()),
             }],
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .expect("serialize");
         assert_eq!(json["board"][0]["action"], "assigned");
@@ -2617,6 +2708,8 @@ mod tests {
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .expect("serialize");
         assert!(
@@ -2648,6 +2741,8 @@ mod tests {
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["node"], "done");
@@ -2681,6 +2776,8 @@ mod tests {
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["status"], "pending");
@@ -2699,6 +2796,8 @@ mod tests {
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"], serde_json::json!([]));
@@ -3297,6 +3396,8 @@ mod tests {
                         cancelled: false,
                         notices: Vec::new(),
                         board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
                     },
                 )
                 .await
@@ -3532,6 +3633,8 @@ mod tests {
                         cancelled: false,
                         notices: Vec::new(),
                         board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
                     },
                 )
                 .await
@@ -4669,6 +4772,8 @@ mod tests {
                             nodes: Vec::new(),
                             notices: Vec::new(),
                             board: Vec::new(),
+                            blocked_nodes: Vec::new(),
+                            approvals: Vec::new(),
                         });
                     }
                 }
@@ -4681,6 +4786,8 @@ mod tests {
                     nodes: Vec::new(),
                     notices: Vec::new(),
                     board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
                 })
             }
         }
@@ -5310,6 +5417,8 @@ label = "ok"
                     }],
                     notices: Vec::new(),
                     board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
                 })
             }
         }
