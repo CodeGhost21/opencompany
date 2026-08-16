@@ -118,7 +118,11 @@ test("the line recording a decision is visible in a real channel", async ({ page
   // Back in the channel the operator was last in — the console keeps that
   // across the trip to Approvals, which is the whole of the fix.
   await navigate(page, "Chat", /#\/chat/);
-  await expect(console_(page).getByText(/Approved — the agent is completing the action/)).toBeVisible({
+  // The stub above answers without `stillAwaiting`, which is the pre-#561 host.
+  // Nothing is claimed about what happens next in that case — "recorded" is the
+  // whole promise, and the optimistic sentence this used to assert is exactly
+  // what #561 removed.
+  await expect(console_(page).getByText(/Approved — recorded/)).toBeVisible({
     timeout: 30_000,
   });
 });
