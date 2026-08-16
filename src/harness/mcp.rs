@@ -661,7 +661,7 @@ mod tests {
             tier: None,
             tools: grants.iter().map(|g| g.to_string()).collect(),
             delegates_to: vec![],
-            context: vec![],
+            context: None,
             budget_usd_daily: None,
         }
     }

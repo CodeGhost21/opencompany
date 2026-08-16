@@ -1313,7 +1313,7 @@ mod tests {
             tier: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
-            context: vec![],
+            context: None,
             budget_usd_daily: None,
         }
     }
@@ -1495,7 +1495,7 @@ mod tests {
             tier: None,
             tools: Vec::new(),
             delegates_to: delegates_to.iter().map(|d| d.to_string()).collect(),
-            context: vec![],
+            context: None,
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -1535,7 +1535,7 @@ mod tests {
             tier: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
-            context: vec![],
+            context: None,
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -1571,7 +1571,7 @@ mod tests {
             tier: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
-            context: vec![],
+            context: None,
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -1605,7 +1605,7 @@ mod tests {
             tier: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
-            context: vec![],
+            context: None,
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -1801,7 +1801,7 @@ mod tests {
             // only compiled under the gated feature combo, so neither this
             // branch's CI nor #245's could see the other's half.
             delegates_to: Vec::new(),
-            context: vec![],
+            context: None,
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);

@@ -4267,7 +4267,7 @@ mod tests {
             tier: tier.map(str::to_string),
             tools: Vec::new(),
             delegates_to: Vec::new(),
-            context: vec![],
+            context: None,
             budget_usd_daily: None,
         }
     }
