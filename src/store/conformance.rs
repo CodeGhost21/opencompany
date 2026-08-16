@@ -163,6 +163,12 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
         overlay_policy: Some(sample_policy_override()),
+        // Non-empty so a backend that drops the field is caught: an empty map
+        // survives every possible bug, including not persisting it at all.
+        overlay_desk_tools: std::collections::BTreeMap::from([(
+            "studio".to_string(),
+            vec!["docs.*".to_string(), "web".to_string()],
+        )]),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
     }
@@ -302,6 +308,15 @@ pub async fn assert_isolation_by_company(
     assert!(
         !loaded.workflow_enabled("digest"),
         "the paused workflow id did not survive save/load"
+    );
+    // The per-desk tool ceilings survive too. A backend that dropped this would
+    // silently widen every console-narrowed department back to the company's
+    // full grant on the next restart — a capability regression whose only
+    // symptom is an agent succeeding at something it had been denied.
+    assert_eq!(
+        loaded.effective_desk_tools("studio"),
+        vec!["docs.*".to_string(), "web".to_string()],
+        "overlay_desk_tools did not survive save/load"
     );
     assert_eq!(
         events

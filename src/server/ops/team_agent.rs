@@ -72,7 +72,7 @@ use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::CompanyRecord;
-use crate::runtime::builder::agent_effective_grants;
+use crate::runtime::builder::agent_scoped_grants;
 use crate::server::error::ApiError;
 use crate::server::ops::ScopedCompany;
 use crate::server::ops::language;
@@ -172,7 +172,15 @@ pub(super) struct AgentToolsDto {
     requested: Vec<String>,
     /// The company-wide `[tools].allow` ceiling.
     company_allow: Vec<String>,
-    /// What the agent actually holds, after the intersection.
+    /// The ceiling contributed by the desks this agent sits on — the union of
+    /// their `tools`, already narrowed by `company_allow`.
+    ///
+    /// **Empty means no desk narrows anything**, which is the same "empty is not
+    /// nothing" trap `requested` carries: a console rendering an empty list as
+    /// "this desk grants no tools" would invert the meaning. It is empty for
+    /// every company that has not set a desk ceiling, which is most of them.
+    desk_allow: Vec<String>,
+    /// What the agent actually holds, after all three levels.
     effective: Vec<String>,
 }
 
@@ -267,12 +275,35 @@ pub(super) fn is_orchestrator(record: &CompanyRecord, agent_id: &str) -> bool {
 /// dealing slices of `[tools].allow`, so the graph and the detail card beside
 /// it disagreed about the same agent. Sharing the constructor makes that
 /// disagreement unrepresentable rather than merely fixed once.
-pub(super) fn agent_tools(company_allow: &[String], requested: Vec<String>) -> AgentToolsDto {
-    let effective = agent_effective_grants(company_allow, &requested);
+/// Takes the `record` and `agent_id` rather than a pre-extracted allow-list,
+/// because the desk level cannot be derived from the company grant alone — it
+/// depends on which desks this teammate sits on. Passing the record is what makes
+/// "forgot to apply the desk ceiling" unrepresentable at the call site rather
+/// than a thing three callers each have to remember.
+pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsDto {
+    let company_allow = &record.manifest.tools.allow;
+    let requested = requested_grants(record, agent_id);
+
+    // The desk ceilings this agent is under, resolved through the record's
+    // *effective* desk membership so a console-seated member is scoped exactly
+    // as a manifest one.
+    let desk_tools = record.agent_desk_tools(agent_id);
+    let desk_refs: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+
+    // Reported already narrowed by the company grant, so the console can render
+    // the three rows as a strictly shrinking chain. A raw union could show a
+    // desk "granting" something the company never allowed.
+    let desk_allow = if desk_tools.iter().all(Vec::is_empty) {
+        Vec::new()
+    } else {
+        agent_scoped_grants(company_allow, &desk_refs, &[])
+    };
+
     AgentToolsDto {
+        effective: agent_scoped_grants(company_allow, &desk_refs, &requested),
         requested,
         company_allow: company_allow.to_vec(),
-        effective,
+        desk_allow,
     }
 }
 
@@ -629,10 +660,7 @@ async fn detail(
         },
         tier: declared_tier(record, agent_id),
         is_orchestrator: is_orchestrator(record, agent_id),
-        tools: agent_tools(
-            &record.manifest.tools.allow,
-            requested_grants(record, agent_id),
-        ),
+        tools: agent_tools(record, agent_id),
         desks: desks_for(record, agent_id),
         inbox_enabled,
         budget_usd_daily: cap,
@@ -757,6 +785,7 @@ members = ["writer", "ceo"]
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         };
@@ -805,6 +834,7 @@ members = ["writer", "ceo"]
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
@@ -995,6 +1025,86 @@ members = ["writer", "ceo"]
             vec!["workspace", "workspace.*", "composio"],
             "an agent that lists no tools holds the company's whole allow-list, \
              which is the reading a surface must not invert: {writer}"
+        );
+    }
+
+    /// With no desk declaring a ceiling — the shape of every company written
+    /// before desks could scope tools — the desk row is empty and the effective
+    /// grant is unchanged. This is the case that must not regress for anybody.
+    #[tokio::test]
+    async fn a_company_with_no_desk_ceilings_reports_an_empty_desk_row() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        for agent in ["ceo", "writer", "hermit"] {
+            let (_, body) = get_agent(&state, agent).await;
+            assert!(
+                strings(&body["tools"]["deskAllow"]).is_empty(),
+                "{agent}: {body}"
+            );
+        }
+    }
+
+    /// A desk ceiling narrows every member of that desk, and only that desk's
+    /// members — the department scoping the feature exists for.
+    #[tokio::test]
+    async fn a_desk_ceiling_narrows_its_members_and_nobody_else() {
+        let scoped = ROSTER.replace(
+            "members = [\"writer\", \"ceo\"]",
+            "members = [\"writer\", \"ceo\"]\ntools = [\"workspace.read\"]",
+        );
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), &scoped).await;
+
+        // `writer` asks for nothing, so before the desk it held the whole
+        // company allow-list. The desk cuts it to one grant.
+        let (_, writer) = get_agent(&state, "writer").await;
+        assert_eq!(
+            strings(&writer["tools"]["deskAllow"]),
+            vec!["workspace.read"],
+            "{writer}"
+        );
+        assert_eq!(
+            strings(&writer["tools"]["effective"]),
+            vec!["workspace.read"],
+            "the desk ceiling must bite on a member that requested nothing: {writer}"
+        );
+
+        // `hermit` sits on no desk, so it is untouched and still holds the
+        // company grant. A ceiling that leaked to non-members would be a scoping
+        // bug invisible from the desk's own screen.
+        let (_, hermit) = get_agent(&state, "hermit").await;
+        assert!(
+            strings(&hermit["tools"]["deskAllow"]).is_empty(),
+            "{hermit}"
+        );
+        assert_eq!(
+            strings(&hermit["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "{hermit}"
+        );
+    }
+
+    /// The three rows the console renders must shrink monotonically, or the card
+    /// would show a "ceiling" that is not one.
+    #[tokio::test]
+    async fn a_desk_ceiling_can_never_widen_past_the_company_grant() {
+        // The desk names a grant the company never allowed.
+        let scoped = ROSTER.replace(
+            "members = [\"writer\", \"ceo\"]",
+            "members = [\"writer\", \"ceo\"]\ntools = [\"shell\", \"workspace.read\"]",
+        );
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), &scoped).await;
+
+        let (_, writer) = get_agent(&state, "writer").await;
+        assert!(
+            !strings(&writer["tools"]["deskAllow"]).contains(&"shell".to_string()),
+            "a desk cannot grant what the company withheld: {writer}"
+        );
+        assert!(
+            !strings(&writer["tools"]["effective"]).contains(&"shell".to_string()),
+            "{writer}"
         );
     }
 

@@ -4269,6 +4269,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         }
     }
 
@@ -6210,6 +6214,7 @@ name = "Morning"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -7070,6 +7075,7 @@ name = "Morning"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }

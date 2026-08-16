@@ -42,6 +42,7 @@ pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -187,6 +188,7 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -1087,6 +1089,7 @@ async fn skills_and_workflows_resolve_from_source_dir() {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -1161,6 +1164,7 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -1276,6 +1280,7 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
             }],
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -1370,6 +1375,7 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
             }],
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })

@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Software Company harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -42,51 +42,6 @@ allow = ["*", "media", "composio", "search"]
 # open mode with the live catalog — so re-adding a list here to make providers
 # appear would restore the cap it was meant to relieve. Narrow it only to
 # genuinely narrow this company.
-
-[[agent]]
-id = "product_manager"
-role = "Product Manager"
-description = "Own the roadmap, specs, and prioritization."
-
-[[agent]]
-id = "designer"
-role = "Designer"
-description = "Product and UX design."
-
-[[agent]]
-id = "backend_engineer"
-role = "Backend Engineer"
-description = "Build and operate the backend and services."
-
-[[agent]]
-id = "frontend_engineer"
-role = "Frontend Engineer"
-description = "Build the user-facing frontend."
-
-[[agent]]
-id = "qa_engineer"
-role = "QA Engineer"
-description = "Test features and catch regressions."
-
-[[agent]]
-id = "security_engineer"
-role = "Security Engineer"
-description = "Security review, hardening, and response."
-
-[[agent]]
-id = "docs_writer"
-role = "Documentation Writer"
-description = "Write and maintain product documentation."
-
-[[agent]]
-id = "customer_support"
-role = "Customer Support"
-description = "Resolve customer issues and feed insight back."
-
-[[agent]]
-id = "devrel"
-role = "Developer Relations"
-description = "Engage developers with demos, content, and community."
 
 # Group chats — the desks the human talks to. Each pulls in a few agents from
 # the roster above; the first member is the desk's lead (the routing target).

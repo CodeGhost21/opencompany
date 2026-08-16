@@ -277,6 +277,7 @@ mod test {
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 overlay_policy: None,
+                overlay_desk_tools: Default::default(),
             })
             .await
             .unwrap();
