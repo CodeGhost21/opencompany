@@ -525,6 +525,38 @@ pub(crate) fn courtesy_validate_draft(draft: &RawWorkflow, record: &CompanyRecor
     Ok(())
 }
 
+/// Lowers a copilot draft [`WorkflowGraphSpec`] into the tinyflows
+/// [`WorkflowGraph`](tinyflows::model::WorkflowGraph) the run-time gates read,
+/// through the SAME `RawWorkflow → render → parse → translate` pipeline the
+/// create path uses (issue #840). It is the seam the create-time copilot's
+/// `check_workflow` tool runs [`tinyflows::gates::failures`] over, so a draft is
+/// checked against exactly the graph the engine would compile — not a second,
+/// drifting translation.
+///
+/// Fallible on the render/parse half: a spec whose kind or shape `parse_workflow`
+/// refuses cannot be translated, and the error is mapped to an actionable
+/// [`InvalidRequest`](OpenCompanyError::InvalidRequest) the same way
+/// [`courtesy_validate_draft`] maps it — so the tool hands the model one honest
+/// sentence rather than a 500.
+///
+/// Gated with the copilot it serves (its only caller is
+/// `crate::harness::workflow_build`), so it is not dead code in the default build.
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_graph_from_spec(
+    spec: &WorkflowGraphSpec,
+) -> Result<tinyflows::model::WorkflowGraph> {
+    let raw = raw_workflow_from_spec(spec)?;
+    let toml_src = render_workflow(&raw)?;
+    let file = parse_workflow(&toml_src).map_err(|err| match err {
+        OpenCompanyError::DataInvalid { problems, .. } => {
+            OpenCompanyError::InvalidRequest(problems.join(" "))
+        }
+        OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
+        other => other,
+    })?;
+    Ok(crate::workflows::translate::translate(&file))
+}
+
 /// Journals a best-effort [`WorkflowEnabledChanged`](CompanyEvent::WorkflowEnabledChanged).
 ///
 /// Best-effort in the same sense as every other write-path audit event here: the
