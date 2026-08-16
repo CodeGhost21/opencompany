@@ -947,7 +947,20 @@ impl AppState {
             display_name: self.config.instance_name.clone(),
             capabilities: self.capabilities(),
             storage: self.storage_kind.as_str(),
-            setup_complete: self.setup_complete(),
+            // Not the raw stamp: a host already serving a company is set up as
+            // far as the console is concerned, whether or not it was this flow
+            // that got it there. `--company` predates setup, so every existing
+            // deployment has companies and no `setup_completed_at`, and
+            // reporting the bare stamp would send all of them through the
+            // wizard on their next console load. The wizard exists to fix a
+            // host with nothing to open; a host with something to open does not
+            // need it.
+            //
+            // The authorization gate deliberately reads the raw
+            // [`Self::setup_complete`] instead — see `server::setup::authorize`.
+            // There, "has companies" is what supplies an admin to check
+            // against, so the two questions come apart.
+            setup_complete: self.setup_complete() || !self.registry().is_empty(),
         }
     }
 
