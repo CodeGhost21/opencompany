@@ -163,6 +163,13 @@ The ladder is ordered, and order is the policy:
 6. unproductive beyond threshold → `Diversify`
 7. otherwise → `Retry`
 
+Step 6's counter is driven by the judge's `Verdict`, not by `verify`: a
+`Restart` verdict increments it (per [Restart is not a
+route](#restart-is-not-a-route) — that is what "mark the attempt
+unproductive" means), and `Proceed` or `Steer` do not. This keeps the
+unproductive count reading conduct, consistent with judge being the arm that
+scores conduct rather than correctness.
+
 The two outcomes step 2 and step 3 used to share a line are not the same
 event and MUST NOT be produced by the same condition: `Answered` means
 verification actually passed; `Reported` means the loop gave up at its cap
