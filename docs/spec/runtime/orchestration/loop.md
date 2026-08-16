@@ -224,6 +224,14 @@ All bounds live in one `Thresholds` value, defaulted per company
 be a second set of constants anywhere — a threshold that exists twice is a
 threshold that will disagree with itself.
 
+**"All bounds" is literal, and includes the two the ladder reads directly:**
+`attempt_cap` (ladder step 3) and `wall_clock_ceiling` (checked at every step
+boundary, per [Bounds](#bounds)). Both are bounds by the definition this rule
+uses — a number that decides when the loop stops — so leaving them beside the
+struct as prose while the streak counters live inside it would be exactly the
+split this paragraph forbids. A reader looking for "what stops this loop"
+finds one struct with every answer in it.
+
 Diversification MUST trigger on **consecutive** unproductive attempts, so work
 making thin but genuine progress never reaches it. `Thresholds` carries (at
 least) two independent, consecutive-attempt counters feeding the ladder
