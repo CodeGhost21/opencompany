@@ -103,7 +103,7 @@ export class OpenCompanyClient {
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders());
 
     let res: TransportResponse;
     try {
@@ -156,7 +156,7 @@ export class OpenCompanyClient {
    */
   async postForm<T>(path: string, form: FormData): Promise<T> {
     const headers: Record<string, string> = {};
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders());
 
     let res: Response;
     try {
@@ -208,7 +208,7 @@ export class OpenCompanyClient {
    */
   async getDocument(path: string): Promise<{ text: string; filename?: string }> {
     const headers: Record<string, string> = {};
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders());
 
     let res: TransportResponse;
     try {
@@ -244,7 +244,7 @@ export class OpenCompanyClient {
    */
   async getBlob(path: string): Promise<Blob> {
     const headers: Record<string, string> = {};
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders());
 
     let res: Response;
     try {
