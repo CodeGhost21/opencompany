@@ -48,10 +48,11 @@ export class OpenCompanyClient {
   readonly baseUrl: string;
   readonly defaultCompany: string | null;
   private readonly token: string | null;
+  private readonly session: string | null;
   private readonly transport: Transport;
 
   constructor(
-    config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken">,
+    config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken" | "sessionHeader">,
     // Injected so a desktop shell can route the same client through its own
     // core, and so tests can drive one without a network. Defaults to the
     // browser's `fetch`/`EventSource`, which is what every web build uses.
@@ -60,7 +61,32 @@ export class OpenCompanyClient {
     this.baseUrl = config.baseUrl;
     this.defaultCompany = config.company;
     this.token = config.operatorToken;
+    this.session = config.sessionHeader ?? null;
     this.transport = transport;
+  }
+
+  /**
+   * The credential headers every request carries, whichever kind this client
+   * holds.
+   *
+   * One method rather than the line repeated at each call site, because a
+   * request path that forgot one would not fail loudly — it would silently
+   * make an *anonymous* request, and the surfaces that read fine anonymously
+   * would look like they worked.
+   *
+   * Both may be present: a platform bearer authenticates the *hosting layer*
+   * and a session authenticates a *person*, and a hub console holding a
+   * platform token still signs its operator in per tenant.
+   */
+  private authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    // Only ever set for a connection that cannot use a cookie — a console on a
+    // different origin from its host. Same-origin consoles leave this null and
+    // keep the HttpOnly cookie, which nothing here can read. See
+    // `SESSION_CARRIER_HEADER` in the host's `users/cookie.rs`.
+    if (this.session) headers["x-opencompany-session"] = this.session;
+    return headers;
   }
 
   /** Resolves the `/companies/{id}` vs single-company `/company` route prefix. */
