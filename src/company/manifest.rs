@@ -85,7 +85,7 @@ impl CompanyManifest {
         // the two call forms from resolving `agents/` differently.
         match located.path.parent() {
             Some(bundle) if super::agent_file::has_agent_files(bundle) => {
-                Self::from_file_with_agents(&located.path, &bundle.to_path_buf())
+                Self::from_file_with_agents(&located.path, bundle)
             }
             _ => Self::from_file(&located.path),
         }
