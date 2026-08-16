@@ -341,6 +341,19 @@ a brief explaining what the board is for.
   policy or the boundary sentence, which are universal and not declared per
   role, or the workspace overlay, which is a company-owned file outside
   `context` entirely (see [assembly order](#assembly-order-is-a-cache-decision)).
+- **Negative fixtures for the three exclusions** — proving absence, not just
+  proving the positive list is right:
+  - An evidence-weighing role's assembled prompt does not contain the
+    assertion board, even when that role's `context` (or its per-tier
+    default) is configured to route it — the routing layer MUST refuse to
+    honor that entry, not merely default away from it.
+  - A judging role's assembled prompt does not contain scratch, under the
+    same "configured to route it anyway" condition.
+  - A directive-acting role's assembled prompt does not contain
+    `CLAIMS.md`, under the same condition.
+  Each fixture MUST configure the forbidden document explicitly (not rely on
+  a default that happens to omit it) so the assertion is about enforcement,
+  not about a default table nobody tried to override.
 - The brief clamp cuts on a character boundary, keeps the leading portion, and
   appends the marker.
 - Assembly order puts the shared policy first, and no per-run value precedes it.
