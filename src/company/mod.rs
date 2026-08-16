@@ -195,7 +195,10 @@ pub fn run_check(path: &Path) -> bool {
         );
     }
 
-    match CompanyManifest::from_file(&located.path) {
+    // `from_located`, not `from_file`: a bundle whose roster lives in
+    // `agents/*.toml` must be validated with that roster loaded, or every desk
+    // member reads as "not an agent in the roster".
+    match CompanyManifest::from_located(&located) {
         Ok(manifest) => {
             println!("✓ {} — valid\n", located.path.display());
             print!("{}", manifest.effective_summary());
