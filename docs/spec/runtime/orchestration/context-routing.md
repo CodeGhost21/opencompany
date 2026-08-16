@@ -71,9 +71,22 @@ working context at all.
 **Representation note.** `Agent.context` is `Option<Vec<String>>`, not a
 defaulted `Vec<String>`: `None` is an omitted key, `Some(vec![])` is an
 explicit `context = []`, and only that split lets the manifest layer carry
-the distinction above at all. The field is otherwise inert until the routing
-layer lands — `role_context` does not exist yet, so nothing reads either
-variant today.
+the distinction above at all.
+
+**Implemented** in `src/company/context_routing.rs`, always compiled and tested:
+`routed_documents` carries the table above and the exclusions below;
+`resolve_routed_documents` reads the selected notes out of a `WorkspaceStore`,
+skipping any that do not exist. Rendering into a prompt section is
+`crate::company::prompt::context_section`.
+
+**Not yet wired into the harness.** The agent build is synchronous, so the
+resolved documents have to be fetched ahead of it and carried on `HarnessDeps`
+— the pattern `mcp_servers`, `composio` and the skill deltas already follow in
+`Harness::ensure_roster` — and folded into the persona last, after the static
+`prompt_files`. Until that lands, `context` selects documents that nothing
+spends. The remaining work is: resolve per roster member in `ensure_roster`,
+install on `fresh_deps`, fingerprint the result so an edited note rebuilds the
+roster, and append `context_section` in `build::build_agent`.
 
 ## Exclusions are load-bearing
 
@@ -115,9 +128,17 @@ into, not of the manifest text**:
 - Roster teammates default to **unclassified**, which imposes no exclusion and
   is the correct default: an ordinary teammate is not judging anything.
 - A company that wants an exclusion on a roster teammate states it, rather than
-  having it guessed. The manifest key for this is deliberately left to the
-  implementing change, but it MUST be an explicit declaration — a `classes`
-  list or equivalent — and never a match on `role`.
+  having it guessed. **The manifest key is `classes`**, a list taking any of
+  `evidence`, `judge` and `directive` — one per rule above, in that order. An
+  unrecognized entry is a validation error rather than an ignored string: a
+  typo'd exclusion is an exclusion that is not applied, and the whole point of
+  declaring the class is that it cannot be lost silently.
+
+An exclusion **outranks** both the tier default and an explicit `context` list.
+That is what makes a declared class a control rather than a routing line
+somebody can edit away. The universal method document is the one exemption — it
+is method, not assertion, so no class has cause to withhold it, and a role
+excluded from the method could not follow it.
 
 The rule this preserves: an exclusion applies because something *declared* the
 role's job, and a company can add one but cannot silently remove one by

@@ -2588,6 +2588,12 @@ pub struct OverlayBlob {
     /// the pre-#562 behaviour exactly.
     #[serde(default)]
     pub policy: Option<PolicyOverride>,
+    /// The operator-set per-desk tool ceilings. Absent on rows written before
+    /// desks could scope tools, and `#[serde(default)]` reads that absence as
+    /// "no desk overrides a ceiling" — which leaves the manifest in charge,
+    /// exactly as those companies ran.
+    #[serde(default)]
+    pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids the operator has switched off (issue #276). Absent on
     /// rows written before the pause switch existed, and `#[serde(default)]`
     /// reads that absence as "nothing is paused" — the pre-#276 behaviour
@@ -2612,6 +2618,7 @@ impl OverlayBlob {
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
             policy: record.overlay_policy.clone(),
+            desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
         }
@@ -2637,6 +2644,7 @@ impl OverlayBlob {
                     workflows: Vec::new(),
                     budgets: Vec::new(),
                     policy: None,
+                    desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     provenance: None,
                 })
@@ -2718,6 +2726,27 @@ pub struct CompanyRecord {
     /// approval gate and the console cannot disagree about which tier is live.
     #[serde(default)]
     pub overlay_policy: Option<PolicyOverride>,
+    /// Per-desk tool ceilings the operator has set from the console, keyed on
+    /// desk id — the runtime override of a desk's manifest
+    /// [`tools`](crate::company::GroupChat::tools).
+    ///
+    /// Read through [`Self::effective_desk_tools`], never directly, so the
+    /// console card and the harness gate cannot disagree about what a desk
+    /// permits. An absent key means the manifest decides, which is exactly the
+    /// behaviour of every record written before this field existed — the
+    /// `#[serde(default)]` is a no-op migration.
+    ///
+    /// A `BTreeMap` rather than the `Vec<…Override>` shape its neighbours use,
+    /// because the key here is genuinely unique: a desk has one ceiling, and the
+    /// map makes the "at most one entry" invariant those neighbours have to
+    /// document and police a property of the type instead.
+    ///
+    /// An entry present but **empty** is meaningful and distinct from an absent
+    /// one: it is the operator clearing a manifest ceiling back to "this desk
+    /// narrows nothing". Removing the key restores the manifest's value; storing
+    /// an empty list overrides it.
+    #[serde(default)]
+    pub overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// Workflow ids the operator has switched **off** (issue #276). A workflow
     /// named here keeps its graph, stays listed and stays runnable by hand, and
     /// is skipped by
@@ -2821,6 +2850,51 @@ impl CompanyRecord {
             members = ranked.into_iter().map(|(_, _, id)| id).collect();
         }
         members
+    }
+
+    /// One desk's effective tool ceiling: the operator's override when one is
+    /// stored, and the manifest's `[[group_chat]].tools` otherwise.
+    ///
+    /// Empty means the desk narrows nothing. An operator-created overlay desk
+    /// has no manifest row at all, so its ceiling is whatever the override says
+    /// and empty until somebody sets one.
+    pub fn effective_desk_tools(&self, desk_id: &str) -> Vec<String> {
+        if let Some(override_tools) = self.overlay_desk_tools.get(desk_id) {
+            return override_tools.clone();
+        }
+        self.manifest
+            .group_chats
+            .iter()
+            .find(|chat| chat.id == desk_id)
+            .map(|chat| chat.tools.clone())
+            .unwrap_or_default()
+    }
+
+    /// The tool ceilings of every desk `agent_id` sits on, in desk order.
+    ///
+    /// Built from [`effective_desk_members`](Self::effective_desk_members) and
+    /// [`effective_desk_tools`](Self::effective_desk_tools) rather than by
+    /// reading the manifest directly, so a teammate added to a desk through the
+    /// console is scoped by that desk exactly as a manifest member would be —
+    /// otherwise the console could seat someone on a restricted desk and leave
+    /// them unrestricted.
+    ///
+    /// Overlay desks are walked after manifest ones, matching how every other
+    /// desk reader on this type orders the two sources.
+    pub fn agent_desk_tools(&self, agent_id: &str) -> Vec<Vec<String>> {
+        let manifest_desks = self.manifest.group_chats.iter().map(|chat| chat.id.clone());
+        let overlay_desks = self.overlay_desks.iter().map(|desk| desk.id.clone());
+        let mut seen = std::collections::HashSet::new();
+        manifest_desks
+            .chain(overlay_desks)
+            .filter(|desk_id| seen.insert(desk_id.clone()))
+            .filter(|desk_id| {
+                self.effective_desk_members(desk_id)
+                    .iter()
+                    .any(|member| member == agent_id)
+            })
+            .map(|desk_id| self.effective_desk_tools(&desk_id))
+            .collect()
     }
 
     /// Resolves a desk key (an id, or a case-insensitive name) to its canonical
@@ -4149,6 +4223,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }

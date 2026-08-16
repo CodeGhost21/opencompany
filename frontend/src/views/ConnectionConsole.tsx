@@ -11,13 +11,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { OpenCompanyClient } from "@/api/client";
+import type { SignIn } from "@/api/auth";
 import { ApiError, type CompanyStatus } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { CompanyPicker } from "@/components/company-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { probe, useConnection } from "@/connections/registry";
+import { adoptSession, probe, useConnection } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { Login } from "@/views/Login";
 import { SetupWizard } from "@/views/setup/SetupWizard";
@@ -91,12 +92,20 @@ export function ConnectionConsole({
   // Re-probe this connection and re-run the boot effect. A reload would tear
   // down every *other* connection's stream to recover this one; bumping the
   // epoch keeps the recovery local.
-  const reBoot = useCallback(() => {
-    void probe(connectionId).then(() => {
-      setPhase({ kind: "loading" });
-      setBootEpoch((n) => n + 1);
-    });
-  }, [connectionId]);
+  const reBoot = useCallback(
+    (result?: SignIn) => {
+      // Store the session *before* probing. A cross-origin sign-in's token is
+      // the only proof this connection has — no cookie was set — and adopting
+      // it replaces the client, so a probe that ran first would authenticate
+      // with the pre-sign-in client and conclude the host still refuses us.
+      if (result?.session) adoptSession(connectionId, result.session);
+      void probe(connectionId).then(() => {
+        setPhase({ kind: "loading" });
+        setBootEpoch((n) => n + 1);
+      });
+    },
+    [connectionId],
+  );
 
   useEffect(() => {
     // `forceLogin` forces the sign-in view until the *first* boot; a sign-in

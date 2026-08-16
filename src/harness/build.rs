@@ -170,20 +170,14 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// This is what makes the agent answer *as* the CEO of Acme rather than falling
 /// back to openhuman's own assistant identity — the harness passes it as the
 /// archetype body with the default identity section omitted.
+///
+/// Delegates to [`crate::company::prompt::persona_prompt`], which is compiled in
+/// every build. Kept as a re-export rather than inlined at the call sites so the
+/// harness's existing callers and tests keep one name for "the persona", and so
+/// the composition rules (including the operator's inline `prompt`) are exercised
+/// by the default-build test suite rather than only where this module links.
 pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
-    let mut prompt = format!(
-        "You are the {role} at {company}. Speak in the first person as this role.",
-        role = agent.role,
-        company = company_name,
-    );
-    if let Some(description) = agent.description.as_deref() {
-        let description = description.trim();
-        if !description.is_empty() {
-            prompt.push(' ');
-            prompt.push_str(description);
-        }
-    }
-    prompt
+    crate::company::prompt::persona_prompt(company_name, agent)
 }
 
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
@@ -674,7 +668,16 @@ pub fn build_agent(
 
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
+    // Includes the operator's inline `prompt`, appended to the generated framing.
     let mut persona = persona_prompt(company_name, manifest_agent);
+
+    // The agent's checked-in briefing documents, placed here — before every
+    // tool brief and before the routed workspace documents — because they are
+    // the most static material in the prompt after the persona itself. The
+    // prompt prefix is what a provider cache reuses across turns, so ordering
+    // static-before-volatile is what keeps an operator editing a workspace note
+    // from invalidating the briefing behind it.
+    persona.push_str(&crate::company::prompt::bundle_section(manifest_agent));
 
     // A short, STATIC brief — never a tree snapshot. A snapshot baked into the
     // system prompt would be stale the moment the operator edits a note, which
@@ -1315,6 +1318,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         }
     }
 
@@ -1497,6 +1504,10 @@ mod tests {
             delegates_to: delegates_to.iter().map(|d| d.to_string()).collect(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1537,6 +1548,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1573,6 +1588,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1607,6 +1626,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1803,6 +1826,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();

@@ -171,13 +171,14 @@ use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{
-    BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, PolicyOverride, TurnStep,
+    BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk, OverlayDeskMember,
+    PolicyOverride, TurnStep,
 };
 use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
     UsageMeter,
 };
-use crate::runtime::builder::agent_effective_grants;
+use crate::runtime::builder::agent_scoped_grants;
 
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
@@ -908,6 +909,18 @@ pub struct HarnessPool {
     /// restart. Without this axis the override persists and is silently ignored:
     /// `ApprovalPolicy` is built once per roster, not once per call.
     policy_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the desk scoping a roster's grants resolve
+    /// through — which desks exist, who sits on them, and each one's tool
+    /// ceiling.
+    ///
+    /// Needed for the same reason as [`Self::budget_fingerprints`]: a tool belt
+    /// is wired once per roster, not once per call, so without this axis a
+    /// console desk-ceiling edit (or seating a teammate on a restricted desk)
+    /// would leave every other fingerprint stable and the fast path would keep
+    /// serving the old belt until the process restarted. A company whose desks
+    /// declare no ceilings keeps a stable fingerprint and never rebuilds on this
+    /// axis.
+    desk_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
     /// failure has already been reported (issue #449).
     ///
@@ -955,6 +968,7 @@ impl HarnessPool {
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
+            desk_fingerprints: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
     }
@@ -1038,11 +1052,16 @@ impl HarnessPool {
 
         // Re-resolve + fingerprint the live overlay-agent set the same way, and
         // the operator budget overrides riding the same store read (issue #343).
-        let (overlay_agents, overlay_budgets, overlay_policy) =
-            self.resolve_effective_overlay(company, deps).await;
-        let overlay_fp = overlay_fingerprint(&overlay_agents);
-        let budget_fp = budget_fingerprint(&overlay_budgets);
-        let policy_fp = policy_fingerprint(overlay_policy.as_ref());
+        let overlay = self.resolve_effective_overlay(company, deps).await;
+        let overlay_fp = overlay_fingerprint(&overlay.agents);
+        let budget_fp = budget_fingerprint(&overlay.budgets);
+        let policy_fp = policy_fingerprint(overlay.policy.as_ref());
+        // Desk scoping now decides capability (the middle level of the
+        // three-level narrowing), so it joins the staleness check: without this
+        // a console desk-ceiling edit — or seating a teammate on a restricted
+        // desk — would not reach the roster until a restart.
+        let desk_fp =
+            desk_scope_fingerprint(&overlay.desks, &overlay.desk_members, &overlay.desk_tools);
 
         // Re-resolve + fingerprint the tenant's capability filter (issue #108):
         // a per-tenant, per-period, fail-closed budget read from the meter. With
@@ -1091,6 +1110,7 @@ impl HarnessPool {
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
+            let desk_fingerprints = self.desk_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
@@ -1100,6 +1120,7 @@ impl HarnessPool {
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
+                && desk_fingerprints.get(&company.id) == Some(&desk_fp)
             {
                 return Ok(());
             }
@@ -1126,17 +1147,24 @@ impl HarnessPool {
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
         let mut fresh_company = company.clone();
-        fresh_company.overlay_agents = overlay_agents;
+        fresh_company.overlay_agents = overlay.agents;
         // Same treatment for the budget overrides (issue #343): `build_roster`
         // resolves every agent's cap through `fresh_company.effective_budget`,
         // so installing the live set here is what carries a console budget edit
         // into the roster the very next turn runs on.
-        fresh_company.overlay_budgets = overlay_budgets;
+        fresh_company.overlay_budgets = overlay.budgets;
+        // The desk axis gets the same treatment, and needs it for the same
+        // reason: `build_roster` resolves every teammate's grants through
+        // `fresh_company.agent_desk_tools`, so the live desk set, seating and
+        // ceilings have to be the ones installed here.
+        fresh_company.overlay_desks = overlay.desks;
+        fresh_company.overlay_desk_members = overlay.desk_members;
+        fresh_company.overlay_desk_tools = overlay.desk_tools;
         // Issue #562: same treatment for the policy override — `build_roster`
         // resolves the tier through `fresh_company.effective_policy`, so installing
         // the live value here is what carries a console tier change into the roster
         // the next turn runs on.
-        fresh_company.overlay_policy = overlay_policy;
+        fresh_company.overlay_policy = overlay.policy;
 
         // Issue #551 note — this rebuild deliberately touches no workspace.
         //
@@ -1189,6 +1217,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), policy_fp);
+        self.desk_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), desk_fp);
         Ok(())
     }
 
@@ -1343,22 +1375,24 @@ impl HarnessPool {
         &self,
         company: &CompanyRecord,
         deps: &HarnessDeps,
-    ) -> (
-        Vec<OverlayAgent>,
-        Vec<BudgetOverride>,
-        Option<PolicyOverride>,
-    ) {
+    ) -> EffectiveOverlay {
         match deps.store.load(&company.id).await {
-            Ok(Some(record)) => (
-                record.overlay_agents,
-                record.overlay_budgets,
-                record.overlay_policy,
-            ),
-            _ => (
-                company.overlay_agents.clone(),
-                company.overlay_budgets.clone(),
-                company.overlay_policy.clone(),
-            ),
+            Ok(Some(record)) => EffectiveOverlay {
+                agents: record.overlay_agents,
+                budgets: record.overlay_budgets,
+                policy: record.overlay_policy,
+                desks: record.overlay_desks,
+                desk_members: record.overlay_desk_members,
+                desk_tools: record.overlay_desk_tools,
+            },
+            _ => EffectiveOverlay {
+                agents: company.overlay_agents.clone(),
+                budgets: company.overlay_budgets.clone(),
+                policy: company.overlay_policy.clone(),
+                desks: company.overlay_desks.clone(),
+                desk_members: company.overlay_desk_members.clone(),
+                desk_tools: company.overlay_desk_tools.clone(),
+            },
         }
     }
 
@@ -1409,6 +1443,14 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn budget_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.budget_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current desk-scope fingerprint for a company (test-only), so a
+    /// desk-scoping test can assert the roster was actually rebuilt after a
+    /// ceiling or seating change rather than inferring it from a refused call.
+    #[cfg(test)]
+    pub async fn desk_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.desk_fingerprints.read().await.get(company).copied()
     }
 
     /// Routes a message to one agent and returns its reply, recording the turn's
@@ -2088,6 +2130,67 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
     hasher.finish()
 }
 
+/// The live overlay state one roster rebuild is resolved against.
+///
+/// A struct rather than the tuple this used to be: it grew past the point where
+/// positional returns stay readable, and — more to the point — the desk fields
+/// were added because desks now decide *capability*, so a caller silently
+/// binding `desk_tools` to the `desks` position would hand every teammate the
+/// wrong tool belt with nothing to catch it.
+pub(crate) struct EffectiveOverlay {
+    pub agents: Vec<OverlayAgent>,
+    pub budgets: Vec<BudgetOverride>,
+    pub policy: Option<PolicyOverride>,
+    pub desks: Vec<OverlayDesk>,
+    pub desk_members: Vec<OverlayDeskMember>,
+    pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Fingerprints the desk scoping a roster's grants are resolved through: which
+/// desks exist, who sits on them, and what each one's tool ceiling is.
+///
+/// All three axes are hashed together because all three feed one answer — an
+/// agent's effective grant. Seating a teammate on a restricted desk narrows its
+/// belt just as surely as editing that desk's ceiling does, so a fingerprint
+/// over the ceilings alone would leave a membership change invisible until the
+/// next restart, which is the staleness bug this whole fingerprint set exists to
+/// prevent.
+///
+/// Sorted before hashing, for the reason [`budget_fingerprint`] documents: the
+/// write routes push and retain rather than maintain an order, and an
+/// order-sensitive hash would drop every live agent session on a save that
+/// changed nothing an agent can observe. (`desk_tools` is a `BTreeMap` and so is
+/// already ordered by construction.)
+fn desk_scope_fingerprint(
+    desks: &[OverlayDesk],
+    members: &[OverlayDeskMember],
+    tools: &std::collections::BTreeMap<String, Vec<String>>,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+
+    let mut desk_ids: Vec<&str> = desks.iter().map(|desk| desk.id.as_str()).collect();
+    desk_ids.sort_unstable();
+    desk_ids.hash(&mut hasher);
+
+    let mut seats: Vec<(&str, &str)> = members
+        .iter()
+        .map(|seat| (seat.desk_id.as_str(), seat.agent_id.as_str()))
+        .collect();
+    seats.sort_unstable();
+    seats.hash(&mut hasher);
+
+    tools.len().hash(&mut hasher);
+    for (desk_id, ceiling) in tools {
+        desk_id.hash(&mut hasher);
+        ceiling.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
 /// A stable fingerprint of a company's operator budget-override set (issue
 /// #343), used to detect a cap set / changed / cleared / reset between
 /// [`HarnessPool::ensure`] calls. Mirrors [`overlay_fingerprint`]'s shape; a
@@ -2252,7 +2355,13 @@ pub(crate) fn build_roster(
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
-        let grants = agent_effective_grants(allow, &manifest_agent.tools);
+        // Three-level narrowing: company → the desks this teammate sits on →
+        // the teammate itself. `agent_desk_tools` resolves through the record's
+        // *effective* desk membership, so a console-seated member is scoped by
+        // its desk exactly as a manifest one is.
+        let desk_tools = company.agent_desk_tools(&manifest_agent.id);
+        let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -2298,7 +2407,12 @@ pub(crate) fn build_roster(
         if let Some(meter) = deps.meter.as_ref() {
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
-        let grants = agent_effective_grants(allow, &manifest_agent.tools);
+        // An overlay teammate is scoped by its desks the same as a manifest one:
+        // it can be seated on a desk, and a desk ceiling that applied to only
+        // half its members would not be a ceiling.
+        let desk_tools = company.agent_desk_tools(&manifest_agent.id);
+        let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -2350,6 +2464,10 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         delegates_to: Vec::new(),
         context: None,
         budget_usd_daily: None,
+        prompt: None,
+        prompt_files: Vec::new(),
+        prompt_files_resolved: Vec::new(),
+        classes: Vec::new(),
     }
 }
 
@@ -2367,6 +2485,10 @@ mod tests {
     use crate::ports::types::{
         ChunkAddr, ChunkHit, ChunkMeta, CompanySummary, ContextChunk, LedgerEntry,
     };
+    // The two-level resolver. Test-only now: the roster build goes through
+    // `agent_scoped_grants`, and these tests assert the desk-less case still
+    // resolves identically to what shipped before desks could scope tools.
+    use crate::runtime::builder::agent_effective_grants;
 
     fn fp_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
         use crate::ports::types::{Actor, ActorKind};
@@ -2718,6 +2840,7 @@ description = "Builds the product."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -4330,6 +4453,7 @@ description = "Sets direction."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -5348,6 +5472,10 @@ budget_usd_daily = 0.0
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -5459,6 +5587,10 @@ budget_usd_daily = 0.0
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let agent = build::build_agent(
             &CompanyId::new("acme"),

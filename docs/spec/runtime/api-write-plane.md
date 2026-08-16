@@ -43,6 +43,7 @@ POST   …/skills/{slug}/install              install a registry/company skill
 POST   …/skills/{slug}/uninstall            uninstall a skill
 PUT    …/skills/{slug}                       enable / disable a skill
 POST   …/team                               add an operator-overlay teammate
+GET    …/tools/catalog                       everything this company can grant
 GET    …/team/{agentId}                      one agent in full (tier, tools, desks)
 PATCH  …/team/{agentId}                      edit an overlay teammate
 DELETE …/team/{agentId}                      remove an overlay teammate
@@ -213,17 +214,33 @@ its tool grants or its desk membership — the roster row carried none of them, 
 checking what a company actually grants an agent was not possible from outside
 the process.
 
-The `tools` object is the reason the route earns its keep. It carries three
-lists, because only the third is the answer:
+The `tools` object is the reason the route earns its keep. It carries four
+lists, because only the last is the answer:
 
 | field | meaning |
 |---|---|
-| `requested` | the agent's own `[[agent]].tools` globs. **Empty means the company's standard grant**, not "no tools" |
-| `companyAllow` | the `[tools].allow` ceiling the request is intersected with |
-| `effective` | what the agent actually holds |
+| `requested` | the agent's own `tools` globs. **Empty means the company's standard grant**, not "no tools" |
+| `companyAllow` | the `[tools].allow` ceiling |
+| `deskAllow` | the union of the `tools` ceilings of the desks this agent sits on, already narrowed by `companyAllow`. **Empty means no desk narrows anything** |
+| `effective` | what the agent actually holds, after all three levels |
 
-`effective` is computed by the same `agent_effective_grants` the harness calls
-when it builds the agent, so the readout cannot drift from what is enforced.
+The three ceilings shrink monotonically, so a console can render them as a
+chain. Both "empty" readings above are the same trap in two places: an empty
+grant list means *inherit*, never *nothing*, and a surface rendering it as "no
+tools" has inverted the meaning.
+
+`effective` is computed by the same `agent_scoped_grants` the harness calls when
+it builds the agent, so the readout cannot drift from what is enforced. The
+constructor takes the company record and agent id rather than a pre-extracted
+allow-list, because the desk level cannot be derived from the company grant
+alone — that shape is what makes "forgot to apply the desk ceiling"
+unrepresentable at a call site rather than something three callers each have to
+remember.
+
+`GET …/tools/catalog` is the companion read: every grantable thing this company
+has — built-in families, `[[mcp_server]]` entries, `[tools.composio]` toolkits —
+in one vocabulary, each row carrying the exact grant token an operator would
+write. See [runtime/tools.md](tools.md).
 `isOrchestrator` is likewise resolved by the roster rule (a `tier =
 "orchestrator"` agent, else the first declared) rather than read off `tier`, so
 a company that tags nobody still names its orchestrator.

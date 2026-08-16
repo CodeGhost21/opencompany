@@ -1,0 +1,20 @@
+role = "Signal Scout"
+description = "Continuously gather raw market signals from web, forums, and inbound channels."
+# Was `tier = "subconscious"`. This teammate has always been the company's
+# orchestrator — it was declared first in `company.toml`, and with nobody tagged
+# `orchestrator` the roster's first entry takes the job. Moving the roster into
+# one file per teammate made that ordering alphabetical, so the tier is now
+# stated rather than inherited from where the block happened to sit.
+#
+# The old value was incidental, not a decision: an agent cannot be both the
+# orchestrator and `subconscious`, and it was the orchestrator in fact. Naming
+# the tier it actually runs as also moves it onto the agentic model workload,
+# which is the one that matches the routing it was already doing.
+tier = "orchestrator"
+# `search` is listed alongside `web.*` because the two are not interchangeable:
+# `web.*` reads a URL the agent already has, `search` is the only way to find
+# one. It must appear here AND in `[tools].allow` in `company.toml` — the
+# per-agent list narrows the company-wide one, so either edit alone is a silent
+# no-op (#312).
+tools = ["web.*", "search"]
+budget_usd_daily = 5.0

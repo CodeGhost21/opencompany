@@ -77,6 +77,43 @@ export function isAddressableBaseUrl(baseUrl: string): boolean {
 }
 
 /**
+ * Whether this client must carry its own session to `baseUrl`, instead of
+ * letting the browser attach a cookie.
+ *
+ * **Derived from the address, never configured.** "Can a cookie work here"
+ * already has an exact answer — the host sets its session cookie
+ * `SameSite=Lax`, so it rides same-origin requests and is withheld from every
+ * cross-site one — and a flag restating that would be a second source of truth
+ * free to disagree with the first. When it disagreed the symptom would be a
+ * console that signs in successfully and is then treated as anonymous by every
+ * request after it, which reads as a server bug.
+ *
+ * So: same origin means the cookie, and the cookie stays the better credential
+ * wherever it is available, because nothing in the page can read it. A
+ * different origin means no cookie is coming and the console has to hold a
+ * token itself — which is what a hub console is built out of.
+ *
+ * False in the desktop whatever the address, and that is not an oversight: its
+ * requests go through `ProxyTransport` to the Rust core, which attaches the
+ * credential it holds in the keychain. Having the webview carry one too would
+ * put a token in the page for no benefit, on the one runtime that had
+ * successfully kept it out.
+ */
+export function needsCarriedSession(baseUrl: string): boolean {
+  if (isDesktopRuntime()) return false;
+  // The empty string *is* same-origin, by the convention `ConsoleConfig` sets.
+  if (baseUrl === "") return false;
+  if (typeof window === "undefined") return false;
+  try {
+    return new URL(baseUrl, window.location.href).origin !== window.location.origin;
+  } catch {
+    // An unparseable address reaches nothing, so it needs no credential.
+    // Reporting that is `isAddressableBaseUrl`'s job, not this function's.
+    return false;
+  }
+}
+
+/**
  * Whether a secret may be sent to `baseUrl`.
  *
  * **HTTPS, or a host that is this machine.** A device session is a person's
