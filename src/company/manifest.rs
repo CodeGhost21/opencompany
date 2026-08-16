@@ -199,6 +199,17 @@ impl CompanyManifest {
                     "{label} `budget_usd_daily` cannot be negative — you wrote `{budget}`."
                 ));
             }
+
+            // Classes gate which routed documents this role may be told, so an
+            // unrecognized entry is refused rather than ignored: a typo'd
+            // exclusion is an exclusion that is not applied, and the whole point
+            // of declaring the class explicitly is that it cannot be silently
+            // lost. See `PROMPT_CLASSES`.
+            for class in &agent.classes {
+                if !PROMPT_CLASSES.contains(&class.as_str()) {
+                    problems.push(one_of(&format!("{label} `classes` entry"), &PROMPT_CLASSES, class));
+                }
+            }
         }
 
         // Group chats: ids snake_case + unique; every member is a real agent.
