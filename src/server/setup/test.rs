@@ -608,6 +608,47 @@ async fn a_hostname_bind_is_accepted() {
     assert!(home_dir.path().join("config.toml").exists());
 }
 
+/// A failed persist must leave the process exactly as it was: no live
+/// auth-mode override, no seeded company, and `setup_complete` still false.
+/// Before #908's fix, `apply_inner` set the live override and seeded the
+/// company *before* calling `write_config_toml`, so a write failure returned
+/// an error while the live host had already moved — breaking both the module
+/// doc's "one transaction" claim and `AppliedDto::complete`'s "a partial
+/// apply is an error, not a result".
+///
+/// The write is forced to fail by making `config.toml` a directory: the read
+/// that opens `write_config_toml` fails before anything is touched, the same
+/// shape a permission or disk-full failure would take.
+#[tokio::test]
+async fn a_failed_write_leaves_no_live_state_behind() {
+    let home_dir = home();
+    std::fs::create_dir(home_dir.path().join("config.toml")).unwrap();
+
+    let state = fresh_state(home_dir.path());
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "fields": { "auth_mode": "wallet" },
+            "template": "agentic_marketing_agency",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        state.auth_mode_override().is_none(),
+        "the live auth-mode override must not survive a failed write"
+    );
+    assert!(
+        state.registry().is_empty(),
+        "no company may be seeded when the write that should record it failed"
+    );
+    assert!(
+        !state.setup_complete(),
+        "setup must not read as complete when its write failed"
+    );
+}
+
 /// Clearing a field removes the key so the layer below applies, rather than
 /// writing a blank that shadows it.
 #[tokio::test]
