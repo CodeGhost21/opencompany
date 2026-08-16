@@ -107,8 +107,8 @@ export async function verifyCode(
   client: OpenCompanyClient,
   company: string | null,
   code: string,
-): Promise<Me> {
-  return client.post<Me>(`${client.scopeFor(company)}/auth/verify`, { code });
+): Promise<SignIn> {
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/verify`, { code });
 }
 
 /** One ecosystem sign-in button, as the host describes it. */
@@ -161,8 +161,8 @@ export async function signInWithHubToken(
   client: OpenCompanyClient,
   company: string | null,
   token: string,
-): Promise<Me> {
-  return client.post<Me>(`${client.scopeFor(company)}/auth/hub`, { token });
+): Promise<SignIn> {
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/hub`, { token });
 }
 
 /** Exchanges an email and password for a session. */
@@ -171,8 +171,8 @@ export async function loginWithPassword(
   company: string | null,
   email: string,
   password: string,
-): Promise<Me> {
-  return client.post<Me>(`${client.scopeFor(company)}/auth/login`, { email, password });
+): Promise<SignIn> {
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/login`, { email, password });
 }
 
 /** Who the current session belongs to; throws 401 when signed out. */
@@ -233,7 +233,10 @@ export async function verifyWalletSignature(
   nonce: string,
   signature: string,
 ): Promise<Me> {
-  return client.post<Me>(`${client.scopeFor(company)}/auth/wallet/verify`, { nonce, signature });
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/wallet/verify`, {
+    nonce,
+    signature,
+  });
 }
 
 /** Revokes this session, server-side and in the browser. */
