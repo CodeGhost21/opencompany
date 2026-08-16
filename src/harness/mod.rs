@@ -982,6 +982,7 @@ impl HarnessPool {
             budget_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
+            context_fingerprints: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
     }
