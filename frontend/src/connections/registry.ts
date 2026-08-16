@@ -303,6 +303,12 @@ function sameCredential(a: Credential, b: Credential): boolean {
   // comparison is what makes the bootstrap's live token count as a change.
   if (a.kind === "platform" && b.kind === "platform") return a.token === b.token;
   if (a.kind === "device" && b.kind === "device") return a.ref === b.ref;
+  // Signing in again mints a *new* session, so the values differ and the client
+  // has to be rebuilt around the new one. Comparing only the kind here would
+  // leave the console presenting the session it just replaced — which keeps
+  // working until the old one expires or is revoked, making it the kind of bug
+  // that surfaces an hour later and nowhere near its cause.
+  if (a.kind === "session" && b.kind === "session") return a.value === b.value;
   return true;
 }
 
