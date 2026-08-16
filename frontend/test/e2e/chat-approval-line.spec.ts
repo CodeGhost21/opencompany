@@ -33,9 +33,11 @@ const PARKED = [
     task: { link: "unlinked" },
     // Present, and load-bearing since #395: `agent` is what makes this a
     // blocked *harness tool call* rather than a native effect the runtime
-    // performs itself, and the console now words the confirmation differently
-    // for the two — "the agent is completing the action" only when there is an
-    // agent, "carrying it out now" when there is not.
+    // performs itself, and the console words the confirmation differently for
+    // the two — `approvedLine` names the agent, `approvedByRuntimeLine` does
+    // not, because there is no agent to re-dispatch. They diverge only once the
+    // host reports `stillAwaiting`; without it both answer "recorded", which is
+    // the arm this fixture exercises.
     //
     // The fixture omitted it and so exercised the no-agent arm while the
     // assertion below still named the agent one, which is why this spec went
