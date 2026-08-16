@@ -709,6 +709,23 @@ mod tests {
         assert!(problems[0].contains("company.toml"), "{problems:?}");
     }
 
+    /// `opencompany check` must load the bundle roster too. It calls
+    /// [`discover`] itself (for the legacy-filename note) and so takes its own
+    /// route into loading — which is exactly how it came to validate a manifest
+    /// whose roster it had never read, reporting every desk member as missing
+    /// from the roster.
+    #[test]
+    fn run_check_accepts_a_bundle_roster() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n\n[[group_chat]]\nid = \"d\"\nname = \"D\"\nmembers = [\"ceo\"]\n",
+            &[("ceo.toml", "role = \"CEO\"\n")],
+        );
+        assert!(
+            super::super::run_check(dir.path()),
+            "a bundle-roster company must validate through the check command"
+        );
+    }
+
     /// Cross-cutting validation still applies to a bundle roster: a
     /// `delegates_to` target is checked against the desks in `company.toml`,
     /// which the per-file loader cannot see on its own.
