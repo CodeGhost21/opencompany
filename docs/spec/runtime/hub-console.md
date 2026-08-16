@@ -7,11 +7,24 @@ Read [Users and sessions](users.md) first: this document assumes the two session
 carriers described there, and the hub exists because only one of them works
 across origins.
 
-The console can be deployed **once**, at its own origin, and operate many hosts
-living on other origins — typically one subdomain per tenant. The same bundle
-serves both shapes; a hub build sets `VITE_OC_HUB=1` (or is opened with `?hub`).
+The same bundle serves both shapes; a hub build sets `VITE_OC_HUB=1`, or is
+opened with `?hub`.
 
-What changes, and what does not:
+## Deploying one
+
+```sh
+# The hub: static assets, no host behind them.
+VITE_OC_HUB=1 pnpm build
+
+# Each tenant, so the browser will let the hub read its responses.
+OPENCOMPANY_CORS_ORIGINS=https://app.example.com opencompany serve --company …
+```
+
+Operators then add hosts from the "+" in the connection rail
+(`https://acme.example.com`), and each is remembered in `localStorage`. There is
+no directory service: a hub knows exactly the hosts somebody told it about.
+
+## What changes, and what does not
 
 | | Same-origin console | Hub console |
 |---|---|---|
