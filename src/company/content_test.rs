@@ -93,12 +93,13 @@ fn every_company_skill_and_workspace_parses() {
 /// Templates whose shipped skills (`web-research`, `seo-audit`,
 /// `competitor-scan`) instruct agents to search the web and cite sources, so
 /// each must carry an explicit `search` grant (issue #312).
-const SEARCH_GRANTED_COMPANIES: [&str; 6] = [
+const SEARCH_GRANTED_COMPANIES: [&str; 7] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_research_lab",
     "signals_opportunity_studio",
 ];
 
@@ -109,7 +110,11 @@ const SEARCH_DENIED_COMPANIES: [&str; 2] = ["e2e_harness", "openhuman_demo"];
 
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
-/// excluded: it overrides the default down to a research-only belt on purpose.
+/// excluded: it overrides the default down to a research-only belt on purpose,
+/// and `agentic_research_lab` is excluded for the same reason — its belt is
+/// `["*", "search"]`, dropping `media` and `composio`, because a research lab
+/// has no use for image generation or third-party OAuth side effects and both
+/// are opt-in spend.
 const FULL_BELT_PLUS_SEARCH: [&str; 5] = [
     "agentic_consultation_firm",
     "agentic_design_studio",

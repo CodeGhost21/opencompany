@@ -379,6 +379,37 @@ pub struct Agent {
     /// than inferred from who happens to lead which desk.
     #[serde(default)]
     pub delegates_to: Vec<String>,
+    /// Workspace documents routed into this agent's system prompt.
+    ///
+    /// The manifest half of *context routing*
+    /// (`docs/spec/runtime/orchestration/alignment.md`): which working
+    /// documents this role is told to reason from. Context is authority, so it
+    /// is stated per role rather than given to everyone — and the exclusions
+    /// carry as much weight as the entries, because a role that weighs evidence
+    /// must not be handed unevidenced text beside it.
+    ///
+    /// Paths are relative to the company workspace root. A named document that
+    /// does not exist is skipped; one that is oversized or not valid UTF-8 is an
+    /// error, because silently dropping it yields a role whose prompt was
+    /// written around a document it never received.
+    ///
+    /// `None` (an omitted `context` key) means this agent takes the
+    /// per-tier default once the routing layer lands. `Some(vec![])` (an
+    /// explicit `context = []`) means the role gets the universal document
+    /// and nothing else, distinct from taking the default — see
+    /// `docs/spec/runtime/orchestration/alignment.md`. `Option<Vec<String>>`
+    /// rather than a defaulted `Vec<String>` is what makes that distinction
+    /// representable at all: a plain `Vec` with `#[serde(default)]` cannot
+    /// tell an omitted key from an explicit empty list apart, since both
+    /// deserialize to the same empty vec.
+    ///
+    /// **Inert until the routing layer lands.** The field is parsed and carried
+    /// so a manifest can declare its routing as data today; nothing consumes it
+    /// yet. It is declared now rather than later because `Agent` does not deny
+    /// unknown fields — a `context` key on an older binary is silently ignored,
+    /// which reads exactly like routing that works and does nothing.
+    #[serde(default)]
+    pub context: Option<Vec<String>>,
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,
@@ -1142,6 +1173,61 @@ mod test {
         let value = serde_json::to_value(&manifest).unwrap();
         assert!(value.get("agent").is_some());
         assert!(value.get("schedule").is_some());
+    }
+
+    /// `Agent.context` is `Option<Vec<String>>`, not a defaulted `Vec`,
+    /// specifically so an omitted `context` key and an explicit `context = []`
+    /// stay distinguishable (docs/spec/runtime/orchestration/alignment.md's
+    /// per-tier-default rule depends on this). Pin the manifest round-trip for
+    /// both spellings so a regression to a defaulted `Vec` — which would
+    /// collapse them back to the same value — fails a test instead of shipping
+    /// silently.
+    #[test]
+    fn agent_context_distinguishes_omitted_from_explicit_empty() {
+        let omitted: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            omitted.context, None,
+            "an omitted `context` key MUST deserialize to None, not an empty vec"
+        );
+
+        let explicit_empty: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = []
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            explicit_empty.context,
+            Some(vec![]),
+            "an explicit `context = []` MUST deserialize to Some(vec![]), distinct from None"
+        );
+
+        let populated: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = ["GOAL.md", "CLAIMS.md"]
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            populated.context,
+            Some(vec!["GOAL.md".to_string(), "CLAIMS.md".to_string()])
+        );
+
+        // The distinction survives a JSON round-trip too, since the routing
+        // layer this field feeds may cross that boundary (e.g. the console).
+        let json = serde_json::to_string(&omitted).expect("serialize");
+        let back: Agent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.context, None);
     }
 
     /// The `[plan]` section (issue #108) survives a TOML → struct → JSON → struct

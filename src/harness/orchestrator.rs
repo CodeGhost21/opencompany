@@ -4529,6 +4529,7 @@ mod tests {
             tier: tier.map(str::to_string),
             tools: Vec::new(),
             delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
         }
     }
