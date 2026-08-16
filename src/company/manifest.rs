@@ -74,26 +74,75 @@ impl CompanyManifest {
     ///
     /// `path` may be a manifest file or a directory containing one. Validation
     /// collects every problem and reports them together.
+    /// When `path` resolves to a bundle carrying an `agents/` directory, the
+    /// roster is read from those per-teammate files instead of from
+    /// `[[agent]]` — see [`agent_file`](super::agent_file).
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
         let located = discover(path.as_ref())?;
-        Self::from_file(&located.path)
+        // The bundle root is the located manifest's own parent, whether the
+        // caller passed the directory or the file itself: `discover` accepts
+        // both, and deriving the root from the located manifest is what keeps
+        // the two call forms from resolving `agents/` differently.
+        match located.path.parent() {
+            Some(bundle) if super::agent_file::has_agent_files(bundle) => {
+                Self::from_file_with_agents(&located.path, &bundle.to_path_buf())
+            }
+            _ => Self::from_file(&located.path),
+        }
     }
 
     /// Reads, parses, and validates a specific manifest file.
     pub fn from_file(path: &Path) -> Result<Self> {
+        Self::parse_file(path)?.into_validated(path)
+    }
+
+    /// [`from_file`](Self::from_file), with the roster taken from
+    /// `<bundle>/agents/*.toml` rather than the manifest's `[[agent]]` entries.
+    ///
+    /// The bundle roster **replaces** the inline one; it does not merge with it.
+    /// Declaring both is refused rather than resolved by precedence, because
+    /// either precedence rule silently discards teammates an operator wrote
+    /// down — and the roster is the one part of a manifest where a silent
+    /// omission stays invisible until the missing teammate fails to answer.
+    fn from_file_with_agents(path: &Path, bundle: &Path) -> Result<Self> {
+        let mut manifest = Self::parse_file(path)?;
+
+        if !manifest.agents.is_empty() {
+            return Err(OpenCompanyError::ManifestInvalid {
+                path: path.to_path_buf(),
+                problems: vec![format!(
+                    "this company defines its roster in `{dir}/*.toml`, but `{file}` also has `[[agent]]` entries — the two forms are exclusive, so remove the `[[agent]]` blocks or delete the `{dir}/` directory.",
+                    dir = super::agent_file::AGENTS_DIR,
+                    file = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(MANIFEST_FILE),
+                )],
+            });
+        }
+
+        manifest.agents = super::agent_file::load_agents(bundle)?;
+        manifest.into_validated(path)
+    }
+
+    /// Reads and deserializes a manifest file, without validating it.
+    fn parse_file(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).map_err(|source| OpenCompanyError::ManifestRead {
                 path: path.to_path_buf(),
                 source,
             })?;
 
-        let manifest: CompanyManifest = toml::from_str(&text).map_err(|err| {
+        toml::from_str(&text).map_err(|err| {
             OpenCompanyError::ManifestParse(path.to_path_buf(), err.message().to_string())
-        })?;
+        })
+    }
 
-        let problems = manifest.validate();
+    /// Runs [`validate`](Self::validate), reporting every problem against `path`.
+    fn into_validated(self, path: &Path) -> Result<Self> {
+        let problems = self.validate();
         if problems.is_empty() {
-            Ok(manifest)
+            Ok(self)
         } else {
             Err(OpenCompanyError::ManifestInvalid {
                 path: path.to_path_buf(),
