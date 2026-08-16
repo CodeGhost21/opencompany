@@ -512,20 +512,6 @@ export function adoptSession(id: ConnectionId, session: string): void {
   adoptCredential(id, { kind: "session", value: session });
 }
 
-/**
- * Drops a carried session, locally.
- *
- * The counterpart of {@link adoptSession} for signing out. Revoking it
- * server-side is `logout`'s job and happens first — clearing here alone would
- * leave a live token on the host for the rest of its TTL, and clearing there
- * alone would leave this client presenting a token that no longer works.
- */
-export function clearSession(id: ConnectionId): void {
-  const existing = getConnection(id);
-  if (existing?.credential.kind !== "session") return;
-  adoptCredential(id, { kind: "cookie" });
-}
-
 export function removeConnection(id: ConnectionId): void {
   entries = entries.filter((e) => e.connection.id !== id);
   forgetProfile(id);
