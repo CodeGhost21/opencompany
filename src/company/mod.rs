@@ -5,6 +5,11 @@
 //! report its effective configuration. The cognition kernel (Brain, cycle
 //! loop, stores) lands in later phases; see `docs/spec/roadmap.md`.
 
+// Per-teammate roster files (`companies/<name>/agents/<id>.toml`) — the richer
+// alternative to inline `[[agent]]` entries, carrying a custom prompt and its
+// own briefing documents. Always compiled: it is part of parsing a company, and
+// `opencompany check` must report on it in every build.
+mod agent_file;
 /// Issue #552: the seam between a task artifact and the shared workspace tree.
 /// Always compiled — the console's workspace and artifact routes reach it in
 /// every build, and only the publish drain's half is behind `openhuman`.
