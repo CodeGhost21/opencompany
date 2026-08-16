@@ -834,14 +834,23 @@ async fn run_workflow_inner(
 /// where a blocked node is joined by a genuinely broken one must still report
 /// the failure: hiding a real error behind "waiting on approval" is the same
 /// class of lie #881 exists to remove, pointed the other way.
+///
+/// Requires **at least one** errored row before it will vouch for the
+/// reclassification (issue #900). `Iterator::all` is vacuously `true` on an
+/// empty iterator, so without this an engine failure that named no node at
+/// all — a setup or validation error the engine raised before any node ran —
+/// would satisfy the check by default and get relabelled as a plain block,
+/// dropping the real failure exactly as the doc comment above says this guard
+/// exists to prevent.
 fn only_blocked_nodes_errored(
     nodes: &[crate::ports::WorkflowRunNodeRow],
     blocked: &[crate::ports::WorkflowBlockedNode],
 ) -> bool {
-    nodes
+    let mut errored = nodes
         .iter()
         .filter(|row| row.status == WorkflowNodeStatus::Error)
-        .all(|row| blocked.iter().any(|b| b.node_id == row.node_id))
+        .peekable();
+    errored.peek().is_some() && errored.all(|row| blocked.iter().any(|b| b.node_id == row.node_id))
 }
 
 /// Reclassifies a blocked node's row and lists it as something the run is
@@ -1733,6 +1742,77 @@ to = "done"
         assert!(run.deliveries.is_empty());
         assert!(run.pending_approvals.is_empty());
         assert!(run.nodes.is_empty());
+    }
+
+    /// Issue #900's regression: `Iterator::all` is vacuously `true` on an
+    /// empty iterator, so before this guard required at least one errored row,
+    /// an engine failure that named no node at all satisfied
+    /// `only_blocked_nodes_errored` by default and would have been
+    /// relabelled as a plain block — exactly the "hide a real error behind
+    /// waiting on approval" lie the function's own doc comment says it exists
+    /// to prevent.
+    #[test]
+    fn no_errored_nodes_never_counts_as_only_blocked_nodes_errored() {
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "work".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+        }];
+        // No node row reported `Error` at all — a setup/validation failure the
+        // engine raised before any node ran, for instance.
+        let nodes: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
+        assert!(
+            !only_blocked_nodes_errored(&nodes, &blocked),
+            "an engine error naming no errored node must never be waved through as \
+             a plain block"
+        );
+    }
+
+    /// The guard's positive case still holds: when every errored row is one the
+    /// host blocked, reclassification is safe.
+    #[test]
+    fn every_errored_node_blocked_counts_as_only_blocked_nodes_errored() {
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "work".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+        }];
+        let nodes = vec![crate::ports::WorkflowRunNodeRow {
+            node_id: "work".to_string(),
+            status: WorkflowNodeStatus::Error,
+            elapsed_ms: 10,
+        }];
+        assert!(only_blocked_nodes_errored(&nodes, &blocked));
+    }
+
+    /// The guard's whole reason to exist: a genuinely broken node alongside a
+    /// blocked one must still fail the check, so the real error is not hidden.
+    #[test]
+    fn a_genuinely_errored_node_alongside_a_blocked_one_fails_the_guard() {
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "work".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+        }];
+        let nodes = vec![
+            crate::ports::WorkflowRunNodeRow {
+                node_id: "work".to_string(),
+                status: WorkflowNodeStatus::Error,
+                elapsed_ms: 10,
+            },
+            crate::ports::WorkflowRunNodeRow {
+                node_id: "other".to_string(),
+                status: WorkflowNodeStatus::Error,
+                elapsed_ms: 5,
+            },
+        ];
+        assert!(
+            !only_blocked_nodes_errored(&nodes, &blocked),
+            "a genuinely broken node must not be masked by an unrelated block"
+        );
     }
 
     /// A dry run writes NOTHING durable — no output snapshot, matching its "the
