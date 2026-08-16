@@ -668,6 +668,60 @@ async fn an_unconfigured_but_routable_host_refuses_an_anonymous_write() {
     );
 }
 
+/// A loopback-*configured* bind is not the same claim as a loopback
+/// *request*: an undeclared reverse proxy in front of a loopback-bound
+/// listener still presents a loopback peer to `TcpListener`, but the console
+/// review on #908 flagged that `is_local_only()` alone cannot see that — it
+/// only inspects the configured bind and `public_url`, never the request
+/// itself. `request_looks_local` is the second gate that closes that gap: a
+/// non-loopback peer on an otherwise loopback-configured, unconfigured host
+/// must still be refused.
+#[tokio::test]
+async fn a_loopback_configured_host_still_refuses_a_non_loopback_peer() {
+    use axum::extract::ConnectInfo;
+
+    let home_dir = home();
+    let app = router(fresh_state(home_dir.path()));
+
+    let mut req = Request::builder()
+        .uri("/api/v1/setup")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(
+        "203.0.113.7:54321".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
+    assert_ne!(
+        response.status(),
+        StatusCode::OK,
+        "a non-loopback peer must not pass the anonymous setup gate even on a \
+         loopback-configured bind"
+    );
+}
+
+/// The other half of the same gap: a same-host reverse proxy connects to a
+/// loopback-bound listener over loopback too, so the peer alone cannot catch
+/// an *undeclared* one — only a proxy-forwarding header can. Any request
+/// carrying one must be refused just as a non-loopback peer is.
+#[tokio::test]
+async fn a_loopback_configured_host_refuses_a_forwarded_request() {
+    let home_dir = home();
+    let app = router(fresh_state(home_dir.path()));
+
+    let req = Request::builder()
+        .uri("/api/v1/setup")
+        .header("x-forwarded-for", "203.0.113.7")
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(req).await.unwrap();
+    assert_ne!(
+        response.status(),
+        StatusCode::OK,
+        "a request carrying a proxy-forwarding header must not pass the \
+         anonymous setup gate even on a loopback-configured bind"
+    );
+}
+
 /// The other half: a configured host is closed even on loopback, so a page in
 /// the browser cannot rewrite a laptop's settings after setup has run.
 #[tokio::test]
