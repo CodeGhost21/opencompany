@@ -1824,7 +1824,10 @@ mod test {
                 for i in 0..25 {
                     write_config_toml(
                         &path,
-                        &[("public_url", ConfigValue::Str(format!("https://h{i}.example")))],
+                        &[(
+                            "public_url",
+                            ConfigValue::Str(format!("https://h{i}.example")),
+                        )],
                     )
                     .unwrap();
                 }
