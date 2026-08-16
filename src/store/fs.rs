@@ -564,13 +564,34 @@ pub(crate) async fn read_lines_lossy(path: &Path) -> Result<Vec<String>> {
 
 /// Atomically writes `contents` to `path` via a temp file + rename.
 pub(crate) async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    write_atomic_bytes(path, contents.as_bytes()).await
+}
+
+/// Atomically writes `bytes` to `path` via a temp file + rename.
+///
+/// The byte-taking half of [`write_atomic`], which delegates here so the
+/// tmp-then-rename dance has exactly one implementation: a second copy is how
+/// one of the two paths ends up missing the `create_dir_all`, or renaming
+/// before the write is flushed, with nothing to say the two ever disagreed.
+///
+/// What the rename buys is that **no reader ever sees a partial file** (issue
+/// #887). A plain `tokio::fs::write` opens with `O_TRUNC` and then streams: for
+/// the whole of that window the file on disk is short, and a concurrent reader
+/// gets whatever had landed. On a workspace note that surfaces two ways, and
+/// the quieter one is worse — `read_to_string` fails with `InvalidData` when the
+/// cut lands mid-codepoint, which at least produces a red step, but when the cut
+/// lands *on* a codepoint boundary the read **succeeds** and the agent grounds
+/// an answer in half a document with nothing anywhere saying so. A `rename(2)`
+/// over the same directory is atomic, so the reader sees the old file or the new
+/// one and never a prefix of either.
+pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| io_err(parent, e))?;
     }
     let tmp = path.with_extension(format!("tmp-{}", generate_id()));
-    tokio::fs::write(&tmp, contents)
+    tokio::fs::write(&tmp, bytes)
         .await
         .map_err(|e| io_err(&tmp, e))?;
     tokio::fs::rename(&tmp, path)

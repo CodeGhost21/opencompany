@@ -145,6 +145,24 @@ rendered identically:
 - **`result` — what came back.** An intrinsic OpenCompany tool's own message; a
   shape (`"12 items"`, `"4.2k characters"`) for anything else; a
   plain-language cause on a failure.
+
+That sentence was not fully retired by #411, and saying so matters more than
+the tidier telling: #411 fixed the *classified* failures, and everything the
+classifier had no arm for still landed on `Unknown` and rendered as the same
+catch-all. The workspace tools were the whole family in that gap — issue #887
+found `workspace_read` writing five distinct, actionable sentences for its five
+failure exits and the operator being shown "Something went wrong with this
+action." for all of them, which is why the underlying fault in a live turn
+could not be diagnosed at all. #887 closed that fall-through by widening
+`INTRINSIC_TOOLS` to the workspace family.
+
+Membership in that list is an audit, not a one-line edit. A tool qualifies when
+its message is OC-authored copy **and** every one of its failure exits is free
+of host paths and raw store errors — `OpenCompanyError::StoreIo` renders an
+absolute host path, and what lands in `result` is shown on the console *and*
+written into the persisted trace. #887 therefore sanitised every workspace exit
+first and added the names second; the reverse order would have published the
+host's filesystem layout into every agent turn.
 - **`failure` — why it stopped**, as a typed `TurnStepFailure`
   (`unauthorized` · `timeout` · `declined` · `blocked_by_policy` ·
   `missing_permission` · `missing_app` · `unavailable` · `failed`), projected
