@@ -675,6 +675,8 @@ mod test {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
 
         let wired = wire_event(7, &event);
@@ -715,6 +717,8 @@ mod test {
             cancelled: true,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
 
         let wired = wire_event(7, &event);
