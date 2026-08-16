@@ -288,6 +288,49 @@ fn carry_policy_override(
     (previous_seed == next_seed).then(|| held.clone())
 }
 
+/// Carries the operator's per-desk tool ceilings across a rebuild, dropping any
+/// whose desk had its seed `tools` edited in version control.
+///
+/// The same rule [`carry_policy_override`] applies to the approval gate, applied
+/// per desk to the capability gate — and it belongs here for the *stronger* of
+/// that function's two reasons. A desk ceiling decides which tools its members
+/// are wired with, so a console override outliving a seed that narrowed the desk
+/// is a runtime widening surviving the operator revoking it in version control.
+/// That is the exact failure the `[tools]`/`[policy]` seed-wins rule exists to
+/// prevent, and a per-desk grant is squarely within it rather than being "a
+/// number, not the gate" the way a spend cap is.
+///
+/// Per **desk** rather than whole-block, unlike the policy rule: desks are
+/// independent of one another, so an operator editing the finance desk's
+/// ceiling has said nothing about the creative desk's, and clearing both would
+/// revert a console action nobody's edit was about. Within a single desk the
+/// comparison is still whole-value, for the reason the policy rule gives — an
+/// operator who edited that desk's grant at all has turned their attention to
+/// it, and guessing which half of the edit was meant to win cannot silently
+/// pick right.
+///
+/// An override for a desk the seed does not declare (an operator-created desk)
+/// is always carried: version control never spoke about it, so it has no seed
+/// value that could have changed.
+fn carry_desk_tool_overrides(
+    previous_seed: &[GroupChat],
+    next_seed: &[GroupChat],
+    held: &std::collections::BTreeMap<String, Vec<String>>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let seed_tools = |desks: &[GroupChat], desk_id: &str| {
+        desks
+            .iter()
+            .find(|desk| desk.id == desk_id)
+            .map(|desk| desk.tools.clone())
+    };
+    held.iter()
+        .filter(|(desk_id, _)| {
+            seed_tools(previous_seed, desk_id) == seed_tools(next_seed, desk_id)
+        })
+        .map(|(desk_id, ceiling)| (desk_id.clone(), ceiling.clone()))
+        .collect()
+}
+
 fn merge_enabled_workflows(seed_enabled: &[String], overlays: &[OverlayWorkflow]) -> Vec<String> {
     let mut merged: Vec<String> = Vec::with_capacity(seed_enabled.len() + overlays.len());
     let mut seen = std::collections::HashSet::new();
