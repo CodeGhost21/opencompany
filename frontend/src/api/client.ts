@@ -289,7 +289,14 @@ export class OpenCompanyClient {
    * know which transport it is on, and every future caller would too.
    */
   subscribeToEvents(company: string | null | undefined, handlers: StreamHandlers): () => void {
-    return this.transport.subscribe(`${this.baseUrl}${this.scope(company)}/events`, handlers);
+    return this.transport.subscribe(
+      `${this.baseUrl}${this.scope(company)}/events`,
+      handlers,
+      // The same credential the request path carries. A stream authenticated
+      // differently from the requests beside it would load every view and then
+      // never update one.
+      this.authHeaders(),
+    );
   }
 
   /** A typed POST, for surfaces that live outside this class (e.g. auth). */
