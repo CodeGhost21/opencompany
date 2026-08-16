@@ -2519,7 +2519,10 @@ pub(crate) fn build_roster(
             deps,
             &grants,
             skill_deltas,
-            routed_context.get(&manifest_agent.id).map(Vec::as_slice).unwrap_or(&[]),
+            routed_context
+                .get(&manifest_agent.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
             is_orchestrator,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -2571,7 +2574,10 @@ pub(crate) fn build_roster(
             deps,
             &grants,
             skill_deltas,
-            routed_context.get(&manifest_agent.id).map(Vec::as_slice).unwrap_or(&[]),
+            routed_context
+                .get(&manifest_agent.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
             /* is_orchestrator */ false,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -3061,7 +3067,8 @@ description = "Builds the product."
     #[tokio::test]
     async fn roster_builds_every_manifest_agent() {
         let fx = fixture();
-        let roster = build_roster(&record(), &fx.deps, &[], &HashMap::new()).expect("roster builds");
+        let roster =
+            build_roster(&record(), &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(ids, vec!["ceo", "engineer"]);
         assert_eq!(roster[0].role, "Chief Executive");
@@ -3136,9 +3143,7 @@ description = "Builds the product."
             assert!(fx.deps.workspace.is_none(), "fixture has no store wired");
 
             let pool = HarnessPool::new();
-            let routed = pool
-                .resolve_routed_context(&record(), &fx.deps, &[])
-                .await;
+            let routed = pool.resolve_routed_context(&record(), &fx.deps, &[]).await;
             assert!(routed.is_empty(), "{routed:?}");
             assert_eq!(
                 routed_context_fingerprint(&routed),
@@ -3178,9 +3183,7 @@ description = "Builds the product."
             fx.deps.workspace = Some(ws);
 
             let pool = HarnessPool::new();
-            let routed = pool
-                .resolve_routed_context(&record(), &fx.deps, &[])
-                .await;
+            let routed = pool.resolve_routed_context(&record(), &fx.deps, &[]).await;
 
             // Both fixture agents default to the `reasoning` row, which routes
             // BRIEF — so both resolve it, and neither invents the notes that do
@@ -3261,7 +3264,8 @@ description = "Builds the product."
             checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
 
-        let roster = build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster builds with skills");
+        let roster = build_roster(&record(), &deps, &[], &HashMap::new())
+            .expect("roster builds with skills");
         assert_eq!(roster.len(), 2);
         // The scratch skill tree was materialized for the first roster agent.
         assert!(
