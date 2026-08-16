@@ -150,6 +150,74 @@ pub fn routed_documents(agent: &Agent) -> Vec<String> {
     routed
 }
 
+/// Reads the documents [`routed_documents`] selected for `agent` out of the
+/// company's workspace tree.
+///
+/// Returns `(path, body)` pairs in routing order, ready for
+/// [`context_section`](crate::company::prompt::context_section).
+///
+/// **A named document that does not exist is skipped, not an error.** These are
+/// live operator-owned notes: a company that has not written its brief yet is
+/// not a misconfigured company, and failing the roster build over one would take
+/// the whole company down for a missing file anybody could create. This is the
+/// opposite rule to
+/// [`prompt_files`](crate::company::Agent::prompt_files), which names a file in
+/// the same commit as the agent referencing it — see `runtime/agents.md` for why
+/// the two differ.
+///
+/// Async and always compiled, so it is exercised by the default-build test
+/// suite against a real store rather than only where the agent runtime links.
+/// The harness calls this before building the (synchronous) agent, the same way
+/// it resolves skill deltas ahead of time.
+pub async fn resolve_routed_documents(
+    workspace: &dyn crate::ports::WorkspaceStore,
+    company: &crate::ports::types::CompanyId,
+    agent: &Agent,
+) -> crate::Result<Vec<(String, String)>> {
+    let wanted = routed_documents(agent);
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // One tree read for the whole roster's worth of lookups, rather than a read
+    // per document: the tree is the only way to resolve a logical path to a node
+    // id, and a per-document walk would multiply that cost by the routing table.
+    let nodes = workspace.tree(company).await?;
+    let by_id: std::collections::HashMap<&str, &crate::ports::workspace::WorkspaceNode> =
+        nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+
+    let mut by_path: std::collections::HashMap<String, &str> =
+        std::collections::HashMap::with_capacity(nodes.len());
+    for node in &nodes {
+        if node.kind != crate::ports::workspace::NodeKind::File {
+            continue;
+        }
+        if let Some(path) = super::workspace_paths::render_path(node, &by_id) {
+            by_path.insert(path, node.id.as_str());
+        }
+    }
+
+    let mut resolved = Vec::with_capacity(wanted.len());
+    for path in wanted {
+        // Normalise the manifest's spelling the same way the agent tools do, so
+        // `/Brand/Voice.md` and `Brand/Voice.md` name the same note.
+        let key = match super::workspace_paths::split_logical_path(&path) {
+            Ok(segments) => segments.join("/"),
+            // A traversal-shaped or malformed entry resolves to nothing, exactly
+            // like a missing document. Refusing the boot would let one bad
+            // manifest line stop a company whose other routing is fine.
+            Err(_) => continue,
+        };
+        let Some(id) = by_path.get(&key) else {
+            continue;
+        };
+        if let Some((_, body)) = workspace.read(company, id).await? {
+            resolved.push((key, body));
+        }
+    }
+    Ok(resolved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
