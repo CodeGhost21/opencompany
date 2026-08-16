@@ -1170,6 +1170,61 @@ mod test {
         assert!(value.get("schedule").is_some());
     }
 
+    /// `Agent.context` is `Option<Vec<String>>`, not a defaulted `Vec`,
+    /// specifically so an omitted `context` key and an explicit `context = []`
+    /// stay distinguishable (docs/spec/runtime/orchestration/alignment.md's
+    /// per-tier-default rule depends on this). Pin the manifest round-trip for
+    /// both spellings so a regression to a defaulted `Vec` — which would
+    /// collapse them back to the same value — fails a test instead of shipping
+    /// silently.
+    #[test]
+    fn agent_context_distinguishes_omitted_from_explicit_empty() {
+        let omitted: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            omitted.context, None,
+            "an omitted `context` key MUST deserialize to None, not an empty vec"
+        );
+
+        let explicit_empty: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = []
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            explicit_empty.context,
+            Some(vec![]),
+            "an explicit `context = []` MUST deserialize to Some(vec![]), distinct from None"
+        );
+
+        let populated: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = ["GOAL.md", "CLAIMS.md"]
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            populated.context,
+            Some(vec!["GOAL.md".to_string(), "CLAIMS.md".to_string()])
+        );
+
+        // The distinction survives a JSON round-trip too, since the routing
+        // layer this field feeds may cross that boundary (e.g. the console).
+        let json = serde_json::to_string(&omitted).expect("serialize");
+        let back: Agent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.context, None);
+    }
+
     /// The `[plan]` section (issue #108) survives a TOML → struct → JSON → struct
     /// round-trip, and an absent section deserializes to the not-set default.
     #[test]
