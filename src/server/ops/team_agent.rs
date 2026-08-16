@@ -275,12 +275,35 @@ pub(super) fn is_orchestrator(record: &CompanyRecord, agent_id: &str) -> bool {
 /// dealing slices of `[tools].allow`, so the graph and the detail card beside
 /// it disagreed about the same agent. Sharing the constructor makes that
 /// disagreement unrepresentable rather than merely fixed once.
-pub(super) fn agent_tools(company_allow: &[String], requested: Vec<String>) -> AgentToolsDto {
-    let effective = agent_effective_grants(company_allow, &requested);
+/// Takes the `record` and `agent_id` rather than a pre-extracted allow-list,
+/// because the desk level cannot be derived from the company grant alone — it
+/// depends on which desks this teammate sits on. Passing the record is what makes
+/// "forgot to apply the desk ceiling" unrepresentable at the call site rather
+/// than a thing three callers each have to remember.
+pub(super) fn agent_tools(record: &CompanyRecord, agent_id: &str) -> AgentToolsDto {
+    let company_allow = &record.manifest.tools.allow;
+    let requested = requested_grants(record, agent_id);
+
+    // The desk ceilings this agent is under, resolved through the record's
+    // *effective* desk membership so a console-seated member is scoped exactly
+    // as a manifest one.
+    let desk_tools = record.agent_desk_tools(agent_id);
+    let desk_refs: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+
+    // Reported already narrowed by the company grant, so the console can render
+    // the three rows as a strictly shrinking chain. A raw union could show a
+    // desk "granting" something the company never allowed.
+    let desk_allow = if desk_tools.iter().all(Vec::is_empty) {
+        Vec::new()
+    } else {
+        agent_scoped_grants(company_allow, &desk_refs, &[])
+    };
+
     AgentToolsDto {
+        effective: agent_scoped_grants(company_allow, &desk_refs, &requested),
         requested,
         company_allow: company_allow.to_vec(),
-        effective,
+        desk_allow,
     }
 }
 
