@@ -123,11 +123,18 @@ The board columns become a derived view. No column is stored on a demand.
 | `done` | `accepted` |
 | `paused` | `blocked` |
 | `planning` | **removed** — becomes the first attempt of the [loop](loop.md) |
+| *(none — dropped)* | `dropped` |
 
 `planning` is the one column that does not survive. It exists today as a
 transient station firing a single tool-less model call with no retry; the
 [attempt loop](loop.md) makes that the first attempt of something that can
 retry, which is what the station was reaching for.
+
+`dropped` has no column: a withdrawn demand is removed from the board view
+entirely rather than parked in a terminal column, because it was withdrawn,
+not finished. The [verification](#verification) claim that the projection
+round-trips "every demand state" means every state that is still on the
+board — `dropped` is the one state that is, by definition, off it.
 
 ---
 
