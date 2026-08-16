@@ -51,9 +51,10 @@ winning:
 
 1. `OPENCOMPANY_AUTH_MODE`
 2. `auth_mode` in `config.toml` — what the [first-run setup flow](setup.md)
-   writes when an operator picks a sign-in mode. Because the mode is resolved
-   once, at build, that choice is staged: the flow says so, and the mode takes
-   effect at the next restart.
+   writes when an operator picks a sign-in mode. The flow applies the choice
+   live by rebuilding registered companies when a rebuilder is available. If
+   rebuilding cannot apply the change to a given company, the response reports
+   that it needs a restart.
 3. the company's `[users].mode`
 4. `email`
 
