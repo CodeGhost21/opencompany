@@ -1943,9 +1943,16 @@ async fn fix_from_run(
         Ok(DescriptionDraftOutcome::Graph {
             summary,
             spec,
-            notes,
+            mut notes,
         }) => {
             let (ok, advisories) = workflow_readiness(&spec);
+            if !dropped_error_policy_nodes.is_empty() {
+                notes.push(format!(
+                    "on_error/retry on {} — this correction does not carry per-node error \
+                     policy through; reapply it after reviewing if the node is still there.",
+                    dropped_error_policy_nodes.join(", ")
+                ));
+            }
             Ok(Json(FixFromRunResponse::Fixed {
                 automatable: true,
                 summary,
