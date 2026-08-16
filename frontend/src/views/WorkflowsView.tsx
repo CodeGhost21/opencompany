@@ -1071,7 +1071,10 @@ export function WorkflowsView({
           e instanceof Error ? e.message : "Couldn't reach the workflow copilot.",
         );
       } finally {
-        setFixingRunSeq(null);
+        // Only the run that set the slot may clear it — if a second Fix started
+        // on another row while this one was in flight, this `finally` firing
+        // first must not re-enable that still-running row's button.
+        setFixingRunSeq((current) => (current === run.seq ? null : current));
       }
     },
     [client, company],
