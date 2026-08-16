@@ -36,6 +36,12 @@ pub mod mcp;
 // primitive + `uuid`/`base64`/`url`, so it links only under the `mcp` feature.
 #[cfg(feature = "mcp")]
 pub mod mcp_oauth;
+// How an agent's system prompt is composed from its manifest definition and the
+// documents routed to it. Always compiled and runtime-free: the harness that
+// spends the prompt is behind `openhuman`, but the composition and budget-clamp
+// rules are ordinary text handling with real edge cases, and they are worth
+// testing in the default build rather than only where the agent runtime links.
+pub mod prompt;
 pub mod runtime;
 mod skill_file;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
