@@ -425,6 +425,71 @@ fn the_outcome_resolves_graph_versus_not_automatable() {
     assert!(matches!(empty, BuildOutcome::NotAutomatable(r) if !r.is_empty()));
 }
 
+/// Every way the copilot turn can end WITHOUT an accepted proposal maps to a
+/// distinct, non-empty operator reason. Exercised on the pure reason fn so the
+/// wording is pinned without constructing a `tokio` `Elapsed` or driving a real
+/// timeout — a regression in any arm's message fails here.
+#[test]
+fn the_not_automatable_reason_covers_every_turn_ending() {
+    // Timed out before proposing.
+    let timed = not_automatable_reason(&TurnEnd::TimedOut, &[]);
+    assert!(timed.contains("ran out of time"), "{timed}");
+
+    // The agent turn itself errored — the failure is carried through verbatim.
+    let errored =
+        not_automatable_reason(&TurnEnd::Errored("model backend exploded".to_string()), &[]);
+    assert!(errored.contains("could not complete"), "{errored}");
+    assert!(errored.contains("model backend exploded"), "{errored}");
+
+    // Hit the tool budget — names the step budget and carries the last gate tail.
+    let capped = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: "still trying".to_string(),
+            hit_cap: true,
+        },
+        &["binding `=input.foo` is unresolved".to_string()],
+    );
+    assert!(capped.contains("step budget"), "{capped}");
+    assert!(
+        capped.contains("binding `=input.foo` is unresolved"),
+        "{capped}"
+    );
+
+    // Gave up after a failing check/propose — names the gate sentences.
+    let gated = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: String::new(),
+            hit_cap: false,
+        },
+        &["the graph has no trigger node".to_string()],
+    );
+    assert!(
+        gated.contains("could not be drafted into one that would be accepted"),
+        "{gated}"
+    );
+    assert!(gated.contains("the graph has no trigger node"), "{gated}");
+
+    // Finished cleanly without proposing — the agent's own words are the reason.
+    let declined = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: "this is a one-off ask, not a recurring workflow".to_string(),
+            hit_cap: false,
+        },
+        &[],
+    );
+    assert_eq!(declined, "this is a one-off ask, not a recurring workflow");
+
+    // Finished silently — a truthful default rather than an empty reason.
+    let silent = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: String::new(),
+            hit_cap: false,
+        },
+        &[],
+    );
+    assert!(silent.contains("better done once"), "{silent}");
+}
+
 /// The host assigns a safe, unique id — slugged from the name, deduped, and
 /// never the model's — so the model can never doom a proposal with a colliding
 /// or unsafe stem.
