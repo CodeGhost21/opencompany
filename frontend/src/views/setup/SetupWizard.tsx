@@ -158,6 +158,10 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
 
   const submit = useCallback(async () => {
     if (!status) return;
+    // Mirrors the "Finish setup" button's `disabled`: a host with no
+    // companies and no template chosen must not complete setup into a
+    // configured dead end (see `noCompanyChosen` above the button).
+    if (status.companies.length === 0 && template === null) return;
     setSaving(true);
     setSaveError(null);
     try {
