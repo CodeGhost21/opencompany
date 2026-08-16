@@ -498,7 +498,14 @@ mod tests {
         async fn a_nested_document_resolves_by_its_logical_path() {
             let (_dir, ws, company) = store().await;
             let brand = folder(&ws, &company, "Brand").await;
-            file(&ws, &company, Some(&brand), "Voice.md", "Plain, never loud.").await;
+            file(
+                &ws,
+                &company,
+                Some(&brand),
+                "Voice.md",
+                "Plain, never loud.",
+            )
+            .await;
 
             let mut a = agent(None);
             a.context = Some(vec!["Brand/Voice.md".into()]);
@@ -508,7 +515,10 @@ mod tests {
                 .expect("resolves");
             assert_eq!(
                 resolved,
-                vec![("Brand/Voice.md".to_string(), "Plain, never loud.".to_string())]
+                vec![(
+                    "Brand/Voice.md".to_string(),
+                    "Plain, never loud.".to_string()
+                )]
             );
         }
 
