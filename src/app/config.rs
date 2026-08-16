@@ -466,6 +466,24 @@ pub enum ConfigValue {
 /// meant to read and uncomment (`docs/spec/runtime/config.md`), and a
 /// round-trip through the struct would silently delete it.
 ///
+/// Serializes every [`write_config_toml`] call in this process. See that
+/// function's doc for why a single process-wide lock, rather than one keyed
+/// per directory, is the right shape here.
+static CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A temp-file name no two calls in this process can collide on, and that two
+/// processes racing the same directory are very unlikely to either.
+fn unique_tmp_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    format!("{CONFIG_FILE}.{}.{nanos}.{call}.tmp", std::process::id())
+}
+
 /// The write is atomic: the document is rendered to a uniquely-named temporary
 /// file in the same directory and then `rename`d over the target, so a crash
 /// mid-write cannot leave a half-written config that the next boot refuses to
