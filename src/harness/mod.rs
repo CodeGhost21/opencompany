@@ -1343,22 +1343,24 @@ impl HarnessPool {
         &self,
         company: &CompanyRecord,
         deps: &HarnessDeps,
-    ) -> (
-        Vec<OverlayAgent>,
-        Vec<BudgetOverride>,
-        Option<PolicyOverride>,
-    ) {
+    ) -> EffectiveOverlay {
         match deps.store.load(&company.id).await {
-            Ok(Some(record)) => (
-                record.overlay_agents,
-                record.overlay_budgets,
-                record.overlay_policy,
-            ),
-            _ => (
-                company.overlay_agents.clone(),
-                company.overlay_budgets.clone(),
-                company.overlay_policy.clone(),
-            ),
+            Ok(Some(record)) => EffectiveOverlay {
+                agents: record.overlay_agents,
+                budgets: record.overlay_budgets,
+                policy: record.overlay_policy,
+                desks: record.overlay_desks,
+                desk_members: record.overlay_desk_members,
+                desk_tools: record.overlay_desk_tools,
+            },
+            _ => EffectiveOverlay {
+                agents: company.overlay_agents.clone(),
+                budgets: company.overlay_budgets.clone(),
+                policy: company.overlay_policy.clone(),
+                desks: company.overlay_desks.clone(),
+                desk_members: company.overlay_desk_members.clone(),
+                desk_tools: company.overlay_desk_tools.clone(),
+            },
         }
     }
 
