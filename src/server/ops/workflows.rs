@@ -3471,6 +3471,152 @@ mod tests {
             assert_eq!(resolve_fix_error(None, Some("   ".to_string())), None);
         }
 
+        /// Journals a `WorkflowRunFinished` naming a `run_id`, the shape
+        /// `journaled_run_failure` scans for — distinct from `journal_run` above,
+        /// which always journals `run_id: None` for the delivery-history tests.
+        #[cfg(feature = "openhuman")]
+        async fn journal_run_with_id(
+            state: &AppState,
+            id: &CompanyId,
+            workflow_id: &str,
+            run_id: &str,
+            error: &str,
+        ) {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: workflow_id.to_string(),
+                        scheduled: false,
+                        run_id: Some(run_id.to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: Vec::new(),
+                        error: Some(error.to_string()),
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
+        /// Issue #840 (PR-3), tinysweeper finding: the only prior server test for
+        /// `fix_from_run` exercised the builder-gap path (404/409, above). This is
+        /// the core of the feature — a valid request with the `openhuman` feature
+        /// on, asserting a 200 with `automatable: true`, the corrected workflow,
+        /// and its readiness — proven at the HTTP boundary rather than only at the
+        /// `fix_workflow_from_failure` unit layer (`workflow_build::test` already
+        /// covers identity-preservation there).
+        ///
+        /// Reuses `workflow_build::test`'s scripted-model + `HarnessDeps` fixture
+        /// (widened to `pub(crate)` for this) rather than hand-rolling a second
+        /// `HarnessModel`/`HarnessDeps` here — that struct has ~30 fields and
+        /// duplicating it would drift silently the next time one is added.
+        ///
+        /// A copilot turn nests the provider/tool loop deep enough to overflow
+        /// tokio's default 2 MiB worker-thread stack — the same exposure
+        /// `openhuman_core::core::runtime::AGENT_WORKER_STACK_BYTES`'s doc comment
+        /// names for production hosts. Every other agent-turn test in this module
+        /// (and `workflow_build::test`) is plain `#[tokio::test]` and relies on
+        /// CI setting `RUST_MIN_STACK=16777216` for this job
+        /// (`.github/workflows/ci.yml`'s `Rust (openhuman, tinycortex)` lane) —
+        /// this one follows the same convention rather than wrapping itself in a
+        /// custom-stack thread, which no sibling test does. Run locally with
+        /// `RUST_MIN_STACK=16777216 cargo test …` if it overflows outside CI.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn fix_from_run_returns_the_corrected_graph_on_success() {
+            use crate::harness::provider::HarnessModel;
+            use crate::harness::workflow_build::WorkflowBuilder;
+            use crate::harness::workflow_build::test::{
+                NativeCopilotModel, NativeStep, agent_deps, propose_step,
+            };
+
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            // Wire a builder AND the harness deps `run_copilot` builds its agent
+            // from — the route's own capability gate only checks the former, but
+            // the copilot needs both (issue #840, PR-2's `HarnessDeps` wiring).
+            let model = NativeCopilotModel::scripting(vec![
+                propose_step(
+                    "dropped the unwired step",
+                    serde_json::json!({
+                        "name": "Greeter",
+                        "nodes": [
+                            { "id": "start", "kind": "trigger", "name": "Start" },
+                            { "id": "done", "kind": "output", "name": "Report" }
+                        ],
+                        "edges": [ { "from": "start", "to": "done" } ]
+                    }),
+                ),
+                NativeStep::done("Corrected the workflow."),
+            ]);
+            {
+                let mut runtime =
+                    std::sync::Arc::into_inner(state.registry().remove(&id).expect("registered"))
+                        .expect("uniquely held in this test");
+                let deps = agent_deps(&runtime, model.clone() as std::sync::Arc<dyn HarnessModel>);
+                runtime.set_builder(std::sync::Arc::new(WorkflowBuilder::new(
+                    model as std::sync::Arc<dyn HarnessModel>,
+                    "test-model",
+                )));
+                runtime.set_workflow_harness_deps(deps);
+                state
+                    .registry()
+                    .insert(id.clone(), std::sync::Arc::new(runtime));
+            }
+
+            // Seed the workflow the run failed on (hosted mode has no source
+            // dir, so it exists only as an overlay created via the API).
+            let created = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows",
+                    Some(create_body()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+
+            journal_run_with_id(
+                &state,
+                &id,
+                "greeter",
+                "run-1",
+                "the tool `web_search` is not wired on this deployment",
+            )
+            .await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/greeter/fix-from-run",
+                    Some(serde_json::json!({ "runId": "run-1" })),
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = json_body(response).await;
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+            assert_eq!(body["automatable"], true, "body: {body}");
+            assert_eq!(
+                body["workflow"]["id"], "greeter",
+                "the fix keeps the workflow's id"
+            );
+            assert!(
+                body["workflow"]["nodes"]
+                    .as_array()
+                    .is_some_and(|n| !n.is_empty()),
+                "body: {body}"
+            );
+            assert!(body["readiness"]["ok"].is_boolean(), "body: {body}");
+        }
+
         /// Issue #783: the per-workflow copilot's tool-grounding read answers
         /// `200 {"slugs":[…]}` on **both** scope forms — which also proves the
         /// static prefix is wired ahead of the dynamic `/workflows/{wid}` (a
