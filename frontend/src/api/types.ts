@@ -969,8 +969,35 @@ export interface CapabilityStatusDto {
   composioGranted?: boolean;
   /** Whether the `composio` feature is compiled into this build at all. */
   composioInBuild?: boolean;
-  /** Whether a per-tenant Composio token is stored — never the token itself. */
+  /**
+   * Whether a per-tenant Composio **BYO override** token is stored under
+   * `composio/token` — never the token itself.
+   *
+   * Narrow on purpose, and **not** "can this company reach Composio" (issue
+   * #886). The BYO slot is the first of three credential tiers; on a hosted
+   * tenant nobody pastes one and the instance's platform identity answers, so
+   * this reads `false` for companies whose Composio tools are wired and
+   * working. Read `composioCredentialSource` for the resolution verdict.
+   */
   composioTokenConfigured?: boolean;
+  /**
+   * Which tier this company's Composio credential actually resolves from
+   * (issue #886) — the same three-tier resolution the toolbelt gates on, and
+   * the same `credentialSource` the Composio status route reports:
+   *
+   * * `attested` — the instance's platform identity (nothing stored here);
+   * * `company` — the company's own TinyHumans key;
+   * * `static` — a pasted BYO token, or a static instance key;
+   * * `none` — nothing resolves, so no tools are wired.
+   *
+   * A **resolution** verdict, not a liveness one: `attested` says a bearer can
+   * be obtained, not that Composio answered or that any account is connected.
+   *
+   * `undefined` is **unknown** — either an older host that does not send the
+   * field, or one whose secret store could not be read this request. It must
+   * never be rendered as `none`: that is the #886 lie in the other direction.
+   */
+  composioCredentialSource?: "attested" | "company" | "static" | "none";
   /**
    * Metered web search (issue #238): whether the company **explicitly** grants
    * the `search` namespace (a `*` wildcard does not count). Every call is a
