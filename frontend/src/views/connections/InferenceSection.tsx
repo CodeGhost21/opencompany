@@ -388,13 +388,39 @@ export function InferenceSection({
                     data-testid="inference-restart-required"
                   >
                     <RotateCcw className="mt-px size-3.5 shrink-0" />
-                    <span>
-                      <span className="font-medium">Restart required.</span> This company started
-                      with no inference source, so it is running the offline echo brain and its
-                      scheduled workflows cannot fire. The brain is chosen at startup — this
-                      configuration is saved, but agents keep echoing until the company is
-                      restarted.
-                    </span>
+                    <div className="space-y-2">
+                      <span>
+                        <span className="font-medium">Restart required.</span> This company started
+                        with no inference source, so it is running the offline echo brain and its
+                        scheduled workflows cannot fire. The brain is chosen at startup — this
+                        configuration is saved, but agents keep echoing until the company is
+                        restarted.
+                      </span>
+                      {/* The action, not just the diagnosis. Telling a hosted
+                          operator to "restart the company" names something they
+                          have no way to do — the container is the unit of
+                          restart and the control plane has no button for it —
+                          so this rebuilds the runtime in place instead (#290).
+                          Only rendered for an admin, matching the route's own
+                          authority check, so a member is not shown a control
+                          that can only 403. */}
+                      {canManage && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null}
+                          data-testid="inference-restart-now"
+                          onClick={() => void restartNow()}
+                        >
+                          {busy === "restart" ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="size-3.5" />
+                          )}
+                          Restart now
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
                 {modelRows.length > 0 && (
