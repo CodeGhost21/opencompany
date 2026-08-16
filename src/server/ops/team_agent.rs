@@ -660,10 +660,7 @@ async fn detail(
         },
         tier: declared_tier(record, agent_id),
         is_orchestrator: is_orchestrator(record, agent_id),
-        tools: agent_tools(
-            &record.manifest.tools.allow,
-            requested_grants(record, agent_id),
-        ),
+        tools: agent_tools(record, agent_id),
         desks: desks_for(record, agent_id),
         inbox_enabled,
         budget_usd_daily: cap,

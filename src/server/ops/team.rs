@@ -333,10 +333,7 @@ fn member_row(
         // two arms, and the arm it dropped would be invisible on screen.
         tier: super::team_agent::declared_tier(record, agent_id),
         is_orchestrator: super::team_agent::is_orchestrator(record, agent_id),
-        tools: super::team_agent::agent_tools(
-            &record.manifest.tools.allow,
-            super::team_agent::requested_grants(record, agent_id),
-        ),
+        tools: super::team_agent::agent_tools(record, agent_id),
         desks: super::team_agent::desks_for(record, agent_id),
         inbox_enabled,
         budget_usd_daily: cap,
@@ -475,10 +472,7 @@ async fn add_member(
     // (issues #601, #643).
     let tier = super::team_agent::declared_tier(&record, &agent.id);
     let is_orchestrator = super::team_agent::is_orchestrator(&record, &agent.id);
-    let tools = super::team_agent::agent_tools(
-        &record.manifest.tools.allow,
-        super::team_agent::requested_grants(&record, &agent.id),
-    );
+    let tools = super::team_agent::agent_tools(&record, &agent.id);
     let desks = super::team_agent::desks_for(&record, &agent.id);
     Ok(Json(TeamMemberDto {
         id: agent.id,
