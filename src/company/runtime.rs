@@ -2141,6 +2141,65 @@ impl std::fmt::Debug for CompanyRuntime {
 mod tests {
     use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
 
+    /// Issue #880: which parked approvals name a workflow run, and which must
+    /// not.
+    ///
+    /// The discrimination is the whole content of the change, because
+    /// `Effect::run_id` carries two id spaces — issue #242's task attempt and
+    /// the workflow run — and `generate_id` is only process-locally unique, so
+    /// the value cannot be inspected to tell them apart. Getting this wrong in
+    /// the permissive direction would print a task-attempt id on an approvals
+    /// card as though it were a workflow run.
+    #[test]
+    fn only_an_unlinked_park_with_a_run_id_names_a_workflow_run() {
+        use crate::ports::types::{ApprovalId, Effect, EffectGroup};
+        use crate::runtime::journal::{PendingApproval, TaskLink};
+
+        let parked = |task: Option<TaskLink>, run_id: Option<&str>| PendingApproval {
+            id: ApprovalId::new("appr-1"),
+            effect: Effect {
+                kind: "publish_artifact".to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({}),
+                agent: Some("ceo".to_string()),
+                run_id: run_id.map(str::to_string),
+            },
+            at_millis: 1,
+            task,
+            thread: None,
+            batch: None,
+        };
+
+        // A workflow park: `park_and_journal` records it explicitly unlinked
+        // (#333) and the run stamps its id.
+        assert_eq!(
+            super::workflow_run_of(&parked(Some(TaskLink::Unlinked), Some("run-1"))),
+            Some("run-1".to_string())
+        );
+        // A board task's attempt: same field, different id space. Must NOT be
+        // reported as a workflow run.
+        assert_eq!(
+            super::workflow_run_of(&parked(
+                Some(TaskLink::Task {
+                    id: "card-1".to_string()
+                }),
+                Some("attempt-1")
+            )),
+            None
+        );
+        // A chat turn: unlinked, but nothing stamped a run onto it.
+        assert_eq!(
+            super::workflow_run_of(&parked(Some(TaskLink::Unlinked), None)),
+            None
+        );
+        // A pre-#333 line records no link at all, so the park site is unknown.
+        // Conservative rather than guessing — the same fallback rule #333 set.
+        assert_eq!(super::workflow_run_of(&parked(None, Some("run-1"))), None);
+    }
+
     #[cfg(feature = "openhuman")]
     use std::sync::{Arc, Mutex};
 

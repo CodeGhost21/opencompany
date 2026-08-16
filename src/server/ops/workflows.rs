@@ -2718,6 +2718,114 @@ mod tests {
         );
     }
 
+    /// Issues #881 / #880: the synchronous run response carries the blocked
+    /// nodes and the parked-approval receipts, in the same camelCase shape the
+    /// journal event and the history route use.
+    ///
+    /// The operator who pressed Run is the reader these exist for: before this,
+    /// a pipeline whose first step had its `publish_artifact` parked came back
+    /// with every node green and an empty body, and there was nothing anywhere
+    /// in the response that said otherwise.
+    ///
+    /// Omission matters as much, for the same reason it does on `board`: a run
+    /// that blocked on nobody sends neither key, so every existing caller's body
+    /// is byte-unchanged.
+    #[test]
+    fn the_run_response_carries_blocked_nodes_and_parked_approvals() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: Value::Null,
+            pending_approvals: vec!["spec".into()],
+            deliveries: Vec::new(),
+            run_id: "run-1".into(),
+            cancelled: false,
+            nodes: vec![WorkflowRunNode {
+                node_id: "spec".into(),
+                status: WorkflowNodeStatus::Blocked,
+                elapsed_ms: 42,
+            }],
+            dry_run: false,
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "spec".into(),
+                tools: vec!["publish_artifact".into()],
+                approval_ids: vec!["appr-1".into()],
+                unparkable: 0,
+            }],
+            approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                node_id: Some("spec".into()),
+                tool: Some("publish_artifact".into()),
+                outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                approval_id: Some("appr-1".into()),
+            }],
+        })
+        .expect("serialize");
+        assert_eq!(json["nodes"][0]["status"], "blocked");
+        assert_eq!(json["blockedNodes"][0]["nodeId"], "spec");
+        assert_eq!(json["blockedNodes"][0]["tools"][0], "publish_artifact");
+        assert_eq!(json["blockedNodes"][0]["approvalIds"][0], "appr-1");
+        assert!(
+            json["blockedNodes"][0].get("unparkable").is_none(),
+            "the ordinary case — every call was parked — stays off the wire: {json}"
+        );
+        assert_eq!(json["approvals"][0]["outcome"], "parked");
+        assert_eq!(json["approvals"][0]["approvalId"], "appr-1");
+
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-2".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        })
+        .expect("serialize");
+        assert!(json.get("blockedNodes").is_none(), "{json}");
+        assert!(json.get("approvals").is_none(), "{json}");
+    }
+
+    /// A park that could NOT happen is on the wire as loudly as one that did
+    /// (issue #880).
+    ///
+    /// This is the arm whose only previous record was a `tracing::error!` — the
+    /// operator will never be asked about the call, so a run that hides it is
+    /// telling them the least when it matters most.
+    #[test]
+    fn a_failed_park_is_reported_rather_than_only_logged() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: Value::Null,
+            pending_approvals: vec!["spec".into()],
+            deliveries: Vec::new(),
+            run_id: "run-3".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "spec".into(),
+                tools: vec!["publish_artifact".into()],
+                approval_ids: Vec::new(),
+                unparkable: 2,
+            }],
+            approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                node_id: Some("spec".into()),
+                tool: Some("publish_artifact".into()),
+                outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                approval_id: None,
+            }],
+        })
+        .expect("serialize");
+        assert_eq!(json["blockedNodes"][0]["unparkable"], 2);
+        assert_eq!(json["approvals"][0]["outcome"], "parkFailed");
+        assert!(
+            json["approvals"][0].get("approvalId").is_none(),
+            "there is no card, so naming one would point at nothing: {json}"
+        );
+    }
+
     /// The run response carries `deliveries` in camelCase — this is the ONLY
     /// place an operator learns a report was not delivered, since a delivery
     /// failure never fails the run.
@@ -3693,6 +3801,86 @@ mod tests {
             assert_eq!(nodes[0]["elapsedMs"], 42);
             assert_eq!(nodes[1]["nodeId"], "send");
             assert_eq!(nodes[1]["status"], "error");
+        }
+
+        /// Issues #881 / #880 at the HTTP boundary: a blocked run reads as
+        /// blocked in the history, and **its node chip is relabelled too**.
+        ///
+        /// The node row is journaled live, node by node, long before anything
+        /// knows the run stopped for an approval rather than a fault — so the
+        /// durable `WorkflowNodeFinished` says `error`, honestly, in the
+        /// engine's own terms. Without the read-side relabel the panel would
+        /// show a run that says "blocked" beside a node chip that says
+        /// "failed", and an operator would go hunting for a bug that is not
+        /// there.
+        #[tokio::test]
+        async fn run_history_reports_a_blocked_node_and_the_approvals_it_parked() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-b", false).await;
+            // The engine's own account: the capability returned an error, so
+            // the observer reported `error`.
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-b",
+                "spec",
+                WorkflowNodeStatus::Error,
+            )
+            .await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "digest".to_string(),
+                        scheduled: false,
+                        run_id: Some("run-b".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["spec".to_string()],
+                        // The whole point: a blocked run carries NO error.
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                            node_id: "spec".to_string(),
+                            tools: vec!["publish_artifact".to_string()],
+                            approval_ids: vec!["appr-1".to_string()],
+                            unparkable: 0,
+                        }],
+                        approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                            node_id: Some("spec".to_string()),
+                            tool: Some("publish_artifact".to_string()),
+                            outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                            approval_id: Some("appr-1".to_string()),
+                        }],
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1, "{body}");
+            assert!(
+                rows[0].get("error").is_none(),
+                "a run waiting on a person did not fail: {body}"
+            );
+            assert_eq!(rows[0]["blockedNodes"][0]["nodeId"], "spec");
+            assert_eq!(rows[0]["approvals"][0]["outcome"], "parked");
+            assert_eq!(
+                rows[0]["nodes"][0]["status"], "blocked",
+                "the node chip must agree with the run's terminal reading: {body}"
+            );
         }
 
         /// A run whose host died leaves a start with no finish, and it folds as

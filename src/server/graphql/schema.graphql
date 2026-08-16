@@ -44,7 +44,7 @@ type Approval {
 	contentsHidden: Boolean!
 	"""
 	The workflow run waiting on this approval, when one is (issue #880).
-
+	
 	Structural — a run id, nothing more — and it is what lets a reader join
 	a card on the Approvals page back to the run that opened it. Null for
 	every park with no workflow behind it (a chat turn, a scheduler tick, a

@@ -5314,6 +5314,63 @@ mod test {
         }
     }
 
+    /// A `WorkflowRunFinished` line written before #881 / #880 still replays.
+    ///
+    /// **This is not a nicety.** The event is folded at boot, so a new field
+    /// without `#[serde(default)]` would make every pre-existing journal line
+    /// fail to parse — and the failure mode is a company silently losing its
+    /// whole run history, not a compile error. Pinned against a hand-written
+    /// legacy payload rather than a round-trip, because a round-trip can only
+    /// ever prove the new shape agrees with itself.
+    #[test]
+    fn a_pre_881_run_finished_line_still_replays() {
+        let legacy = serde_json::json!({
+            "kind": "WorkflowRunFinished",
+            "workflow_id": "digest",
+            "scheduled": true,
+            "run_id": "run-1",
+            "pending_approvals": ["review"],
+            "cancelled": false
+        });
+        let event: CompanyEvent =
+            serde_json::from_value(legacy).expect("a pre-#881 journal line must still parse");
+        let CompanyEvent::WorkflowRunFinished {
+            blocked_nodes,
+            approvals,
+            pending_approvals,
+            ..
+        } = &event
+        else {
+            panic!("expected a WorkflowRunFinished, got {event:?}");
+        };
+        assert!(blocked_nodes.is_empty());
+        assert!(approvals.is_empty());
+        assert_eq!(pending_approvals, &vec!["review".to_string()]);
+    }
+
+    /// A run that blocked on nobody serializes byte-for-byte as it did before
+    /// #881 / #880 — which is nearly every run, so this is what keeps the
+    /// journal from growing two empty arrays per line.
+    #[test]
+    fn a_run_that_blocked_on_nobody_adds_no_keys() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: false,
+            run_id: Some("run-1".to_string()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize");
+        assert!(json.get("blocked_nodes").is_none(), "{json}");
+        assert!(json.get("approvals").is_none(), "{json}");
+    }
+
     /// Every field on both #371 variants is required, and that is the point:
     /// the correlation id is what groups a run's nodes with its outcome, so a
     /// line without one would be unfoldable. Nothing is `skip_serializing_if`,

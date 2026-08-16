@@ -5643,6 +5643,67 @@ mod test {
         assert_eq!(v["deliveries"].as_array().unwrap().len(), 0);
     }
 
+    /// Issues #881 / #880: the blocked arm reaches the console live.
+    ///
+    /// Without it a console watching a run settle would be told it finished
+    /// cleanly — no error, not cancelled, nothing delivered — and then the
+    /// history it reloads a moment later would say the run blocked. The two
+    /// surfaces read the same journal event, so they must project the same
+    /// facts.
+    #[test]
+    fn projects_workflow_run_finished_with_its_blocked_nodes_and_parked_approvals() {
+        let v = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: Some("run-b".into()),
+            deliveries: Vec::new(),
+            pending_approvals: vec!["spec".into()],
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "spec".into(),
+                tools: vec!["publish_artifact".into()],
+                approval_ids: vec!["appr-1".into()],
+                unparkable: 0,
+            }],
+            approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                node_id: Some("spec".into()),
+                tool: Some("publish_artifact".into()),
+                outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                approval_id: Some("appr-1".into()),
+            }],
+        }))
+        .expect("workflow_run_finished is an attention signal");
+        assert_eq!(v["blockedNodes"][0]["nodeId"], "spec");
+        assert_eq!(v["blockedNodes"][0]["tools"][0], "publish_artifact");
+        assert_eq!(v["approvals"][0]["outcome"], "parked");
+        assert!(
+            v.get("error").is_none(),
+            "a run waiting on a person did not fail: {v}"
+        );
+
+        // The presence-check discipline: a run that blocked on nobody sends
+        // neither key, so an existing frame is byte-unchanged.
+        let clean = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: None,
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        }))
+        .expect("projects");
+        assert!(clean.get("blockedNodes").is_none(), "{clean}");
+        assert!(clean.get("approvals").is_none(), "{clean}");
+    }
+
     /// Issue #371: the live per-node trail. Both arms project, both carry the
     /// run id that ties them to the run's settle-frame, and — the point — the
     /// node arm carries a status and a duration and nothing else.
