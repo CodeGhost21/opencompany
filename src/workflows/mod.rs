@@ -19,6 +19,11 @@
 /// downstream agent node's turn (an `agent -> agent` pipeline passes data).
 #[cfg(test)]
 mod agent_upstream_input_test;
+/// Issues #881 / #880: end-to-end proof that a node whose deliverable was
+/// parked for approval reports `blocked`, stops its branch instead of handing
+/// its apology downstream, and that the run says what it parked.
+#[cfg(test)]
+mod blocked_node_test;
 /// Issue #661 (M5): end-to-end proof that a workflow node can open and re-own a
 /// board card, and that everything it may not do stays refused.
 #[cfg(test)]

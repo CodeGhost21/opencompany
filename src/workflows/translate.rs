@@ -451,7 +451,10 @@ mod tests {
                 "agent_ref": "brand_strategist",
                 "prompt": "Turns the brief into an angle + outline.",
                 // Issue #782: the upstream-output binding every agent node carries.
-                "input": "=items"
+                "input": "=items",
+                // Issue #881: the node's own id, so the agent capability can say
+                // WHICH node blocked when its turn parks an approval.
+                "node_id": "strategist"
             })
         );
         // The gate carries its boolean discriminant (issue #661): a condition
@@ -471,7 +474,9 @@ mod tests {
                 "agent_ref": "copywriter",
                 "prompt": "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off.",
                 // Issue #782: the upstream-output binding every agent node carries.
-                "input": "=items"
+                "input": "=items",
+                // Issue #881: as above.
+                "node_id": "publish"
             })
         );
         assert_eq!(config("done"), json!({}));

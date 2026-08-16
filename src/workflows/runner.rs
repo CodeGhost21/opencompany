@@ -952,7 +952,7 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
 /// approvals", never "waiting on N" — because a settle-time count of what is
 /// still outstanding is stale the moment the operator approves one, while a
 /// record of what this run parked is true forever.
-fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> String {
+pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> String {
     let tools = if blocked.tools.is_empty() {
         "a tool call".to_string()
     } else {

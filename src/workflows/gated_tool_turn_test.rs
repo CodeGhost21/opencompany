@@ -92,17 +92,23 @@ pub(super) enum Turn {
 }
 
 /// A scripted OpenAI-compatible `/chat/completions` endpoint.
-struct Script {
+pub(super) struct Script {
     turns: Mutex<Vec<Turn>>,
     /// Every request body the model was sent, in order (issue #453). The tool
     /// results of a turn come back to the model inside the *next* request, so
-    /// this is where a test reads what a refused tool actually told it.
-    seen: Mutex<Vec<Value>>,
+    /// this is where a test reads what a refused tool actually told it — and,
+    /// since #881, what a node downstream of a blocked one was never sent.
+    pub(super) seen: Mutex<Vec<Value>>,
 }
 
 /// Serve the script on loopback and return its base URL, handing back the
 /// shared script so a test can read what the model was sent.
-async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
+///
+/// `pub(super)` since #881: proving a blocked node's branch did **not** continue
+/// means reading what the model was never asked, so the sibling
+/// [`blocked_node_test`](crate::workflows::blocked_node_test) needs the recorder
+/// rather than only the URL.
+pub(super) async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
     let script = Arc::new(Script {
         turns: Mutex::new(turns),
         seen: Mutex::new(Vec::new()),
@@ -301,7 +307,13 @@ async fn run_gated(dir: &std::path::Path) -> (Arc<RuntimeJournal>, HarnessDeps, 
         &ctx,
     )
     .await
-    .expect("the run completes — a gated tool refuses the call, it does not fail the node");
+    // Issue #881 changed what "completes" means here: the node now BLOCKS, so
+    // the run settles short of its output node. It still settles `Ok` — a node
+    // waiting on a person is not a failed one — which is what this `expect`
+    // pins. The parking claims below are unaffected: blocking the node must not
+    // cost the operator the card, and `blocked_node_test` asserts the same
+    // thing from the other side.
+    .expect("the run settles — a gated tool blocks the node, it does not fail the run");
     (journal, deps, run_id)
 }
 
@@ -422,7 +434,8 @@ async fn a_workflow_node_is_refused_in_turn_instead_of_having_its_verdict_destro
     )
     .await
     .expect(
-        "the run completes — a refused board action refuses the call, it does not fail the node",
+        "the run completes — a refused board action refuses the call, it does not fail the node. \
+         It is NOT a #881 block either: a board refusal parks no approval, so the node stays ok",
     );
 
     // The model was told, in its own turn, that the card did NOT move.
