@@ -285,14 +285,23 @@ impl Tool for CheckWorkflowTool {
         // workflow's saved id, so `check_workflow` validates the graph the host
         // WOULD build — a check that minted a fresh deduped id could flag a
         // duplicate the propose pass will not hit, misleading the agent.
-        spec.id = match self.ctx.fixing.as_ref() {
-            Some(fix) => fix.id.clone(),
-            None => safe_workflow_id(
-                &spec.name,
-                &self.ctx.description,
-                &self.ctx.company.existing_ids,
-            ),
-        };
+        match self.ctx.fixing.as_ref() {
+            // Mirror the propose path's fixing branch exactly: the host pins BOTH
+            // id and name to the failing workflow's, so check must validate against
+            // the same name the host will keep — otherwise it validates a
+            // model-supplied name the propose pass overwrites, a false positive.
+            Some(fix) => {
+                spec.id = fix.id.clone();
+                spec.name = fix.name.clone();
+            }
+            None => {
+                spec.id = safe_workflow_id(
+                    &spec.name,
+                    &self.ctx.description,
+                    &self.ctx.company.existing_ids,
+                );
+            }
+        }
 
         let mut problems: Vec<String> = Vec::new();
 
