@@ -246,6 +246,42 @@ pub fn grants_workspace_write_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "workspace" || grant == "workspace.write")
 }
 
+/// Epistemic classes a roster teammate may declare, gating which routed
+/// documents it may be told (`docs/spec/runtime/orchestration/context-routing.md`).
+///
+/// The routing spec's three exclusions quantify over "roles that weigh
+/// evidence", "roles that judge" and "roles acting on a directive", and it is
+/// explicit that the classification MUST be an explicit declaration and **never**
+/// a match on `role`: `role` is prose an operator writes for humans, so matching
+/// on it would make a company that renames "Critic" to "Reviewer" silently lose
+/// an exclusion, and a control a rename can switch off is not a control.
+///
+/// * `evidence` — weighs evidence, so it is never routed the assertion board.
+/// * `judge` — scores a deliverable, so it is never routed the scratch.
+/// * `directive` — acts on an operator instruction, so it is never routed the
+///   claim ledger.
+///
+/// Declaring none (the default) is *unclassified*, which imposes no exclusion —
+/// the correct default, because an ordinary teammate is not judging anything.
+pub const PROMPT_CLASSES: [&str; 3] = ["evidence", "judge", "directive"];
+
+/// Ceiling, in Unicode codepoints, on the prompt text one agent's
+/// `prompt_files` (and, separately, its routed `context` documents) may
+/// contribute to the system prompt.
+///
+/// Sized as [`alignment.md`'s brief budget][brief] — 10,000 provider-billed
+/// tokens — measured in codepoints as a cheap, tokenizer-free upper bound. One
+/// token typically spans several codepoints for the encodings in use, so a
+/// codepoint count is never smaller than the true token count: the clamp may cut
+/// earlier than the budget strictly requires, never later.
+///
+/// Applied **where the prompt is spent** (assembly), never by refusing to load
+/// the file. Refusing the read costs the company the whole document; clamping at
+/// assembly costs only its tail.
+///
+/// [brief]: https://docs/spec/runtime/orchestration/alignment.md
+pub const PROMPT_FILE_BUDGET_CHARS: usize = 10_000;
+
 /// Built-in capability tier names selectable in `[plan].name` (issue #108). The
 /// name → budget-map table lives in
 /// [`plan_named`](crate::harness::capability_budget::plan_named); this list is
