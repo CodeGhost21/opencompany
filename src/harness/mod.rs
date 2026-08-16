@@ -1038,11 +1038,16 @@ impl HarnessPool {
 
         // Re-resolve + fingerprint the live overlay-agent set the same way, and
         // the operator budget overrides riding the same store read (issue #343).
-        let (overlay_agents, overlay_budgets, overlay_policy) =
-            self.resolve_effective_overlay(company, deps).await;
-        let overlay_fp = overlay_fingerprint(&overlay_agents);
-        let budget_fp = budget_fingerprint(&overlay_budgets);
-        let policy_fp = policy_fingerprint(overlay_policy.as_ref());
+        let overlay = self.resolve_effective_overlay(company, deps).await;
+        let overlay_fp = overlay_fingerprint(&overlay.agents);
+        let budget_fp = budget_fingerprint(&overlay.budgets);
+        let policy_fp = policy_fingerprint(overlay.policy.as_ref());
+        // Desk scoping now decides capability (the middle level of the
+        // three-level narrowing), so it joins the staleness check: without this
+        // a console desk-ceiling edit — or seating a teammate on a restricted
+        // desk — would not reach the roster until a restart.
+        let desk_fp =
+            desk_scope_fingerprint(&overlay.desks, &overlay.desk_members, &overlay.desk_tools);
 
         // Re-resolve + fingerprint the tenant's capability filter (issue #108):
         // a per-tenant, per-period, fail-closed budget read from the meter. With
