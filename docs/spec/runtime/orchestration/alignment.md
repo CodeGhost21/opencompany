@@ -314,6 +314,34 @@ Two process-global mutexes, and the distinction matters:
 
 Per-file atomicity comes from write-temp-then-rename and depends on neither.
 
+#### Search re-derivation takes no lock
+
+A search re-derives (above) rather than reading the rendered file, which raises
+the obvious question of whether it must take the write lock. **It MUST NOT**,
+and the reason is that it is a different operation than it looks:
+
+- A search re-derivation **renders into memory and writes nothing**. The write
+  lock guards a write *and its cascade*; a read that produces no file has
+  nothing to serialise against.
+- Taking it would be actively harmful. The lock is not reentrant and is held
+  across an entire cascade, so a search issued from inside a cascade — a tool
+  the cascade itself invokes, now or after some later change — would deadlock
+  against a lock its own call stack already holds. Every read contending on the
+  writer's lock would also serialise reads behind unrelated writes.
+
+What a lock-free search can observe is a source directory mid-cascade: some
+items updated, others not. That is acceptable and bounded, because each source
+item is written temp-then-rename, so a search sees every individual item either
+wholly before or wholly after its write — **never torn**. The worst case is a
+result set that omits an item written microseconds ago, which is the same
+staleness any concurrent reader accepts and is strictly better than the failure
+this design exists to prevent: reading a *rendered* table that no longer matches
+its sources at all.
+
+A caller needing a point-in-time-consistent view across several ledgers takes
+the write lock itself, at its own tool-call boundary, and performs its reads
+inside it — the ordinary rule, not a special case for search.
+
 ---
 
 ## The assertion board
