@@ -1195,7 +1195,7 @@ impl HarnessPool {
         // repair path if boot's create ever fail-softed, since the minter
         // creates the root it needs. A rebuild-time call would now be a tree
         // read that can only ever find its work already done.
-        let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas)?;
+        let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas, &routed_context)?;
 
         let mut agents = self.agents.write().await;
         agents.insert(company.id.clone(), roster);
@@ -1235,6 +1235,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), desk_fp);
+        self.context_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), context_fp);
         Ok(())
     }
 
