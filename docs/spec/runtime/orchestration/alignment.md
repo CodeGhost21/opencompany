@@ -91,6 +91,16 @@ Every entry and every exclusion in the shipped default table MUST carry a
 comment saying what it prevents. A routing table that flatters the code is how a
 role comes to be missing the one document its prompt was written around.
 
+**The three exclusions above bind the workspace overlay too, not only
+`context`.** The overlay is a company-owned file, but "company-owned" is not
+"exempt from the routing rules" — a company could still author an overlay
+that pastes in the assertion board, scratch, or the claim ledger's contents,
+and an exclusion that only checked `role_context`'s output would wave that
+straight through, making the overlay a trivial bypass of every exclusion
+above it. `role_context` (or the assembly step that reads its output) MUST
+apply the same three checks to the overlay's content as to routed `context`
+entries before it is concatenated into the prompt.
+
 ### Assembly order is a cache decision
 
 The system prompt MUST be assembled most-shared-first:
