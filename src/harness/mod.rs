@@ -1444,6 +1444,14 @@ impl HarnessPool {
         self.budget_fingerprints.read().await.get(company).copied()
     }
 
+    /// The current desk-scope fingerprint for a company (test-only), so a
+    /// desk-scoping test can assert the roster was actually rebuilt after a
+    /// ceiling or seating change rather than inferring it from a refused call.
+    #[cfg(test)]
+    pub async fn desk_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.desk_fingerprints.read().await.get(company).copied()
+    }
+
     /// Routes a message to one agent and returns its reply, recording the turn's
     /// cost. `agent_id` must name a member of the company's roster.
     ///
