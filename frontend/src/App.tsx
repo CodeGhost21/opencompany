@@ -172,6 +172,17 @@ function Console() {
       // desktop given an explicit host through `?api=` or an injected
       // `OPENCOMPANY_CONFIG` still gets its bootstrap connection.
       if (!isAddressableBaseUrl(config.baseUrl)) return null;
+      // A hub's own origin serves this bundle and nothing else — there is no
+      // host there and there never will be. Adding one anyway reproduces #613
+      // in the browser exactly: a connection that cannot work, selected on
+      // load, presenting a failure in front of the hosts that are healthy. The
+      // hosts a hub knows are the remembered ones, which `restoreConnections`
+      // above has already put back.
+      //
+      // As with the desktop, only the same-origin *default* is refused: a hub
+      // opened with an explicit `?api=` still gets its bootstrap connection,
+      // which is how a link to one specific host is shared.
+      if (config.hub && config.baseUrl === "") return null;
       return addConnection({
         baseUrl: config.baseUrl,
         defaultCompany: config.company,
