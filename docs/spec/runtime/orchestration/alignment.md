@@ -184,6 +184,21 @@ no bearing on cache-prefix stability.
   Silently dropping it produces a role whose prompt was written around a
   document it never received.
 
+  **Oversized** means the document alone exceeds the same token budget the
+  [brief](#the-brief) is held to. Reusing that number rather than inventing a
+  second one is deliberate: it is already the runtime's answer to "how much of
+  one document is a prompt allowed to spend", and two limits for the same
+  question is the duplicated-constant failure this spec objects to elsewhere.
+  Note the asymmetry with the brief, which is *clamped* rather than refused —
+  the brief has a single owner who can be told to compress, whereas a routed
+  document is whatever a role happened to write, so a silent truncation would
+  hand a reasoning role half a claim with no indication the other half existed.
+- A routed document that a role's [exclusions](#exclusions-are-load-bearing)
+  forbid is also a **hard error**, not a silent omission. The manifest asked
+  for something the routing layer must refuse, and that is a misconfiguration
+  the operator needs to see: dropping it quietly leaves a company believing it
+  routed a document that never arrives.
+
 ---
 
 ## The brief
