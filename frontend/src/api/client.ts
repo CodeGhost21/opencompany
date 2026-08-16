@@ -8,7 +8,7 @@
 
 import type { ConsoleConfig } from "../config";
 import type { TaskDeliverable } from "./tasks";
-import { defaultTransport } from "./transport";
+import { defaultTransport, needsCarriedSession } from "./transport";
 import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
