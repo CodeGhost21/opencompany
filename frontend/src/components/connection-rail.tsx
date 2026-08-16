@@ -38,6 +38,14 @@ interface Props {
   selected: ConnectionId | null;
   onSelect: (id: ConnectionId) => void;
   onAdd: (baseUrl: string) => void;
+  /**
+   * Whether this is a hub deployment, which draws the rail at any count.
+   *
+   * Passed rather than read from config here, so this component keeps taking
+   * everything it renders from its props and stays drivable from a test
+   * without a global to arrange.
+   */
+  hub?: boolean;
 }
 
 /** How a connection's state reads, and what colour says so. */
