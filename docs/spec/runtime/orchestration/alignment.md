@@ -48,6 +48,23 @@ context = ["GOAL.md", "INDEX.md", "CLAIMS.md"]
 An omitted `context` key takes a per-tier default. `context = []` means the role
 gets the universal document and nothing else.
 
+**The per-tier default table**, keyed on the [tier](../../glossary.md) a
+role's `[[agent]]` entry declares (unqualified "context" below means the
+routed-workspace-documents section only, on top of the universal method
+policy every role always gets):
+
+| Tier | Default `context` | Why |
+| --- | --- | --- |
+| `orchestrator` | `BRIEF.md`, `CLAIMS.md`, `THREADS.md` | Decides what happens next across the whole company; needs the full established/ruled-out picture and both derived ledgers to route work without re-deriving them from raw notes. |
+| `reasoning` | `BRIEF.md`, `CLAIMS.md` | Does the substantive work a demand asks for; needs what is established and what already holds true, not the open-question tracker that is the orchestrator's routing concern. |
+| `frontend` | `BRIEF.md` | Talks to the operator or another company; needs the summarized picture to speak from, not the derivation detail behind it. |
+| `compress` | *(none)* | Reads and summarizes raw workspace notes directly — routing it the brief it exists to help write would be circular. |
+| `subconscious` | *(none)* | Runs over compressed history between cycles, not the live workspace; a routed document would be stale by construction before the tick that reads it runs. |
+
+Every row above is a default, not a floor or a ceiling: a manifest's explicit
+`context` — including `[]` — always overrides it for that role, per the
+representation note below.
+
 **Representation note.** `Agent.context` is `Option<Vec<String>>`, not a
 defaulted `Vec<String>`: `None` is an omitted key, `Some(vec![])` is an
 explicit `context = []`, and only that split lets the manifest layer carry
