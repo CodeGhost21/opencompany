@@ -1403,6 +1403,75 @@ impl HarnessPool {
     /// The two collections share **one** store round-trip deliberately: they
     /// come off the same record, and splitting them would double the per-turn
     /// read for no gain.
+    /// Resolves every roster member's routed workspace documents, keyed by agent
+    /// id (`docs/spec/runtime/orchestration/context-routing.md`).
+    ///
+    /// Runs here, in the async caller, because `build_roster` is synchronous and
+    /// the [`WorkspaceStore`](crate::ports::WorkspaceStore) is not — the same
+    /// split as the skill deltas beside it.
+    ///
+    /// **Fails soft, per agent.** A store error yields no documents for that
+    /// role rather than failing the rebuild: routing enriches a prompt, and a
+    /// company whose workspace read hiccuped should answer from a thinner prompt
+    /// rather than stop answering. An unwired store (`None`) resolves to an
+    /// empty map, which is the pre-routing behaviour exactly.
+    ///
+    /// Overlay teammates are included: they are real roster agents that
+    /// [`build_roster`] builds the same way, so leaving them out would give a
+    /// console-added teammate a silently different prompt from a manifest one.
+    async fn resolve_routed_context(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+        overlay_agents: &[OverlayAgent],
+    ) -> HashMap<String, Vec<(String, String)>> {
+        let Some(workspace) = deps.workspace.as_ref() else {
+            return HashMap::new();
+        };
+
+        // A manifest agent wins an id collision, exactly as `build_roster`
+        // resolves one, so the overlay half skips any id already claimed.
+        let manifest_ids: HashSet<&str> = company
+            .manifest
+            .agents
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        let overlay_as_manifest: Vec<ManifestAgent> = overlay_agents
+            .iter()
+            .filter(|overlay| !manifest_ids.contains(overlay.id.as_str()))
+            .map(overlay_agent_to_manifest)
+            .collect();
+
+        let mut routed = HashMap::new();
+        for agent in company.manifest.agents.iter().chain(&overlay_as_manifest) {
+            match crate::company::context_routing::resolve_routed_documents(
+                workspace.as_ref(),
+                &company.id,
+                agent,
+            )
+            .await
+            {
+                // An agent that resolved nothing is left out of the map rather
+                // than stored as an empty vec: `build_roster` reads an absent id
+                // as "no routed documents", so the two are the same answer and
+                // the map stays the size of what actually routed.
+                Ok(documents) if documents.is_empty() => {}
+                Ok(documents) => {
+                    routed.insert(agent.id.clone(), documents);
+                }
+                Err(err) => tracing::warn!(
+                    company = %company.id,
+                    agent = %agent.id,
+                    error = %err,
+                    "[context] could not read this role's routed documents; its prompt \
+                     goes out without them"
+                ),
+            }
+        }
+        routed
+    }
+
     async fn resolve_effective_overlay(
         &self,
         company: &CompanyRecord,
