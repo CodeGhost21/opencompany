@@ -1554,6 +1554,14 @@ impl HarnessPool {
         self.desk_fingerprints.read().await.get(company).copied()
     }
 
+    /// The current routed-context fingerprint for a company (test-only), so a
+    /// routing test can assert that editing a routed workspace note actually
+    /// rebuilt the roster rather than inferring it from a reply.
+    #[cfg(test)]
+    pub async fn context_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.context_fingerprints.read().await.get(company).copied()
+    }
+
     /// Routes a message to one agent and returns its reply, recording the turn's
     /// cost. `agent_id` must name a member of the company's roster.
     ///
