@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getInferenceStatus,
+  restartInference,
   revertInference,
   setInference,
   testInference,
@@ -159,7 +160,9 @@ export function InferenceSection({
 }) {
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
-  const [busy, setBusy] = useState<"save" | "reset" | "test" | "removeKey" | null>(null);
+  const [busy, setBusy] = useState<
+    "save" | "reset" | "test" | "removeKey" | "restart" | null
+  >(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
 
   // Switch form.
