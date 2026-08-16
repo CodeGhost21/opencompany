@@ -101,6 +101,18 @@ recorded. An accepted cycle leaves every demand on it permanently `blocked`
 and undispatchable — the one state this ledger cannot recover from on its
 own, since nothing on either demand can ever close to break the loop.
 
+**Entering `blocked`.** A demand's `blocked_by` list can be set two ways —
+named at creation (the asker already knows what they're waiting on), or added
+later to an `open` or `claimed` demand (an agent working it discovers the
+prerequisite mid-attempt). Either way, code moves the demand to `blocked` at
+the moment `blocked_by` becomes non-empty and validation confirms at least
+one named id currently resolves to a demand that is not itself `answered`,
+`accepted`, or `dropped` — a `blocked_by` entry naming an already-closed
+demand is a no-op (the write is accepted, but the state does not move,
+because there is nothing left to wait on). This is the same write-time check
+that runs the cycle rejection above; both run before the write is accepted,
+not as a separate pass.
+
 ---
 
 ## Answered is not accepted
