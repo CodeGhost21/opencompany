@@ -250,8 +250,8 @@ meter and caps a dispatched card does.
 - A demand cannot reach `answered` except by a claim citing its id.
 - No agent-reachable path moves a demand to `accepted`.
 - An agent cannot accept its own demand.
-- The column projection round-trips every demand state, and `planning` is
-  absent.
+- The column projection round-trips every on-board demand state (every state
+  except `dropped`), and `planning` is absent.
 - The dispatch bound holds: an agent restating one need in a loop cannot spawn
   unbounded runs.
 - A demand blocked by an unclosed demand projects to `paused`, and unblocks when
