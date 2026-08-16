@@ -3051,12 +3051,22 @@ mod test {
         /// The documented sharp edge, asserted so it cannot change silently: a
         /// desk with no ceiling narrows nothing, so an agent on both a
         /// restricted and an unrestricted desk ends up unrestricted.
+        ///
+        /// Asserted by **coverage** rather than by list equality. The union
+        /// leaves the restricted desk's `docs.*` in the result beside the open
+        /// desk's `*`, which is redundant but not wrong — `*` already covers it
+        /// — and pinning the exact list here would be asserting the shape of the
+        /// bookkeeping instead of the capability it resolves to.
         #[test]
         fn an_unceilinged_desk_widens_the_union_back_to_the_company_grant() {
-            assert_eq!(
-                scope(&["*", "search"], &[&["docs.*"], &[]], &[]),
-                ["*", "search"]
-            );
+            let company = ["*", "search"];
+            let resolved = scope(&company, &[&["docs.*"], &[]], &[]);
+            for grant in company {
+                assert!(
+                    allow_covers(&resolved, grant),
+                    "`{grant}` must survive an open desk: {resolved:?}"
+                );
+            }
         }
 
         /// The invariant that makes this safe to add: no path through the
