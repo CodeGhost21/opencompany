@@ -1550,6 +1550,14 @@ mod test {
                 set_by: admin_actor(),
                 at_millis: 1_700_000_000_002,
             }),
+            // Non-empty for the same reason the tier above is: an empty map here
+            // could not detect the field being dropped from the bundle, and
+            // dropping it would silently restore an imported company's narrowed
+            // desk at the company's full tool grant.
+            overlay_desk_tools: std::collections::BTreeMap::from([(
+                "research".to_string(),
+                vec!["docs.*".to_string()],
+            )]),
             // Issue #276: a paused workflow rides the same bundle. The empty
             // list this fixture used to carry could not have detected the field
             // being dropped — and dropping it would silently re-arm a schedule
