@@ -79,10 +79,10 @@ How a many-agent Company converges. See
 | **Claim** | One statement the Company holds to be true, with `status` recording how well: `verified`, `sourced`, `asserted`, `heuristic`. A claim citing a Demand id is what closes that Demand. |
 | **Demand** | A stated need: what is missing, what the asker would do with it, and what would show their current belief wrong. Stated by whoever is blocked, deduped against what the Company already knows, and closed only by a Claim that cites it. Replaces the board card as the work model. |
 | **Demand ledger** | The derived ledger of Demands. The Company's work model; the board columns are a projection of Demand state. |
-| **Brief** | The single budgeted document nearly every reasoning role is given, holding what the Company established, ruled out, and recalled. Exactly one writer. Internal-only. |
+| **Brief** | The single budgeted document (`BRIEF.md`) nearly every reasoning role is given, holding what the Company established, ruled out, and recalled. Exactly one writer. An unreadable brief measures as empty rather than erroring — a deliberate narrow exception to the routed-document hard-error rule, since the brief is wholly machine-derived and machine-consumed. Internal-only. |
 | **Context routing** | The per-role decision about which workspace documents enter that role's system prompt. Context is authority; exclusions are deliberate. |
 | **Assertion board** | Where a Teammate tells the others something it cannot yet establish — a dead end, a lesson, a hunch. Never an input to a derived ledger. Distinct from the work board. |
-| **Attempt** | One try at a Demand. Followed by a concurrent evaluation fan-out, then a routing decision. |
+| **Attempt** | One try at a Demand. Followed by a concurrent evaluation fan-out — `judge`, `verify`, `critique`, `completeness` — then a routing decision. |
 | **Verdict** | The judge's reading of how an Attempt was *conducted*: `Proceed`, `Steer`, `Restart`. Distinct from verification, which reads whether the result is *right* and alone can end the loop. |
 | **Directive** | An Operator instruction queued for a run already in flight. Delivered verbatim into the next Attempt, never blocking. Cannot force a restart or make unverified work count as answered. Internal-only. |
 
