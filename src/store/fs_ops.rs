@@ -47,7 +47,9 @@ use crate::ports::workflow_revisions::{
     sort_newest_first as sort_revisions_newest_first,
 };
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
-use crate::store::fs::{append_line, io_err, path_lock, read_jsonl, read_optional, write_atomic};
+use crate::store::fs::{
+    append_line, io_err, path_lock, read_jsonl, read_optional, write_atomic, write_atomic_bytes,
+};
 use crate::store::paths::Bundle;
 
 /// One filesystem store implementing every WS3 console port over a company
@@ -1320,14 +1322,7 @@ impl WorkspaceStore for FsOps {
         node.updated_by = author;
         let node = node.clone();
         let file = self.physical_path(company, &index, id)?;
-        if let Some(parent) = file.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| io_err(parent, e))?;
-        }
-        tokio::fs::write(&file, content)
-            .await
-            .map_err(|e| io_err(&file, e))?;
+        write_atomic(&file, content).await?;
         self.save_index(company, &index).await?;
         Ok(node)
     }
@@ -1376,14 +1371,7 @@ impl WorkspaceStore for FsOps {
                     .map_err(|e| io_err(&physical, e))?;
             }
             NodeKind::File => {
-                if let Some(parent) = physical.parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|e| io_err(parent, e))?;
-                }
-                tokio::fs::write(&physical, content.unwrap_or(""))
-                    .await
-                    .map_err(|e| io_err(&physical, e))?;
+                write_atomic(&physical, content.unwrap_or("")).await?;
             }
         }
         self.save_index(company, &index).await
@@ -1502,14 +1490,7 @@ impl WorkspaceStore for FsOps {
         // The same sanitized derivation the text path uses, so a binary node
         // cannot reach a path a note could not.
         let physical = self.physical_path(company, &index, &node.id)?;
-        if let Some(parent) = physical.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| io_err(parent, e))?;
-        }
-        tokio::fs::write(&physical, bytes)
-            .await
-            .map_err(|e| io_err(&physical, e))?;
+        write_atomic_bytes(&physical, bytes).await?;
         self.save_index(company, &index).await?;
         // The stamped node, so the digest a caller records can only have come
         // from the store (issue #668).
@@ -1534,14 +1515,7 @@ impl WorkspaceStore for FsOps {
         crate::ports::workspace::rebind_binary(node, bytes, mime, author)?;
         let node = node.clone();
         let file = self.physical_path(company, &index, id)?;
-        if let Some(parent) = file.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| io_err(parent, e))?;
-        }
-        tokio::fs::write(&file, bytes)
-            .await
-            .map_err(|e| io_err(&file, e))?;
+        write_atomic_bytes(&file, bytes).await?;
         self.save_index(company, &index).await?;
         Ok(node)
     }
