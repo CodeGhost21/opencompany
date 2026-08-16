@@ -103,7 +103,7 @@ pub fn catalog(manifest: &CompanyManifest) -> Vec<CatalogEntry> {
             grant: (*namespace).to_string(),
             description: (*description).to_string(),
             covered_by_wildcard: wildcard_covers(namespace),
-            granted: crate::runtime::builder::grant_list_covers(allow, namespace),
+            granted: crate::runtime::builder::allow_covers(allow, namespace),
         });
     }
 
@@ -121,7 +121,7 @@ pub fn catalog(manifest: &CompanyManifest) -> Vec<CatalogEntry> {
             // A disabled server is listed but never granted: an operator needs to
             // see that it exists and is switched off, which an omitted row cannot
             // say.
-            granted: server.enabled && crate::runtime::builder::grant_list_covers(allow, &grant),
+            granted: server.enabled && crate::runtime::builder::allow_covers(allow, &grant),
             covered_by_wildcard: false,
             grant,
         });
