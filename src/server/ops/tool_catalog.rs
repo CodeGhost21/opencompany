@@ -59,8 +59,11 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::company::CompanyManifest;
+    use crate::ports::CompanyStore;
+    use crate::ports::types::{CompanyId, CompanyRecord};
     use crate::runtime::RuntimeBuilder;
     use crate::server::router;
+    use crate::store::FsCompanyStore;
     use crate::{AppConfig, AppState};
 
     const MANIFEST: &str = r#"
