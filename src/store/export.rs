@@ -260,7 +260,7 @@ impl BundleContents {
             overlay_workflows: record.overlay_workflows,
             overlay_budgets: record.overlay_budgets,
             overlay_policy: record.overlay_policy,
-            overlay_desk_tools: Default::default(),
+            overlay_desk_tools: record.overlay_desk_tools,
             disabled_workflows: record.disabled_workflows,
         })
     }
@@ -291,7 +291,7 @@ impl BundleContents {
                 overlay_workflows: self.overlay_workflows.clone(),
                 overlay_budgets: self.overlay_budgets.clone(),
                 overlay_policy: self.overlay_policy.clone(),
-                overlay_desk_tools: Default::default(),
+                overlay_desk_tools: self.overlay_desk_tools.clone(),
                 disabled_workflows: self.disabled_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
             })
@@ -337,7 +337,7 @@ impl BundleContents {
             overlay_workflows: self.overlay_workflows.clone(),
             overlay_budgets: self.overlay_budgets.clone(),
             overlay_policy: self.overlay_policy.clone(),
-            overlay_desk_tools: Default::default(),
+            overlay_desk_tools: self.overlay_desk_tools.clone(),
             disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
         };
@@ -448,7 +448,7 @@ impl BundleContents {
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
             overlay_policy: meta.overlay_policy,
-            overlay_desk_tools: Default::default(),
+            overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
         })
     }
