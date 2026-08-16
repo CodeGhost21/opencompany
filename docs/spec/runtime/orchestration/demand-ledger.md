@@ -70,7 +70,7 @@ struct Demand {
 topic into a question. *"Anything on our churn numbers"* is a search; *"whether churn is
 concentrated in the first billing cycle, because if it is not, the onboarding
 rewrite does not pay for itself"* is something evidence can answer or fail to.
-A demand with an empty `falsifies` SHOULD be refused with that explanation.
+A demand with an empty `falsifies` MUST be refused with that explanation.
 
 ### States
 
