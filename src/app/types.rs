@@ -563,6 +563,23 @@ impl AppState {
         self
     }
 
+    /// Sets the root `config.toml` — and the first-run setup flow — resolves
+    /// under, when it differs from [`Self::with_home`]. See the `config_root`
+    /// field doc for when that happens and why it matters.
+    pub fn with_config_root(mut self, config_root: impl Into<std::path::PathBuf>) -> Self {
+        self.config_root = Some(config_root.into());
+        self
+    }
+
+    /// The root `config.toml` resolves under: [`Self::with_config_root`] when
+    /// set, else [`Self::home`]. Every reader of `config.toml` — startup and
+    /// `crate::server::setup` alike — must resolve through this, not through
+    /// [`Self::home`] directly, so the two can never read or write two
+    /// different files for the same instance.
+    pub fn config_root(&self) -> &std::path::Path {
+        self.config_root.as_deref().unwrap_or(&self.home)
+    }
+
     /// Sets the repo-level shared skill library directory (`skills/`) backing the
     /// top-level `skillRegistry` query. Set on the serve path; unset in
     /// platform-provisioned mode.
