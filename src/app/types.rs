@@ -1393,4 +1393,26 @@ mod tests {
         assert!(config.cycles_available());
         assert!(AppState::new(config).spec().cycles_available);
     }
+
+    /// `config_root` defaults to `home` — the aligned shape every deployment
+    /// but an explicit, diverging `--home` takes (see the field doc and
+    /// `store::home_divergence_warning`).
+    #[test]
+    fn config_root_defaults_to_home() {
+        let state = AppState::new(AppConfig::default()).with_home("/data/companies");
+        assert_eq!(state.config_root(), std::path::Path::new("/data/companies"));
+    }
+
+    /// Once set explicitly, `config_root` diverges from `home` — this is the
+    /// fix for #908's review: `server::setup` must resolve `config.toml`
+    /// through this, not through `home`, or it reads and writes a different
+    /// file than startup does on a deployment where the two differ.
+    #[test]
+    fn config_root_can_diverge_from_home() {
+        let state = AppState::new(AppConfig::default())
+            .with_home("/data/companies")
+            .with_config_root("/data");
+        assert_eq!(state.home(), std::path::Path::new("/data/companies"));
+        assert_eq!(state.config_root(), std::path::Path::new("/data"));
+    }
 }
