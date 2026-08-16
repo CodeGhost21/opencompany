@@ -1133,7 +1133,7 @@ impl HarnessPool {
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
         let mut fresh_company = company.clone();
-        fresh_company.overlay_agents = overlay_agents;
+        fresh_company.overlay_agents = overlay.agents;
         // Same treatment for the budget overrides (issue #343): `build_roster`
         // resolves every agent's cap through `fresh_company.effective_budget`,
         // so installing the live set here is what carries a console budget edit
@@ -1150,7 +1150,7 @@ impl HarnessPool {
         // resolves the tier through `fresh_company.effective_policy`, so installing
         // the live value here is what carries a console tier change into the roster
         // the next turn runs on.
-        fresh_company.overlay_policy = overlay_policy;
+        fresh_company.overlay_policy = overlay.policy;
 
         // Issue #551 note — this rebuild deliberately touches no workspace.
         //
