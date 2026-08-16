@@ -159,13 +159,39 @@ The ladder is ordered, and order is the policy:
    `falsifies` → `Answered`
 3. the attempt cap is reached, regardless of `verify`/`completeness` → `Reported`
 4. verified but `completeness` judges the result partial → `Diversify`
-5. unverified beyond threshold → `Diversify`
-6. unproductive beyond threshold → `Diversify`
+5. unverified beyond threshold (consecutive) → `Diversify`
+6. unproductive beyond threshold (consecutive) → `Diversify`
 7. otherwise → `Retry`
 
-Step 6's counter is driven by the judge's `Verdict`, not by `verify`: a
-`Restart` verdict increments it (per [Restart is not a
-route](#restart-is-not-a-route) — that is what "mark the attempt
+**Step 1's trigger is external to the four evaluation arms.** None of
+`judge`/`verify`/`critique`/`completeness` inspects tool-call outcomes — they
+read the attempt's result and workspace, not the provider or dispatch layer.
+`Blocked` is instead raised by the harness itself, outside the fan-out: a
+tool-provider error the attempt could not route around, or a hard
+prerequisite (per the [demand ledger](demand-ledger.md)'s own `blocked`
+state — this loop's `blocked` route is what puts a demand into that ledger
+state) that the merge step observes directly from the attempt's outcome, not
+from any arm's verdict. It is checked first in the ladder because it can be
+known before any arm even needs to run — an attempt that could not execute
+has nothing for `judge`/`verify`/`critique`/`completeness` to evaluate.
+
+Step 3's `Reported` outcome does not, by itself, change the demand's
+[state](demand-ledger.md#states). No claim was produced to cite the demand's
+id, so `answered` is unreachable — the demand remains in whatever state
+dispatched the capped-out attempt (ordinarily `claimed`), carrying the
+partial result and the loop's own record of why it stopped, and stays
+re-dispatchable exactly as any other `claimed` demand is. `Reported` is a
+loop-level signal ("I stopped, here's what I have"), not a demand-ledger
+transition — the two are different layers, and only a claim citing the id
+moves the ledger.
+
+Steps 5 and 6's counters are both **consecutive**, matching [the rule stated
+below](#thresholds-are-a-struct) for the unproductive counter and extending
+it explicitly to the unverified counter: work that verifies once in a string
+of failures resets both counts, so thin-but-genuine progress never trips
+either threshold. Step 6's counter specifically is driven by the judge's
+`Verdict`, not by `verify`: a `Restart` verdict increments it (per [Restart
+is not a route](#restart-is-not-a-route) — that is what "mark the attempt
 unproductive" means), and `Proceed` or `Steer` do not. This keeps the
 unproductive count reading conduct, consistent with judge being the arm that
 scores conduct rather than correctness.
