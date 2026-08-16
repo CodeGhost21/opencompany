@@ -75,6 +75,7 @@ pub fn router() -> Router<AppState> {
         get(get_status).put(set_config).delete(revert_config),
     )
     .merge(scoped("/inference/test", post(test_config)))
+    .merge(scoped("/inference/restart", post(restart_runtime)))
 }
 
 /// The company's effective inference status as the console renders it. **Never**
