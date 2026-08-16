@@ -209,6 +209,7 @@ pub fn build_agent(
     deps: &HarnessDeps,
     grants: &[String],
     skill_deltas: &[SkillState],
+    routed_context: &[(String, String)],
     is_orchestrator: bool,
 ) -> crate::Result<Agent> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
