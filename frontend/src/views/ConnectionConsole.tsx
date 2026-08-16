@@ -11,13 +11,14 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { OpenCompanyClient } from "@/api/client";
+import type { SignIn } from "@/api/auth";
 import { ApiError, type CompanyStatus } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { CompanyPicker } from "@/components/company-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { probe, useConnection } from "@/connections/registry";
+import { adoptSession, probe, useConnection } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { Login } from "@/views/Login";
 
