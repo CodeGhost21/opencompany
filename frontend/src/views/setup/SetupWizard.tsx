@@ -615,7 +615,7 @@ function FieldRow({
           {field.key}
         </Label>
         {field.requires_restart && (
-          <Badge variant="outline" className="text-[10px]">
+          <Badge variant="outline" className="text-3xs">
             restart
           </Badge>
         )}
