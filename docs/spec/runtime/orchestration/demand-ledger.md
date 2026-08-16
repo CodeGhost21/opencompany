@@ -76,15 +76,24 @@ A demand with an empty `falsifies` MUST be refused with that explanation.
 
 ```text
 open ──claim──> claimed ──a claim cites the id──> answered ──operator──> accepted
- │  ▲              │  ▲
- │  └── blocker answered ──┐
- └──────────── blocked ────────────┘            (any state) ──> dropped
+
+open ──blocked_by set──> blocked ──blocker answered or dropped, was open──> open
+claimed ──blocked_by set──> blocked ──blocker answered or dropped, was claimed──> claimed
+
+(any state) ──> dropped
 ```
 
 `blocked` is not terminal: when the blocking demand referenced in `blocked_by`
-reaches `answered`, code moves the blocked demand back to the state it was in
-when it became blocked — `open` if nobody had claimed it yet, `claimed` if an
-agent already had. Blocking never discards work in progress.
+reaches **either** `answered` **or** `dropped`, code moves the blocked demand
+back to the state it was in when it became blocked — `open` if nobody had
+claimed it yet, `claimed` if an agent already had. Blocking never discards
+work in progress. `dropped` unblocks exactly like `answered` does, rather than
+propagating the drop to the dependent demand: a blocker being withdrawn means
+the prerequisite no longer exists to wait on, not that the work depending on
+it is also unwanted — those are different operator decisions, and only the
+operator who drops a demand knows whether its dependents should be dropped
+too. If they should be, that is a second, explicit `dropped` write on each
+dependent, not an automatic cascade.
 
 | State | Meaning | Who moves it |
 | --- | --- | --- |
