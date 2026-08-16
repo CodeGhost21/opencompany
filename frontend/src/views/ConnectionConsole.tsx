@@ -200,7 +200,7 @@ export function ConnectionConsole({
   // it answers 401 — and letting that swap the wizard for a sign-in form would
   // put the operator back at the dead end this flow exists to remove, asking
   // them to authenticate against a roster that does not exist yet.
-  if (refused && phase.kind !== "login" && phase.kind !== "setup") {
+  if (refused && phase.kind !== "login" && phase.kind !== "setup" && phase.kind !== "no-company") {
     return (
       <Login
         client={client}
