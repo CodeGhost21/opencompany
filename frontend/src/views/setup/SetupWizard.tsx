@@ -242,6 +242,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
 
   const current = STEPS[step];
   const last = step === STEPS.length - 1;
+  // A host with no companies and no template chosen would finish setup into
+  // exactly the dead end this flow exists to remove: a configured instance
+  // with nothing to sign in to and no way back into setup. Block completion
+  // rather than let that state be reachable.
+  const noCompanyChosen = status.companies.length === 0 && template === null;
 
   return (
     <Shell>
