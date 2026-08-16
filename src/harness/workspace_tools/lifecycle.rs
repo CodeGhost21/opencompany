@@ -75,7 +75,7 @@ use crate::ports::workspace::NodeKind;
 
 use super::{
     CompanyWorkspace, Entry, PathIndex, WORKSPACE_CREATE_TOOL, WORKSPACE_LIST_TOOL,
-    WORKSPACE_READ_TOOL, WORKSPACE_WRITE_TOOL, echo_path,
+    WORKSPACE_READ_TOOL, WORKSPACE_WRITE_TOOL, echo_path, store_reason,
 };
 
 /// Tool name: delete one node from the agent's own workspace folder.
@@ -167,7 +167,8 @@ async fn resolve_in_index(
         Ok(index) => index,
         Err(e) => {
             return Err(ToolResult::error(format!(
-                "Could not read the company workspace: {e}"
+                "Could not read the company workspace: {reason}.",
+                reason = store_reason(&e),
             )));
         }
     };
@@ -423,8 +424,9 @@ impl Tool for WorkspaceDeleteTool {
                 shown = echo_path(&entry.path),
             ))),
             Err(e) => Ok(ToolResult::error(format!(
-                "Could not delete `{shown}`: {e}",
+                "Could not delete `{shown}`: {reason}.",
                 shown = echo_path(&entry.path),
+                reason = store_reason(&e),
             ))),
         }
     }
@@ -668,8 +670,9 @@ impl Tool for WorkspaceRenameTool {
                 rev = node.updated_at_millis,
             ))),
             Err(e) => Ok(ToolResult::error(format!(
-                "Could not move `{shown}`: {e}",
+                "Could not move `{shown}`: {reason}.",
                 shown = echo_path(&entry.path),
+                reason = store_reason(&e),
             ))),
         }
     }

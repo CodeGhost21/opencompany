@@ -160,6 +160,15 @@ pub trait WorkspaceStore: Send + Sync {
 Nodes are folders or files (`NodeKind`); `[[wikilink]]` backlinks are derived
 at read time by the GraphQL layer.
 
+**No torn reads (#887).** A `read` concurrent with a `write` on the same node
+returns one whole revision or the other — never an error, and never a prefix.
+sqlite and mongodb get this from a row update and a document replace; `fs` gets
+it from a tmp-file-plus-rename (`store::fs::write_atomic{,_bytes}`), which is
+what it was missing. `conformance::assert_workspace_read_never_tears` holds all
+three to it. The half that made this a data-integrity bug rather than a noisy
+one: a prefix that happens to end on a codepoint boundary *decodes cleanly*, so
+an agent grounds its answer in half a document with nothing failing anywhere.
+
 **Bytes (#553).** A node holds prose or it holds a payload, never both. A
 binary node is a `File` whose `mime`, `size` and `sha256` are all `Some`;
 `mime` alone is the discriminator every surface keys off. `size` and `sha256`

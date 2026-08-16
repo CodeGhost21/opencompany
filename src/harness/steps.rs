@@ -474,14 +474,35 @@ fn humanize(tool_name: &str) -> String {
     }
 }
 
-/// OpenCompany's own orchestrator tools (issue #112 et al). Their output is
-/// **OC-authored, operator-facing copy** — the tool's own `ToolResult` message
-/// (e.g. "workflow needs exactly one trigger"), not a remote or untrusted body
-/// — so it is safe *and* useful to surface verbatim (bounded) rather than
-/// collapsing it to a class or a shape. Contrast `mcp_call_tool`, whose output
-/// is a remote server body and therefore never leaves this module as content.
-/// Keep this list in lockstep with
-/// [`orchestrator_tools`](crate::harness::orchestrator::orchestrator_tools).
+/// The tools whose own `ToolResult` message is surfaced verbatim (bounded by
+/// [`RESULT_MAX`]) instead of being collapsed to a failure class.
+///
+/// **Membership rule** — a name belongs here when BOTH hold:
+///
+/// 1. The message is **OC-authored, operator-facing copy** — the tool wrote the
+///    sentence itself (e.g. "a workflow needs exactly one trigger"), rather than
+///    relaying a remote or untrusted body. Contrast `mcp_call_tool`, whose
+///    output is a remote server's body and therefore never leaves this module
+///    as content.
+/// 2. The message is **free of host paths and raw store errors** on every one of
+///    the tool's failure exits. This half is not a formality: what lands here is
+///    shown on the console step timeline AND written into the persisted turn
+///    trace, so a `{e}` interpolation of
+///    [`OpenCompanyError`](crate::error::OpenCompanyError) — whose `StoreIo`
+///    Display embeds an absolute host path — would publish the host's
+///    filesystem layout the moment its tool joined this list.
+///
+/// Rule 2 was implicit while the list held only orchestrator tools, and issue
+/// #887 is what made it load-bearing: the whole workspace family interpolated
+/// the store error, so each tool's exits had to be audited and sanitised
+/// (`workspace_tools::store_reason`) BEFORE its name was added here. Adding a
+/// name is therefore an audit of that tool's exits, not a one-line edit.
+///
+/// The orchestrator half must stay in lockstep with
+/// [`orchestrator_tools`](crate::harness::orchestrator::orchestrator_tools); the
+/// workspace half with
+/// [`workspace_tools`](crate::harness::workspace_tools::workspace_tools). Both
+/// are pinned mechanically by `intrinsic_tools_covers_every_oc_authored_tool`.
 const INTRINSIC_TOOLS: &[&str] = &[
     "query_company",
     "spawn_task",
@@ -509,6 +530,20 @@ const INTRINSIC_TOOLS: &[&str] = &[
     // rendered as a bare class instead of the sentence the tool wrote.
     "assign_task",
     "review_task",
+    // #887's family. `workspace_read` is the one the issue was filed against —
+    // it writes five different sentences for its five failure exits and the
+    // operator saw the same catch-all for all of them, which is precisely why
+    // the underlying fault could not be diagnosed. The other six are here on
+    // the same audit: every exit is a sentence the tool wrote, and since the
+    // sanitisation commit none of them carries a host path or a raw store
+    // error.
+    "workspace_list",
+    "workspace_read",
+    "workspace_search",
+    "workspace_create",
+    "workspace_write",
+    "workspace_rename",
+    "workspace_delete",
 ];
 
 /// Bound on an OC-authored message surfaced as a step result.
@@ -856,19 +891,24 @@ mod tests {
         )
     }
 
-    /// The lockstep [`INTRINSIC_TOOLS`] claims, made mechanical. Every
-    /// orchestrator tool name is a `pub const`, so drift between the two lists
-    /// now fails here instead of silently downgrading a tool's own sentence to
-    /// a bare failure class (which is how `assign_task` / `review_task` sat
-    /// missing from #186 until #461).
+    /// The lockstep [`INTRINSIC_TOOLS`] claims, made mechanical. Every name it
+    /// carries is a `pub const` on the module that wires the tool, so drift
+    /// between the lists fails here instead of silently downgrading a tool's own
+    /// sentence to a bare failure class (which is how `assign_task` /
+    /// `review_task` sat missing from #186 until #461, and how the whole
+    /// workspace family sat missing until #887).
     #[test]
-    fn intrinsic_tools_covers_every_orchestrator_tool() {
+    fn intrinsic_tools_covers_every_oc_authored_tool() {
         use crate::harness::orchestrator::{
             ADD_AGENT_TOOL, ASSIGN_TASK_TOOL, CREATE_WORKFLOW_TOOL, QUERY_COMPANY_TOOL,
             READ_RUN_OUTPUT_TOOL, REVIEW_TASK_TOOL, RUN_WORKFLOW_TOOL,
         };
         use crate::harness::workflow_admin::{
             DELETE_WORKFLOW_TOOL, READ_WORKFLOW_TOOL, UPDATE_WORKFLOW_TOOL,
+        };
+        use crate::harness::workspace_tools::{
+            WORKSPACE_CREATE_TOOL, WORKSPACE_DELETE_TOOL, WORKSPACE_LIST_TOOL, WORKSPACE_READ_TOOL,
+            WORKSPACE_RENAME_TOOL, WORKSPACE_SEARCH_TOOL, WORKSPACE_WRITE_TOOL,
         };
         use crate::runtime::delegation_tools::{
             DELEGATE_TO_DESK_TOOL, DELEGATE_TO_TEAMMATE_TOOL, SPAWN_TASK_TOOL,
@@ -888,16 +928,52 @@ mod tests {
             ADD_AGENT_TOOL,
             ASSIGN_TASK_TOOL,
             REVIEW_TASK_TOOL,
+            // Issue #887. The whole family, because a tool's refusal is worth
+            // exactly as much on a write as on a read — and because leaving
+            // siblings out is how a list like this rots.
+            WORKSPACE_LIST_TOOL,
+            WORKSPACE_READ_TOOL,
+            WORKSPACE_SEARCH_TOOL,
+            WORKSPACE_CREATE_TOOL,
+            WORKSPACE_WRITE_TOOL,
+            WORKSPACE_RENAME_TOOL,
+            WORKSPACE_DELETE_TOOL,
         ];
         for name in expected {
             assert!(
                 INTRINSIC_TOOLS.contains(&name),
-                "{name} is wired by `orchestrator_tools` but absent from INTRINSIC_TOOLS"
+                "{name} is a wired OC-authored tool but is absent from INTRINSIC_TOOLS"
             );
         }
         // Exact, not just covering: a name here that no longer exists upstream
         // would surface a stale tool's output as OC-authored copy.
         assert_eq!(INTRINSIC_TOOLS.len(), expected.len(), "{INTRINSIC_TOOLS:?}");
+    }
+
+    /// The catch-all this issue is named after must still be reachable — for
+    /// the tools that genuinely have nothing OC-authored to say.
+    ///
+    /// Without this, "surface the tool's message" could be implemented as
+    /// "surface every tool's message", which is the `mcp_call_tool` leak the
+    /// membership rule exists to prevent. So the same failing output is
+    /// asserted BOTH ways round: verbatim for a workspace tool, collapsed to
+    /// the class for a remote one.
+    #[test]
+    fn a_non_intrinsic_tools_output_is_still_collapsed_to_its_class() {
+        let output = "Could not read `Standards/Engineering standards.md`: the workspace store \
+                      failed (store_io).";
+        let classified = oh::tools::status::classify(output, false);
+
+        let intrinsic = failure_result("workspace_read", output, &classified);
+        assert_eq!(intrinsic.as_deref(), Some(output));
+
+        let remote = failure_result("mcp_call_tool", output, &classified);
+        assert_eq!(remote.as_deref(), Some(classified.cause_plain.trim()));
+        assert_ne!(
+            remote.as_deref(),
+            Some(output),
+            "a remote server's body must never leave this module as content"
+        );
     }
 
     /// Reads a file out of the vendored OpenHuman checkout, for the tests that
