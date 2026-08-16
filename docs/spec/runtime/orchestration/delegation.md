@@ -83,14 +83,25 @@ interleave partial writes into the same file. This is narrower than a lock:
 it is a rule about how many writers the queue is allowed to have, enforced by
 only ever running one.
 
-**A directive's id is its line number.** Not a stored field. So a line the
-reader cannot parse is skipped **and still counted** — a torn append costs one
-directive rather than the alignment of every later one. Before appending, the
-writer MUST check whether the current final line is a complete, parseable
-record; an incomplete trailing record from a prior crash MUST be truncated
-back to the last complete newline before the new append lands, so a torn
-write from one crash cannot merge with the next directive and corrupt two
-line numbers instead of costing one.
+**A directive's id is its line number.** Not a stored field — which is exactly
+why recovery MUST NOT change the line count. A line the reader cannot parse is
+skipped **and still counted**: a torn append costs one directive (its id is
+consumed and never reused), not the alignment of every later one.
+
+Before appending, the writer MUST check whether the current final line is a
+complete, parseable record. An incomplete trailing record from a prior crash
+is recovered by **tombstoning, not truncating**: the writer truncates back to
+the last complete newline to discard the torn bytes, then immediately writes
+a fixed, parseable tombstone record terminated by its own newline in that
+line's place, restoring the line count to what it would have been had the
+crashed append completed. Only then does the new directive get appended, as
+the next line. Plain truncation — discarding the torn bytes and appending the
+new directive directly after — would instead let the new directive reuse the
+torn line's number, silently violating "still counted": the reader would see
+one fewer directive id than was actually consumed, and a receipt filed
+against the torn id (if one raced ahead of the crash) would end up describing
+the wrong line's content. The tombstone is what makes recovery a same-costs-one
+event instead of an id collision.
 
 The cursor MUST be written staged-and-renamed, so a torn cursor reads as zero
 rather than as a garbage offset.
