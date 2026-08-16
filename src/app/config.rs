@@ -554,7 +554,7 @@ pub fn write_config_toml(dir: &Path, edits: &[(&str, ConfigValue)]) -> Result<Pa
         }
     }
 
-    let tmp = dir.join(format!("{CONFIG_FILE}.tmp"));
+    let tmp = dir.join(unique_tmp_name());
     std::fs::write(&tmp, doc.to_string())
         .map_err(|e| OpenCompanyError::Config(format!("could not write {}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, &path).map_err(|e| {
