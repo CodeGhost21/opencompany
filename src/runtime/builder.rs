@@ -2995,6 +2995,192 @@ mod test {
             .expect("tempdir")
     }
 
+    mod scoped_grants {
+        use super::*;
+
+        fn strings(values: &[&str]) -> Vec<String> {
+            values.iter().map(|v| v.to_string()).collect()
+        }
+
+        /// Runs the three-level narrowing over `&str` slices, so each case below
+        /// reads as the table row it is.
+        fn scope(company: &[&str], desks: &[&[&str]], agent: &[&str]) -> Vec<String> {
+            let company = strings(company);
+            let desk_owned: Vec<Vec<String>> = desks.iter().map(|d| strings(d)).collect();
+            let desk_refs: Vec<&[String]> = desk_owned.iter().map(Vec::as_slice).collect();
+            agent_scoped_grants(&company, &desk_refs, &strings(agent))
+        }
+
+        /// No desk and no per-agent list: the company grant passes through
+        /// untouched. This is the shape every pre-existing manifest has, so it
+        /// is the case that must be byte-identical to the old behaviour.
+        #[test]
+        fn empty_levels_pass_through() {
+            assert_eq!(scope(&["*", "search"], &[], &[]), ["*", "search"]);
+            assert_eq!(scope(&["*", "search"], &[&[]], &[]), ["*", "search"]);
+            assert_eq!(scope(&["*", "search"], &[&[], &[]], &[]), ["*", "search"]);
+        }
+
+        /// The middle level does the work the feature exists for: a department
+        /// ceiling narrows every member without touching any member's own line.
+        #[test]
+        fn a_desk_ceiling_narrows_its_members() {
+            assert_eq!(scope(&["*", "search"], &[&["docs.*"]], &[]), ["docs.*"]);
+        }
+
+        /// And the agent narrows further still.
+        #[test]
+        fn an_agent_narrows_below_its_desk() {
+            assert_eq!(
+                scope(&["*", "search"], &[&["docs.*", "web"]], &["docs.*"]),
+                ["docs.*"]
+            );
+        }
+
+        /// Desks union, so joining a second desk *adds* capability rather than
+        /// removing it. Intersecting would make adding someone to a desk break
+        /// the job they already did.
+        #[test]
+        fn desks_combine_by_union() {
+            assert_eq!(
+                scope(&["*", "search"], &[&["docs.*"], &["web"]], &[]),
+                ["docs.*", "web"]
+            );
+        }
+
+        /// The documented sharp edge, asserted so it cannot change silently: a
+        /// desk with no ceiling narrows nothing, so an agent on both a
+        /// restricted and an unrestricted desk ends up unrestricted.
+        #[test]
+        fn an_unceilinged_desk_widens_the_union_back_to_the_company_grant() {
+            assert_eq!(
+                scope(&["*", "search"], &[&["docs.*"], &[]], &[]),
+                ["*", "search"]
+            );
+        }
+
+        /// The invariant that makes this safe to add: no path through the
+        /// narrowing can yield a grant the company did not already allow. A desk
+        /// ceiling naming something outside `[tools].allow` cannot widen.
+        #[test]
+        fn a_desk_can_never_widen_past_the_company_grant() {
+            // `search` is deliberately not in the company allow-list, and `*`
+            // never confers it.
+            assert_eq!(scope(&["docs.*"], &[&["search", "shell"]], &[]), Vec::<String>::new());
+            // Nor can the agent reach past a desk that did not grant it.
+            assert_eq!(scope(&["*"], &[&["docs.*"]], &["shell"]), Vec::<String>::new());
+        }
+
+        /// Adding the desk level must not disturb the two-level answer for a
+        /// company whose desks declare nothing — the regression that would hit
+        /// every shipped company at once.
+        #[test]
+        fn matches_the_two_level_resolver_when_no_desk_has_a_ceiling() {
+            for (company, agent) in [
+                (&["*", "media"][..], &[][..]),
+                (&["*", "media"][..], &["docs.*"][..]),
+                (&["docs.*", "web"][..], &["web"][..]),
+                (&["docs.*"][..], &["shell"][..]),
+            ] {
+                assert_eq!(
+                    agent_scoped_grants(&strings(company), &[&[], &[]], &strings(agent)),
+                    agent_effective_grants(&strings(company), &strings(agent)),
+                    "company={company:?} agent={agent:?}"
+                );
+            }
+        }
+    }
+
+    mod desk_tool_carry {
+        use super::*;
+
+        fn desk(id: &str, tools: &[&str]) -> GroupChat {
+            GroupChat {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: None,
+                members: Vec::new(),
+                tools: tools.iter().map(|t| t.to_string()).collect(),
+            }
+        }
+
+        fn held(entries: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
+            entries
+                .iter()
+                .map(|(id, tools)| {
+                    (
+                        id.to_string(),
+                        tools.iter().map(|t| t.to_string()).collect(),
+                    )
+                })
+                .collect()
+        }
+
+        /// A routine redeploy that changed nothing keeps the operator's console
+        /// ceilings — clearing on every rebuild would silently revert a console
+        /// action with nothing to show it had moved.
+        #[test]
+        fn an_unchanged_seed_carries_the_override() {
+            let seed = [desk("finance", &["docs.*"])];
+            let carried = carry_desk_tool_overrides(&seed, &seed, &held(&[("finance", &["web"])]));
+            assert_eq!(carried.get("finance").map(Vec::as_slice), Some(&["web".to_string()][..]));
+        }
+
+        /// The security property: version control narrowing a desk must not be
+        /// silently overridden by a wider console value set before the edit.
+        #[test]
+        fn a_changed_seed_clears_that_desks_override() {
+            let carried = carry_desk_tool_overrides(
+                &[desk("finance", &["*"])],
+                &[desk("finance", &["docs.*"])],
+                &held(&[("finance", &["web"])]),
+            );
+            assert!(carried.is_empty(), "{carried:?}");
+        }
+
+        /// Per desk, not whole-block: editing one department says nothing about
+        /// another, and clearing both would revert an action nobody's edit was
+        /// about.
+        #[test]
+        fn editing_one_desk_leaves_another_desks_override_alone() {
+            let carried = carry_desk_tool_overrides(
+                &[desk("finance", &["*"]), desk("creative", &["docs.*"])],
+                &[desk("finance", &["docs.*"]), desk("creative", &["docs.*"])],
+                &held(&[("finance", &["web"]), ("creative", &["media"])]),
+            );
+            assert!(!carried.contains_key("finance"), "{carried:?}");
+            assert_eq!(
+                carried.get("creative").map(Vec::as_slice),
+                Some(&["media".to_string()][..])
+            );
+        }
+
+        /// An operator-created desk has no seed value that could have changed,
+        /// so its ceiling always survives a rebuild.
+        #[test]
+        fn an_override_for_a_desk_the_seed_does_not_declare_is_carried() {
+            let carried = carry_desk_tool_overrides(
+                &[desk("finance", &["*"])],
+                &[desk("finance", &["*"])],
+                &held(&[("adhoc", &["docs.*"])]),
+            );
+            assert!(carried.contains_key("adhoc"), "{carried:?}");
+        }
+
+        /// A desk deleted from the seed *has* changed — from declaring a ceiling
+        /// to declaring nothing — so its stale override is dropped rather than
+        /// outliving the desk in version control.
+        #[test]
+        fn deleting_a_desk_from_the_seed_clears_its_override() {
+            let carried = carry_desk_tool_overrides(
+                &[desk("finance", &["docs.*"])],
+                &[],
+                &held(&[("finance", &["web"])]),
+            );
+            assert!(carried.is_empty(), "{carried:?}");
+        }
+    }
+
     /// Issue #242, the property this whole PR exists to create, proven across a
     /// real restart: a host killed mid-run leaves the attempt's **partial trace
     /// intact**, and the next boot settles the row it stranded.
