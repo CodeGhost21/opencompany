@@ -591,11 +591,16 @@ async function readIdentity(client: OpenCompanyClient): Promise<InstanceIdentity
  * question here is what turns that refusal into something a person can act on;
  * see the note on `mayCarryACredential`.
  *
- * Desktop only. A browser's credential is a cookie the browser decides about,
- * with `Secure` and the origin's own rules doing this job — narrowing the web
- * build here would refuse the plain-HTTP deployments `opencompany serve` is
- * built for, on the transport where the console is not the thing holding the
- * secret.
+ * Desktop only **for the ambient credentials**. A browser's cookie is one the
+ * browser decides about, with `Secure` and the origin's own rules doing this
+ * job — narrowing the web build there would refuse the plain-HTTP deployments
+ * `opencompany serve` is built for, on the transport where the console is not
+ * the thing holding the secret.
+ *
+ * A `session` credential is the exception, and gated everywhere: a hub console
+ * holds that token itself and puts it on the wire itself, so "the browser is
+ * deciding" stops being true. The runtime it happens to run in changes nothing
+ * about what an unencrypted hop exposes.
  *
  * Read off the profile's credential *kind*, which is a claim about this machine
  * rather than the secret itself: a `device` entry means the keychain holds a
