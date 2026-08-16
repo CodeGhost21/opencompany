@@ -2718,6 +2718,27 @@ pub struct CompanyRecord {
     /// approval gate and the console cannot disagree about which tier is live.
     #[serde(default)]
     pub overlay_policy: Option<PolicyOverride>,
+    /// Per-desk tool ceilings the operator has set from the console, keyed on
+    /// desk id — the runtime override of a desk's manifest
+    /// [`tools`](crate::company::GroupChat::tools).
+    ///
+    /// Read through [`Self::effective_desk_tools`], never directly, so the
+    /// console card and the harness gate cannot disagree about what a desk
+    /// permits. An absent key means the manifest decides, which is exactly the
+    /// behaviour of every record written before this field existed — the
+    /// `#[serde(default)]` is a no-op migration.
+    ///
+    /// A `BTreeMap` rather than the `Vec<…Override>` shape its neighbours use,
+    /// because the key here is genuinely unique: a desk has one ceiling, and the
+    /// map makes the "at most one entry" invariant those neighbours have to
+    /// document and police a property of the type instead.
+    ///
+    /// An entry present but **empty** is meaningful and distinct from an absent
+    /// one: it is the operator clearing a manifest ceiling back to "this desk
+    /// narrows nothing". Removing the key restores the manifest's value; storing
+    /// an empty list overrides it.
+    #[serde(default)]
+    pub overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// Workflow ids the operator has switched **off** (issue #276). A workflow
     /// named here keeps its graph, stays listed and stays runnable by hand, and
     /// is skipped by
