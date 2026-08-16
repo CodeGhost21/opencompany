@@ -76,15 +76,22 @@ export const CONNECTION_RAIL_WIDTH = "3.5rem";
  * second host — so the working case became the one with no way out of it,
  * which is the dead end the zero exception existed to prevent.
  *
- * A browser is unaffected: `isDesktopRuntime()` is false there, so one host
- * still draws nothing.
+ * **A hub always draws it too**, for the same reason and by the same argument.
+ * A hub has no bootstrap connection either (its origin serves assets, not a
+ * host), so it holds exactly the hosts someone added — and at zero the "+" in
+ * this rail is the only way to add the first one. Hiding the rail at one host
+ * would strand a hub with a single host as surely as it stranded the desktop.
+ *
+ * An ordinary same-origin browser console is unaffected: neither
+ * `isDesktopRuntime()` nor `hub` is true there, so one host still draws
+ * nothing.
  *
  * Exported so the shell can offset the sidebar by the same condition that
  * draws the rail — two copies of this rule is how the sidebar ends up clipped
  * under it again.
  */
-export function connectionRailVisible(count: number): boolean {
-  return count >= 2 || isDesktopRuntime();
+export function connectionRailVisible(count: number, hub = false): boolean {
+  return count >= 2 || hub || isDesktopRuntime();
 }
 
 export function ConnectionRail({ connections, selected, onSelect, onAdd }: Props) {
