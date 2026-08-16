@@ -196,6 +196,18 @@ A demand refused because the company already knows the answer MUST return **the
 claims themselves**, not merely a refusal. The point is to put what is known in
 front of the asker, not to send them looking for it.
 
+### Same id, already open
+
+A deterministic `DemandId` guarantees the same normalized `need` text produces
+the same id; it does not by itself prevent two submissions from landing as two
+rows. A submission whose `DemandId` already names an **open, non-`dropped`**
+demand MUST be refused as a duplicate and MUST return the existing demand,
+not create a second row — the same "dedup" property claimed above, made
+explicit as a write-time rule rather than left implicit in the id function. A
+submission whose `DemandId` names a demand that is `dropped` MAY be accepted
+as a fresh `open` demand: withdrawal is not permanent disinterest, and a
+demand worth restating after it was dropped is a new occurrence of the need.
+
 ---
 
 ## Dispatch
