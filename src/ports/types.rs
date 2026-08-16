@@ -2618,6 +2618,7 @@ impl OverlayBlob {
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
             policy: record.overlay_policy.clone(),
+            desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
         }
