@@ -244,6 +244,171 @@ async fn login_via_link(state: &AppState, sender: &RecordingMailSender, email: &
     session_cookie(&response)
 }
 
+// ---------------------------------------------------------------------------
+// The header carrier — a hub console that cannot receive a cookie
+// ---------------------------------------------------------------------------
+
+/// A login request that asks for a session the client will carry itself.
+fn post_wanting_header_carrier(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header(super::cookie::SESSION_CARRIER_HEADER, "header")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn get_with_session_header(uri: &str, session: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header(super::cookie::SESSION_HEADER, session)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Signs `email` in asking for the header carrier, returning the whole body.
+async fn login_wanting_header_carrier(
+    state: &AppState,
+    sender: &RecordingMailSender,
+    email: &str,
+) -> (axum::http::HeaderMap, serde_json::Value) {
+    let code = request_code(state, sender, email).await;
+    let app = router(state.clone());
+    let response = app
+        .oneshot(post_wanting_header_carrier(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": code }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    (headers, body_json(response).await)
+}
+
+#[tokio::test]
+async fn the_header_carrier_returns_a_session_that_authenticates() {
+    // The whole point of the carrier: a console on another origin gets a
+    // credential it can actually present, because a cookie would never be sent.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let (_, json) = login_wanting_header_carrier(&state, &sender, "ada@example.com").await;
+
+    let session = json["session"]
+        .as_str()
+        .expect("the header carrier must return a session")
+        .to_string();
+    assert!(
+        session.starts_with("acme."),
+        "the value must name its company so a client need not know how the \
+         addressed company was resolved: {session}"
+    );
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_session_header(
+            "/api/v1/companies/acme/auth/me",
+            &session,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the returned session must authenticate the next request"
+    );
+    assert_eq!(body_json(response).await["email"], "ada@example.com");
+}
+
+#[tokio::test]
+async fn the_header_carrier_sets_no_cookie() {
+    // One session, one carrier. Setting both would leave the cookie half as a
+    // third-party cookie some browsers keep and others drop, so whether logging
+    // out actually ended the session would vary by browser.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let (headers, _) = login_wanting_header_carrier(&state, &sender, "ada@example.com").await;
+    assert!(
+        headers.get("set-cookie").is_none(),
+        "a client that asked to carry the session must not also be given a cookie"
+    );
+}
+
+#[tokio::test]
+async fn a_login_that_asks_for_nothing_is_unchanged() {
+    // The carrier is opt-in, and every existing console is the opt-out case:
+    // it must still get its HttpOnly cookie and must never see a token in the
+    // body, which is precisely what it has no way to store safely.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let code = request_code(&state, &sender, "ada@example.com").await;
+    let app = router(state.clone());
+    let response = app
+        .oneshot(post(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": code }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set = response
+        .headers()
+        .get("set-cookie")
+        .expect("the default carrier is still the cookie")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(set.contains("HttpOnly"), "{set}");
+    let json = body_json(response).await;
+    assert!(
+        json.get("session").is_none(),
+        "a cookie client must never be handed the raw token: {json}"
+    );
+    // And the body it always returned is still there, unflattened by the change.
+    assert_eq!(json["email"], "ada@example.com");
+}
+
+#[tokio::test]
+async fn a_header_carried_session_can_be_logged_out() {
+    // Revocation has to reach the session however it was carried, or a hub
+    // console's "sign out" would clear its own storage and leave a live token
+    // on the server for the rest of its TTL.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let (_, json) = login_wanting_header_carrier(&state, &sender, "ada@example.com").await;
+    let session = json["session"].as_str().unwrap().to_string();
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/companies/acme/auth/logout")
+                .header(super::cookie::SESSION_HEADER, &session)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let app = router(state.clone());
+    let after = app
+        .oneshot(get_with_session_header(
+            "/api/v1/companies/acme/auth/me",
+            &session,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status(),
+        StatusCode::UNAUTHORIZED,
+        "the token must be dead server-side, not merely dropped by the client"
+    );
+}
+
 /// Looks a user's id up through the admin roster.
 async fn user_id(state: &AppState, admin: &str, email: &str) -> String {
     let app = router(state.clone());
