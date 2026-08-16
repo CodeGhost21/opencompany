@@ -77,6 +77,11 @@ function fromQuery(): Partial<ConsoleConfig> {
   // makes — see `signInWithHubToken`, which hands it to the host once and lets
   // it go. `key=auth` is the hub's own marker for that redirect.
   if (token !== null && q.get("key") !== "auth") out.operatorToken = token;
+  // `?hub` and `?hub=1` both mean yes; `?hub=0` and `?hub=false` mean no, so a
+  // hub build can be turned *off* for a debugging session without editing the
+  // deployment. Absent leaves it to the layers below rather than forcing false.
+  const hub = q.get("hub");
+  if (hub !== null) out.hub = isTruthy(hub);
   return out;
 }
 
@@ -86,7 +91,22 @@ function fromEnv(): Partial<ConsoleConfig> {
   if (env.VITE_OC_API) out.baseUrl = env.VITE_OC_API;
   if (env.VITE_OC_COMPANY) out.company = env.VITE_OC_COMPANY;
   if (env.VITE_OC_TOKEN) out.operatorToken = env.VITE_OC_TOKEN;
+  if (env.VITE_OC_HUB) out.hub = isTruthy(env.VITE_OC_HUB);
   return out;
+}
+
+/**
+ * Reads a flag written the way a person writes one.
+ *
+ * Vite env values are always strings, so `VITE_OC_HUB=false` is truthy in
+ * JavaScript — a build that meant to turn the hub off would silently turn it
+ * on, and the symptom (a bootstrap connection that cannot be reached) looks
+ * nothing like the cause.
+ */
+function isTruthy(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  // An empty value is the bare `?hub` form, which is an assertion, not a blank.
+  return normalized !== "0" && normalized !== "false" && normalized !== "no";
 }
 
 /** Resolves the effective console configuration once, at startup. */
