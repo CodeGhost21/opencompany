@@ -2844,6 +2844,51 @@ impl CompanyRecord {
         members
     }
 
+    /// One desk's effective tool ceiling: the operator's override when one is
+    /// stored, and the manifest's `[[group_chat]].tools` otherwise.
+    ///
+    /// Empty means the desk narrows nothing. An operator-created overlay desk
+    /// has no manifest row at all, so its ceiling is whatever the override says
+    /// and empty until somebody sets one.
+    pub fn effective_desk_tools(&self, desk_id: &str) -> Vec<String> {
+        if let Some(override_tools) = self.overlay_desk_tools.get(desk_id) {
+            return override_tools.clone();
+        }
+        self.manifest
+            .group_chats
+            .iter()
+            .find(|chat| chat.id == desk_id)
+            .map(|chat| chat.tools.clone())
+            .unwrap_or_default()
+    }
+
+    /// The tool ceilings of every desk `agent_id` sits on, in desk order.
+    ///
+    /// Built from [`effective_desk_members`](Self::effective_desk_members) and
+    /// [`effective_desk_tools`](Self::effective_desk_tools) rather than by
+    /// reading the manifest directly, so a teammate added to a desk through the
+    /// console is scoped by that desk exactly as a manifest member would be —
+    /// otherwise the console could seat someone on a restricted desk and leave
+    /// them unrestricted.
+    ///
+    /// Overlay desks are walked after manifest ones, matching how every other
+    /// desk reader on this type orders the two sources.
+    pub fn agent_desk_tools(&self, agent_id: &str) -> Vec<Vec<String>> {
+        let manifest_desks = self.manifest.group_chats.iter().map(|chat| chat.id.clone());
+        let overlay_desks = self.overlay_desks.iter().map(|desk| desk.id.clone());
+        let mut seen = std::collections::HashSet::new();
+        manifest_desks
+            .chain(overlay_desks)
+            .filter(|desk_id| seen.insert(desk_id.clone()))
+            .filter(|desk_id| {
+                self.effective_desk_members(desk_id)
+                    .iter()
+                    .any(|member| member == agent_id)
+            })
+            .map(|desk_id| self.effective_desk_tools(&desk_id))
+            .collect()
+    }
+
     /// Resolves a desk key (an id, or a case-insensitive name) to its canonical
     /// id, searching the manifest desks first and then the operator-created
     /// overlay desks. Lets the harness route to overlay desks by the same
