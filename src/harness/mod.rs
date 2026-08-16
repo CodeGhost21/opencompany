@@ -2304,7 +2304,12 @@ pub(crate) fn build_roster(
         if let Some(meter) = deps.meter.as_ref() {
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
-        let grants = agent_effective_grants(allow, &manifest_agent.tools);
+        // An overlay teammate is scoped by its desks the same as a manifest one:
+        // it can be seated on a desk, and a desk ceiling that applied to only
+        // half its members would not be a ceiling.
+        let desk_tools = company.agent_desk_tools(&manifest_agent.id);
+        let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
             company_name,
