@@ -9,6 +9,47 @@ import type { OpenCompanyClient } from "./client";
 /** What a company may call a user. */
 export type UserRole = "admin" | "member";
 
+/**
+ * How a company signs people in.
+ *
+ * - `email` — magic link, optional password, ecosystem buttons. The default,
+ *   and what every company did before this was configurable.
+ * - `wallet` — a signed challenge from an Ed25519 (Solana-style) wallet. No
+ *   mailbox is involved anywhere, so nothing is emailed and no password exists.
+ * - `none` — there is no sign-in. The app on this device is the owner, and the
+ *   console never renders a login screen at all.
+ */
+export type AuthMode = "email" | "wallet" | "none";
+
+/** What the console must know before it can draw a sign-in screen. */
+export interface AuthConfig {
+  mode: AuthMode;
+  /** Whether a password may be offered. Only ever true in `email` mode. */
+  passwords: boolean;
+}
+
+/**
+ * Asks the host how this company signs people in.
+ *
+ * Unauthenticated, and it has to be: the console asks before anyone has a
+ * credential, because it cannot choose a screen otherwise. Branch on this rather
+ * than on which routes fail — a company with no sign-in must render "open the
+ * desktop app", not an email box that can never work.
+ *
+ * Defaults to `email` if the host cannot answer, which is what every host
+ * predating this route does.
+ */
+export async function fetchAuthConfig(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<AuthConfig> {
+  try {
+    return await client.get<AuthConfig>(`${client.scopeFor(company)}/auth/config`);
+  } catch {
+    return { mode: "email", passwords: true };
+  }
+}
+
 /** The signed-in user, as `GET .../auth/me` reports them. */
 export interface Me {
   id: string;
@@ -135,6 +176,53 @@ export async function setPassword(
   return client.post<Me>(`${client.scopeFor(company)}/auth/password`, { password });
 }
 
+// ---------------------------------------------------------------------------
+// Wallet sign-in
+// ---------------------------------------------------------------------------
+
+/** The challenge a wallet must sign. */
+export interface WalletChallenge {
+  /** Echoed back on verify so the host can find the record. */
+  nonce: string;
+  /**
+   * The exact text to sign, UTF-8.
+   *
+   * Sign it verbatim. Do not rebuild it here — the layout is versioned by its
+   * first line and belongs to the host, and a console that reassembled it would
+   * make every future change to that layout a breaking change for this file.
+   */
+  message: string;
+  expiresAtMillis: number;
+}
+
+/**
+ * Asks for a challenge for `address`.
+ *
+ * Always succeeds, for every well-formed address, including ones this company
+ * has never heard of — the same rule that makes `requestCode` always report
+ * `sent`. A challenge is not evidence the wallet may sign in; only
+ * {@link verifyWalletSignature} answers that.
+ */
+export async function requestWalletChallenge(
+  client: OpenCompanyClient,
+  company: string | null,
+  address: string,
+): Promise<WalletChallenge> {
+  return client.post<WalletChallenge>(`${client.scopeFor(company)}/auth/wallet/challenge`, {
+    address,
+  });
+}
+
+/** Answers a challenge with the wallet's signature, and receives a session. */
+export async function verifyWalletSignature(
+  client: OpenCompanyClient,
+  company: string | null,
+  nonce: string,
+  signature: string,
+): Promise<Me> {
+  return client.post<Me>(`${client.scopeFor(company)}/auth/wallet/verify`, { nonce, signature });
+}
+
 /** Revokes this session, server-side and in the browser. */
 export async function logout(client: OpenCompanyClient, company: string | null): Promise<void> {
   await client.post(`${client.scopeFor(company)}/auth/logout`, {});
@@ -198,7 +286,7 @@ export interface Invite {
  * on a host with no mail transport just as readily as on one with, and the
  * difference decides whether the operator still has to go and tell the person.
  */
-export type InviteDelivery = "sent" | "no_transport" | "failed";
+export type InviteDelivery = "sent" | "no_transport" | "failed" | "no_mailbox";
 
 /** Whether an invite comes from the manifest rather than a stored record. */
 export function isManifestInvite(invite: Invite): boolean {
@@ -231,12 +319,18 @@ export async function listInvites(
 export async function invite(
   client: OpenCompanyClient,
   company: string | null,
-  email: string,
+  identifier: string,
   role: UserRole,
+  mode: AuthMode,
 ): Promise<Invite & { delivery: InviteDelivery }> {
+  // Which field carries the identifier follows the company's mode, because the
+  // server normalizes them by different rules: an address is lowercased, a
+  // base58 key must not be. Sending both, or the wrong one, is refused.
+  const body =
+    mode === "wallet" ? { wallet: identifier, role } : { email: identifier, role };
   return client.post<Invite & { delivery: InviteDelivery }>(
     `${client.scopeFor(company)}/users/invites`,
-    { email, role },
+    body,
   );
 }
 

@@ -131,6 +131,7 @@ export function CopilotPanel({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   // The cognition path the company actually booted onto. `null` until the read
   // lands, or when the host does not serve the route.
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
@@ -195,10 +196,16 @@ export function CopilotPanel({
     setReviews({});
     setThisSession(new Set());
     setError(null);
+    setHistoryError(null);
     setSending(false);
     (async () => {
       const replayed = await loadCopilotHistory(client, company, workflowId);
-      if (live) setMessages(replayed);
+      if (!live) return;
+      if (replayed.ok) {
+        setMessages(replayed.messages);
+      } else {
+        setHistoryError(`Previous copilot messages could not be loaded: ${replayed.error.message}`);
+      }
     })();
     return () => {
       live = false;
@@ -502,6 +509,11 @@ export function CopilotPanel({
       </div>
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-3">
+        {historyError && (
+          <Alert variant="destructive" data-testid="workflow-copilot-history-error">
+            <AlertDescription>{historyError}</AlertDescription>
+          </Alert>
+        )}
         {/* What it can see and what it cannot do, stated before the first
             question rather than discovered after it.
 

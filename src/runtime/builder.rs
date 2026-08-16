@@ -10,10 +10,11 @@
 //! any parked approvals into the gate so an approval survives a restart.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::Result;
-use crate::app::config::BrainMode;
+use crate::app::config::{AuthMode, BrainMode};
 use crate::brain::medulla::MedullaTransport;
 use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::brain::{EchoBrain, HostedMedullaBrain};
@@ -288,6 +289,10 @@ pub struct RuntimeBuilder {
     /// their first sign-in mints a user record. `None` everywhere but the hosted
     /// serve path.
     bootstrap_admin: Option<String>,
+    /// A host-wide override of this company's `[users].mode`
+    /// (`AppConfig::auth_mode_override`). `None` — the usual case — leaves the
+    /// manifest to answer.
+    auth_mode_override: Option<AuthMode>,
     tasks: Option<Arc<dyn TaskStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
     /// Issue #553: the byte limits the workspace is held to. Defaults to a
@@ -404,6 +409,7 @@ impl RuntimeBuilder {
             inbox: None,
             mail: None,
             bootstrap_admin: None,
+            auth_mode_override: None,
             tasks: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
@@ -885,6 +891,23 @@ impl RuntimeBuilder {
     /// `owner` delivery resolving admins from the user store alone.
     pub fn with_bootstrap_admin(mut self, bootstrap_admin: Option<String>) -> Self {
         self.bootstrap_admin = bootstrap_admin;
+        self
+    }
+
+    /// Overrides how humans sign in to this company, beating its manifest's
+    /// `[users].mode`.
+    ///
+    /// This is where [`AppConfig::auth_mode_override`](crate::AppConfig) — the
+    /// `OPENCOMPANY_AUTH_MODE` / `config.toml` layers — wins, and it wins here
+    /// rather than at each read so that every part of the runtime sees one
+    /// answer. `None` is a clean no-op leaving the manifest to decide.
+    ///
+    /// The mode is resolved **once, at build**, and cached on the runtime,
+    /// because it is read on the request hot path: the alternative is a
+    /// `CompanyStore` read per request to re-parse a manifest that cannot change
+    /// without a rebuild.
+    pub fn with_auth_mode_override(mut self, auth_mode: Option<AuthMode>) -> Self {
+        self.auth_mode_override = auth_mode;
         self
     }
 
@@ -2394,6 +2417,16 @@ impl RuntimeBuilder {
         // (`companies/<name>`); record it so read resolvers can find committed
         // skills/workflows content on the serve path.
         runtime.set_source_dir(self.seed_dir.clone());
+        // How humans sign in, resolved once here rather than per request: the
+        // host-wide override wins, else the manifest's `[users].mode`. An
+        // unparseable manifest mode cannot reach this point — `validate` names it
+        // — so falling back to the default here is for a hand-built manifest in a
+        // test, not for a live misconfiguration.
+        runtime.set_auth_mode(
+            self.auth_mode_override.unwrap_or_else(|| {
+                AuthMode::from_str(&self.manifest.users.mode).unwrap_or_default()
+            }),
+        );
         runtime.set_repos(repos);
         // Install-wide MCP defaults (issue #527) — set before anything resolves
         // the effective server set, so the first resolution already sees them.
@@ -4908,6 +4941,7 @@ mod test {
             text: text.to_string(),
             by: None,
             chat: Some("eng".to_string()),
+            deliverable: None,
         };
 
         // Baseline: the blueprint lead answers. Asserted rather than assumed, so
@@ -5051,6 +5085,7 @@ mod test {
                 text: "hello design".to_string(),
                 by: None,
                 chat: Some("design".to_string()),
+                deliverable: None,
             }])
             .await
             .expect("cycle");
@@ -5164,6 +5199,7 @@ mod test {
                 text: "who leads?".to_string(),
                 by: None,
                 chat: Some("eng".to_string()),
+                deliverable: None,
             }])
             .await
             .expect("cycle");

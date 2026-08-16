@@ -242,6 +242,35 @@ export function channelTitle(channel: Channel): string {
   return channel.kind === "dm" ? channel.name : `#${channel.name}`;
 }
 
+/**
+ * Whether this chat target's composer offers "Do it once" / "Build me the
+ * workflow" (issues #580, #845).
+ *
+ * True for every real chat target — a channel line and a DM can each open a
+ * board card, and the card is what routes a `workflow` request to the builder
+ * pass. It is deliberately a total function over [`ChannelKind`] rather than an
+ * inline `kind === "channel"`, so adding a kind is a decision someone makes here
+ * instead of a control that silently fails to appear.
+ *
+ * Not every composer asks: the thread and copilot composers pass nothing and
+ * keep their plain `(text)` `onSend`. A thread reply continues a message that
+ * already made this choice, and a copilot line is about one graph rather than a
+ * request to the company.
+ *
+ * #580 shipped the control on channels only. Nothing downstream was ever scoped
+ * to channels — the chat route reads `deliverable` off the payload whatever
+ * thread it came from — so the asymmetry lived entirely in the caller, and a DM
+ * asking for a workflow had no way to say so. It went as a `once` card, was
+ * dispatched to a desk agent holding no authoring tool, and came back a refusal.
+ */
+export function offersDeliverableChoice(kind: ChannelKind): boolean {
+  switch (kind) {
+    case "channel":
+    case "dm":
+      return true;
+  }
+}
+
 /* ---- senders ---- */
 
 export type SenderKind = "you" | "company" | "agent" | "system";

@@ -769,6 +769,7 @@ mod test {
                 text: "kick off".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .expect("cycle");
@@ -1705,6 +1706,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();

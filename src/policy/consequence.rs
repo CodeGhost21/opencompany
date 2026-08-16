@@ -546,19 +546,29 @@ const DECLARED: &[Declared] = &[
         Reach::Consequence,
     ),
     d("media_list_models", EffectGroup::Other, Reach::Nothing),
-    // ---- Skills / workflow catalogue ---------------------------------------
+    // ---- Skills catalogue --------------------------------------------------
     // The three OpenHuman skill *read* tools, scoped to this agent's own
     // materialized skill tree under its workspace. All local, all reads.
     //
     // `describe_workflow` PARKED before this table existed, for the same
     // reason `file_read` did and with nobody reporting either: the read-only
     // rule matched a name *prefix* and "describe" is not one of the words. The
-    // persona hands an agent all three in one sentence — "use `list_workflows`
-    // to enumerate them, `describe_workflow` to inspect one" — so two ran and
+    // persona hands an agent all three in one sentence — "use `list_skills`
+    // to enumerate them, `describe_skill` to inspect one" — so two ran and
     // the middle one interrupted an operator.
-    d("list_workflows", EffectGroup::Other, Reach::Nothing),
-    d("describe_workflow", EffectGroup::Other, Reach::Nothing),
-    d("read_workflow_resource", EffectGroup::Other, Reach::Nothing),
+    //
+    // Issue #845 renamed all three off upstream's "workflow" wording, which is
+    // a *skill* upstream and a saved graph here. `describe_skill` inherits
+    // exactly the hazard above — "describe" is still not a read-only prefix —
+    // so these three rows are what keep the rename from re-parking it.
+    //
+    // Spelled as literals, not as `harness::skills::naming`'s constants: this
+    // table is compiled in every build and that module is behind `openhuman`.
+    // `skill_read_tools_are_declared_reads` (in that module, where the constants
+    // are) is what pins the two spellings together.
+    d("list_skills", EffectGroup::Other, Reach::Nothing),
+    d("describe_skill", EffectGroup::Other, Reach::Nothing),
+    d("read_skill_resource", EffectGroup::Other, Reach::Nothing),
     // ---- MCP ---------------------------------------------------------------
     // The agent persona *instructs* every agent to call `mcp_list_servers` (and
     // `mcp_list_tools` for a specific server) rather than answer a capability
@@ -1202,6 +1212,11 @@ fn composio_action_is_read(_slug: &str) -> bool {
 /// over-prompt. The coverage test is what stops a *registered* tool reaching
 /// this path at all.
 fn undeclared(name: &str) -> Consequence {
+    // `describe` is deliberately absent. This fallback is a courtesy for an
+    // unregistered read, not a second classifier to trust with an unreviewed
+    // capability: adding it would let an undeclared tool claim it only reads.
+    // Declare a known `describe_*` tool instead, as `describe_skill` does for
+    // issue #845, so its reach is an explicit policy decision.
     const READ_ONLY_PREFIXES: &[&str] = &[
         "read",
         "list",

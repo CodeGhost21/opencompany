@@ -35,7 +35,9 @@ use crate::ports::types::{
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
-use crate::server::chat_history::{MessageView, ReactionView, Viewer, history_for_desk};
+use crate::server::chat_history::{
+    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, history_for_desk,
+};
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
 use crate::server::ops::language::{self, DEFAULT_DESK};
@@ -1200,6 +1202,23 @@ async fn run_chat(
     // the harness stops the turn from acting; this stops the route from acting
     // on its behalf, and it holds in every build because it is here rather than
     // behind the `openhuman` feature.
+    //
+    // Issue #845: an explicit `workflow` deliverable opens a card whatever the
+    // triage said. The operator reached for a control **named** "Build me the
+    // workflow" and pressed it — that is a positive statement of intent about
+    // this message, and it is better evidence than a lexical classifier's guess.
+    // Where the two disagreed, the classifier won and the choice was dropped on
+    // the floor: no card, so no builder pass, so nothing built, and no error
+    // either — the operator got a conversational reply to a request they had
+    // asked to be turned into a workflow.
+    //
+    // Deliberately narrow. It does not change what the card *is* (the title
+    // still comes from the triage, or from the message when the triage declined
+    // to name one), it does not touch `Track`'s existing behaviour, and it stays
+    // inside the `!confined` guard — a copilot thread still opens nothing,
+    // because a message *about* a graph is not a request to build one.
+    let workflow_requested =
+        !confined && message.deliverable == Some(crate::ports::tasks::TaskDeliverable::Workflow);
     if let Some(title) = (!confined)
         .then(|| crate::company::task_intent::triage_message(&message.text))
         .and_then(|triage| match triage {
@@ -1207,6 +1226,10 @@ async fn run_chat(
             crate::company::task_intent::MessageTriage::Answer
             | crate::company::task_intent::MessageTriage::Chatter => None,
         })
+        .or_else(|| {
+            workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
+        })
+        .filter(|title| !title.trim().is_empty())
     {
         // Keep the full message as the note only when the title was shortened
         // from it, so a one-line ask doesn't duplicate itself.
@@ -1280,6 +1303,12 @@ async fn run_chat(
             // …and the message being replied to, so the thread is a fact about
             // the transcript rather than about one browser (issue #364).
             parent,
+            // Issue #845: and the once-vs-workflow choice, so the turn that
+            // answers this message knows whether the builder pass owns the
+            // authoring. Without it the turn ran blind and denied a capability
+            // that was being exercised on the very same message — see the field
+            // docs on `CompanyEvent::OperatorMessage`.
+            deliverable: message.deliverable,
         }])
         .await?;
     Ok((report, feedback_note))
@@ -1392,10 +1421,15 @@ async fn chat_actor(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Option<Actor>, Response> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
-    let auth = resolve_principal(headers, state, Some(company))
+    // `peer` is threaded from every one of this function's callers, all the
+    // way from their own handler's `MaybePeer` extractor, so `local_owner`'s
+    // loopback-peer gate applies on this surface exactly as it does through
+    // `CompanyAuth` and the GraphQL handler.
+    let auth = resolve_principal(headers, state, Some(company), peer)
         .await
         .map_err(|_| unauthorized_response())?;
     if let Some(resp) = authorize_address(state, &auth, company) {
@@ -1426,10 +1460,11 @@ async fn operator_chat(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatResponse>, Response> {
     let company = CompanyId::new(&id);
-    let by = chat_actor(&headers, &state, &company).await?;
+    let by = chat_actor(&headers, &state, &company, peer).await?;
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     chat_and_emit(&state, &company, runtime, message, by)
         .await
@@ -1440,11 +1475,12 @@ async fn operator_chat(
 async fn operator_chat_single(
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatResponse>, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    let by = chat_actor(&headers, &state, &id).await?;
+    let by = chat_actor(&headers, &state, &id, peer).await?;
     chat_and_emit(&state, &id, runtime, message, by)
         .await
         .map_err(IntoResponse::into_response)
@@ -1457,6 +1493,14 @@ struct ChatHistoryQuery {
     /// General/"main" line — the console's default thread (issue #65).
     #[serde(default)]
     desk: Option<String>,
+    /// Exclusive event cursor. Omitted reads the current tail; passing the
+    /// oldest id already held walks backward without rereading newer events.
+    #[serde(default)]
+    before: Option<u64>,
+    /// Maximum transcript messages to return. Capped server-side so a caller
+    /// cannot turn one history read back into an unbounded response.
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// One desk-history message, as the console renders it. Mirrors `ChatMessage`
@@ -1543,12 +1587,6 @@ impl From<MessageView> for ChatHistoryMessageDto {
     }
 }
 
-/// How many messages `GET .../chat/history` returns. Generous enough to
-/// hydrate a console thread on load (issue #65) while still bounding the
-/// response on a very long transcript; pagination is a GraphQL `Chat.history`
-/// concern, not this REST convenience route's.
-const CHAT_HISTORY_LIMIT: usize = 200;
-
 /// Resolves a `?desk=` selector to the `(id, name)` pair `history_for_desk`
 /// filters on.
 ///
@@ -1587,8 +1625,9 @@ async fn history_viewer(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Viewer, Response> {
-    let actor = chat_actor(headers, state, company).await?;
+    let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
         _ => Viewer::Operator,
@@ -1601,22 +1640,20 @@ async fn chat_history_response(
     company: &CompanyId,
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
-    let viewer = history_viewer(headers, state, company).await?;
+    let viewer = history_viewer(headers, state, company, peer).await?;
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    let (messages, _total) = history_for_desk(
-        &runtime,
-        &desk_id,
-        &desk_name,
-        &viewer,
-        None,
-        CHAT_HISTORY_LIMIT,
-    )
-    .await
-    .map_err(|e| ApiError(e).into_response())?;
+    let limit = query
+        .limit
+        .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
+        .min(CHAT_HISTORY_PAGE_LIMIT);
+    let messages = history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
     Ok(Json(
         messages
             .into_iter()
@@ -1632,22 +1669,24 @@ async fn chat_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    chat_history_response(&state, &company, runtime, &headers, query).await
+    chat_history_response(&state, &company, runtime, &headers, peer, query).await
 }
 
 /// `GET /api/v1/company/chat/history` (single-company alias).
 async fn chat_history_single(
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    chat_history_response(&state, &id, runtime, &headers, query).await
+    chat_history_response(&state, &id, runtime, &headers, peer, query).await
 }
 
 /// Body for `POST {scope}/chat/messages/{seq}/reactions` (issue #364).
@@ -1706,10 +1745,11 @@ async fn react_to_message(
     company: &CompanyId,
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     seq: String,
     body: ReactionBody,
 ) -> Result<StatusCode, Response> {
-    let by = chat_actor(headers, state, company).await?;
+    let by = chat_actor(headers, state, company, peer).await?;
     let message_seq = parse_message_id(&seq).map_err(IntoResponse::into_response)?;
     validate_emoji(&body.emoji).map_err(IntoResponse::into_response)?;
     // The target must be a message. Without this the route would happily hang a
@@ -1757,11 +1797,12 @@ async fn react_to_message_scoped(
     State(state): State<AppState>,
     Path((id, seq)): Path<(String, String)>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
 ) -> Result<StatusCode, Response> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    react_to_message(&state, &company, runtime, &headers, seq, body).await
+    react_to_message(&state, &company, runtime, &headers, peer, seq, body).await
 }
 
 /// `POST /api/v1/company/chat/messages/{seq}/reactions` (single-company alias).
@@ -1769,11 +1810,12 @@ async fn react_to_message_single(
     State(state): State<AppState>,
     Path(seq): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
 ) -> Result<StatusCode, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    react_to_message(&state, &id, runtime, &headers, seq, body).await
+    react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
 }
 
 /// `GET /api/v1/companies/{id}/approvals`.
@@ -2336,6 +2378,85 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
+    }
+
+    /// Issue #845: an explicit "Build me the workflow" opens a card even when
+    /// the triage would have opened nothing.
+    ///
+    /// The composer's toggle was consulted *only* on the card-opening branch,
+    /// and that branch is gated on the triage. So a `workflow` request the
+    /// classifier read as a question or as chatter dropped the choice on the
+    /// floor: no card, therefore no builder pass, therefore nothing built — and
+    /// no error either, because a conversational reply came back as though the
+    /// message had been handled.
+    ///
+    /// Both halves are pinned here: the same text opens nothing as a `once`
+    /// message and opens a `workflow` card when the operator asked for one.
+    #[tokio::test]
+    async fn an_explicit_workflow_request_opens_a_card_the_triage_declined() {
+        use crate::ports::tasks::TaskDeliverable;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        // A question by construction — `is_question` fires on the wh-opener, so
+        // the triage answers `Answer` and the card branch declines.
+        let text = "what would a weekly AEO audit of the blog even look like?";
+        assert!(
+            matches!(
+                crate::company::task_intent::triage_message(text),
+                crate::company::task_intent::MessageTriage::Answer
+            ),
+            "fixture must be one the triage declines to card, or this proves nothing"
+        );
+
+        let chat = |deliverable: Option<&str>| {
+            let body = match deliverable {
+                Some(d) => format!(
+                    r#"{{"text":{},"deliverable":"{d}"}}"#,
+                    serde_json::json!(text)
+                ),
+                None => format!(r#"{{"text":{}}}"#, serde_json::json!(text)),
+            };
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        // `once` (and no choice at all): unchanged — the triage still decides.
+        let r = app.clone().oneshot(chat(None)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = app.clone().oneshot(chat(Some("once"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "a `once` question must still open nothing"
+        );
+
+        // `workflow`: the operator's explicit choice outranks the classifier.
+        let r = app.oneshot(chat(Some("workflow"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "the workflow choice must open its card");
+        assert_eq!(
+            tasks[0].deliverable,
+            TaskDeliverable::Workflow,
+            "and it must be the deliverable that routes it to the builder pass"
+        );
+        // Titled through `to_title`, exactly as a `Track` card would have been.
+        assert_eq!(
+            tasks[0].title,
+            crate::company::task_intent::to_title(text),
+            "a bypassed card must be titled byte-for-byte as a tracked one"
+        );
     }
 
     /// Issue #576: **who** asked decides whether the card self-promotes.
@@ -3531,6 +3652,126 @@ mod test {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value.as_array().unwrap().len(), 0);
+    }
+
+    /// Issue #862: REST history carries the same cursor/window contract as the
+    /// paginated GraphQL surface. A copilot replay can therefore ask for the
+    /// tail it needs without the route reading past its cursor.
+    #[tokio::test]
+    async fn chat_history_route_honors_before_and_limit() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let mut seqs = Vec::new();
+        for text in ["oldest", "kept", "newest"] {
+            seqs.push(
+                runtime
+                    .events()
+                    .append(
+                        runtime.id(),
+                        CompanyEvent::AgentReply {
+                            parent: None,
+                            task_id: None,
+                            chat_id: "workflow-copilot:weekly_report".to_string(),
+                            agent_id: "ceo".to_string(),
+                            text: text.to_string(),
+                            steps: Vec::new(),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let uri = format!(
+            "/api/v1/company/chat/history?desk=workflow-copilot:weekly_report&before={}&limit=1",
+            seqs[2].value()
+        );
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value[0]["text"], "kept");
+        assert_eq!(value.as_array().unwrap().len(), 1);
+    }
+
+    /// A history cursor pages messages, not the current reaction state. A
+    /// toggle can be journaled after the cursor for a message still selected by
+    /// that cursor, and must therefore remain visible on the paged result.
+    #[tokio::test]
+    async fn chat_history_cursor_keeps_later_reactions_on_displayed_messages() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let message = runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::AgentReply {
+                    parent: None,
+                    task_id: None,
+                    chat_id: "General".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "kept".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let cursor = runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::FeedbackFiled {
+                    note: "cursor marker".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::ReactionToggled {
+                    message_seq: message,
+                    emoji: "👍".to_string(),
+                    on: true,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/company/chat/history?before={}&limit=1",
+                        cursor.value()
+                    ))
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value[0]["id"], message.value().to_string());
+        assert_eq!(value[0]["reactions"][0]["emoji"], "👍");
     }
 
     /* ---- issue #364: durable ids, threads, reactions, channel isolation ---- */
@@ -5526,6 +5767,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),

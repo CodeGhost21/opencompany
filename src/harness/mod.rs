@@ -5282,7 +5282,7 @@ budget_usd_daily = 0.0
             // are gated on both — with a manager and nothing bound the belt
             // would be missing `repo_checkout` / `repo_pr` and this check would
             // pass while never having looked at them, which is the exact way
-            // `describe_workflow` stayed invisible here while parking in
+            // `describe_skill` stayed invisible here while parking in
             // production.
             // Issue #752 added a fourth gate: a backend that keeps the
             // credential off this container's disk. Declared here for the same
@@ -5313,10 +5313,11 @@ budget_usd_daily = 0.0
             // `mcp_list_tools` and `mcp_call_tool` on the belt — the three
             // tools issue #443 is about. Without one the coverage check would
             // pass while never having looked at them.
-            // A skills source dir is what puts `list_workflows`,
-            // `describe_workflow` and `read_workflow_resource` on the belt.
-            // Leaving it `None` is how those three stayed invisible to this
-            // check while `describe_workflow` parked in production.
+            // A skills source dir is what puts `list_skills`, `describe_skill`
+            // and `read_skill_resource` on the belt (named for skills since
+            // issue #845; upstream calls them `*_workflow*`). Leaving it `None`
+            // is how those three stayed invisible to this check while
+            // `describe_workflow` parked in production.
             let company_src = dir.path().join("company-src");
             std::fs::create_dir_all(company_src.join("skills").join("brief")).expect("skill dir");
             std::fs::write(
@@ -5408,7 +5409,7 @@ budget_usd_daily = 0.0
             "shell",
             "workspace_write",
             "file_read",
-            "describe_workflow",
+            "describe_skill",
             "repo_checkout",
             #[cfg(feature = "mcp")]
             "mcp_list_servers",

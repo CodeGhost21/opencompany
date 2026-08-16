@@ -20,6 +20,9 @@
 //! - [`password`]: optional password hashing, verification, and policy.
 //! - [`cookie`]: naming, parsing, and rendering the session carriers.
 //! - [`devices`]: pairing a non-browser client as a person.
+//! - [`wallet`]: signing a challenge with an Ed25519 key instead of holding a
+//!   mailbox, for a company whose
+//!   [`AuthMode`](crate::app::config::AuthMode) is `wallet`.
 //!
 //! ## Two carriers, one session
 //!
@@ -55,6 +58,7 @@ pub mod devices;
 pub mod password;
 pub mod routes;
 pub mod token;
+pub mod wallet;
 
 pub(crate) mod scope;
 
@@ -66,5 +70,7 @@ mod auth_test;
 mod devices_test;
 #[cfg(test)]
 mod hub_test;
+#[cfg(test)]
+mod mode_test;
 #[cfg(test)]
 mod routes_test;

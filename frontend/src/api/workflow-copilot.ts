@@ -430,27 +430,31 @@ export async function askCopilot(
 /**
  * Replays a workflow's copilot transcript from the company journal.
  *
- * Returns an empty transcript on ANY failure: a host predating
- * `…/chat/history` answers 404, and a copilot that refuses to open because it
- * could not replay old messages would be worse than one that starts blank.
+ * A failed replay is reported separately from an empty transcript so the panel
+ * can leave the copilot usable while making the degraded history visible.
  */
 export async function loadCopilotHistory(
   client: OpenCompanyClient,
   company: string | null,
   workflowId: string,
-): Promise<CopilotMessage[]> {
+): Promise<{ ok: true; messages: CopilotMessage[] } | { ok: false; error: Error }> {
   try {
-    const rows = await client.getChatHistory(copilotThreadId(workflowId), company);
-    return rows.map((row) => ({
-      id: row.id,
-      role: row.mine ? "operator" : "company",
-      // Strip the inlined grounding back off the operator's side, so a
-      // rehydrated transcript reads like the conversation the operator had.
-      text: row.mine ? questionOf(row.text) : row.text,
-      atMillis: row.atMillis,
-    }));
+    const rows = await client.getChatHistory(copilotThreadId(workflowId), company, { limit: 200 });
+    return {
+      ok: true,
+      messages: rows.map((row) => ({
+        id: row.id,
+        role: row.mine ? "operator" : "company",
+        // Strip the inlined grounding back off the operator's side, so a
+        // rehydrated transcript reads like the conversation the operator had.
+        text: row.mine ? questionOf(row.text) : row.text,
+        atMillis: row.atMillis,
+      })),
+    };
   } catch (e) {
-    console.debug("[workflow-copilot] no transcript to replay", e);
-    return [];
+    return {
+      ok: false,
+      error: e instanceof Error ? e : new Error("The copilot transcript could not be loaded."),
+    };
   }
 }

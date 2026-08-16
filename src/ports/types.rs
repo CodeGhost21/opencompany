@@ -253,6 +253,26 @@ pub enum CompanyEvent {
         /// terms above, so no stored record migrates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<EventSeq>,
+        /// The composer's once-vs-workflow choice for this message (issue #845),
+        /// as the operator set it — [`TaskDeliverable::Workflow`] when they
+        /// picked "Build me the workflow".
+        ///
+        /// Carried on the event because the cycle is the only place that holds
+        /// both this fact and the turn about to answer, and without it the turn
+        /// answered blind. A `workflow` message opens a card that the **builder
+        /// pass** owns ([`crate::harness::workflow_build`]) — the chat cycle
+        /// still runs, in parallel, and the desk agent answering it has no
+        /// authoring tool and correctly says so. So the operator was told "I
+        /// can't build the workflow" *while a proposal for it was being built*.
+        /// [`CompanyRuntime::inject_workflow_builder_awareness`](crate::company::runtime::CompanyRuntime)
+        /// reads this to tell the turn who owns the authoring.
+        ///
+        /// `None` means the caller expressed no choice — every message journaled
+        /// before this field existed, and every non-chat producer. Additive on
+        /// exactly the `by` / `chat` / `parent` terms above, so no stored record
+        /// migrates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deliverable: Option<crate::ports::tasks::TaskDeliverable>,
     },
     /// An inbound webhook fired.
     WebhookReceived {
@@ -3751,6 +3771,7 @@ mod test {
             text: "a follow-up".into(),
             by: None,
             chat: Some("studio".into()),
+            deliverable: None,
         };
         let json = serde_json::to_string(&threaded).unwrap();
         assert!(json.contains(r#""parent":41"#), "{json}");
@@ -3824,6 +3845,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }
         );
     }
@@ -3838,6 +3860,7 @@ mod test {
             text: "hi".into(),
             by: None,
             chat: None,
+            deliverable: None,
         };
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
@@ -3855,6 +3878,7 @@ mod test {
                 id: "u1".into(),
             }),
             chat: None,
+            deliverable: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["by"]["kind"], "user");
@@ -3881,6 +3905,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),

@@ -35,7 +35,7 @@ use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO, TaskOutputAction, TaskOu
 use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
-use crate::runtime::cycle::OPEN_WORK_ANNOTATION;
+use crate::runtime::cycle::{BUILDER_ANNOTATION, OPEN_WORK_ANNOTATION};
 
 /// One agent turn, abstracted so delegation orchestration never touches the
 /// harness-specific [`HarnessDeps`](crate::harness::HarnessDeps).
@@ -2387,10 +2387,24 @@ fn work_words(text: &str) -> Vec<String> {
 /// is evidence of substance — and opened a card. Which then lengthened the
 /// briefing on the next message. Each card made the next one likelier.
 ///
-/// Splits on the shared constant rather than a transcribed copy of it, so the
+/// Splits on the shared constants rather than transcribed copies of them, so the
 /// two sides cannot drift.
+///
+/// Issue #845 added a second appended block, [`BUILDER_ANNOTATION`], on exactly
+/// the same terms — so this cuts at whichever marker comes first. Missing it
+/// would be the "thanks!" bug again in a new costume: the builder briefing is
+/// several lines of imperative prose, and `looks_like_work` scores length and
+/// work verbs, so every `workflow` message would read as substantial no matter
+/// what the operator actually typed.
 pub(crate) fn operator_words(message: &str) -> &str {
-    match message.find(OPEN_WORK_ANNOTATION) {
+    let cut = [
+        message.find(OPEN_WORK_ANNOTATION),
+        message.find(BUILDER_ANNOTATION),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    match cut {
         Some(at) => &message[..at],
         None => message,
     }
@@ -2589,6 +2603,44 @@ investor update for the quarter\n]"
         );
         // An un-annotated message (the orchestrator's own thread) is untouched.
         assert_eq!(operator_words("draft the memo"), "draft the memo");
+    }
+
+    /// Issue #845: the builder briefing is not the operator's request either.
+    ///
+    /// The same trap as the open-work briefing above, and worse-shaped: this
+    /// block is several lines of imperative prose containing "workflow",
+    /// "create", "build" and "draft", so an unstripped `workflow` message would
+    /// score as substantial work whatever the operator typed. Built from the
+    /// shared constant, so rewording the briefing fails this test.
+    #[test]
+    fn the_cycles_builder_briefing_is_not_the_operators_request() {
+        let briefed = format!(
+            "thanks!{BUILDER_ANNOTATION}: the operator asked for a reusable workflow, not a \
+one-off, so a card for it has been opened and the workflow builder owns authoring the graph.]"
+        );
+        assert_eq!(operator_words(&briefed), "thanks!");
+        assert!(
+            !is_trackable_work(operator_words(&briefed)),
+            "small talk stays small talk however much context is folded onto it"
+        );
+        assert!(
+            is_trackable_work(&briefed),
+            "the unstripped briefing really does read as work — which is why the \
+             strip has to happen"
+        );
+    }
+
+    /// Both briefings can land on one message — a desk-addressed `workflow`
+    /// request gets the open-work list *and* the builder note. The operator's
+    /// words end at whichever marker comes first, so the cut is a `min`, not a
+    /// chain of `find`s that would leave the earlier block in place.
+    #[test]
+    fn operator_words_cuts_at_the_first_of_both_briefings() {
+        let both = format!("ship the audit{OPEN_WORK_ANNOTATION} …]{BUILDER_ANNOTATION} …]");
+        assert_eq!(operator_words(&both), "ship the audit");
+        // …and in the other order, since nothing pins which is appended first.
+        let reversed = format!("ship the audit{BUILDER_ANNOTATION} …]{OPEN_WORK_ANNOTATION} …]");
+        assert_eq!(operator_words(&reversed), "ship the audit");
     }
 
     /// A title never breaks a character in half (the byte-slice trap) and never

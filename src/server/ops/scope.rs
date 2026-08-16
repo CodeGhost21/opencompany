@@ -238,7 +238,11 @@ impl FromRequestParts<AppState> for AdminScopedCompany {
             // the role has to be re-resolved — which is the whole reason this
             // class of gap existed.
             Some(actor) => {
-                let admin = require_admin(&parts.headers, state, &runtime).await?;
+                let peer = parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|info| info.0);
+                let admin = require_admin(&parts.headers, state, &runtime, peer).await?;
                 Ok(AdminScopedCompany {
                     runtime,
                     admin: Some(admin),

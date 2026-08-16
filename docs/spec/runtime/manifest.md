@@ -38,12 +38,20 @@ budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
 
 # ── new tables (all optional) ──────────────────────────────────────────
 [users]
+# How humans sign in: email (default) | wallet | none. See
+# runtime/auth-modes.md. The mode decides which bootstrap list below is read —
+# `admins` in email mode, `wallets` in wallet mode, neither in none mode, which
+# has no sign-in at all and cannot add a second person.
+mode = "email"
 # Addresses that may sign in as admins without being invited first. This is
 # the bootstrap for invite-only access: someone has to send the first invite,
 # and there is no operator token to do it with. Listing an address does not
 # create an account — it makes the address eligible, and signing in mints the
 # admin. See runtime/users.md.
 admins = ["ada@example.com"]
+# The same grant, for `mode = "wallet"`: base58 Ed25519 wallet addresses that
+# may sign in as admins without an invite.
+wallets = ["7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"]
 
 [brain]
 mode = "hosted"                    # hosted (default) | sidecar

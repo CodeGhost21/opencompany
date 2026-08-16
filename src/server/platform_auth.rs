@@ -428,7 +428,11 @@ impl FromRequestParts<AppState> for CompanyAuth {
                     .find(|(key, _)| *key == "id")
                     .map(|(_, value)| CompanyId::new(value))
             });
-        match resolve_principal(&parts.headers, state, company.as_ref()).await {
+        let peer = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|info| info.0);
+        match resolve_principal(&parts.headers, state, company.as_ref(), peer).await {
             Ok(auth) => Ok(Self(auth)),
             Err(_) => Err(unauthorized()),
         }

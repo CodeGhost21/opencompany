@@ -464,14 +464,21 @@ impl ChatGql {
             Ok(GqlAuth::User(user)) => Viewer::User(user.user_id.clone()),
             _ => Viewer::Operator,
         };
-        let first = first.max(0) as usize;
-        let (messages, total) = chat_history::history_for_desk(
+        let first = first.clamp(0, chat_history::CHAT_HISTORY_PAGE_LIMIT as i32) as usize;
+        let messages = chat_history::history_for_desk(
             &self.runtime,
             &self.desk.id,
             &self.desk.name,
             &viewer,
             before_seq,
             first,
+        )
+        .await?;
+        let total = chat_history::history_total_for_desk(
+            &self.runtime,
+            &self.desk.id,
+            &self.desk.name,
+            before_seq,
         )
         .await?;
         Ok(Page {

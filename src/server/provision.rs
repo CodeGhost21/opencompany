@@ -268,6 +268,21 @@ async fn provision(
         Err(err) => return ApiError(err).into_response(),
     };
 
+    // The same refusal boot applies to `serve --company`: a company with no
+    // sign-in on a host anyone can reach is an unauthenticated admin console,
+    // not a desktop app. A tenant's manifest can request `[users].mode =
+    // "none"`, but this host will not silently serve it wherever it binds —
+    // it is refused here exactly as it would be refused at boot.
+    if !runtime.auth_mode().has_login() && !state.config().is_local_only() {
+        return envelope(
+            StatusCode::BAD_REQUEST,
+            "auth_mode_none_not_allowed",
+            "this manifest sets `[users].mode = \"none\"`, which has no sign-in, but this \
+             host binds a routable address and would serve it to anyone who can reach it. \
+             Choose `email` or `wallet`, or bind loopback.",
+        );
+    }
+
     let status = match runtime.status().await {
         Ok(status) => status,
         Err(err) => return ApiError(err).into_response(),

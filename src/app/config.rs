@@ -5,7 +5,7 @@
 //! 1. Environment variables (`OPENCOMPANY_*`, `TINYHUMANS_*`, `TINYPLACE_*`,
 //!    `GITHUB_TOKEN`).
 //! 2. `~/.opencompany/config.toml`.
-//! 3. The company manifest (`[brain].mode`).
+//! 3. The company manifest (`[brain].mode`, `[users].mode`).
 //! 4. Built-in defaults.
 //!
 //! [`resolve`] returns the effective config together with a
@@ -74,6 +74,91 @@ impl FromStr for BrainMode {
             "sidecar" => Ok(Self::Sidecar),
             other => Err(OpenCompanyError::Config(format!(
                 "brain mode must be one of hosted, sidecar — you wrote `{other}`"
+            ))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth mode
+// ---------------------------------------------------------------------------
+
+/// How humans prove who they are to a company.
+///
+/// One choice per company, made in configuration rather than in code, because
+/// the three answers suit three different deployments and no host can serve all
+/// three at once: offering a fallback would mean the weakest one is always
+/// available, which is not a choice at all.
+///
+/// | Mode | Who signs in | How |
+/// |---|---|---|
+/// | [`Email`](Self::Email) | an invited address | magic link, optional password, ecosystem hub |
+/// | [`Wallet`](Self::Wallet) | an invited base58 wallet | a signed challenge, no mailbox anywhere |
+/// | [`None`](Self::None) | nobody | there is no sign-in; the app on this device *is* the owner |
+///
+/// [`Email`](Self::Email) is the default and is exactly the behaviour that
+/// existed before this was configurable, so a company that names no mode is
+/// unaffected.
+///
+/// [`None`](Self::None) is for the packaged desktop app, which binds loopback
+/// and is used by the one person sitting at the machine. It does not merely skip
+/// the login screen: the login routes are gone, and so is every route that would
+/// add a second person, because a company nobody signs in to has no way to tell
+/// one human from another and inviting someone would hand them an account they
+/// could never reach.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuthMode {
+    /// Magic-link (and optional password) sign-in over email. The default.
+    #[default]
+    Email,
+    /// Sign-in by proving control of an Ed25519 wallet key.
+    Wallet,
+    /// No sign-in at all — a single implicit local owner. Desktop only.
+    None,
+}
+
+impl AuthMode {
+    /// The manifest/env spelling of this mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Email => "email",
+            Self::Wallet => "wallet",
+            Self::None => "none",
+        }
+    }
+
+    /// Whether this mode has any sign-in flow at all.
+    ///
+    /// The inverse is the single question every login and user-administration
+    /// route asks, so it is asked once, here, rather than by matching on the
+    /// enum at each site and getting a later variant wrong.
+    pub fn has_login(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Whether this mode can address a mailbox — the gate on magic links,
+    /// invite mail, and password login.
+    pub fn uses_email(self) -> bool {
+        matches!(self, Self::Email)
+    }
+}
+
+impl std::fmt::Display for AuthMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for AuthMode {
+    type Err = OpenCompanyError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim() {
+            "email" => Ok(Self::Email),
+            "wallet" => Ok(Self::Wallet),
+            "none" => Ok(Self::None),
+            other => Err(OpenCompanyError::Config(format!(
+                "auth mode must be one of email, wallet, none — you wrote `{other}`"
             ))),
         }
     }
@@ -195,6 +280,10 @@ pub struct ConfigFile {
     pub api_url: Option<String>,
     /// Brain mode (`hosted` | `sidecar`).
     pub brain_mode: Option<String>,
+    /// Auth mode (`email` | `wallet` | `none`), overriding every company's own
+    /// `[users].mode` on this host. Absent — the normal case — leaves each
+    /// company to name its own.
+    pub auth_mode: Option<String>,
     /// HTTP bind address.
     pub bind: Option<String>,
     /// Data directory holding company bundles and this file.
@@ -343,6 +432,8 @@ pub struct RuntimeConfig {
     pub api_url: String,
     /// Which brain the runtime drives.
     pub brain_mode: BrainMode,
+    /// How humans sign in to this company.
+    pub auth_mode: AuthMode,
     /// OpenHuman sidecar base URL, if configured.
     pub openhuman_url: Option<String>,
     /// tiny.place economy API base URL.
@@ -409,6 +500,7 @@ impl std::fmt::Debug for RuntimeConfig {
             .field("data_dir", &self.data_dir)
             .field("api_url", &self.api_url)
             .field("brain_mode", &self.brain_mode)
+            .field("auth_mode", &self.auth_mode)
             .field("openhuman_url", &self.openhuman_url)
             .field("tinyplace_api_url", &self.tinyplace_api_url)
             .field("public_url", &self.public_url)
@@ -490,6 +582,25 @@ pub fn resolve(
     );
     let brain_mode = BrainMode::from_str(&brain_raw)?;
 
+    // auth_mode: env <- config.toml <- manifest (always present) <- default.
+    //
+    // Unlike brain_mode this resolution is not the last word, because `serve`
+    // hosts N companies and this pass sees one manifest. The env and config.toml
+    // layers are host-wide and are carried to every company as
+    // `AppConfig::auth_mode_override`; the manifest layer is per company and is
+    // read from that company's own `[users].mode` when its runtime is built. The
+    // precedence is the same either way — see
+    // [`RuntimeBuilder::with_auth_mode_override`](crate::runtime::RuntimeBuilder::with_auth_mode_override).
+    let auth_raw = resolve_str(
+        &mut prov,
+        "auth_mode",
+        env.get("OPENCOMPANY_AUTH_MODE"),
+        config_toml.and_then(|c| c.auth_mode.clone()),
+        Some(manifest.users.mode.clone()),
+        AuthMode::default().as_str().to_string(),
+    );
+    let auth_mode = AuthMode::from_str(&auth_raw)?;
+
     let openhuman_url = resolve_opt(
         &mut prov,
         "openhuman_url",
@@ -560,6 +671,7 @@ pub fn resolve(
         data_dir: PathBuf::from(data_dir),
         api_url,
         brain_mode,
+        auth_mode,
         openhuman_url,
         tinyplace_api_url,
         public_url,
@@ -877,6 +989,78 @@ mod test {
         // api_url only in config.toml, so config.toml wins over the default.
         assert_eq!(cfg.api_url, "https://toml.example");
         assert_eq!(prov.layer("api_url"), Some(ConfigLayer::ConfigToml));
+    }
+
+    fn manifest_with_auth(mode: &str) -> CompanyManifest {
+        let toml_src = format!("[company]\nname = \"X\"\n[users]\nmode = \"{mode}\"\n");
+        toml::from_str(&toml_src).expect("valid manifest")
+    }
+
+    /// A manifest naming no mode signs people in by email — which is what every
+    /// company did before the mode existed, so no deployment changes behaviour
+    /// by upgrading.
+    #[test]
+    fn auth_mode_defaults_to_email() {
+        let env = MapEnv::default();
+        let (cfg, prov) = resolve(&env, None, &default_manifest()).unwrap();
+        assert_eq!(cfg.auth_mode, AuthMode::Email);
+        // The manifest always supplies one (serde fills the default), exactly
+        // as it does for the brain mode.
+        assert_eq!(prov.layer("auth_mode"), Some(ConfigLayer::Manifest));
+    }
+
+    #[test]
+    fn manifest_supplies_auth_mode_when_env_and_toml_absent() {
+        let env = MapEnv::default();
+        let (cfg, prov) = resolve(&env, None, &manifest_with_auth("wallet")).unwrap();
+        assert_eq!(cfg.auth_mode, AuthMode::Wallet);
+        assert_eq!(prov.layer("auth_mode"), Some(ConfigLayer::Manifest));
+    }
+
+    #[test]
+    fn config_toml_beats_the_manifest_for_auth_mode() {
+        let env = MapEnv::default();
+        let file = ConfigFile {
+            auth_mode: Some("none".into()),
+            ..ConfigFile::default()
+        };
+        let (cfg, prov) = resolve(&env, Some(&file), &manifest_with_auth("email")).unwrap();
+        assert_eq!(cfg.auth_mode, AuthMode::None);
+        assert_eq!(prov.layer("auth_mode"), Some(ConfigLayer::ConfigToml));
+    }
+
+    /// The host has the last word. A packaged desktop build and a hosting
+    /// platform both need to guarantee a mode across whatever a company's
+    /// manifest happens to say.
+    #[test]
+    fn env_beats_everything_for_auth_mode() {
+        let env = MapEnv::new([("OPENCOMPANY_AUTH_MODE", "wallet")]);
+        let file = ConfigFile {
+            auth_mode: Some("none".into()),
+            ..ConfigFile::default()
+        };
+        let (cfg, prov) = resolve(&env, Some(&file), &manifest_with_auth("email")).unwrap();
+        assert_eq!(cfg.auth_mode, AuthMode::Wallet);
+        assert_eq!(prov.layer("auth_mode"), Some(ConfigLayer::Env));
+    }
+
+    /// Not a silent fallback to email: "the sign-in you configured is not the
+    /// one you got" is invisible from a running host, so it fails at boot.
+    #[test]
+    fn an_unknown_auth_mode_is_a_config_error() {
+        let env = MapEnv::new([("OPENCOMPANY_AUTH_MODE", "walet")]);
+        let err = resolve(&env, None, &default_manifest()).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("email, wallet, none"), "{message}");
+        assert!(message.contains("walet"), "{message}");
+    }
+
+    #[test]
+    fn auth_mode_predicates_match_the_variants() {
+        assert!(AuthMode::Email.has_login() && AuthMode::Email.uses_email());
+        // A wallet company has a sign-in, but no mailbox anywhere in it.
+        assert!(AuthMode::Wallet.has_login() && !AuthMode::Wallet.uses_email());
+        assert!(!AuthMode::None.has_login() && !AuthMode::None.uses_email());
     }
 
     #[test]
