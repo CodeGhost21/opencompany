@@ -2350,6 +2350,10 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         delegates_to: Vec::new(),
         context: None,
         budget_usd_daily: None,
+        prompt: None,
+        prompt_files: Vec::new(),
+        prompt_files_resolved: Vec::new(),
+        classes: Vec::new(),
     }
 }
 
@@ -5348,6 +5352,10 @@ budget_usd_daily = 0.0
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -5459,6 +5467,10 @@ budget_usd_daily = 0.0
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let agent = build::build_agent(
             &CompanyId::new("acme"),
