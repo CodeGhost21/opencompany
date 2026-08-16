@@ -5630,6 +5630,7 @@ budget_usd_daily = 0.0
             &deps,
             &grants,
             &[],
+            &[],
             is_orchestrator,
         )
         .expect("agent builds");
@@ -5742,6 +5743,7 @@ budget_usd_daily = 0.0
             ApprovalPolicy::new(&Policy::default(), None),
             &deps,
             &["*".to_string()],
+            &[],
             &[],
             true,
         )
