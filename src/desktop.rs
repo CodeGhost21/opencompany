@@ -420,6 +420,36 @@ mod tests {
         }
     }
 
+    /// `manifest_parsed` is what `server::setup::templates()` calls to describe
+    /// each shipped preset without touching disk — so a preset that fails to
+    /// parse must report a specific, attributable error rather than panic or
+    /// silently produce garbage.
+    #[test]
+    fn manifest_parsed_reads_a_real_preset() {
+        let preset = preset(DEFAULT_PRESET_ID).expect("default preset is shipped");
+        let manifest = preset.manifest_parsed().unwrap();
+        assert_eq!(manifest.company.name, "Agentic Marketing Agency");
+        assert!(
+            !manifest.agents.is_empty(),
+            "the default preset should ship at least one agent"
+        );
+    }
+
+    #[test]
+    fn manifest_parsed_reports_a_configuration_error_for_a_malformed_manifest() {
+        let bad = DesktopPreset {
+            id: "not-a-real-preset",
+            name: "Not A Real Preset",
+            manifest: "this is not valid toml >>>",
+        };
+        let err = bad.manifest_parsed().unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("not-a-real-preset"),
+            "the error should name the offending preset id: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn starts_a_loopback_runtime_from_the_default_preset() {
         let directory = tempfile::tempdir().unwrap();
