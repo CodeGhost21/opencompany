@@ -345,6 +345,53 @@ pub(crate) async fn local_owner(
     })
 }
 
+/// Whether a request's actual TCP peer and headers back up a claim of
+/// "local", not just that the process is *configured* loopback.
+///
+/// [`crate::app::config::AppConfig::is_local_only`] answers a different
+/// question — whether the configured bind and `public_url` make this host
+/// unreachable from outside — and it is a statement about the deployment, not
+/// about any one request. A host can be configured loopback and still receive
+/// a request that did not truly originate on this machine, if something in
+/// front of it forwards traffic without the operator declaring `public_url`
+/// (an undeclared reverse proxy). This checks the request itself, as a second,
+/// independent gate:
+///
+/// - **`peer`**, when the caller can name the request's TCP peer, must be
+///   loopback.
+/// - **`headers`** must carry none of `X-Forwarded-For`, `X-Forwarded-Host`,
+///   RFC 7239 `Forwarded`, or `X-Real-IP` (not RFC 7239, but the header
+///   `nginx`'s own `proxy_set_header X-Real-IP $remote_addr` recipe sets, and
+///   common enough elsewhere to matter). Their presence means something in
+///   front of this process terminated a connection this process did not —
+///   exactly the case `peer` cannot see, because a same-host reverse proxy
+///   connects to a loopback-bound listener over loopback too, so the peer it
+///   presents always reads as loopback regardless of where the original
+///   client actually was.
+///
+/// Neither refuses on its own when its signal is absent (an embedded caller
+/// with no real socket and no forwarding in front of it, or a test) — both
+/// are additive to the configured-loopback check, not a replacement for it. A
+/// proxy specifically configured to strip all four headers is
+/// indistinguishable from no proxy at all by header content alone; detecting
+/// that needs a trusted-proxy boundary this does not implement.
+pub(crate) fn request_looks_local(peer: Option<std::net::SocketAddr>, headers: &HeaderMap) -> bool {
+    if let Some(peer) = peer
+        && !peer.ip().is_loopback()
+    {
+        return false;
+    }
+    const FORWARDING_HEADERS: [&str; 4] = [
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "forwarded",
+        "x-real-ip",
+    ];
+    !FORWARDING_HEADERS
+        .iter()
+        .any(|name| headers.contains_key(*name))
+}
+
 /// Resolves a session — from either carrier — to a live user, or `None`.
 ///
 /// Returns `None` — never an error — for every failure: no session presented,
