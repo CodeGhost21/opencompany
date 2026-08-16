@@ -138,8 +138,8 @@ reads the action slug (issue #441), `web_fetch` reads the URL's host (issue
 `shell` is the one an operator feels. Classifying the name meant `grep -c foo
 *.log` and `rm -rf /` were the same input, so an agent that investigates by
 grepping its own workspace bought an approval card per command — under `auto`,
-whose contract says it stops only before what leaves the company or spends
-money, and a grep does neither. The grading is the vendored runtime's own
+whose contract says it stops only before what leaves the company, and a grep
+does not. The grading is the vendored runtime's own
 `SecurityPolicy::classify_command`, the classifier OpenHuman gates its shell
 tool with: it splits the command into unquoted segments, classifies each against
 a curated safe-read allowlist, takes the **maximum** — so `grep x && rm -rf /`
