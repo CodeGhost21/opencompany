@@ -59,7 +59,7 @@ describe("the fetch event stream", () => {
     await settle();
 
     const [, init] = fetchMock.mock.calls[0];
-    const headers = init.headers as Record<string, string>;
+    const headers = init?.headers as Record<string, string>;
     expect(headers["x-opencompany-session"]).toBe("acme.tok");
     expect(headers["accept"]).toBe("text/event-stream");
   });
