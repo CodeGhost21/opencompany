@@ -73,14 +73,20 @@ defaulted `Vec<String>`: `None` is an omitted key, `Some(vec![])` is an
 explicit `context = []`, and only that split lets the manifest layer carry
 the distinction above at all.
 
-**Implemented** in `src/company/context_routing.rs` (`routed_documents`), which
-is always compiled and carries the table above plus the exclusions below as
-tested code. Documents are resolved against the workspace before the
-(synchronous) agent build and folded into the system prompt last, after the
-static `prompt_files` — see [runtime/agents.md](../agents.md) for the prompt
-order and why volatile material goes at the end. A routed document that changes
-moves the roster fingerprint, so an edit reaches the next turn rather than the
-next restart.
+**Implemented** in `src/company/context_routing.rs`, always compiled and tested:
+`routed_documents` carries the table above and the exclusions below;
+`resolve_routed_documents` reads the selected notes out of a `WorkspaceStore`,
+skipping any that do not exist. Rendering into a prompt section is
+`crate::company::prompt::context_section`.
+
+**Not yet wired into the harness.** The agent build is synchronous, so the
+resolved documents have to be fetched ahead of it and carried on `HarnessDeps`
+— the pattern `mcp_servers`, `composio` and the skill deltas already follow in
+`Harness::ensure_roster` — and folded into the persona last, after the static
+`prompt_files`. Until that lands, `context` selects documents that nothing
+spends. The remaining work is: resolve per roster member in `ensure_roster`,
+install on `fresh_deps`, fingerprint the result so an edited note rebuilds the
+roster, and append `context_section` in `build::build_agent`.
 
 ## Exclusions are load-bearing
 
