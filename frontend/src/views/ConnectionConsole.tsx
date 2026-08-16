@@ -30,6 +30,11 @@ type Phase =
   // of `login` on purpose: an unconfigured host may have no company and no
   // users at all, so a sign-in form there addresses nobody.
   | { kind: "setup" }
+  // A configured host (setup has completed) that nonetheless has no
+  // companies — an operator who ran setup for host settings alone, or who
+  // deleted the only company afterward. Distinct from `error`: this is not a
+  // connection problem, and the way out is back into setup, not a retry.
+  | { kind: "no-company" }
   | { kind: "picker"; companies: CompanyStatus[] }
   | {
       kind: "console";
