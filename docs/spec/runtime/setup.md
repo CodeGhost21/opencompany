@@ -133,13 +133,21 @@ and gating that host behind an admin check would leave it with no company to sig
 in to and no way back into setup to create one, which is this flow's own dead end
 reintroduced one step later.
 
-Outside those two unauthenticated cases — a configured host with at least one
+Outside those two unauthenticated cases — a configured host with exactly one
 company — the ordinary admin check applies instead: a live session belonging to
 an admin of the sole company, resolved the same way `server/users/admin.rs`
 resolves it. This path accepts an authenticated human session from anywhere, not
 just loopback; it is `require_admin`, not the loopback gate, that authorizes it.
-A host serving several companies has no single roster that could speak for the
-instance, and setup refuses outright rather than guessing which one.
+
+Two states reach neither the anonymous branch nor `require_admin`, and both
+answer the same `409`: a host serving **several** companies, which has no single
+roster that could speak for the instance, and a **routable host with none**,
+where the loopback condition above did not apply and there is no roster at all.
+`registry().sole()` is `None` for both, so the refusal names what is true of
+either rather than a count that might be wrong. The recovery is the one the
+response itself gives — edit `config.toml` directly and restart — because the
+alternative on a routable host is an unauthenticated write, which is exactly
+what the loopback gate exists to prevent.
 
 The console's 401 handling is excluded while the wizard is showing: on an
 unconfigured host every authenticated route answers 401, and letting that swap
