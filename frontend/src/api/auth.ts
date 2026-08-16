@@ -1,8 +1,16 @@
 // The user-authentication surface: magic link, password, session.
 //
-// The session itself is an HttpOnly cookie, so none of this returns or stores a
-// token — the browser holds it and `credentials: "include"` in the client sends
-// it. There is nothing here for an XSS to read.
+// For a console served by the host it talks to — every same-origin deployment,
+// which is the normal one — the session is an HttpOnly cookie: none of this
+// returns or stores a token, the browser holds it, and `credentials: "include"`
+// in the client sends it. There is nothing here for an XSS to read.
+//
+// A console on a *different* origin from its host gets no cookie at all: the
+// host sets it `SameSite=Lax` and the browser withholds it from every
+// cross-site request. Those sign-ins ask for a token instead and return it as
+// `SignIn.session`, which the caller stores on the connection. See
+// `Credential` in `connections/types.ts` for what that costs and why it is
+// still the right trade where the alternative is no console at all.
 
 import type { OpenCompanyClient } from "./client";
 
