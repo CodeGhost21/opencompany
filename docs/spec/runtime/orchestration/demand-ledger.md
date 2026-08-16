@@ -162,33 +162,81 @@ board — `dropped` is the one state that is, by definition, off it.
 
 ## Identity and dedup
 
-A demand's id MUST be a **deterministic** derivation from its `need` text — a
-hash of the normalized (whitespace-collapsed, case-folded) text — so the same
-gap stated twice, byte-for-byte, produces the same id without a lookup. This
-is `DemandId` derivation, and it is separate from the dedup check below:
-identity answers "is this the same string", not "is this the same gap in
-different words", and only a deterministic function keeps `Claim.answers`
-referring to a stable id rather than one that could shift between two
-semantically-equivalent restatements.
+There are two separate mechanisms here, and the failure this section fixes is
+treating them as one: a deterministic id catches the same gap stated
+byte-for-byte, and it MUST NOT be asked to also catch the same gap stated in
+different words. That is a different problem, solved below in [semantic
+dedup against open demands](#semantic-dedup-against-open-demands).
+
+### `DemandId` canonicalization
+
+`DemandId` MUST be produced by this exact pipeline, applied to the demand's
+`need` field, so that two implementations given the same `need` text always
+produce the same id:
+
+1. **Unicode-normalize to NFC.** Two byte-distinct encodings of the same
+   visible text (e.g. a precomposed `é` versus `e` + combining acute) MUST
+   collapse to one id.
+2. **Case-fold**, using Unicode default case folding (not a locale-specific
+   casing rule — no Turkish `İ`/`i` special-casing), so identity does not
+   silently depend on which locale the process happened to be running under.
+3. **Collapse whitespace**: any run of Unicode whitespace becomes a single
+   ASCII space, and leading/trailing whitespace is trimmed.
+4. **Hash** the resulting string with **SHA-256** and encode the digest as
+   **lowercase hex**. `DemandId` is that hex string, in full — no truncation.
+   A full 256-bit digest is deliberately not shortened: `DemandId` is a
+   permanent cross-reference (`Claim.answers`, `blocked_by`), and a truncated
+   digest trades an imperceptible storage saving for a collision class this
+   design has no reason to accept.
+
+Steps 1-3 MUST run in that order — case-folding before whitespace-collapsing
+can change which characters count as whitespace under some normalizations,
+so the order is part of the contract, not an implementation detail.
+
+**Test vectors** (`need` → SHA-256 hex of the canonicalized string) MUST be
+checked into the implementation as a fixture, covering at minimum: plain
+ASCII; leading/trailing and internal multi-space runs; mixed case; a
+precomposed-vs-decomposed accented character pair that must collapse to one
+id; and a non-Latin script (to prove step 2 does not assume ASCII casing).
+
+### Semantic dedup against open demands
 
 **Dedup — recognizing that a *differently worded* demand is already known —
-MUST be semantic, not lexical.** The sibling runtime derives its id from a
-hash of the whitespace-stripped text (identity only) and separately checks "do
-we already know this" with a two-distinctive-word overlap against the claim
-ledger. That overlap check dedupes exact restatements and a little more; it is
-the weakest part of an otherwise strong design, and it is weak because that
-runtime had no semantic retrieval to hand.
+MUST be semantic, not lexical, and MUST run against two different corpora for
+two different questions:**
 
-OpenCompany does, once [P0](memory.md) binds `MemoryRecall`. The already-known
-check — "does an existing claim already answer a gap worded like this one" —
-MUST go through `MemoryRecall` as **candidate matching**, replacing the
-sibling's lexical overlap threshold outright rather than layering semantic
-recall on top of it. A candidate claim MemoryRecall surfaces still needs the
-same relevance bar the lexical check was reaching for — a return on a subject
-is not the same as an answer to a specific `falsifies` — so the recall
-integration MUST rank or threshold candidates on relevance to the demand's
-`falsifies`, not merely its topic; this is the one place the port deliberately
-improves on its source; it does not change what `DemandId` is derived from.
+1. **"Is this already answered?"** — against the [claim
+   ledger](alignment.md#claimsmd--the-evidence-ledger). The sibling runtime's
+   answer to this was a two-distinctive-word overlap against claims, which
+   dedupes exact restatements and a little more; it is the weakest part of an
+   otherwise strong design, and weak because that runtime had no semantic
+   retrieval to hand.
+2. **"Is someone already blocked on this?"** — against **other open
+   (`open`/`claimed`/`blocked`) demands' `need` and `falsifies` text.** This
+   is the mechanism the "two agents stating the same need produce one demand"
+   claim actually rests on for demands that are worded differently: two
+   `DemandId`s computed from different wording will differ, so id equality
+   alone cannot make this claim true, and a check against claims alone cannot
+   either, because an unanswered duplicate has no claim to be found via.
+
+OpenCompany runs both through `MemoryRecall` once [P0](memory.md) binds it,
+replacing the sibling's lexical overlap threshold outright rather than
+layering semantic recall on top of it. A candidate either check surfaces
+still needs the same relevance bar the lexical check was reaching for — a
+return on a subject is not the same as an answer to, or a restatement of, a
+specific `falsifies` — so both integrations MUST rank or threshold candidates
+on relevance to the demand's `falsifies`, not merely its topic, with the
+**same threshold value** used for both (a `Thresholds`-style single source,
+per [loop.md](loop.md#thresholds-are-a-struct)'s rule against a value that
+exists twice). A demand whose semantic-dedup check surfaces an existing open
+demand above threshold MUST be refused and MUST return the existing demand's
+id rather than minting a new one — this is the semantic sibling of [same id,
+already open](#same-id-already-open) below, for demands that only look
+different because they are not, in fact, identical strings.
+
+This is the one place the port deliberately improves on its source, and it
+does not change what `DemandId` is derived from — the deterministic pipeline
+above is unaffected by whether a semantic match is found.
 
 ### Refusal is informative
 
@@ -200,11 +248,20 @@ front of the asker, not to send them looking for it.
 
 A deterministic `DemandId` guarantees the same normalized `need` text produces
 the same id; it does not by itself prevent two submissions from landing as two
-rows. A submission whose `DemandId` already names an **open, non-`dropped`**
-demand MUST be refused as a duplicate and MUST return the existing demand,
-not create a second row — the same "dedup" property claimed above, made
-explicit as a write-time rule rather than left implicit in the id function. A
-submission whose `DemandId` names a demand that is `dropped` MAY be accepted
+rows. A submission whose `DemandId` names an existing demand in **any state
+other than `dropped`** — `open`, `claimed`, `blocked`, `answered`, or
+`accepted` — MUST be refused as a duplicate and MUST return the existing
+demand, not create a second row. Narrowing this to only `open` would defeat
+the dedup property the whole design rests on: a duplicate landing while the
+original is `claimed` (someone is already on it) or `blocked` (someone is
+already waiting) is exactly the case dedup exists to prevent, and neither has
+a claim on disk yet for the semantic-against-claims check to catch. For
+`answered` and `accepted`, refusal MUST return the existing demand together
+with its citing claim(s), per [Refusal is
+informative](#refusal-is-informative) — the asker gets the answer, not a bare
+rejection.
+
+A submission whose `DemandId` names a demand that is `dropped` MAY be accepted
 as a fresh `open` demand: withdrawal is not permanent disinterest, and a
 demand worth restating after it was dropped is a new occurrence of the need.
 
