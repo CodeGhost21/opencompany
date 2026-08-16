@@ -3149,7 +3149,7 @@ description = "Builds the product."
             tools: Vec::new(),
         });
 
-        let roster = build_roster(&rec, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(ids, vec!["ceo", "engineer", "growth"], "got {ids:?}");
         let overlay_agent = roster
@@ -3173,7 +3173,7 @@ description = "Builds the product."
             tools: Vec::new(),
         });
 
-        let roster = build_roster(&rec, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -3249,7 +3249,7 @@ description = "Builds the product."
         let saved = store.load(&company).await.unwrap().expect("record");
         assert_eq!(saved.overlay_agents[0].id, "engineer_2");
 
-        let roster = build_roster(&saved, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&saved, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(
             ids,
