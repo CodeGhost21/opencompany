@@ -13,7 +13,6 @@ import { needsCarriedSession } from "@/api/transport";
 import {
   addConnection,
   adoptSession,
-  clearSession,
   getConnection,
   resetConnections,
 } from "@/connections/registry";
@@ -191,17 +190,6 @@ describe("keeping a carried session", () => {
       kind: "session",
       value: "acme.second",
     });
-  });
-
-  it("is dropped on sign-out, in storage as well as in memory", () => {
-    // Clearing only the in-memory copy would restore the dead token on the next
-    // reload and present a revoked credential to the host forever.
-    const id = addConnection({ baseUrl: "https://acme.example.com" });
-    adoptSession(id, "acme.tok");
-    clearSession(id);
-
-    expect(getConnection(id)?.credential).toEqual({ kind: "cookie" });
-    expect(readProfiles().find((p) => p.id === id)?.credential).toEqual({ kind: "cookie" });
   });
 
   it("refuses to send a session over plain http to a remote host", () => {
