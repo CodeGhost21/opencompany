@@ -336,6 +336,14 @@ fn spec_for(key: &str) -> Option<&'static FieldSpec> {
 /// into setup to create one. That is precisely the dead end this flow exists to
 /// remove, reintroduced one step later.
 ///
+/// `state.config().is_local_only()` is a statement about the *configured*
+/// bind and `public_url`, not about this particular request — so it alone
+/// cannot refuse a request that reaches a loopback-bound listener through an
+/// undeclared reverse proxy. `request_looks_local` closes that gap: it checks
+/// the request's actual TCP peer and rejects any proxy-forwarding header, the
+/// same two-gate check `none`-mode login uses for the same reason (see
+/// [`crate::server::graphql::auth::local_owner`]).
+///
 /// Otherwise the ordinary admin check applies, resolved through the sole
 /// company: setup is host-level but authority is per company, and a host
 /// serving several has no single roster that could speak for the instance.
@@ -344,7 +352,10 @@ async fn authorize(
     headers: &HeaderMap,
     peer: Option<std::net::SocketAddr>,
 ) -> Result<(), Response> {
-    if state.config().is_local_only() && (!state.setup_complete() || state.registry().is_empty()) {
+    if state.config().is_local_only()
+        && (!state.setup_complete() || state.registry().is_empty())
+        && crate::server::graphql::auth::request_looks_local(peer, headers)
+    {
         return Ok(());
     }
     let runtime = state.registry().sole().ok_or_else(|| {
