@@ -2588,6 +2588,12 @@ pub struct OverlayBlob {
     /// the pre-#562 behaviour exactly.
     #[serde(default)]
     pub policy: Option<PolicyOverride>,
+    /// The operator-set per-desk tool ceilings. Absent on rows written before
+    /// desks could scope tools, and `#[serde(default)]` reads that absence as
+    /// "no desk overrides a ceiling" — which leaves the manifest in charge,
+    /// exactly as those companies ran.
+    #[serde(default)]
+    pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids the operator has switched off (issue #276). Absent on
     /// rows written before the pause switch existed, and `#[serde(default)]`
     /// reads that absence as "nothing is paused" — the pre-#276 behaviour
