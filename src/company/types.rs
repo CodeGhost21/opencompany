@@ -388,15 +388,15 @@ pub struct Agent {
     /// error, because silently dropping it yields a role whose prompt was
     /// written around a document it never received.
     ///
-    /// Empty means this agent takes the per-tier default when the routing
-    /// layer lands. `Vec<String>` with `#[serde(default)]` cannot yet
-    /// distinguish an omitted `context` key from an explicit `context = []`
-    /// in TOML — both deserialize to an empty vec — so today there is no way
-    /// to say "route nothing" instead of "use the default"; both spellings
-    /// mean the same thing. `docs/spec/runtime/orchestration/alignment.md`
-    /// specifies that the two MUST be distinguished (for example by moving to
-    /// `Option<Vec<String>>`) before the routing layer starts consuming this
-    /// field, since only then does the distinction have an observable effect.
+    /// `None` (an omitted `context` key) means this agent takes the
+    /// per-tier default once the routing layer lands. `Some(vec![])` (an
+    /// explicit `context = []`) means the role gets the universal document
+    /// and nothing else, distinct from taking the default — see
+    /// `docs/spec/runtime/orchestration/alignment.md`. `Option<Vec<String>>`
+    /// rather than a defaulted `Vec<String>` is what makes that distinction
+    /// representable at all: a plain `Vec` with `#[serde(default)]` cannot
+    /// tell an omitted key from an explicit empty list apart, since both
+    /// deserialize to the same empty vec.
     ///
     /// **Inert until the routing layer lands.** The field is parsed and carried
     /// so a manifest can declare its routing as data today; nothing consumes it
@@ -404,7 +404,7 @@ pub struct Agent {
     /// unknown fields — a `context` key on an older binary is silently ignored,
     /// which reads exactly like routing that works and does nothing.
     #[serde(default)]
-    pub context: Vec<String>,
+    pub context: Option<Vec<String>>,
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,
