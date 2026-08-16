@@ -693,6 +693,104 @@ mod tests {
         state
     }
 
+    /// A rebuilder that rebuilds over the handover, as the binary's does.
+    struct Working {
+        home: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::RuntimeRebuilder for Working {
+        async fn rebuild(
+            &self,
+            _state: &AppState,
+            request: crate::runtime::RebuildRequest,
+        ) -> crate::Result<crate::company::runtime::CompanyRuntime> {
+            RuntimeBuilder::new(self.home.clone(), request.manifest)
+                .with_id(request.id)
+                .with_handover(request.handover)
+                .build()
+                .await
+        }
+    }
+
+    /// `POST …/inference/restart` rebuilds the runtime in place, so the console's
+    /// "Restart required" notice has an action behind it rather than being a
+    /// dead end pointing at a container the operator may not be able to touch.
+    #[tokio::test]
+    async fn restart_rebuilds_the_registered_runtime() {
+        let home_dir = home();
+        let home = home_dir.path();
+        let id = CompanyId::new("acme");
+        let state = state_with_company(home).await.with_rebuilder(std::sync::Arc::new(
+            Working {
+                home: home.to_path_buf(),
+            },
+        ));
+        state.set_boot_inputs(id.clone(), crate::runtime::BootInputs::default());
+        let before = state.registry().get(&id).expect("registered");
+
+        let (status, resp, raw) =
+            send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        // A genuinely different runtime is registered — the point of the route.
+        let after = state.registry().get(&id).expect("registered");
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "the restart must actually swap the runtime, not report success and leave it"
+        );
+        // And it is taking work, rather than stuck in the quiesce window. A
+        // company parked there refuses every cycle forever, which is worse than
+        // the stale brain the rebuild was replacing.
+        assert!(!after.is_quiesced());
+        assert!(resp["status"].is_object(), "{raw}");
+    }
+
+    /// Calling it twice is not an error. The console offers the button off a
+    /// status read, so it can always be a moment stale — refusing when nothing
+    /// is pending would turn a harmless retry into a failure an operator has to
+    /// interpret.
+    #[tokio::test]
+    async fn restarting_a_healthy_company_is_a_no_op_not_a_refusal() {
+        let home_dir = home();
+        let home = home_dir.path();
+        let id = CompanyId::new("acme");
+        let state = state_with_company(home).await.with_rebuilder(std::sync::Arc::new(
+            Working {
+                home: home.to_path_buf(),
+            },
+        ));
+        state.set_boot_inputs(id, crate::runtime::BootInputs::default());
+
+        for attempt in 1..=2 {
+            let (status, _, raw) =
+                send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+            assert_eq!(status, StatusCode::OK, "attempt {attempt}: {raw}");
+        }
+    }
+
+    /// A host that wired no rebuilder cannot do this, and must say so rather
+    /// than report a success that changed nothing. This is the pre-#290
+    /// deployment, and the console keeps showing the restart notice.
+    #[tokio::test]
+    async fn a_host_that_cannot_rebuild_says_so() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) =
+            send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+        assert_ne!(status, StatusCode::OK, "{raw}");
+        assert!(
+            raw.contains("restart the process"),
+            "the failure must tell the operator what will work instead: {raw}"
+        );
+
+        // Critically, the company is still serving. A failed rebuild that left
+        // it quiesced would turn a cosmetic dead end into an outage.
+        let (status, _, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
     async fn send(
         state: &AppState,
         method: &str,
