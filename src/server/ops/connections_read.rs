@@ -827,16 +827,17 @@ mod tests {
         };
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["credentialSource"], "attested");
-        let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        keys.sort_unstable();
         assert_eq!(
             keys,
             vec![
-                "provider",
+                "account",
                 "connected",
                 "credentialSource",
-                "account",
-                "via",
-                "unverified"
+                "provider",
+                "unverified",
+                "via"
             ],
             "the read shape must stay exactly this: {keys:?}"
         );
