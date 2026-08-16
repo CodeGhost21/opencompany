@@ -144,7 +144,7 @@ export interface Connection {
 /** The fields needed to construct a connection's client. */
 export function connectionConfig(
   connection: Connection,
-): Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken"> {
+): Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken" | "sessionHeader"> {
   return {
     baseUrl: connection.baseUrl,
     company: connection.defaultCompany,
@@ -152,6 +152,8 @@ export function connectionConfig(
       connection.credential.kind === "platform"
         ? (connection.credential.token ?? null)
         : null,
+    sessionHeader:
+      connection.credential.kind === "session" ? connection.credential.value : null,
   };
 }
 
