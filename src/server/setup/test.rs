@@ -573,6 +573,41 @@ async fn an_invalid_auth_mode_is_refused() {
     assert!(!home_dir.path().join("config.toml").exists());
 }
 
+/// An unresolvable `bind` (a malformed port, here) would abort `TcpListener`
+/// at the next boot, so it is refused at the write instead — the same
+/// treatment `auth_mode` gets just above.
+#[tokio::test]
+async fn an_unresolvable_bind_is_refused() {
+    let home_dir = home();
+    let (status, body) = post_setup(
+        fresh_state(home_dir.path()),
+        serde_json::json!({ "fields": { "bind": "127.0.0.1:notaport" } }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        !home_dir.path().join("config.toml").exists(),
+        "validation happens before the write"
+    );
+}
+
+/// The boot path resolves `bind` through `ToSocketAddrs`, which accepts a
+/// hostname alongside a literal IP — so `localhost:PORT` must be accepted
+/// here too, not just an IP-shaped address.
+#[tokio::test]
+async fn a_hostname_bind_is_accepted() {
+    let home_dir = home();
+    let (status, body) = post_setup(
+        fresh_state(home_dir.path()),
+        serde_json::json!({ "fields": { "bind": "localhost:8080" } }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(home_dir.path().join("config.toml").exists());
+}
+
 /// Clearing a field removes the key so the layer below applies, rather than
 /// writing a blank that shadows it.
 #[tokio::test]
