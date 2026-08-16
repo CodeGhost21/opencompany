@@ -256,6 +256,24 @@ export function ConnectionConsole({
         </FullScreen>
       );
 
+    case "no-company":
+      return (
+        <FullScreen>
+          <div className="w-full max-w-md space-y-4" data-testid="no-company">
+            <Alert variant="destructive">
+              <AlertTitle>No companies are running on this host</AlertTitle>
+              <AlertDescription>
+                Start one from setup, or with{" "}
+                <span className="font-mono text-xs">opencompany serve --company &lt;dir&gt;</span>.
+              </AlertDescription>
+            </Alert>
+            <Button className="w-full" onClick={() => setPhase({ kind: "setup" })}>
+              Open setup
+            </Button>
+          </div>
+        </FullScreen>
+      );
+
     case "picker":
       return (
         <CompanyPicker
