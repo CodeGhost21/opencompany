@@ -398,12 +398,16 @@ pub fn build_agent(
     //     `media`, the catch-all `*` does NOT grant it, so a broadly-permissioned
     //     company never accidentally hands its agents a live account-reaching
     //     surface; it must opt in by name.
-    //  2. a resolved per-tenant token on the deps (`deps.composio`), read from the
-    //     company secret store by `HarnessPool::ensure` — never an env/platform
-    //     key. The backend derives the Composio entity from THIS token, so it is
-    //     the entire tenant-isolation lever.
+    //  2. a resolved credential on the deps (`deps.composio`), produced by
+    //     `HarnessPool::ensure` through `composio::resolve_credential` — the BYO
+    //     `composio/token` override, else the company's own TinyHumans key, else
+    //     this instance's platform identity (issue #586). The backend derives the
+    //     Composio entity from whichever tier answered, so this resolution is the
+    //     entire tenant-isolation lever. It is NOT "a stored token": on a hosted
+    //     tenant nobody pastes one and the platform identity is what wires the
+    //     tools (issue #886).
     //
-    // Granted-but-tokenless wires nothing and warns (fail-closed). The
+    // Granted-but-credential-less wires nothing and warns (fail-closed). The
     // `authorize` / `execute` tools additionally park for operator approval via
     // the `ApprovalPolicy`. Gated on the `composio` feature; the default/
     // `openhuman` build never compiles this.
@@ -425,7 +429,12 @@ pub fn build_agent(
             None => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
-                "[build] agent explicitly grants `composio` but no per-tenant Composio token is configured; composio tools NOT wired (fail-closed)"
+                // Issue #886: the gate is `deps.composio.is_none()`, which is a
+                // *resolver* outcome over three tiers (BYO `composio/token`,
+                // the company's TinyHumans key, this instance's platform
+                // identity) — not "no token is stored". Naming the stored token
+                // sent operators to paste one they did not need.
+                "[build] agent explicitly grants `composio` but no Composio credential could be resolved for this company; composio tools NOT wired (fail-closed)"
             ),
         }
     }
