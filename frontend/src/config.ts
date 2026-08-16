@@ -122,5 +122,9 @@ export function resolveConfig(): ConsoleConfig {
     baseUrl,
     company: merged.company ?? null,
     operatorToken: merged.operatorToken ?? null,
+    // Never configured at this level: a session belongs to one connection, and
+    // this resolves at most one connection's *address*. See `ConsoleConfig`.
+    sessionHeader: null,
+    hub: merged.hub ?? false,
   };
 }
