@@ -154,17 +154,28 @@ disagreement.
 The ladder is ordered, and order is the policy:
 
 1. `blocked` — a hard prerequisite is missing or a provider is refusing
-2. `answered`, or the attempt cap is reached → `Answered` / `Reported`
-3. verified but `completeness` judges the result partial against the demand's
-   `falsifies` → `Diversify`
-4. unverified beyond threshold → `Diversify`
-5. unproductive beyond threshold → `Diversify`
-6. otherwise → `Retry`
+2. `verify` passed and `completeness` is satisfied against the demand's
+   `falsifies` → `Answered`
+3. the attempt cap is reached, regardless of `verify`/`completeness` → `Reported`
+4. verified but `completeness` judges the result partial → `Diversify`
+5. unverified beyond threshold → `Diversify`
+6. unproductive beyond threshold → `Diversify`
+7. otherwise → `Retry`
 
-Step 3 is why `completeness` is a distinct arm from `verify` in the
+The two outcomes step 2 and step 3 used to share a line are not the same
+event and MUST NOT be produced by the same condition: `Answered` means
+verification actually passed; `Reported` means the loop gave up at its cap
+and is handing back whatever it has, verified or not. Collapsing them would
+let a capped-out, unverified attempt read as `Answered` — exactly what
+["only the verification arm can move a demand to `answered`"](#verification)
+forbids. Step 3 is checked after step 2 so a result that both verifies and
+lands on the same attempt as the cap still reads as `Answered`, not
+`Reported`.
+
+Step 4 is why `completeness` is a distinct arm from `verify` in the
 [four-question fan-out](#four-questions-one-merge): a result can be verified
 true and still not be what the demand asked for, and that case must not fall
-through step 2's `Answered` or step 6's default `Retry` — retrying repeats an
+through step 2's `Answered` or step 7's default `Retry` — retrying repeats an
 approach that was never wrong, and answering closes a demand nothing actually
 resolved.
 
