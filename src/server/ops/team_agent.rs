@@ -172,7 +172,15 @@ pub(super) struct AgentToolsDto {
     requested: Vec<String>,
     /// The company-wide `[tools].allow` ceiling.
     company_allow: Vec<String>,
-    /// What the agent actually holds, after the intersection.
+    /// The ceiling contributed by the desks this agent sits on — the union of
+    /// their `tools`, already narrowed by `company_allow`.
+    ///
+    /// **Empty means no desk narrows anything**, which is the same "empty is not
+    /// nothing" trap `requested` carries: a console rendering an empty list as
+    /// "this desk grants no tools" would invert the meaning. It is empty for
+    /// every company that has not set a desk ceiling, which is most of them.
+    desk_allow: Vec<String>,
+    /// What the agent actually holds, after all three levels.
     effective: Vec<String>,
 }
 
