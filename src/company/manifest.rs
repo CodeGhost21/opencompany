@@ -626,6 +626,127 @@ mod tests {
         bs58::encode([9u8; 32]).into_string()
     }
 
+    /// Writes a company bundle: `company.toml` plus optional `agents/` files.
+    fn write_bundle(company_toml: &str, agent_files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(MANIFEST_FILE), company_toml).expect("write manifest");
+        if !agent_files.is_empty() {
+            let agents = dir.path().join(super::super::agent_file::AGENTS_DIR);
+            std::fs::create_dir_all(&agents).expect("agents dir");
+            for (name, body) in agent_files {
+                std::fs::write(agents.join(name), body).expect("write agent");
+            }
+        }
+        dir
+    }
+
+    /// The compatibility rule: a bare `company.toml` with `[[agent]]` entries
+    /// and no `agents/` directory keeps working exactly as it always has.
+    #[test]
+    fn an_inline_roster_still_parses_when_there_is_no_agents_directory() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n",
+            &[],
+        );
+        let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
+        assert_eq!(manifest.agents.len(), 1);
+        assert_eq!(manifest.agents[0].id, "ceo");
+    }
+
+    /// The bundle roster replaces the inline one — so a company that has moved
+    /// to `agents/*.toml` gets exactly those teammates.
+    #[test]
+    fn a_bundle_roster_supplies_the_agents() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n",
+            &[
+                ("ceo.toml", "role = \"CEO\"\ntier = \"orchestrator\"\n"),
+                ("writer.toml", "role = \"Writer\"\n"),
+            ],
+        );
+        let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
+        let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["ceo", "writer"]);
+        assert_eq!(orchestrator_id(&manifest.agents), Some("ceo"));
+    }
+
+    /// Declaring both forms is refused rather than resolved by precedence:
+    /// either precedence rule silently discards teammates somebody wrote down.
+    #[test]
+    fn declaring_both_roster_forms_is_refused_in_prosumer_language() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n",
+            &[("writer.toml", "role = \"Writer\"\n")],
+        );
+        let err = CompanyManifest::from_path(dir.path()).expect_err("refused");
+        let problems = match err {
+            OpenCompanyError::ManifestInvalid { problems, .. } => problems,
+            other => panic!("expected ManifestInvalid, got {other}"),
+        };
+        assert_eq!(problems.len(), 1);
+        // It must name both places and say what to do, not merely that something
+        // is wrong: the operator has to know which half to delete.
+        assert!(problems[0].contains("agents/*.toml"), "{problems:?}");
+        assert!(problems[0].contains("[[agent]]"), "{problems:?}");
+        assert!(problems[0].contains("company.toml"), "{problems:?}");
+    }
+
+    /// Cross-cutting validation still applies to a bundle roster: a
+    /// `delegates_to` target is checked against the desks in `company.toml`,
+    /// which the per-file loader cannot see on its own.
+    #[test]
+    fn a_bundle_roster_is_still_validated_against_the_rest_of_the_manifest() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n\n[[group_chat]]\nid = \"research\"\nname = \"Research\"\n",
+            &[(
+                "ceo.toml",
+                "role = \"CEO\"\ndelegates_to = [\"marketing\"]\n",
+            )],
+        );
+        let err = CompanyManifest::from_path(dir.path()).expect_err("refused");
+        let problems = match err {
+            OpenCompanyError::ManifestInvalid { problems, .. } => problems,
+            other => panic!("expected ManifestInvalid, got {other}"),
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("marketing")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_agent_class_is_refused() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"critic\"\nrole = \"Critic\"\nclasses = [\"judgey\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("classes") && p.contains("judgey")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn the_known_agent_classes_are_accepted() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"critic\"\nrole = \"Critic\"\nclasses = [\"judge\", \"evidence\", \"directive\"]\n",
+        );
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
+    /// A desk `tools` ceiling is optional and absent by default, so every
+    /// manifest written before desks could scope tools keeps its meaning.
+    #[test]
+    fn a_desk_tool_ceiling_defaults_to_empty() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\n[[group_chat]]\nid = \"d\"\nname = \"D\"\nmembers = [\"ceo\"]\n",
+        );
+        assert!(manifest.group_chats[0].tools.is_empty());
+        assert!(manifest.validate().is_empty());
+    }
+
     /// A manifest naming no `[users].mode` signs people in by email, exactly as
     /// every manifest did before the key existed.
     #[test]
