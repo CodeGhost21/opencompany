@@ -3165,6 +3165,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "toml",
+ "toml_edit",
  "tower",
  "tower-http 0.7.0",
  "tracing",
