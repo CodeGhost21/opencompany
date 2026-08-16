@@ -129,7 +129,14 @@ struct BundleMeta {
     /// `None` — the manifest's `[policy]` decides, exactly as before.
     #[serde(default)]
     overlay_policy: Option<PolicyOverride>,
-    overlay_desk_tools: Default::default(),
+    /// The operator-set per-desk tool ceilings at export time. Preserved so an
+    /// export→import does not silently widen a desk back to the company's full
+    /// grant — the same class of loss `overlay_policy` above is carried to
+    /// prevent, on the axis that decides capability rather than autonomy.
+    /// `#[serde(default)]` for back-compat with older bundles, which read as
+    /// empty: the manifest's ceilings decide, exactly as before.
+    #[serde(default)]
+    overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids switched off at export time (issue #276). Preserved so
     /// an export→import does not silently re-arm a schedule the operator had
     /// paused — which is the one direction this bundle must never move on its
