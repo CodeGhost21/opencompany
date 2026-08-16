@@ -72,7 +72,7 @@ use crate::AppState;
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::CompanyRecord;
-use crate::runtime::builder::agent_effective_grants;
+use crate::runtime::builder::agent_scoped_grants;
 use crate::server::error::ApiError;
 use crate::server::ops::ScopedCompany;
 use crate::server::ops::language;
