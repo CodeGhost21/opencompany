@@ -357,16 +357,21 @@ pub struct Agent {
     ///
     /// Empty (the default) means **no delegation tools at all** — the behaviour
     /// every manifest had before this field existed, and the reason adding it is
-    /// a no-op for an existing company. A non-empty list wires exactly
-    /// `spawn_task` + `delegate_to_desk` onto this agent (never the
-    /// orchestrator's roster/workflow/lifecycle authority) and narrows
-    /// `delegate_to_desk` to the desks named here. `"*"` is a wildcard for
-    /// "every desk the company has".
+    /// a no-op for an existing company. A non-empty list wires
+    /// `spawn_task` + `delegate_to_desk` + `delegate_to_teammate` (issue #884)
+    /// onto this agent (never the orchestrator's roster/workflow/lifecycle
+    /// authority), narrows `delegate_to_desk` to the desks named here, and lets
+    /// `delegate_to_teammate` reach any member of any desk this agent sits on
+    /// (deliberately unconditional — the enable switch is opting in at all, not
+    /// which desk is named) plus every member of the desks named here. `"*"` is
+    /// a wildcard for "every desk the company has" on both tools.
     ///
     /// Entries are **desk** ids or names, not teammate ids: desks are
     /// OpenCompany's delegation address space, and `delegate_to_desk` already
-    /// resolves its target that way. Deliberately a field of its own rather than
-    /// more [`tools`](Self::tools) grant globs — that vocabulary feeds the
+    /// resolves its target that way — `delegate_to_teammate` reads the same
+    /// list and expands each desk to its members rather than taking teammate
+    /// ids directly. Deliberately a field of its own rather than more
+    /// [`tools`](Self::tools) grant globs — that vocabulary feeds the
     /// capability-namespace math, and a desk id is not a namespace.
     ///
     /// This is simultaneously the per-member enable switch and the capability
