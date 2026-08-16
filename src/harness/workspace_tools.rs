@@ -641,6 +641,58 @@ fn echo_path(path: &str) -> String {
     }
 }
 
+/// The reason clause for a failure the **store** handed back, as the agent and
+/// the operator are allowed to see it (issue #887).
+///
+/// Every tool in this module used to interpolate the error's own `Display` into
+/// its refusal. That was survivable only while nothing read those refusals:
+/// since #887 a workspace tool's message is surfaced verbatim on the console
+/// step timeline and written into the persisted turn trace, and
+/// [`OpenCompanyError::StoreIo`] renders as `could not read {path}: {source}`
+/// where `{path}` is an **absolute host filesystem path** (`src/error.rs`).
+/// Sanitising is therefore the hard precondition for surfacing, not a polish
+/// pass — doing it the other way round publishes the host's directory layout to
+/// every agent turn and every stored trace.
+///
+/// So an I/O- or backend-shaped fault contributes only its stable
+/// machine-readable [`code`](OpenCompanyError::code); the full error, path and
+/// all, goes to the host log at `warn` where an operator can reach it.
+///
+/// The listed variants are surfaced verbatim instead, and the rule is what they
+/// have in common rather than a hand-picked allowlist: each one's payload is
+/// OC-authored prose about the **caller's own request** or about a limit the
+/// company itself set — a refused argument, a name collision, an exhausted
+/// quota. None of it is host state the caller did not already supply, and
+/// collapsing it to `invalid_request` would throw away the one sentence telling
+/// the agent what to do differently.
+fn store_reason(e: &crate::error::OpenCompanyError) -> String {
+    use crate::error::OpenCompanyError as E;
+
+    tracing::warn!(
+        error = %e,
+        code = %e.code(),
+        "[workspace] a workspace tool failed at the store; the agent-facing message carries \
+         the code only"
+    );
+
+    match e {
+        E::InvalidRequest(_)
+        | E::Conflict(_)
+        | E::NotFound(_)
+        | E::CompanyNotFound(_)
+        | E::WorkspaceQuota(_)
+        | E::BudgetExceeded(_)
+        | E::LifecycleConflict(_)
+        | E::Quiescing(_) => e.to_string(),
+        opaque => format!(
+            "the workspace store failed ({code}). A retry with different arguments will not \
+             change that — say so and move on. An operator can find the details in the \
+             server log",
+            code = opaque.code(),
+        ),
+    }
+}
+
 /// A fresh random token for one read's content fence.
 ///
 /// The fence delimits operator/agent-authored prose that the model must treat
@@ -793,7 +845,8 @@ impl Tool for WorkspaceListTool {
             Ok(index) => index,
             Err(e) => {
                 return Ok(ToolResult::error(format!(
-                    "Could not read the company workspace: {e}"
+                    "Could not read the company workspace: {reason}.",
+                    reason = store_reason(&e),
                 )));
             }
         };
@@ -954,7 +1007,8 @@ impl Tool for WorkspaceReadTool {
             Ok(index) => index,
             Err(e) => {
                 return Ok(ToolResult::error(format!(
-                    "Could not read the company workspace: {e}"
+                    "Could not read the company workspace: {reason}.",
+                    reason = store_reason(&e),
                 )));
             }
         };
@@ -1018,8 +1072,9 @@ impl Tool for WorkspaceReadTool {
             }
             Err(e) => {
                 return Ok(ToolResult::error(format!(
-                    "Could not read `{}`: {e}",
-                    entry.path
+                    "Could not read `{path}`: {reason}.",
+                    path = entry.path,
+                    reason = store_reason(&e),
                 )));
             }
         };
@@ -1212,7 +1267,8 @@ impl Tool for WorkspaceSearchTool {
             // anything else is a store fault.
             Err(e) => {
                 return Ok(ToolResult::error(format!(
-                    "Could not search the company workspace: {e}"
+                    "Could not search the company workspace: {reason}.",
+                    reason = store_reason(&e),
                 )));
             }
         };
@@ -1437,7 +1493,8 @@ impl Tool for WorkspaceWriteTool {
             Ok(index) => index,
             Err(e) => {
                 return Ok(ToolResult::error(format!(
-                    "Could not read the company workspace: {e}"
+                    "Could not read the company workspace: {reason}.",
+                    reason = store_reason(&e),
                 )));
             }
         };
@@ -1507,8 +1564,9 @@ impl Tool for WorkspaceWriteTool {
             }
             Err(e) => {
                 return Ok(ToolResult::error(format!(
-                    "Could not read `{}` before overwriting it: {e}",
-                    entry.path
+                    "Could not read `{path}` before overwriting it: {reason}.",
+                    path = entry.path,
+                    reason = store_reason(&e),
                 )));
             }
         };
@@ -1603,8 +1661,9 @@ impl Tool for WorkspaceWriteTool {
                 )))
             }
             Err(e) => Ok(ToolResult::error(format!(
-                "Could not overwrite `{}`: {e}",
-                entry.path
+                "Could not overwrite `{path}`: {reason}.",
+                path = entry.path,
+                reason = store_reason(&e),
             ))),
         }
     }
@@ -1737,7 +1796,8 @@ impl Tool for WorkspaceCreateTool {
             Ok(index) => index,
             Err(e) => {
                 return Ok(ToolResult::error(format!(
-                    "Could not read the company workspace: {e}"
+                    "Could not read the company workspace: {reason}.",
+                    reason = store_reason(&e),
                 )));
             }
         };
@@ -1801,8 +1861,10 @@ impl Tool for WorkspaceCreateTool {
                         Ok(id) => Some(id),
                         Err(e) => {
                             return Ok(ToolResult::error(format!(
-                                "Could not create your own workspace folder `{parent}`: {e}",
+                                "Could not create your own workspace folder `{parent}`: \
+                                 {reason}.",
                                 parent = echo_path(&parent_path),
+                                reason = store_reason(&e),
                             )));
                         }
                     }
@@ -1859,8 +1921,9 @@ impl Tool for WorkspaceCreateTool {
                 ),
             })),
             Err(e) => Ok(ToolResult::error(format!(
-                "Could not create `{path}`: {e}",
+                "Could not create `{path}`: {reason}.",
                 path = echo_path(&normalized),
+                reason = store_reason(&e),
             ))),
         }
     }
@@ -2424,6 +2487,175 @@ mod tests {
         assert!(!after.contains("Review every PR."), "{after}");
     }
 
+    // -- what a failure actually tells the operator (issue #887) -------------
+    //
+    // These assert against the **rendered step**, not against the `ToolResult`
+    // the tool returned, because the whole defect was in the gap between the
+    // two: `workspace_read` wrote five distinct sentences and the step renderer
+    // replaced every one of them with the classifier's catch-all.
+
+    /// An obviously-fake absolute host path, in the shape
+    /// [`crate::error::OpenCompanyError::StoreIo`] embeds. Planted so a leak is
+    /// detectable by substring rather than by eye.
+    const PLANTED_HOST_PATH: &str = "/planted/host/only/data/acme/workspace/n-eng.md";
+
+    /// The store fault every leak test injects: the `InvalidData` a torn read
+    /// off `fs` actually produces, wrapped in the variant whose `Display`
+    /// carries the host path.
+    fn planted_store_io() -> crate::error::OpenCompanyError {
+        crate::error::OpenCompanyError::StoreIo {
+            path: std::path::PathBuf::from(PLANTED_HOST_PATH),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            ),
+        }
+    }
+
+    /// What the console step timeline shows as this call's result.
+    ///
+    /// Folds a realistic start/complete pair through the real
+    /// [`fold_steps`](crate::harness::steps::fold_steps) — including running the
+    /// vendored classifier, since `failure: None` is what the tinyagents path
+    /// actually sends — so this is the operator's view, not a paraphrase of it.
+    fn step_result(tool_name: &str, outcome: &ToolResult) -> Option<String> {
+        use oh::agent::progress::AgentProgress;
+
+        let output = outcome.output();
+        let steps = crate::harness::steps::fold_steps(vec![
+            AgentProgress::ToolCallStarted {
+                call_id: "c1".to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: Value::Null,
+                iteration: 1,
+                display_label: None,
+                display_detail: None,
+            },
+            AgentProgress::ToolCallCompleted {
+                call_id: "c1".to_string(),
+                tool_name: tool_name.to_string(),
+                success: !outcome.is_error,
+                output_chars: output.chars().count(),
+                output: output.clone(),
+                arguments: None,
+                elapsed_ms: 51,
+                iteration: 1,
+                failure: None,
+            },
+        ]);
+        steps.into_iter().next().expect("one step").result
+    }
+
+    /// A tree with one folder and one note inside it, for the fault doubles.
+    fn small_tree() -> Vec<WorkspaceNode> {
+        vec![
+            folder("f-standards", "Standards", None),
+            file("n-eng", "Engineering standards.md", Some("f-standards")),
+        ]
+    }
+
+    /// The precondition for surfacing anything at all.
+    ///
+    /// `StoreIo`'s `Display` is `could not read {path}: {source}` and that
+    /// `{path}` is an absolute host path. Surfacing the tool's message without
+    /// sanitising first would publish the host's filesystem layout into every
+    /// agent's context AND into the persisted turn trace — which is why the
+    /// sanitisation landed before the `INTRINSIC_TOOLS` entry, not after it.
+    ///
+    /// Every workspace tool that reads the index is covered, not just the two
+    /// exits issue #887 named: they all interpolated the same error.
+    #[tokio::test]
+    async fn no_workspace_failure_carries_a_host_path() {
+        let id = CompanyId::new("acme");
+        let faulty = || -> Arc<dyn WorkspaceStore> {
+            Arc::new(FixedTree::failing_tree(small_tree(), planted_store_io))
+        };
+        let note = json!({"path": "Standards/Engineering standards.md"});
+
+        let mut outcomes: Vec<(&str, ToolResult)> = vec![
+            (
+                WORKSPACE_READ_TOOL,
+                WorkspaceReadTool::new(ws(faulty(), id.clone()))
+                    .execute(note.clone())
+                    .await
+                    .unwrap(),
+            ),
+            (
+                WORKSPACE_LIST_TOOL,
+                WorkspaceListTool::new(ws(faulty(), id.clone()))
+                    .execute(json!({}))
+                    .await
+                    .unwrap(),
+            ),
+            (
+                WORKSPACE_SEARCH_TOOL,
+                WorkspaceSearchTool::new(ws(faulty(), id.clone()))
+                    .execute(json!({"query": "review"}))
+                    .await
+                    .unwrap(),
+            ),
+            (
+                WORKSPACE_CREATE_TOOL,
+                WorkspaceCreateTool::new(ws(faulty(), id.clone()))
+                    .execute(json!({"path": "Standards/new.md", "kind": "file"}))
+                    .await
+                    .unwrap(),
+            ),
+            (
+                WORKSPACE_WRITE_TOOL,
+                WorkspaceWriteTool::new(ws(faulty(), id.clone()))
+                    .execute(json!({
+                        "path": "Standards/Engineering standards.md",
+                        "content": "x",
+                        "expected_updated_at": 2_000,
+                    }))
+                    .await
+                    .unwrap(),
+            ),
+        ];
+        // And the one exit that fails *after* the tree resolved.
+        outcomes.push((
+            WORKSPACE_READ_TOOL,
+            WorkspaceReadTool::new(ws(
+                Arc::new(FixedTree::failing_read(
+                    small_tree(),
+                    ReadFault::Failed(planted_store_io),
+                )),
+                id,
+            ))
+            .execute(note)
+            .await
+            .unwrap(),
+        ));
+
+        for (name, outcome) in &outcomes {
+            assert!(outcome.is_error, "{name} was supposed to fail");
+            let written = outcome.output();
+            let shown = step_result(name, outcome).unwrap_or_default();
+            for text in [&written, &shown] {
+                assert!(
+                    !text.contains(PLANTED_HOST_PATH),
+                    "{name} leaked the host path: {text}"
+                );
+                // The prefix too, so a truncated or reformatted path is caught.
+                assert!(
+                    !text.contains("/planted/"),
+                    "{name} leaked part of the host path: {text}"
+                );
+                assert!(
+                    !text.contains("stream did not contain valid UTF-8"),
+                    "{name} leaked the raw io::Error: {text}"
+                );
+            }
+            // What replaces it has to be actionable, so the operator can find
+            // the withheld detail: the stable code.
+            assert!(
+                written.contains("store_io"),
+                "{name} withheld the error without naming its code: {written}"
+            );
+        }
+    }
+
     // -- workspace_search (issue #607) ---------------------------------------
 
     /// A hit carries everything needed to act on it without a second call:
@@ -2937,25 +3169,79 @@ mod tests {
         assert_eq!(body.len(), big.len(), "the oversized note was clobbered");
     }
 
-    /// A store that answers `tree()` from a fixed node list and nothing else.
+    /// How a [`FixedTree`] answers the body read, when a test asks it to fail.
+    #[derive(Clone, Copy)]
+    pub(super) enum ReadFault {
+        /// The store itself failed. A factory rather than a value because
+        /// [`crate::error::OpenCompanyError`] is not `Clone` (it carries a
+        /// `std::io::Error`).
+        Failed(fn() -> crate::error::OpenCompanyError),
+    }
+
+    /// A store that answers `tree()` from a fixed node list, and can be told to
+    /// fail either of the two calls a read makes.
     ///
     /// The listing bounds have to be exercised against a tree big enough to hit
     /// them and containing nodes no real backend will create for us — a
     /// dangling parent, to raise `unaddressable`. `FsOps` refuses both, so the
     /// only way to reach that rendering is to hand the index the tree directly.
-    struct FixedTree(Vec<WorkspaceNode>);
+    ///
+    /// Issue #887 added the faults for the same reason one level along: a
+    /// store-level I/O failure, and a node that vanishes between the tree read
+    /// and the body read, are exactly what a healthy filesystem will not do on
+    /// request — and they are two of `workspace_read`'s five failure exits.
+    pub(super) struct FixedTree {
+        nodes: Vec<WorkspaceNode>,
+        tree_fault: Option<fn() -> crate::error::OpenCompanyError>,
+        read_fault: Option<ReadFault>,
+    }
+
+    impl FixedTree {
+        pub(super) fn new(nodes: Vec<WorkspaceNode>) -> Self {
+            Self {
+                nodes,
+                tree_fault: None,
+                read_fault: None,
+            }
+        }
+
+        /// `tree()` — and therefore every tool's index read — fails.
+        pub(super) fn failing_tree(
+            nodes: Vec<WorkspaceNode>,
+            fault: fn() -> crate::error::OpenCompanyError,
+        ) -> Self {
+            Self {
+                tree_fault: Some(fault),
+                ..Self::new(nodes)
+            }
+        }
+
+        /// The tree resolves normally; the body read is the one that fails.
+        pub(super) fn failing_read(nodes: Vec<WorkspaceNode>, fault: ReadFault) -> Self {
+            Self {
+                read_fault: Some(fault),
+                ..Self::new(nodes)
+            }
+        }
+    }
 
     #[async_trait]
     impl WorkspaceStore for FixedTree {
         async fn tree(&self, _company: &CompanyId) -> crate::Result<Vec<WorkspaceNode>> {
-            Ok(self.0.clone())
+            match self.tree_fault {
+                Some(make) => Err(make()),
+                None => Ok(self.nodes.clone()),
+            }
         }
         async fn read(
             &self,
             _company: &CompanyId,
             _id: &str,
         ) -> crate::Result<Option<(WorkspaceNode, String)>> {
-            unreachable!("the listing never reads a body")
+            match self.read_fault {
+                None => unreachable!("the listing never reads a body"),
+                Some(ReadFault::Failed(make)) => Err(make()),
+            }
         }
         async fn write(
             &self,
@@ -3030,7 +3316,7 @@ mod tests {
             unreachable!("the listing never reads a payload")
         }
         async fn is_empty(&self, _company: &CompanyId) -> crate::Result<bool> {
-            Ok(self.0.is_empty())
+            Ok(self.nodes.is_empty())
         }
     }
 
@@ -3065,7 +3351,7 @@ mod tests {
             ));
         }
 
-        let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree(nodes));
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree::new(nodes));
         let list = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
         let out = text(&list.execute(json!({})).await.unwrap());
 
@@ -3115,7 +3401,7 @@ mod tests {
         nodes.push(file("n-orphan-a", "orphan-a.md", Some("gone")));
         nodes.push(file("n-orphan-b", "orphan-b.md", Some("gone")));
 
-        let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree(nodes));
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree::new(nodes));
         let list = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
         let out = text(&list.execute(json!({})).await.unwrap());
 
