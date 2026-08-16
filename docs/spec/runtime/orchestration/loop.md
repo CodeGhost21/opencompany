@@ -310,9 +310,15 @@ the directive queue, specified in
 - An attempt that times out with no report still produces a judge verdict
   informed by what is on disk.
 - Diversification triggers on consecutive unproductive attempts, not cumulative.
+- Diversification also triggers on consecutive unverified attempts, not
+  cumulative, via the independent `unverified_streak_limit` counter.
 - Reaching the attempt cap returns partial work rather than discarding it, and
   routes to `Reported`, never `Answered`, unless verification independently
   passed on the same attempt.
+- A `Reported` route does not move the demand to `answered`; the demand stays
+  in the state that dispatched the capped attempt and remains re-dispatchable.
+- `Blocked` is raised by the harness observing the attempt's outcome, not by
+  any of the four evaluation arms.
 - A verified attempt whose `completeness` result is partial routes to
   `Diversify`, not `Answered` or `Retry`.
 - An unparsable `Verdict` defaults to `Restart`, and an unparsable `Route`
