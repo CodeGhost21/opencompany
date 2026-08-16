@@ -158,6 +158,14 @@ export function RunHistoryPanel({
   /** A run the copilot judged un-fixable, shown inline under that run's row. */
   fixReason?: { seq: number; reason: string } | null;
 }) {
+  // Only one fix may be in flight at a time: `handleFixWithCopilot` sets a
+  // single `prefilledDraft`/`editOpen` slot, so a second Fix started on a
+  // different row of this same panel while the first is still running would
+  // race it for that slot — whichever resolves last silently wins, which
+  // could show the operator the wrong run's correction. Disabling every row's
+  // button (not just the in-flight one's) while `fixingRunSeq` is set turns
+  // that race into "wait your turn".
+  const anyFixInFlight = fixingRunSeq != null;
   return (
     <div className="border-t bg-card/60" data-testid="workflow-run-history">
       <div className="flex items-center justify-between px-4 py-2">
@@ -188,6 +196,7 @@ export function RunHistoryPanel({
                 onSelect={() => onSelectRun(run)}
                 onFixWithCopilot={onFixWithCopilot}
                 fixing={fixingRunSeq === run.seq}
+                fixDisabled={anyFixInFlight}
                 fixReason={fixReason?.seq === run.seq ? fixReason.reason : null}
               />
             ))}
@@ -209,6 +218,7 @@ function RunHistoryRow({
   onSelect,
   onFixWithCopilot,
   fixing,
+  fixDisabled,
   fixReason,
 }: {
   run: WorkflowRunOutcome;
@@ -218,6 +228,8 @@ function RunHistoryRow({
   onFixWithCopilot?: (run: WorkflowRunOutcome) => void;
   /** Whether this row's copilot fix is currently in flight. */
   fixing?: boolean;
+  /** A DIFFERENT row's fix is in flight — disabled without the "Fixing…" label. */
+  fixDisabled?: boolean;
   /** The copilot's reason this failure could not be fixed by re-wiring, if any. */
   fixReason?: string | null;
 }) {
@@ -302,7 +314,7 @@ function RunHistoryRow({
                   size="sm"
                   variant="outline"
                   className="h-6 px-2 text-3xs"
-                  disabled={fixing}
+                  disabled={fixing || fixDisabled}
                   onClick={() => onFixWithCopilot(run)}
                   data-testid="workflow-run-fix-with-copilot"
                 >
