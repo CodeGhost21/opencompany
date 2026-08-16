@@ -80,7 +80,9 @@ export class OpenCompanyClient {
    */
   private authHeaders(): Record<string, string> {
     const headers: Record<string, string> = {};
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    if (this.token) {
+      headers["authorization"] = `Bearer ${this.token}`;
+    }
     // Only ever set for a connection that cannot use a cookie — a console on a
     // different origin from its host. Same-origin consoles leave this null and
     // keep the HttpOnly cookie, which nothing here can read. See
