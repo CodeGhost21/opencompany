@@ -123,6 +123,39 @@ The rule this preserves: an exclusion applies because something *declared* the
 role's job, and a company can add one but cannot silently remove one by
 rewording a title.
 
+#### The built-in mapping
+
+Naming the construction sites without naming their classes leaves an
+implementer guessing, so the mapping is normative:
+
+| Built-in seat | Class | Therefore excluded |
+| --- | --- | --- |
+| `judge` arm ([loop](loop.md#four-questions-one-merge)) | `judges` | scratch |
+| `verify` arm | `judges`, `weighs-evidence` | scratch, assertion board |
+| `critique` arm | `weighs-evidence` | assertion board |
+| `completeness` arm | `weighs-evidence` | assertion board |
+| `director` (acts on a [directive](delegation.md#operator-directives)) | `acts-on-directive` | `CLAIMS.md` |
+| `curator` (writes the [brief](alignment.md#the-brief)) | *(unclassified)* | nothing |
+
+Two entries carry an argument worth keeping:
+
+- **`verify` holds both classes.** It judges — so the scratch exclusion applies,
+  since provisional working-out read as a result is exactly what would make it
+  pass something unfinished — and it weighs evidence, so the board exclusion
+  applies too. It is the one seat where both failures are reachable, and
+  carrying one class would leave the other open.
+- **The curator is deliberately unclassified.** It reads everything, including
+  the scratch and the board, because its job is to compress what the company
+  knows into one document and a summary that cannot see half the workspace is
+  not a summary. It is safe precisely because it *renders* rather than judges:
+  it ends no loop, closes no demand, and returns no verdict, so there is no
+  decision for unevidenced text to corrupt. What it writes is then subject to
+  every exclusion downstream, since `BRIEF.md` is itself a routed document.
+
+The verification suite MUST assert this table directly — one fixture per built-in
+seat — rather than only asserting the exclusions in the abstract. An exclusion
+nothing checks against the seat that needs it is a rule with no subject.
+
 **The three exclusions above bind the workspace overlay too, not only
 `context`.** The overlay is a company-owned file, but "company-owned" is not
 "exempt from the routing rules" — a company could still author an overlay
