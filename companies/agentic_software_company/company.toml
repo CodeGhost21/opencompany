@@ -36,6 +36,10 @@ allow = ["*", "media", "composio"]
 id = "product_manager"
 role = "Product Manager"
 description = "Own the roadmap, specs, and prioritization."
+# Desk lead (issue #884): may hand one slice to a peer on this desk with
+# `delegate_to_teammate`, instead of declining work addressed to a specialist.
+# Naming its own desk is the enable switch; depth stays capped at 2.
+delegates_to = ["product_design"]
 
 [[agent]]
 id = "designer"
@@ -46,6 +50,10 @@ description = "Product and UX design."
 id = "backend_engineer"
 role = "Backend Engineer"
 description = "Build and operate the backend and services."
+# Desk lead (issue #884): may hand one slice to a peer on this desk with
+# `delegate_to_teammate`, instead of declining work addressed to a specialist.
+# Naming its own desk is the enable switch; depth stays capped at 2.
+delegates_to = ["engineering"]
 
 [[agent]]
 id = "frontend_engineer"
@@ -76,6 +84,10 @@ description = "Resolve customer issues and feed insight back."
 id = "devrel"
 role = "Developer Relations"
 description = "Engage developers with demos, content, and community."
+# Desk lead (issue #884): may hand one slice to a peer on this desk with
+# `delegate_to_teammate`, instead of declining work addressed to a specialist.
+# Naming its own desk is the enable switch; depth stays capped at 2.
+delegates_to = ["go_to_market"]
 
 # Group chats — the desks the human talks to. Each pulls in a few agents from
 # the roster above; the first member is the desk's lead (the routing target).
