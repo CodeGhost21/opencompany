@@ -842,6 +842,13 @@ pub fn build_agent(
         ));
     }
 
+    // The routed workspace documents go LAST, after every tool brief. They are
+    // the most volatile thing in the prompt — an operator editing a note between
+    // two turns moves them — and the prompt prefix is what a provider cache
+    // reuses across turns, so putting them anywhere earlier would invalidate
+    // every brief behind them on an edit that changed none of those briefs.
+    persona.push_str(&crate::company::prompt::context_section(routed_context));
+
     let prompt_builder = SystemPromptBuilder::for_subagent(
         persona, /* omit_identity */ true, /* omit_safety_preamble */ false,
         /* omit_skills_catalog */ true,
