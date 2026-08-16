@@ -542,6 +542,26 @@ pub struct GroupChat {
     /// Agent ids in this chat; each must exist in the roster.
     #[serde(default)]
     pub members: Vec<String>,
+    /// This desk's tool ceiling: the middle level of the three-level narrowing
+    /// `[tools].allow ∩ desk.tools ∩ [[agent]].tools`.
+    ///
+    /// A desk is how a company expresses a department — a finance desk, a
+    /// creative desk — so it is the natural place to say "nobody on this desk
+    /// reaches the web", once, instead of repeating the restriction on every
+    /// member and hoping the next member added inherits it.
+    ///
+    /// Empty (the default) narrows **nothing**, which makes this field a no-op
+    /// for every manifest written before it existed.
+    ///
+    /// A teammate sitting on several desks takes the **union** of their
+    /// ceilings before the intersection with the company grant. Union rather
+    /// than intersection because desks are additive memberships: joining the
+    /// growth desk is how a marketer gains the ad tools, and an intersection
+    /// would make each extra desk silently *remove* capability — so adding
+    /// someone to a desk could break the job they already did. See
+    /// [`effective_grants`](crate::company::effective_grants).
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 /// A `[[connection]]` entry — an integration to prioritize wiring. This is
