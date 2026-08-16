@@ -76,9 +76,15 @@ A demand with an empty `falsifies` SHOULD be refused with that explanation.
 
 ```text
 open ──claim──> claimed ──a claim cites the id──> answered ──operator──> accepted
- │                 │
+ │  ▲              │  ▲
+ │  └── blocker answered ──┐
  └──────────── blocked ────────────┘            (any state) ──> dropped
 ```
+
+`blocked` is not terminal: when the blocking demand referenced in `blocked_by`
+reaches `answered`, code moves the blocked demand back to the state it was in
+when it became blocked — `open` if nobody had claimed it yet, `claimed` if an
+agent already had. Blocking never discards work in progress.
 
 | State | Meaning | Who moves it |
 | --- | --- | --- |
