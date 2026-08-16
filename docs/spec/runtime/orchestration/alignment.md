@@ -137,11 +137,12 @@ them is how a company comes to treat a year-old fact as a current finding.
 
 The brief MUST be held to a token budget (default 10,000). "Token" here is a
 provider-billed unit, not a Rust `char` or byte; the clamp below sizes on
-codepoints as a cheap, tokenizer-free upper bound (a token is never fewer
-codepoints than it is characters for the encodings in use), which is
-conservative — it may cut earlier than the true token budget requires, never
-later. A future revision MAY size against the actual provider tokenizer if
-the slack this leaves is measured to matter.
+codepoints as a cheap, tokenizer-free upper bound (one token typically spans
+several codepoints for the encodings in use, so the codepoint count is never
+smaller than the token count), which is conservative — it may cut earlier
+than the true token budget requires, never later. A future revision MAY size
+against the actual provider tokenizer if the slack this leaves is measured to
+matter.
 
 The clamp MUST be applied **where the brief is spent** — at prompt assembly —
 and MUST NOT be applied by refusing the write. Refusing the write costs the
