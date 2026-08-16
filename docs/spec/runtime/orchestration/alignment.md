@@ -91,6 +91,35 @@ Every entry and every exclusion in the shipped default table MUST carry a
 comment saying what it prevents. A routing table that flatters the code is how a
 role comes to be missing the one document its prompt was written around.
 
+#### How a role is classified
+
+Those three rules quantify over "roles that weigh evidence", "roles that judge"
+and "roles acting on a directive", and the manifest carries no such
+classification — only a free-text `role` and an optional `tier`. Inferring the
+class from either is not acceptable: `role` is prose an operator writes for
+humans, and matching on it would make a company that renames "Critic" to
+"Reviewer" silently lose an exclusion. A control that a rename can switch off is
+not a control.
+
+The classification is therefore **a property of the seat the runtime dispatches
+into, not of the manifest text**:
+
+- Roles the runtime itself instantiates for a known job — the judge and verify
+  arms of the [loop](loop.md), the curator, the director acting on a
+  [directive](delegation.md#operator-directives) — are classified at their
+  construction site, because the runtime built them for that job and knows what
+  they are.
+- Roster teammates default to **unclassified**, which imposes no exclusion and
+  is the correct default: an ordinary teammate is not judging anything.
+- A company that wants an exclusion on a roster teammate states it, rather than
+  having it guessed. The manifest key for this is deliberately left to the
+  implementing change, but it MUST be an explicit declaration — a `classes`
+  list or equivalent — and never a match on `role`.
+
+The rule this preserves: an exclusion applies because something *declared* the
+role's job, and a company can add one but cannot silently remove one by
+rewording a title.
+
 **The three exclusions above bind the workspace overlay too, not only
 `context`.** The overlay is a company-owned file, but "company-owned" is not
 "exempt from the routing rules" — a company could still author an overlay
