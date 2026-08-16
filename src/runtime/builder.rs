@@ -1820,6 +1820,31 @@ impl RuntimeBuilder {
             }
             carried
         });
+        // The per-desk tool ceilings, carried across the rebuild under the same
+        // seed-wins rule as the policy override above — see
+        // `carry_desk_tool_overrides` for why a desk grant needs it even more
+        // than the approval tier does.
+        let overlay_desk_tools = existing
+            .as_ref()
+            .map(|r| {
+                let carried = carry_desk_tool_overrides(
+                    &r.manifest.group_chats,
+                    &self.manifest.group_chats,
+                    &r.overlay_desk_tools,
+                );
+                for desk_id in r.overlay_desk_tools.keys() {
+                    if !carried.contains_key(desk_id) {
+                        tracing::info!(
+                            company = %id,
+                            desk = %desk_id,
+                            "[tools] the seed changed this desk's `tools`, so the console \
+                             ceiling was cleared — version control wins when it speaks"
+                        );
+                    }
+                }
+                carried
+            })
+            .unwrap_or_default();
         // Issue #276: the workflows the operator switched off. This is the field
         // that makes the pause switch durable, and it is carried across the
         // rebuild for a sharper reason than the two above: `merge_enabled_workflows`
