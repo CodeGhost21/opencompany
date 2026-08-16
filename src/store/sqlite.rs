@@ -506,7 +506,7 @@ impl CompanyStore for SqliteStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_policy: overlay.policy,
-            overlay_desk_tools: Default::default(),
+            overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
