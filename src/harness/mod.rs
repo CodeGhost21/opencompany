@@ -2378,6 +2378,7 @@ pub(crate) fn build_roster(
             deps,
             &grants,
             skill_deltas,
+            routed_context.get(&manifest_agent.id).map(Vec::as_slice).unwrap_or(&[]),
             is_orchestrator,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -2429,6 +2430,7 @@ pub(crate) fn build_roster(
             deps,
             &grants,
             skill_deltas,
+            routed_context.get(&manifest_agent.id).map(Vec::as_slice).unwrap_or(&[]),
             /* is_orchestrator */ false,
         )?;
         roster.push(Arc::new(CompanyAgent {
