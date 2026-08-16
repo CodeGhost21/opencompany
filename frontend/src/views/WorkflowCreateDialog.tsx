@@ -498,10 +498,17 @@ export function WorkflowCreateDialog({
     // trip — while `workflow` above still supplies the id + version token the
     // conditional Save writes under. Its banners (summary/notes/readiness) render
     // read-only below. Absent → a normal open, and the readiness banner clears.
+    //
+    // `g.id` comes from `workflow.id`, host-pinned server-side (the fix route
+    // never lets the copilot's own id vote — see `FixTarget`), so it is not
+    // attacker-influenceable in the current call path. `workflow?.id` is
+    // preferred anyway: it is the id the conditional Save on this dialog
+    // actually writes under, so hydrating from anything else would only ever
+    // be a latent bug if that invariant ever drifted.
     if (prefilledDraft) {
       const g = prefilledDraft.workflow;
-      setId(g.id);
-      setName(g.name);
+      setId(workflow?.id ?? g.id);
+      setName(g.name.trim());
       setDescription(g.description ?? "");
       setNodes(draftNodes(g));
       setEdges(draftEdges(g));
