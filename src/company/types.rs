@@ -559,7 +559,7 @@ pub struct GroupChat {
     /// growth desk is how a marketer gains the ad tools, and an intersection
     /// would make each extra desk silently *remove* capability — so adding
     /// someone to a desk could break the job they already did. See
-    /// [`effective_grants`](crate::company::effective_grants).
+    /// [`agent_scoped_grants`](crate::runtime::builder::agent_scoped_grants).
     #[serde(default)]
     pub tools: Vec<String>,
 }
