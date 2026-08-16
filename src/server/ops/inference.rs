@@ -75,6 +75,7 @@ pub fn router() -> Router<AppState> {
         get(get_status).put(set_config).delete(revert_config),
     )
     .merge(scoped("/inference/test", post(test_config)))
+    .merge(scoped("/inference/restart", post(restart_runtime)))
 }
 
 /// The company's effective inference status as the console renders it. **Never**
@@ -498,6 +499,51 @@ async fn revert_config(company: AdminScopedCompany) -> Result<Json<MutationRespo
     }))
 }
 
+/// `POST …/inference/restart` — rebuild this company's runtime in place, now.
+///
+/// The action behind the console's "Restart required" notice. Saving inference
+/// already attempts this rebuild ([`set_config`]), so this route exists for the
+/// cases that attempt could not cover: a company that was already sitting in the
+/// restart-required state before #290 landed, one whose rebuild failed
+/// transiently, and one an operator arrives at without touching the form at all.
+/// Without it the notice is a dead end — it names a restart the operator of a
+/// hosted tenant has no way to perform, since the container is the unit of
+/// restart and the control plane has no button for it.
+///
+/// Requires authority over the company, like the save it mirrors: rebuilding
+/// swaps the brain every agent thinks with.
+///
+/// **Idempotent and safe to call when nothing is pending.** A rebuild of a
+/// company that is already live is a no-op from the operator's point of view —
+/// same journal, same parked approvals, same grants (see
+/// [`rebuild`](crate::runtime::rebuild)) — so this does not gate on
+/// `restart_required` first. Gating would introduce a race in which the check
+/// and the rebuild disagree, and would refuse the one case most worth allowing:
+/// an operator trying to recover a company whose state the console is reading
+/// wrongly.
+async fn restart_runtime(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let id = company.runtime.id().clone();
+    let successor = crate::runtime::rebuild_company(&state, &id)
+        .await
+        .map_err(ApiError)?;
+    // Read the status off the *successor*, never off the runtime we came in
+    // with: a rebuild that landed on the same brain must still report honestly
+    // rather than claim a success the runtime cannot back up.
+    let status = effective_status(successor.as_ref()).await?;
+    Ok(Json(MutationResponse {
+        note: if status.restart_required {
+            RESTART_NOTE
+        } else {
+            REBUILT_NOTE
+        }
+        .to_string(),
+        status,
+    }))
+}
+
 /// `POST …/inference/test` — a live one-message probe of the resolved provider.
 ///
 /// Gated on the `openhuman` feature (the HTTP provider lives there); without it
@@ -645,6 +691,104 @@ mod tests {
         state.registry().insert(id, std::sync::Arc::new(runtime));
         crate::server::test_support::seed_fixed_admin(&state, "acme").await;
         state
+    }
+
+    /// A rebuilder that rebuilds over the handover, as the binary's does.
+    struct Working {
+        home: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::RuntimeRebuilder for Working {
+        async fn rebuild(
+            &self,
+            _state: &AppState,
+            request: crate::runtime::RebuildRequest,
+        ) -> crate::Result<crate::company::runtime::CompanyRuntime> {
+            RuntimeBuilder::new(self.home.clone(), request.manifest)
+                .with_id(request.id)
+                .with_handover(request.handover)
+                .build()
+                .await
+        }
+    }
+
+    /// `POST …/inference/restart` rebuilds the runtime in place, so the console's
+    /// "Restart required" notice has an action behind it rather than being a
+    /// dead end pointing at a container the operator may not be able to touch.
+    #[tokio::test]
+    async fn restart_rebuilds_the_registered_runtime() {
+        let home_dir = home();
+        let home = home_dir.path();
+        let id = CompanyId::new("acme");
+        let state = state_with_company(home)
+            .await
+            .with_rebuilder(std::sync::Arc::new(Working {
+                home: home.to_path_buf(),
+            }));
+        state.set_boot_inputs(id.clone(), crate::runtime::BootInputs::default());
+        let before = state.registry().get(&id).expect("registered");
+
+        let (status, resp, raw) =
+            send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        // A genuinely different runtime is registered — the point of the route.
+        let after = state.registry().get(&id).expect("registered");
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "the restart must actually swap the runtime, not report success and leave it"
+        );
+        // And it is taking work, rather than stuck in the quiesce window. A
+        // company parked there refuses every cycle forever, which is worse than
+        // the stale brain the rebuild was replacing.
+        assert!(!after.is_quiesced());
+        assert!(resp["status"].is_object(), "{raw}");
+    }
+
+    /// Calling it twice is not an error. The console offers the button off a
+    /// status read, so it can always be a moment stale — refusing when nothing
+    /// is pending would turn a harmless retry into a failure an operator has to
+    /// interpret.
+    #[tokio::test]
+    async fn restarting_a_healthy_company_is_a_no_op_not_a_refusal() {
+        let home_dir = home();
+        let home = home_dir.path();
+        let id = CompanyId::new("acme");
+        let state = state_with_company(home)
+            .await
+            .with_rebuilder(std::sync::Arc::new(Working {
+                home: home.to_path_buf(),
+            }));
+        state.set_boot_inputs(id, crate::runtime::BootInputs::default());
+
+        for attempt in 1..=2 {
+            let (status, _, raw) =
+                send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+            assert_eq!(status, StatusCode::OK, "attempt {attempt}: {raw}");
+        }
+    }
+
+    /// A host that wired no rebuilder cannot do this, and must say so rather
+    /// than report a success that changed nothing. This is the pre-#290
+    /// deployment, and the console keeps showing the restart notice.
+    #[tokio::test]
+    async fn a_host_that_cannot_rebuild_says_so() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) =
+            send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+        assert_ne!(status, StatusCode::OK, "{raw}");
+        assert!(
+            raw.contains("restart the process"),
+            "the failure must tell the operator what will work instead: {raw}"
+        );
+
+        // Critically, the company is still serving. A failed rebuild that left
+        // it quiesced would turn a cosmetic dead end into an outage.
+        let (status, _, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     async fn send(
