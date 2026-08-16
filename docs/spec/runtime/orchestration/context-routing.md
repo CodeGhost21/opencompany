@@ -180,7 +180,7 @@ no bearing on cache-prefix stability.
   document it never received.
 
   **Oversized** means the document alone exceeds the same token budget the
-  [brief](#the-brief) is held to. Reusing that number rather than inventing a
+  [brief](alignment.md#the-brief) is held to. Reusing that number rather than inventing a
   second one is deliberate: it is already the runtime's answer to "how much of
   one document is a prompt allowed to spend", and two limits for the same
   question is the duplicated-constant failure this spec objects to elsewhere.

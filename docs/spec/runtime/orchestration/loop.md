@@ -76,7 +76,7 @@ easily collapsed into a single "did it work" call is judge and verify.
 `Answered`. They exist because "right" and "well-conducted" do not cover
 every way an attempt can fail.
 
-- **critique** asks a [critic-shaped](alignment.md#context-routing) question of
+- **critique** asks a [critic-shaped](context-routing.md) question of
   the result itself: does it contradict a claim already on the [claim
   ledger](alignment.md#claimsmd--the-evidence-ledger), does it assert
   something as established that the workspace does not support, is the

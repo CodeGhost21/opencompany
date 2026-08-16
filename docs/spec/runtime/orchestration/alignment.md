@@ -58,7 +58,7 @@ was cut and to what budget.
 
 An unreadable brief — a missing file, or one that fails to parse as UTF-8 —
 measures as empty rather than erroring. This is a deliberate, narrow exception
-to the [routed-document hard-error rule](#failure-handling) above: every other
+to the [routed-document hard-error rule](context-routing.md#failure-handling) above: every other
 routed document is authored by a person or an agent, so a corrupt one signals
 a bug worth surfacing loudly. `BRIEF.md` is instead **wholly machine-derived
 and machine-consumed** — no prompt is ever written around its absence the way
@@ -280,7 +280,7 @@ a brief explaining what the board is for.
   `role_context`'s output specifically: it does not cover the shared method
   policy or the boundary sentence, which are universal and not declared per
   role, or the workspace overlay, which is a company-owned file outside
-  `context` entirely (see [assembly order](#assembly-order-is-a-cache-decision)).
+  `context` entirely (see [assembly order](context-routing.md#assembly-order-is-a-cache-decision)).
 - The brief clamp cuts on a character boundary, keeps the leading portion, and
   appends the marker.
 - An agent cannot post to the board as another agent.

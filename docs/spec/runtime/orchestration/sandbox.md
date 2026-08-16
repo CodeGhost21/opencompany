@@ -128,7 +128,7 @@ correct. That last column is the part not readable from the source.
   agent calls it as described rather than reading the source. Hence derived.
 
 The index is a natural routed document for code-writing roles — see
-[alignment.md](alignment.md#context-routing).
+[alignment.md](context-routing.md).
 
 ---
 
