@@ -158,15 +158,34 @@ fn cap(text: &str, chars: usize) -> String {
     trimmed.chars().take(chars).collect::<String>() + "…"
 }
 
-/// Neutralizes any run of three-or-more backticks in untrusted text before it is
-/// embedded in the fix prompt. The failing graph's JSON and the run's failure
-/// fields are attacker-influenceable (a node name/description or an error string
-/// carrying ` ``` ` would otherwise close the markdown code fence early, and the
-/// tail would read as instructions to the copilot — a prompt-injection vector).
-/// Inserting a zero-width space between the backticks keeps the text readable to
-/// the model while it can no longer open or close a fence.
+/// Neutralizes every backtick in untrusted text before it is embedded in the
+/// fix prompt. The failing graph's JSON and the run's failure fields are
+/// attacker-influenceable (a node name/description or an error string carrying
+/// ` ``` ` would otherwise close the markdown code fence early, and the tail
+/// would read as instructions to the copilot — a prompt-injection vector).
+///
+/// A prior version only replaced exact `"```"` runs, which a run of 4+
+/// backticks defeats: replacing the first three leaves a real backtick at the
+/// end of the replacement adjacent to the leftover real backtick(s), silently
+/// reconstructing a three-backtick fence. Inserting a zero-width space after
+/// EVERY backtick keeps the text legible to the model while guaranteeing no
+/// two backticks are ever adjacent in the output, so no run of any length can
+/// survive.
 fn defang_fences(text: &str) -> String {
-    text.replace("```", "`\u{200b}`\u{200b}`")
+    text.replace('`', "`\u{200b}")
+}
+
+/// Neutralizes untrusted text embedded as a single prompt line (issue #840
+/// PR-3 hardening). [`defang_fences`] alone is enough for the failing graph's
+/// JSON, which is fenced and expected to span multiple lines. The failure
+/// fields below are rendered as one bullet each ("- Error: …") with no fence
+/// around them — a raw `\n`/`\r` in attacker-influenceable text (an error
+/// string, a node name) would let it open a new markdown line of its own,
+/// e.g. a fabricated heading or an "ignore the above" instruction, sitting
+/// outside any code fence. Folding line breaks to a space closes that gap;
+/// the backtick defang still runs on the result.
+fn defang_line(text: &str) -> String {
+    defang_fences(&text.replace(['\n', '\r'], " "))
 }
 
 /// A copy of the plan bounded for the prompt (issue #580): at most
@@ -1341,21 +1360,21 @@ fn fix_evidence_prompt(
     );
     out.push_str(&format!(
         "- Run: {}\n",
-        defang_fences(&cap(&failure.run_id, MAX_SUMMARY_CHARS))
+        defang_line(&cap(&failure.run_id, MAX_SUMMARY_CHARS))
     ));
     out.push_str(&format!(
         "- Error: {}\n",
-        defang_fences(&cap(&failure.error, MAX_REASON_CHARS))
+        defang_line(&cap(&failure.error, MAX_REASON_CHARS))
     ));
     match (&failure.failed_node_name, &failure.failed_node_id) {
         (Some(name), Some(id)) => out.push_str(&format!(
             "- Failed at node “{}” (`{}`)\n",
-            defang_fences(&cap(name, MAX_SUMMARY_CHARS)),
-            defang_fences(&cap(id, MAX_SUMMARY_CHARS))
+            defang_line(&cap(name, MAX_SUMMARY_CHARS)),
+            defang_line(&cap(id, MAX_SUMMARY_CHARS))
         )),
         (None, Some(id)) => out.push_str(&format!(
             "- Failed at node `{}`\n",
-            defang_fences(&cap(id, MAX_SUMMARY_CHARS))
+            defang_line(&cap(id, MAX_SUMMARY_CHARS))
         )),
         _ => out.push_str("- The run failed before a specific node was recorded.\n"),
     }
