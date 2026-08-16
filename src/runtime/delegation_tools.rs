@@ -46,6 +46,16 @@ use crate::ports::types::CompanyRecord;
 pub const SPAWN_TASK_TOOL: &str = "spawn_task";
 /// The `delegate_to_desk` tool name — hand work to a desk's lead member.
 pub const DELEGATE_TO_DESK_TOOL: &str = "delegate_to_desk";
+/// The `delegate_to_teammate` tool name — hand work to a **named teammate**
+/// rather than to whoever leads their desk (issue #884).
+///
+/// [`DELEGATE_TO_DESK_TOOL`] always resolves to [`desk_lead`], so a desk's own
+/// lead had no way to reach anybody else on its desk: handing work back to that
+/// desk is refused by [`reject_cycle_target`] as self-delegation, and there was
+/// no other tool. A three-person desk asked for the specialist by name got the
+/// lead reading the request correctly and declining it, because declining was
+/// the only move the toolbelt left.
+pub const DELEGATE_TO_TEAMMATE_TOOL: &str = "delegate_to_teammate";
 
 /// The `spawn_task` argument schema, shared by the harness tool's
 /// `parameters_schema` and the hosted manifest entry so the two never drift.
@@ -76,8 +86,32 @@ pub fn delegate_to_desk_schema() -> Value {
     })
 }
 
+/// The `delegate_to_teammate` argument schema (issue #884).
+///
+/// `teammate` takes a **roster id**, never a display name and never prose. See
+/// [`reject_teammate_target`] for why the target is a closed set resolved
+/// against the record rather than anything read out of the message.
+pub fn delegate_to_teammate_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "teammate": { "type": "string", "description": "The roster id of the teammate to hand the work to." },
+            "instruction": { "type": "string", "description": "The instruction for that teammate." }
+        },
+        "required": ["teammate", "instruction"],
+        "additionalProperties": false
+    })
+}
+
 /// The delegation tools advertised to Medulla on the hosted path: `spawn_task`
 /// and `delegate_to_desk`, with the same names + schemas the harness exposes.
+///
+/// **`delegate_to_teammate` is deliberately absent** (issue #884). The hosted
+/// brain forwards every event to a single `counterpart_agent_id` and does no
+/// per-agent routing at all (`src/brain/hosted.rs`, tracked in #176), so
+/// advertising a tool the device-side handler in
+/// [`cycle`](crate::runtime::cycle) cannot service would turn a hand-off into a
+/// failed tool frame. The harness path wires it directly instead.
 ///
 /// Registered on top of the manifest's own `tools.allow` catalog so a hosted
 /// company's orchestrator can delegate exactly as the harness one does. The
@@ -274,7 +308,7 @@ pub fn reject_cycle_target(
     // send the model looking for a cycle it cannot find.
     let desk_id = record.resolve_desk_id(key)?;
     if chain.iter().any(|scoped| scoped == &desk_id) {
-        let trail = chain.join(" → ");
+        let trail = chain_trail(chain);
         return Some(format!(
             "The \"{desk_id}\" desk is already working on this — it is where the work came from \
 ({trail}). Handing it back would loop. Do the part you can do yourself, or hand it to a desk \
@@ -282,12 +316,271 @@ that is not already on that list."
         ));
     }
     if desk_lead(record, &desk_id).as_deref() == Some(delegator) {
-        return Some(format!(
-            "You lead the \"{desk_id}\" desk, so handing this to it would hand it back to \
-yourself. Do it in this turn instead, or hand it to a different desk."
-        ));
+        // Issue #884: this refusal used to dead-end at "do it in this turn
+        // instead". That was the only advice available — there was no tool for
+        // handing a slice to a peer — and it is what made a desk lead decline a
+        // request addressed to a specialist sitting beside it. It now names the
+        // tool that does exist, the in-turn teaching shape #272 and #176 use
+        // everywhere else on this seam.
+        let peers = agent_list(teammate_targets(record, delegator, &[]));
+        return Some(match peers {
+            Some(list) => format!(
+                "You lead the \"{desk_id}\" desk, so handing this to it would hand it back to \
+yourself. To give a slice to somebody specific on it, call `{DELEGATE_TO_TEAMMATE_TOOL}` with one \
+of: {list}. Otherwise do it in this turn, or hand it to a different desk."
+            ),
+            None => format!(
+                "You lead the \"{desk_id}\" desk, so handing this to it would hand it back to \
+yourself, and nobody else is on it. Do it in this turn instead, or hand it to a different desk."
+            ),
+        });
     }
     None
+}
+
+/// The scope-chain entry a **teammate** hand-off pushes (issue #884).
+///
+/// Namespaced with a prefix a desk id cannot carry, because one chain now holds
+/// two kinds of identity: [`enter_scope`] records a resolved *desk* id for a
+/// [`DELEGATE_TO_DESK_TOOL`] hand-off and a resolved *agent* id for a
+/// [`DELEGATE_TO_TEAMMATE_TOOL`] one, and the two guards must not read each
+/// other's entries. Without the prefix, a company with a desk and a teammate
+/// sharing an id would have one refuse the other's perfectly ordinary hand-off.
+///
+/// The prefix also keeps the desk guard honest in the direction that matters
+/// most here: a lead handing a slice to a peer on **its own desk** is the whole
+/// point of #884, so that hand-off must not read as "the desk you came from is
+/// already on the chain".
+///
+/// [`enter_scope`]: crate::harness::orchestrator::DelegationQueue::enter_scope
+pub fn teammate_scope_key(agent_id: &str) -> String {
+    format!("{TEAMMATE_SCOPE_PREFIX}{agent_id}")
+}
+
+/// The prefix [`teammate_scope_key`] stamps. Not a legal desk id — desk ids come
+/// from a manifest `[[group_chat]].id` or an operator-created overlay desk, and
+/// neither mints a colon.
+const TEAMMATE_SCOPE_PREFIX: &str = "agent:";
+
+/// Renders a scope chain for a refusal, unwrapping [`teammate_scope_key`]'s
+/// namespace so the model reads names rather than the encoding.
+fn chain_trail(chain: &[String]) -> String {
+    chain
+        .iter()
+        .map(|scoped| {
+            scoped
+                .strip_prefix(TEAMMATE_SCOPE_PREFIX)
+                .unwrap_or(scoped)
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" → ")
+}
+
+/// Why a `delegate_to_teammate` target cannot be delivered, phrased for the
+/// model that called the tool — or `None` when `key` names a teammate this
+/// caller may actually hand work to (issue #884).
+///
+/// **Closed-set validation, never free text.** The target is resolved against
+/// the company record and checked against a set derived from it; nothing is read
+/// out of the message. That is the deliberate half of #884: a `Name:` prefix
+/// parser would let a pasted email beginning "SEO Specialist:" decide whose tool
+/// grants and whose budget execute the turn, is undefined for a message naming
+/// two people, and breaks in every language the company does not write its
+/// personas in. Routing stays deterministic; reading the prose stays with the
+/// model, which already does it correctly.
+///
+/// Three refusals, deliberately distinct:
+///
+/// * **Not a teammate** — `key` resolves to no roster agent. When it names a
+///   *desk* the message says so and points at [`DELEGATE_TO_DESK_TOOL`], the
+///   mirror of [`unknown_desk_message`]'s teammate arm.
+/// * **Yourself** — the target is the caller. Its turn is the one running.
+/// * **Out of reach** — a real teammate the caller may not hand work to: not on
+///   a desk with them, and not on any desk their
+///   [`delegates_to`](crate::company::Agent::delegates_to) allowlist permits.
+///
+/// `caller` is `None` for the **orchestrator's** copy of the tool, which is
+/// unrestricted exactly as its `delegate_to_desk` is: grounding applies, the
+/// allowlist and the self-check do not.
+pub fn reject_teammate_target(
+    record: &CompanyRecord,
+    caller: Option<&str>,
+    allowed: &[String],
+    key: &str,
+) -> Option<String> {
+    let Some(target) = record.resolve_roster_agent_id(key) else {
+        return Some(unknown_teammate_message(record, caller, allowed, key));
+    };
+    let caller = caller?;
+    if target == caller {
+        return Some(format!(
+            "You are \"{caller}\" — handing this to yourself would re-enter the turn you are \
+already running. Do it in this turn instead, or hand it to somebody else."
+        ));
+    }
+    let reachable = teammate_targets(record, caller, allowed);
+    if reachable.contains(&target) {
+        return None;
+    }
+    Some(match agent_list(reachable) {
+        Some(list) => format!(
+            "You may not hand work to \"{target}\": they are not on a desk with you, and no desk \
+you may reach has them on it. The teammates you can hand work to are: {list}. Call \
+`{DELEGATE_TO_TEAMMATE_TOOL}` again with one of those, or do the work yourself."
+        ),
+        None => format!(
+            "You may not hand work to \"{target}\", and there is no other teammate you can hand \
+work to either. Do the work yourself, or say what you cannot do."
+        ),
+    })
+}
+
+/// The refusal for a `delegate_to_teammate` target that names no roster teammate
+/// (issue #884) — the mirror of [`unknown_desk_message`].
+fn unknown_teammate_message(
+    record: &CompanyRecord,
+    caller: Option<&str>,
+    allowed: &[String],
+    key: &str,
+) -> String {
+    let reachable = match caller {
+        Some(caller) => teammate_targets(record, caller, allowed),
+        None => roster_agent_ids(record),
+    };
+    // A desk id is the most likely wrong target here, exactly as a teammate id
+    // is the most likely wrong target for `delegate_to_desk`.
+    if record.resolve_desk_id(key).is_some() {
+        return format!(
+            "\"{key}\" is a desk, not a teammate. Hand work to a desk with \
+`{DELEGATE_TO_DESK_TOOL}`, or name somebody on the roster here instead."
+        );
+    }
+    match agent_list(reachable) {
+        Some(list) => format!(
+            "There is no \"{key}\" on this company's roster. The teammates you can hand work to \
+are: {list}. Call `{DELEGATE_TO_TEAMMATE_TOOL}` again with one of those ids."
+        ),
+        None => format!(
+            "There is no \"{key}\" on this company's roster, and there is nobody you can hand \
+work to. Do the work yourself, or say what you cannot do."
+        ),
+    }
+}
+
+/// Why a **teammate** hand-off would close a loop rather than make progress — or
+/// `None` when the target is a step forward (issue #884).
+///
+/// The agent-keyed companion to [`reject_cycle_target`], reading the same chain
+/// through [`teammate_scope_key`]'s namespace. A→B→A is the shape: `B` cannot
+/// hand back to the teammate whose turn it is running inside.
+///
+/// Identity is the **resolved roster id** on both sides, so a hand-off written
+/// with a different capitalisation is still the same cycle. An unresolvable key
+/// is [`reject_teammate_target`]'s refusal to give, not this one's.
+pub fn reject_teammate_cycle_target(
+    record: &CompanyRecord,
+    chain: &[String],
+    key: &str,
+) -> Option<String> {
+    let target = record.resolve_roster_agent_id(key)?;
+    let scoped = teammate_scope_key(&target);
+    if !chain.iter().any(|entry| entry == &scoped) {
+        return None;
+    }
+    let trail = chain_trail(chain);
+    Some(format!(
+        "\"{target}\" is already working on this — it is where the work came from ({trail}). \
+Handing it back would loop. Do the part you can do yourself, or hand it to somebody who is not \
+already on that list."
+    ))
+}
+
+/// Every roster teammate id the company has: manifest agents in declaration
+/// order, then operator-added overlay teammates, deduplicated.
+///
+/// The teammate-side counterpart of [`desk_ids`], and read for the same reason —
+/// "who exists" and "does this key resolve" must come from one source.
+pub fn roster_agent_ids(record: &CompanyRecord) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for id in record
+        .manifest
+        .agents
+        .iter()
+        .map(|a| &a.id)
+        .chain(record.overlay_agents.iter().map(|a| &a.id))
+    {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    ids
+}
+
+/// The teammates `caller` may hand work to with [`DELEGATE_TO_TEAMMATE_TOOL`]
+/// (issue #884): everybody on a desk with them, plus everybody on a desk their
+/// `allowed` ([`delegates_to`](crate::company::Agent::delegates_to)) list
+/// permits. Never the caller itself.
+///
+/// The desk-peer arm is the one #884 adds and the one that closes D1: a desk's
+/// lead can now reach the specialist sitting beside it without going back
+/// through the orchestrator. The allowlist arm is a re-reading of the existing
+/// #176 permission rather than a second one — a member allowed to hand work to a
+/// desk is allowed to hand it to somebody on that desk — so opting in to
+/// `delegates_to` grants exactly what it already granted, at teammate
+/// granularity.
+///
+/// Order is desk-peers first, then allowlisted desks, each in the desk's own
+/// membership order, deduplicated — so a refusal lists the nearest options
+/// first.
+pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let push = |ids: &mut Vec<String>, id: &str| {
+        if id != caller && record.is_roster_agent(id) && !ids.iter().any(|held| held == id) {
+            ids.push(id.to_string());
+        }
+    };
+    for desk in desks_of_member(record, caller) {
+        for member in record.effective_desk_members(&desk) {
+            push(&mut ids, &member);
+        }
+    }
+    if allowed
+        .iter()
+        .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
+    {
+        for id in roster_agent_ids(record) {
+            push(&mut ids, &id);
+        }
+        return ids;
+    }
+    for desk in allowed
+        .iter()
+        .filter_map(|entry| record.resolve_desk_id(entry.trim()))
+    {
+        for member in record.effective_desk_members(&desk) {
+            push(&mut ids, &member);
+        }
+    }
+    ids
+}
+
+/// Every desk `member` sits on, in [`desk_ids`] order.
+fn desks_of_member(record: &CompanyRecord, member: &str) -> Vec<String> {
+    desk_ids(record)
+        .into_iter()
+        .filter(|id| {
+            record
+                .effective_desk_members(id)
+                .iter()
+                .any(|m| m == member)
+        })
+        .collect()
+}
+
+/// Renders a teammate-id list for a message, on the same terms as [`desk_list`].
+fn agent_list(ids: Vec<String>) -> Option<String> {
+    desk_list(ids)
 }
 
 /// Why a **desk member's** `delegate_to_desk` target is outside what its
@@ -344,12 +637,7 @@ hand work to either. Do the work yourself, or say what you cannot do."
 /// The first desk `member` is on, so an invented teammate-as-desk target can be
 /// redirected at the desk that teammate actually sits on.
 fn desk_of_member(record: &CompanyRecord, member: &str) -> Option<String> {
-    desk_ids(record).into_iter().find(|id| {
-        record
-            .effective_desk_members(id)
-            .iter()
-            .any(|m| m == member)
-    })
+    desks_of_member(record, member).into_iter().next()
 }
 
 /// Renders a desk-id list for a message, capped at [`LISTED_DESKS`] with the
@@ -597,6 +885,255 @@ members = ["counsel"]
         assert!(message.contains("yourself"), "{message}");
         // Somebody who does NOT lead it may hand work to it.
         assert_eq!(reject_cycle_target(&record, &[], "content", "ceo"), None);
+    }
+
+    // --- Teammate hand-off (issue #884) ------------------------------------
+
+    /// The one-member-per-desk shape, reachable from a test that has shadowed
+    /// [`record`] with a binding of its own.
+    fn solo_record() -> CompanyRecord {
+        record()
+    }
+
+    /// The company shape #884 D1 was observed on: one desk with THREE members,
+    /// so its lead has peers it could not previously reach, plus a second desk
+    /// nobody on the first sits on.
+    fn desk_record() -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+
+[[agent]]
+id = "brand_strategist"
+role = "Brand Strategist"
+
+[[agent]]
+id = "seo_specialist"
+role = "SEO Specialist"
+
+[[agent]]
+id = "copywriter"
+role = "Copywriter"
+
+[[agent]]
+id = "analyst"
+role = "Analyst"
+
+[[group_chat]]
+id = "strategy"
+name = "Strategy desk"
+members = ["brand_strategist", "seo_specialist", "copywriter"]
+
+[[group_chat]]
+id = "data"
+name = "Data desk"
+members = ["analyst"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// D1 itself: the lead of a three-person desk may hand a slice to either
+    /// peer on it, with no allowlist and no orchestrator round-trip.
+    #[test]
+    fn a_desk_lead_may_hand_work_to_a_peer_on_its_own_desk() {
+        let record = desk_record();
+        assert_eq!(
+            teammate_targets(&record, "brand_strategist", &[]),
+            ["seo_specialist", "copywriter"],
+            "own-desk peers, in the desk's own order, never the caller"
+        );
+        assert_eq!(
+            reject_teammate_target(&record, Some("brand_strategist"), &[], "seo_specialist"),
+            None
+        );
+        // The key is resolved, not matched: a typed capital is the same person.
+        assert_eq!(
+            reject_teammate_target(&record, Some("brand_strategist"), &[], "SEO_Specialist"),
+            None
+        );
+    }
+
+    /// A teammate on neither the caller's desks nor an allowlisted one is
+    /// refused — and the refusal names who the caller CAN reach, because the
+    /// model has no other way to learn its own closed set.
+    #[test]
+    fn a_teammate_out_of_reach_is_refused_with_the_reachable_set() {
+        let record = desk_record();
+        let message = reject_teammate_target(&record, Some("brand_strategist"), &[], "analyst")
+            .expect("rejected");
+        assert!(message.contains("analyst"), "{message}");
+        assert!(message.contains("seo_specialist"), "{message}");
+        assert!(message.contains(DELEGATE_TO_TEAMMATE_TOOL), "{message}");
+
+        // …and the #176 allowlist admits that desk's members, at teammate
+        // granularity: permission to hand work to a desk is permission to hand
+        // it to somebody on it.
+        let allowed = vec!["data".to_string()];
+        assert_eq!(
+            reject_teammate_target(&record, Some("brand_strategist"), &allowed, "analyst"),
+            None
+        );
+        // `"*"` admits the whole roster, exactly as it does for desks.
+        assert_eq!(
+            reject_teammate_target(&record, Some("brand_strategist"), &["*".into()], "analyst"),
+            None
+        );
+    }
+
+    /// Handing work to yourself re-enters the turn already running.
+    #[test]
+    fn a_teammate_hand_off_to_yourself_is_refused() {
+        let record = desk_record();
+        let message =
+            reject_teammate_target(&record, Some("seo_specialist"), &[], "seo_specialist")
+                .expect("rejected");
+        assert!(message.contains("yourself"), "{message}");
+    }
+
+    /// A key that is nobody is refused, and a key that names a **desk** is
+    /// redirected at the tool that takes desks — the mirror of the
+    /// teammate-as-desk arm `delegate_to_desk` already has.
+    #[test]
+    fn an_unknown_teammate_target_is_grounded() {
+        let record = desk_record();
+        let message = reject_teammate_target(&record, Some("brand_strategist"), &[], "nobody")
+            .expect("rejected");
+        assert!(message.contains("no \"nobody\""), "{message}");
+        assert!(message.contains("copywriter"), "{message}");
+
+        let message = reject_teammate_target(&record, Some("brand_strategist"), &[], "data")
+            .expect("rejected");
+        assert!(message.contains(DELEGATE_TO_DESK_TOOL), "{message}");
+        assert!(message.contains("is a desk, not a teammate"), "{message}");
+    }
+
+    /// The orchestrator's copy is unrestricted — every roster teammate, no
+    /// allowlist — exactly as its `delegate_to_desk` is. Grounding still applies.
+    #[test]
+    fn the_orchestrators_teammate_target_set_is_the_whole_roster() {
+        let record = desk_record();
+        for target in ["analyst", "seo_specialist", "copywriter"] {
+            assert_eq!(reject_teammate_target(&record, None, &[], target), None);
+        }
+        let message = reject_teammate_target(&record, None, &[], "nobody").expect("rejected");
+        assert!(
+            message.contains("analyst"),
+            "the roster is listed: {message}"
+        );
+        assert_eq!(
+            roster_agent_ids(&record),
+            [
+                "chief",
+                "brand_strategist",
+                "seo_specialist",
+                "copywriter",
+                "analyst"
+            ]
+        );
+    }
+
+    /// A→B→A: `seo_specialist` cannot hand the work back to the
+    /// `brand_strategist` whose turn it is running inside.
+    #[test]
+    fn a_teammate_already_on_the_chain_is_refused_as_a_cycle() {
+        let record = desk_record();
+        let chain = vec![teammate_scope_key("brand_strategist")];
+        let message =
+            reject_teammate_cycle_target(&record, &chain, "brand_strategist").expect("rejected");
+        assert!(message.contains("loop"), "{message}");
+        assert!(
+            message.contains("brand_strategist") && !message.contains("agent:"),
+            "the trail must read as names, not as the chain's encoding: {message}"
+        );
+        // A different peer is a step forward.
+        assert_eq!(
+            reject_teammate_cycle_target(&record, &chain, "copywriter"),
+            None
+        );
+        // Case is folded on both sides — a cycle spelled differently is a cycle.
+        assert!(reject_teammate_cycle_target(&record, &chain, "Brand_Strategist").is_some());
+        // An unresolvable key belongs to the grounding check, not to this one.
+        assert_eq!(
+            reject_teammate_cycle_target(&record, &chain, "nobody"),
+            None
+        );
+    }
+
+    /// The two chains share one vector and must not read each other's entries.
+    ///
+    /// The direction that matters: a lead reached through a `delegate_to_desk`
+    /// hand-off has its own desk on the chain, and handing a slice to a peer on
+    /// that desk is precisely what #884 exists to allow. If the teammate guard
+    /// read desk entries it would refuse the feature's own headline case.
+    #[test]
+    fn the_desk_and_teammate_cycle_guards_do_not_read_each_others_entries() {
+        let record = desk_record();
+        let desk_chain = vec!["strategy".to_string()];
+        assert_eq!(
+            reject_teammate_cycle_target(&record, &desk_chain, "seo_specialist"),
+            None,
+            "a peer on the desk the chain came through is still reachable"
+        );
+        let agent_chain = vec![teammate_scope_key("brand_strategist")];
+        assert_eq!(
+            reject_cycle_target(&record, &agent_chain, "data", "chief"),
+            None,
+            "an agent entry is not a desk entry"
+        );
+    }
+
+    /// Issue #884: the self-desk refusal is a dead end no longer — it names the
+    /// tool that can actually deliver the work, and who it can be delivered to.
+    #[test]
+    fn the_self_desk_refusal_names_the_teammate_tool() {
+        let record = desk_record();
+        let message =
+            reject_cycle_target(&record, &[], "strategy", "brand_strategist").expect("rejected");
+        assert!(message.contains("yourself"), "{message}");
+        assert!(message.contains(DELEGATE_TO_TEAMMATE_TOOL), "{message}");
+        assert!(
+            message.contains("seo_specialist") && message.contains("copywriter"),
+            "the peers it can reach are named: {message}"
+        );
+
+        // A lead with nobody else on its desk gets the old advice, not an empty
+        // list and a tool that would refuse every target.
+        let message =
+            reject_cycle_target(&solo_record(), &[], "content", "writer").expect("rejected");
+        assert!(!message.contains(DELEGATE_TO_TEAMMATE_TOOL), "{message}");
+        assert!(message.contains("nobody else is on it"), "{message}");
+    }
+
+    #[test]
+    fn the_teammate_schema_takes_a_roster_id_and_an_instruction() {
+        let schema = delegate_to_teammate_schema();
+        assert_eq!(schema["required"], json!(["teammate", "instruction"]));
+        assert_eq!(schema["additionalProperties"], json!(false));
+    }
+
+    /// The hosted manifest deliberately does NOT advertise the teammate tool —
+    /// that path has no per-agent routing to service it (issue #176).
+    #[test]
+    fn the_hosted_manifest_does_not_advertise_the_teammate_tool() {
+        let names: Vec<String> = delegation_manifest_entries()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(
+            !names.contains(&DELEGATE_TO_TEAMMATE_TOOL.to_string()),
+            "{names:?}"
+        );
     }
 
     /// An unresolvable key belongs to `reject_desk_target`, not to either of
