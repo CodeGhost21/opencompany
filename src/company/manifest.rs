@@ -79,7 +79,20 @@ impl CompanyManifest {
     /// roster is read from those per-teammate files instead of from
     /// `[[agent]]` — see [`agent_file`](super::agent_file).
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
-        let located = discover(path.as_ref())?;
+        Self::from_located(&discover(path.as_ref())?)
+    }
+
+    /// Loads an already-[`discover`]ed manifest, reading the roster from
+    /// `agents/*.toml` when the bundle has one.
+    ///
+    /// Split out from [`from_path`](Self::from_path) so callers that need the
+    /// [`Located`] value for themselves — `opencompany check`, which prints the
+    /// legacy-filename deprecation note — do not have to re-derive "is this a
+    /// bundle roster?" on their own. That duplication is not hypothetical: the
+    /// check command called [`from_file`](Self::from_file) directly and silently
+    /// reported every desk member as "not an agent in the roster", because it
+    /// had validated a manifest whose roster it had never loaded.
+    pub(crate) fn from_located(located: &Located) -> Result<Self> {
         // The bundle root is the located manifest's own parent, whether the
         // caller passed the directory or the file itself: `discover` accepts
         // both, and deriving the root from the located manifest is what keeps
