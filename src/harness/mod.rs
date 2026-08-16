@@ -2252,7 +2252,13 @@ pub(crate) fn build_roster(
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
-        let grants = agent_effective_grants(allow, &manifest_agent.tools);
+        // Three-level narrowing: company → the desks this teammate sits on →
+        // the teammate itself. `agent_desk_tools` resolves through the record's
+        // *effective* desk membership, so a console-seated member is scoped by
+        // its desk exactly as a manifest one is.
+        let desk_tools = company.agent_desk_tools(&manifest_agent.id);
+        let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
             company_name,
