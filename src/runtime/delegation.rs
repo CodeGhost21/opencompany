@@ -2335,12 +2335,16 @@ fn kind_label(delegation: &Delegation) -> &'static str {
 }
 
 /// What a hand-off was aimed at — a desk key or a teammate id — or `None` for
-/// every delegation that is not a hand-off (issue #884).
+/// every delegation that is not a hand-off, which is what distinguishes "this
+/// delegation had a target that did not resolve" from "this delegation never had
+/// a target" (issues #272, #884).
 ///
-/// [`desk_of`] deliberately stays desk-only: its callers write "hand-off to the
-/// \"{desk}\" desk" onto a card, and calling a person a desk there would be a
-/// worse record than none. This is the kind-agnostic companion, for the places
-/// that only need a label to attribute a cancellation to.
+/// Replaces the desk-only `desk_of` this seam used before #884. Its callers all
+/// wanted "the thing this was handed to"; that they could only ever be handed a
+/// desk was an accident of there being one hand-off kind. The one place the
+/// distinction still matters — the card note that says *why* delivery failed —
+/// picks its wording from the delegation's own variant at the call site rather
+/// than from a second accessor.
 fn hand_off_target_of(delegation: &Delegation) -> Option<&str> {
     match delegation {
         Delegation::DelegateToDesk { desk, .. } => Some(desk),
@@ -2357,16 +2361,6 @@ fn instruction_of(delegation: &Delegation) -> &str {
         Delegation::DelegateToDesk { instruction, .. }
         | Delegation::DelegateToTeammate { instruction, .. } => instruction,
         _ => "",
-    }
-}
-
-/// The desk a hand-off targets, or `None` for every other delegation kind —
-/// which is what distinguishes "this delegation had a target that did not
-/// resolve" from "this delegation never had a target" (issue #272).
-fn desk_of(delegation: &Delegation) -> Option<&str> {
-    match delegation {
-        Delegation::DelegateToDesk { desk, .. } => Some(desk),
-        _ => None,
     }
 }
 
