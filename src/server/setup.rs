@@ -600,10 +600,10 @@ async fn apply_inner(
         // `auth_mode` parse above runs before the write — an unresolvable
         // `bind` aborts `TcpListener::bind` at startup, which would turn a
         // typo here into a host that will not come back up.
-        if let ConfigValue::Str(addr) = &parsed {
-            if spec.key == "bind" {
-                validate_bind(addr).await?;
-            }
+        if spec.key == "bind"
+            && let ConfigValue::Str(addr) = &parsed
+        {
+            validate_bind(addr).await?;
         }
         edits.push((spec.key, parsed));
         if spec.requires_restart {
