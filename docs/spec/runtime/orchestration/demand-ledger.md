@@ -269,6 +269,18 @@ id rather than minting a new one — this is the semantic sibling of [same id,
 already open](#same-id-already-open) below, for demands that only look
 different because they are not, in fact, identical strings.
 
+**The claim-corpus check has the symmetric rule.** A demand whose semantic
+check surfaces a claim above the same threshold MUST be refused, and the
+refusal MUST carry those claims (see [Refusal is
+informative](#refusal-is-informative)). Stating this explicitly matters because
+the two corpora answer different questions and only one of them was previously
+given a MUST: *is this already known* is exactly as much a reason to refuse as
+*is this already being worked*, and a check whose result nothing is required to
+act on is a lookup, not a control.
+
+The two refusals are distinguishable to the caller: an open-demand match returns
+the existing demand's id, a claim match returns claims and no id.
+
 This is the one place the port deliberately improves on its source, and it
 does not change what `DemandId` is derived from — the deterministic pipeline
 above is unaffected by whether a semantic match is found.
