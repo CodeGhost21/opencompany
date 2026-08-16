@@ -20,11 +20,16 @@ import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
 import { probe, useConnection } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { Login } from "@/views/Login";
+import { SetupWizard } from "@/views/setup/SetupWizard";
 
 type Phase =
   | { kind: "loading" }
   | { kind: "error"; message: string; hint?: string }
   | { kind: "login"; company: string | null; notice?: string }
+  // A host that has never been through the first-run setup flow. Entered ahead
+  // of `login` on purpose: an unconfigured host may have no company and no
+  // users at all, so a sign-in form there addresses nobody.
+  | { kind: "setup" }
   | { kind: "picker"; companies: CompanyStatus[] }
   | {
       kind: "console";
@@ -96,6 +101,23 @@ export function ConnectionConsole({
     const set = (p: Phase) => !cancelled && setPhase(p);
 
     async function boot() {
+      // Ask the host whether it has ever been configured. `/spec` is the
+      // unauthenticated handshake, which is what makes this answerable before
+      // sign-in — and it has to be, because an unconfigured host has no users
+      // to sign in as. A host too old to carry the field omits it, and
+      // `!== false` leaves those on the existing path unchanged.
+      try {
+        const spec = await client.spec();
+        if (spec.setup_complete === false) {
+          set({ kind: "setup" });
+          return;
+        }
+      } catch {
+        // A host that cannot answer `/spec` is a connection problem, not an
+        // unconfigured one. Fall through to discovery, which reports it
+        // properly.
+      }
+
       // Explicit company wins: go straight to its console.
       if (defaultCompany) {
         try {
@@ -172,7 +194,12 @@ export function ConnectionConsole({
     [connectionId, consoleCompany],
   );
 
-  if (refused && phase.kind !== "login") {
+  // A 401 must not preempt setup. An instance that has never been configured
+  // can have no companies and no users at all, so every authenticated route on
+  // it answers 401 — and letting that swap the wizard for a sign-in form would
+  // put the operator back at the dead end this flow exists to remove, asking
+  // them to authenticate against a roster that does not exist yet.
+  if (refused && phase.kind !== "login" && phase.kind !== "setup") {
     return (
       <Login
         client={client}
@@ -193,6 +220,9 @@ export function ConnectionConsole({
           </div>
         </FullScreen>
       );
+
+    case "setup":
+      return <SetupWizard client={client} onDone={reBoot} />;
 
     case "login":
       return (

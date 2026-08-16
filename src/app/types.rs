@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::Serialize;
@@ -398,6 +399,30 @@ pub struct AppState {
     /// Which storage backend is serving the durable ports. Reported by `/spec`
     /// as a kind only — never a path or a connection string.
     storage_kind: crate::store::StorageKind,
+    /// Whether the first-run setup flow (`crate::server::setup`) has already run
+    /// against this data root.
+    ///
+    /// Seeded at boot from `config.toml`'s `setup_completed_at` and flipped by
+    /// `POST /api/v1/setup`. Held in memory rather than re-read per request: the
+    /// setup route is the only writer, and `/spec` — which reports it so an
+    /// unauthenticated console can decide between the wizard and the sign-in
+    /// form — would otherwise take a disk read on every poll. Shared so the
+    /// clone every handler holds observes the flip.
+    setup_complete: Arc<AtomicBool>,
+    /// The **live** host-wide sign-in mode, seeded at construction from
+    /// [`AppConfig::auth_mode_override`].
+    ///
+    /// Separate from the `AppConfig` field because that one is the value boot
+    /// resolved and can never change, and this one has to: the first-run setup
+    /// flow writes `auth_mode` and then rebuilds the affected companies in
+    /// place, so the mode the rebuild reads must be the one just chosen rather
+    /// than the one the process started with. Reading the frozen field there
+    /// made "no sign-in" apply only after the operator restarted the host by
+    /// hand — a setting that appeared to save and then did nothing.
+    ///
+    /// A lock rather than an atomic because [`AuthMode`] is not a primitive;
+    /// it is read once per company build, never on a request path.
+    auth_mode_override: Arc<RwLock<Option<AuthMode>>>,
     /// Host-global replay-protection cache shared across every inbound A2A
     /// request. Gated behind `tinyplace` so the default build links no crypto.
     #[cfg(feature = "tinyplace")]
@@ -450,8 +475,10 @@ impl std::fmt::Debug for AppState {
 impl AppState {
     /// Builds state from runtime configuration with an empty company registry.
     pub fn new(config: AppConfig) -> Self {
+        let auth_mode_override = Arc::new(RwLock::new(config.auth_mode_override));
         Self {
             config,
+            auth_mode_override,
             registry: CompanyRegistry::new(),
             home: std::path::PathBuf::from("."),
             ownership: Arc::new(RwLock::new(HashMap::new())),
@@ -461,6 +488,10 @@ impl AppState {
             skill_registry: Arc::new(OnceLock::new()),
             instance_id: Arc::new(OnceLock::new()),
             storage_kind: crate::store::StorageKind::default(),
+            // Fails "not set up", so a host that never calls `with_setup_complete`
+            // — every test fixture — presents the wizard rather than silently
+            // claiming a configuration it does not have.
+            setup_complete: Arc::new(AtomicBool::new(false)),
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
             hub_identity: None,
@@ -743,6 +774,49 @@ impl AppState {
         &self.home
     }
 
+    /// Marks this host as already set up, seeded at boot from `config.toml`'s
+    /// `setup_completed_at`. Mirrors the other `with_*` builders.
+    pub fn with_setup_complete(self, complete: bool) -> Self {
+        self.setup_complete.store(complete, Ordering::Relaxed);
+        self
+    }
+
+    /// Whether the first-run setup flow has run against this data root.
+    ///
+    /// `false` is what puts the console into the setup wizard instead of the
+    /// sign-in form, so it must not be confused with "has companies": a host
+    /// can be serving a company named on the command line and still never have
+    /// been through setup.
+    pub fn setup_complete(&self) -> bool {
+        self.setup_complete.load(Ordering::Relaxed)
+    }
+
+    /// Records that setup has just completed, so the flip is visible to every
+    /// clone of this state without a restart.
+    pub fn mark_setup_complete(&self) {
+        self.setup_complete.store(true, Ordering::Relaxed);
+    }
+
+    /// The host-wide sign-in mode currently in force, or `None` when each
+    /// company's own `[users].mode` decides.
+    ///
+    /// Every company build must read this rather than
+    /// [`AppConfig::auth_mode_override`], so a mode changed after boot reaches
+    /// the next build or rebuild. See the field docs.
+    pub fn auth_mode_override(&self) -> Option<AuthMode> {
+        *self.auth_mode_override.read().expect("auth mode poisoned")
+    }
+
+    /// Sets the host-wide sign-in mode for companies built from now on.
+    ///
+    /// Does **not** touch companies already built: the mode is resolved once,
+    /// at build, and cached on the runtime. A caller changing it is expected to
+    /// rebuild or re-register whatever is already registered — which is what
+    /// makes the change take effect without restarting the process.
+    pub fn set_auth_mode_override(&self, mode: Option<AuthMode>) {
+        *self.auth_mode_override.write().expect("auth mode poisoned") = mode;
+    }
+
     /// The registry of running companies served by this host.
     pub fn registry(&self) -> &CompanyRegistry {
         &self.registry
@@ -838,6 +912,7 @@ impl AppState {
             display_name: self.config.instance_name.clone(),
             capabilities: self.capabilities(),
             storage: self.storage_kind.as_str(),
+            setup_complete: self.setup_complete(),
         }
     }
 
@@ -894,6 +969,14 @@ pub struct AppSpec {
     /// The storage backend kind. Deliberately the kind alone: `/spec` is
     /// unauthenticated, so a path or connection string here would be a gift.
     pub storage: &'static str,
+    /// Whether the first-run setup flow has been completed on this instance.
+    ///
+    /// Reported here, on the unauthenticated handshake the console already
+    /// fetches before sign-in, because a host that has never been set up has
+    /// nobody who *can* sign in — gating this behind auth would make the wizard
+    /// unreachable exactly when it is needed. A bare boolean is the whole
+    /// disclosure: the configuration itself lives behind `/api/v1/setup`.
+    pub setup_complete: bool,
 }
 
 #[cfg(test)]

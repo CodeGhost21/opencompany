@@ -521,6 +521,18 @@ export interface AppSpec {
    * "is this instance provisioned" signal. No secret bytes are surfaced.
    */
   cycles_available: boolean;
+  /**
+   * Whether the first-run setup flow has been completed on this instance.
+   *
+   * Reported on this unauthenticated handshake because an instance nobody has
+   * configured has nobody who *can* sign in — gating the answer behind auth
+   * would make the setup wizard unreachable exactly when it is needed.
+   *
+   * Optional: a host predating the field omits it, and the console must read
+   * `undefined` as "assume configured" rather than showing a wizard that host
+   * has no route for.
+   */
+  setup_complete?: boolean;
 }
 
 /**

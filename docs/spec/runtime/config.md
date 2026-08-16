@@ -75,6 +75,13 @@ env (OPENCOMPANY_*, TINYHUMANS_TOKEN_FILE, TINYHUMANS_API_KEY)
 Earlier layers win. `opencompany doctor` prints every effective value, which
 layer set it, and what is missing for each optional capability.
 
+This is also why the [first-run setup flow](setup.md) reports a layer with every
+field it offers. That flow writes `config.toml` — the *second* layer — so on a
+host where the platform injects `OPENCOMPANY_*`, an edit to one of those keys
+would be saved and then outranked at the next boot. It renders such a field
+read-only and refuses the write, rather than reporting a success that changes
+nothing.
+
 ### The bind address
 
 `serve` takes a `--bind` flag, so its listener address has one extra layer on

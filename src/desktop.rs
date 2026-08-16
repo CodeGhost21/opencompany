@@ -68,6 +68,22 @@ pub const DESKTOP_OPERATOR_EMAIL: &str = "operator@opencompany.local";
 /// The origin used by Tauri v2's desktop webview.
 pub const TAURI_WEBVIEW_ORIGIN: &str = "http://tauri.localhost";
 
+impl DesktopPreset {
+    /// Parses this preset's bundled manifest.
+    ///
+    /// Exposed so the setup flow can describe a template — its roster size, its
+    /// own description — without reading `companies/` off disk, which a packaged
+    /// install does not carry.
+    pub fn manifest_parsed(&self) -> Result<CompanyManifest> {
+        toml::from_str(self.manifest).map_err(|error| {
+            crate::OpenCompanyError::Config(format!(
+                "bundled preset `{}` is invalid: {error}",
+                self.id
+            ))
+        })
+    }
+}
+
 /// Finds a bundled preset by its stable id.
 pub fn preset(id: &str) -> Option<&'static DesktopPreset> {
     PRESETS.iter().find(|preset| preset.id == id)
@@ -170,6 +186,39 @@ pub async fn bootstrap_companies(
     state: &AppState,
     preset_id: &str,
 ) -> Result<Vec<crate::ports::types::CompanyId>> {
+    let registered = adopt_companies(state).await?;
+    if !registered.is_empty() {
+        return Ok(registered.into_iter().map(|(id, _)| id).collect());
+    }
+
+    let id = seed_company(state, preset_id).await?;
+    Ok(vec![id])
+}
+
+/// Registers every company this data root already holds, in listing order.
+///
+/// The adopt half of [`bootstrap_companies`], split out because `serve` needs it
+/// **without** the seed half. A company can now reach a data root without ever
+/// being named on a command line — the first-run setup flow
+/// (`crate::server::setup`) puts one there — and `serve` previously only ever
+/// registered what `--company` named. So an operator who completed setup, was
+/// told to restart for their settings to apply, and did, came back to
+/// "serving with no companies": the bundle was on disk and simply never read.
+///
+/// Adopting is not seeding: this registers what is already there and creates
+/// nothing, so a `serve` host with an empty data root still starts empty rather
+/// than inventing a starter company nobody asked for.
+///
+/// Each adopted manifest is returned with its id because `serve` needs it to
+/// start that company's cron scheduler — schedules live on the manifest, not on
+/// the built runtime, and this function has already read it.
+///
+/// An `archived` company is skipped. Archiving removes a company from the
+/// registry on purpose (`src/server/provision.rs`), and re-registering it at the
+/// next launch would undo that quietly.
+pub async fn adopt_companies(
+    state: &AppState,
+) -> Result<Vec<(crate::ports::types::CompanyId, CompanyManifest)>> {
     let store: std::sync::Arc<dyn crate::ports::CompanyStore> = match state.stores() {
         Some(handles) => handles.company.clone(),
         None => std::sync::Arc::new(crate::store::FsCompanyStore::new(
@@ -184,8 +233,7 @@ pub async fn bootstrap_companies(
         }
         // One unreadable bundle must not cost the operator every other company
         // on the machine, so this warns and moves on rather than failing the
-        // boot — the load as much as the build below. The seed further down is
-        // what still runs if *nothing* could be adopted.
+        // boot — the load as much as the build below.
         let record = match store.load(&summary.id).await {
             Ok(Some(record)) => record,
             // Listed a moment ago and gone now: a bundle removed under us.
@@ -195,17 +243,32 @@ pub async fn bootstrap_companies(
                 continue;
             }
         };
+        let manifest = record.manifest.clone();
         match register(state, summary.id.clone(), record.manifest, None).await {
-            Ok(()) => registered.push(summary.id),
+            Ok(()) => registered.push((summary.id, manifest)),
             Err(error) => {
                 tracing::warn!(company = %summary.id, %error, "could not adopt a stored company");
             }
         }
     }
-    if !registered.is_empty() {
-        return Ok(registered);
-    }
+    Ok(registered)
+}
 
+/// Registers `preset_id` as a company on this host, and returns its id.
+///
+/// The seed half of [`bootstrap_companies`], split out so the first-run setup
+/// flow (`crate::server::setup`) can seed the template the **operator** chose
+/// rather than [`DEFAULT_PRESET_ID`]. The packaged desktop still reaches it
+/// through `bootstrap_companies` with the default, so its behavior is unchanged.
+///
+/// Note what this does *not* do: check whether the host already holds companies.
+/// That is `bootstrap_companies`' adopt-before-seed rule, and separately the
+/// setup route's "only seed an empty registry" guard — both of which exist so a
+/// re-run never hands an operator a second starter company.
+pub async fn seed_company(
+    state: &AppState,
+    preset_id: &str,
+) -> Result<crate::ports::types::CompanyId> {
     let manifest = first_run_manifest(preset_id)?;
     let id = company_id_from_name(&manifest.company.name);
     // Issue #85: record which template this install started from. Only the
@@ -218,7 +281,7 @@ pub async fn bootstrap_companies(
     };
     register(state, id.clone(), manifest, Some(provenance)).await?;
     tracing::info!(company = %id, preset = preset_id, "seeded the first-run company");
-    Ok(vec![id])
+    Ok(id)
 }
 
 /// Builds one company over the instance home and puts it in the registry.
@@ -228,7 +291,20 @@ async fn register(
     manifest: CompanyManifest,
     provenance: Option<crate::ports::types::TemplateProvenance>,
 ) -> Result<()> {
-    let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest).with_id(id.clone());
+    let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
+        .with_id(id.clone())
+        // The host-wide sign-in mode (`OPENCOMPANY_AUTH_MODE` / `config.toml`
+        // `auth_mode`), which outranks this manifest's own `[users].mode`.
+        //
+        // `serve`'s `--company` path has always applied it; this one did not,
+        // so a company registered here silently kept its manifest's mode. That
+        // was invisible while only the desktop app reached this code, and stops
+        // being invisible the moment anything else does: the first-run setup
+        // flow writes `auth_mode` and tells the operator to restart, and
+        // without this the restart adopts the company and quietly ignores the
+        // setting they were just told would take effect. `None` — the normal
+        // case — leaves each manifest to name its own mode, as before.
+        .with_auth_mode_override(state.auth_mode_override());
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }
@@ -501,6 +577,79 @@ mod tests {
         assert!(
             relaunched.registry().get(&archived_id).is_none(),
             "an archived company must stay unaddressable"
+        );
+    }
+
+    /// `adopt_companies` registers what is on disk and seeds nothing.
+    ///
+    /// This is the half `serve` calls when no `--company` was named. A company
+    /// can now reach a data root without ever being named on a command line —
+    /// the first-run setup flow puts one there — and before this existed, an
+    /// operator who finished setup, was told to restart for their settings to
+    /// apply, and did, came back to "serving with no companies" with their
+    /// company sitting unread on disk.
+    #[tokio::test]
+    async fn adopting_registers_a_stored_company_without_seeding_one() {
+        let directory = tempfile::tempdir().unwrap();
+
+        // An empty root adopts nothing and — unlike `bootstrap_companies` —
+        // must not invent a starter company. `serve` is not the desktop app.
+        let empty = state_over(directory.path());
+        assert!(adopt_companies(&empty).await.unwrap().is_empty());
+        assert_eq!(empty.registry().len(), 0, "adopting must never seed");
+
+        // Now put one there, the way setup does.
+        let seeded = state_over(directory.path());
+        let id = seed_company(&seeded, "agentic_law_firm").await.unwrap();
+
+        // A later boot finds it.
+        let relaunched = state_over(directory.path());
+        let adopted = adopt_companies(&relaunched).await.unwrap();
+        assert_eq!(
+            adopted.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+            vec![id.clone()],
+        );
+        assert!(relaunched.registry().get(&id).is_some());
+        assert_eq!(
+            adopted[0].1.company.name, "Agentic Law Firm",
+            "the manifest comes back with the id, because serve needs its schedules"
+        );
+    }
+
+    /// The host-wide sign-in mode reaches a company registered through this
+    /// path, not just one named by `serve --company`.
+    ///
+    /// Without it the first-run setup flow is a lie: it writes `auth_mode` to
+    /// `config.toml`, tells the operator the setting needs a restart, and the
+    /// restart then adopts the company under its manifest's own mode instead —
+    /// configuration silently ignored, which is the exact failure the setup
+    /// surface exists to prevent.
+    #[tokio::test]
+    async fn the_host_wide_auth_mode_reaches_an_adopted_company() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let seeding = state_over(directory.path());
+        let id = seed_company(&seeding, "agentic_law_firm").await.unwrap();
+        assert_eq!(
+            seeding.registry().get(&id).unwrap().auth_mode(),
+            crate::app::config::AuthMode::Email,
+            "the shipped template's own mode, with no override in play"
+        );
+
+        // Loopback, so `none` is permitted — a routable host refuses it.
+        let overridden = AppState::new(AppConfig {
+            bind: "127.0.0.1:8080".to_string(),
+            auth_mode_override: Some(crate::app::config::AuthMode::None),
+            ..AppConfig::default()
+        })
+        .with_home(directory.path().to_path_buf());
+
+        adopt_companies(&overridden).await.unwrap();
+
+        assert_eq!(
+            overridden.registry().get(&id).unwrap().auth_mode(),
+            crate::app::config::AuthMode::None,
+            "the host-wide mode must outrank the manifest's `[users].mode`"
         );
     }
 }

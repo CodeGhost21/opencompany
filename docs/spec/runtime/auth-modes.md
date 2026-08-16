@@ -50,7 +50,10 @@ The same four layers as every other setting ([config.md](config.md)), earlier
 winning:
 
 1. `OPENCOMPANY_AUTH_MODE`
-2. `auth_mode` in `config.toml`
+2. `auth_mode` in `config.toml` — what the [first-run setup flow](setup.md)
+   writes when an operator picks a sign-in mode. Because the mode is resolved
+   once, at build, that choice is staged: the flow says so, and the mode takes
+   effect at the next restart.
 3. the company's `[users].mode`
 4. `email`
 

@@ -1,0 +1,711 @@
+//! The first-run setup surface: one flow that configures an instance.
+//!
+//! Everything an operator must decide to get a spun-up harness running is
+//! otherwise spread across four places that never meet — host settings in a
+//! hand-edited `config.toml`, the company template in a `serve --company` flag,
+//! per-company settings behind six console sub-pages, and nothing at all
+//! recording that any of it happened. This module is the single place that
+//! reads all of it back and writes it in one transaction.
+//!
+//! ## Two routes
+//!
+//! - `GET /api/v1/setup` — everything the wizard needs to draw itself: the
+//!   effective value of each field **with the layer that set it**, the template
+//!   catalog, the sign-in modes this host will accept, and which optional
+//!   surfaces are compiled into this build.
+//! - `POST /api/v1/setup` — applies a completed wizard: writes `config.toml`,
+//!   seeds the chosen company template, and stamps `setup_completed_at`.
+//!
+//! ## Why every field carries its layer
+//!
+//! Config resolution is `env ⟵ config.toml ⟵ manifest ⟵ default`
+//! (`docs/spec/runtime/config.md`), and this flow can only write the *second*
+//! layer. A hosted tenant has `OPENCOMPANY_BIND`, `OPENCOMPANY_DATA_DIR` and
+//! friends injected by the control plane, so a wizard that cheerfully accepted
+//! an edit to `bind` there would write a file, report success, and change
+//! nothing — the env layer still wins at the next boot. So each field reports
+//! its [`ConfigLayer`] and an `editable` flag, an env-owned field is rendered
+//! read-only, and [`apply`] **refuses** a write to one rather than pretending.
+//! That refusal is the point: silently ignored configuration is the failure
+//! mode this surface exists to prevent.
+//!
+//! ## Applied, or only staged
+//!
+//! Host-level fields are read once, at boot: `bind` binds a socket, `[workspace]`
+//! decides the data-dir lifecycle. Writing those is a *staged* change, and each
+//! says so via `requires_restart` — the same honesty `InferenceStatusDto`
+//! practices with its own `restart_required` flag.
+//!
+//! `auth_mode` is deliberately **not** in that category, even though it is also
+//! resolved at build and cached on the runtime. Picking a sign-in mode and then
+//! being shown a sign-in form is the single most confusing thing this flow could
+//! do, and "restart the host yourself" is not an answer on a first run. So the
+//! apply makes the mode live on the [`AppState`] *before* it builds anything,
+//! then rebuilds the companies that were already registered
+//! ([`rebuild_company`](crate::runtime::rebuild_company)). A host with no
+//! rebuilder wired is the only case that still needs a restart, and it is
+//! reported per-company rather than assumed either way — `restart_required`
+//! names what is genuinely still pending, never a guess.
+//!
+//! Per-company settings (inference, MCP servers, team) are not written here at
+//! all: they go through the existing `ops` routes, which apply live.
+//!
+//! ## Who may call it
+//!
+//! Loopback-only throughout — nothing here is ever open to a routable host. On
+//! top of that, the call is open without a session in exactly two situations,
+//! both meaning "there is nobody who could authorize it": setup has never
+//! completed, or the host has no companies and therefore no roster to hold an
+//! admin.
+//!
+//! Both conditions being loopback-gated is the point. Openness on a routable
+//! host would let whoever reached a fresh deployment first configure it;
+//! openness on a *configured* laptop would let any page in the browser rewrite
+//! its settings. The no-companies case is not a nicety either: setup can
+//! complete without seeding a company, and gating that host behind an admin
+//! check would leave it with no company to sign in to and no way back into
+//! setup to make one — the dead end this flow exists to remove, one step later.
+//!
+//! Otherwise the ordinary admin check applies. This mirrors how the login routes
+//! already treat loopback (`is_local_only` gates echoing a login code).
+
+use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+
+use crate::AppState;
+use crate::app::config::{
+    AuthMode, ConfigFile, ConfigLayer, ConfigValue, EnvSource, ProcessEnv, resolve,
+    write_config_toml,
+};
+use crate::error::OpenCompanyError;
+use crate::server::error::ApiError;
+use crate::server::users::admin::require_admin;
+
+/// Builds the setup route fragment.
+pub fn router() -> Router<AppState> {
+    Router::new().route("/api/v1/setup", get(read).post(apply))
+}
+
+// ---------------------------------------------------------------------------
+// Response envelopes
+// ---------------------------------------------------------------------------
+
+/// One configurable field, with the layer that currently owns it.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct FieldDto {
+    /// The dotted `config.toml` key (`bind`, `workspace.max_blob_mb`).
+    pub key: &'static str,
+    /// The value currently held in `config.toml`, or `null` when the file does
+    /// not set it. Always `null` for a field marked [`secret`](Self::secret) —
+    /// a credential's status is reportable, its bytes are not.
+    pub value: Option<String>,
+    /// Which layer supplied it: `env`, `config.toml`, `manifest`, `default`.
+    pub layer: &'static str,
+    /// Whether the wizard may write it. `false` when `env` owns the field,
+    /// because `config.toml` cannot outrank an environment variable.
+    pub editable: bool,
+    /// Whether a change takes effect only after the host restarts.
+    pub requires_restart: bool,
+    /// Set when the field holds a credential: the wizard shows "configured"
+    /// rather than the value, and `value` is `None`.
+    pub secret: bool,
+}
+
+/// A company template an instance can be seeded from.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct TemplateDto {
+    /// The stable preset slug, e.g. `agentic_marketing_agency`.
+    pub id: &'static str,
+    /// The human-readable name.
+    pub name: &'static str,
+    /// How many agents the template's roster declares, so the wizard can say
+    /// what the operator is about to get without parsing the manifest itself.
+    pub agent_count: usize,
+    /// What a company built from this template produces (the manifest's
+    /// `[company].output`), so a template card can say what the operator is
+    /// choosing in the product's own words rather than a restated slug.
+    pub output: Option<String>,
+}
+
+/// Which optional surfaces are compiled into this build.
+///
+/// These are **cargo features**, not settings: nothing the wizard writes can
+/// turn one on. Reported so the flow can say "ACP is not in this build" instead
+/// of offering a switch that does nothing. Mirrors the `*_in_build` flags
+/// `ops::capabilities` already publishes.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct BuildDto {
+    /// The Agent Client Protocol module (`acp`).
+    pub acp_in_build: bool,
+    /// Whether the ACP JSON-RPC transport is actually mounted. Distinct from
+    /// `acp_in_build`: this tree compiles the session and permission model but
+    /// mounts no `/acp` handler, so a client would get the reserved-path 404
+    /// even in a build with the feature on. Saying so is the difference between
+    /// "not available" and "misconfigured".
+    pub acp_transport_mounted: bool,
+    /// MCP tool-server management (`mcp`).
+    pub mcp_in_build: bool,
+    /// The embedded OpenHuman agent harness (`openhuman`).
+    pub harness_in_build: bool,
+    /// Third-party OAuth connection writes (`oauth`).
+    pub oauth_in_build: bool,
+}
+
+/// The wizard's whole bootstrap payload.
+#[derive(Clone, Debug, Serialize)]
+pub struct SetupDto {
+    /// Whether setup has already been completed on this instance.
+    pub complete: bool,
+    /// Absolute path of the `config.toml` a write would land in, so the flow can
+    /// tell the operator where its output goes.
+    pub config_path: String,
+    /// Every configurable field, in a stable order.
+    pub fields: Vec<FieldDto>,
+    /// The company templates this build ships.
+    pub templates: Vec<TemplateDto>,
+    /// The sign-in modes this host will accept. `none` is absent on a routable
+    /// bind, where it would mean an unauthenticated admin console.
+    pub auth_modes: Vec<&'static str>,
+    /// Which optional surfaces this build has.
+    pub build: BuildDto,
+    /// Company ids already registered on this host. A non-empty list means the
+    /// seed step should be skipped — the instance already has a company.
+    pub companies: Vec<String>,
+}
+
+/// What `POST /api/v1/setup` accepts.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SetupRequest {
+    /// Field writes, as dotted key → value. A `null` value clears the key,
+    /// letting the next precedence layer supply it.
+    pub fields: std::collections::BTreeMap<String, Option<String>>,
+    /// The template to seed the first company from. Ignored when the host
+    /// already has a company — setup must never hand an operator a second
+    /// starter company on a re-run.
+    pub template: Option<String>,
+}
+
+/// What the apply returns.
+#[derive(Clone, Debug, Serialize)]
+pub struct AppliedDto {
+    /// Always true — a partial apply is an error, not a result.
+    pub complete: bool,
+    /// The file written.
+    pub config_path: String,
+    /// Keys whose new value only takes effect after a restart, so the console
+    /// can say which ones are still pending rather than implying all of it is
+    /// live.
+    pub restart_required: Vec<String>,
+    /// The company seeded by this call, if any.
+    pub seeded_company: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// The field table
+// ---------------------------------------------------------------------------
+
+/// One row of the configurable-field table.
+struct FieldSpec {
+    /// The dotted `config.toml` key.
+    key: &'static str,
+    /// The [`ConfigProvenance`](crate::app::config::ConfigProvenance) field name
+    /// this key resolves under. `None` for keys that have no resolution pass of
+    /// their own (the `[workspace]` section, read straight off the file).
+    prov: Option<&'static str>,
+    /// Whether a change needs a restart to take effect.
+    requires_restart: bool,
+    /// Whether the value is a credential and must never be echoed.
+    secret: bool,
+}
+
+/// Every field the setup flow owns, in the order the wizard shows them.
+///
+/// Deliberately not "every key in `ConfigFile`": `data_dir` is excluded because
+/// a running host has already opened and locked its data root, so writing a new
+/// one into the very file that lives *inside* that root would leave a config
+/// nothing reads. Moving a data root is a relocation, not a setting.
+const FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        key: "bind",
+        prov: Some("bind"),
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "auth_mode",
+        prov: Some("auth_mode"),
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "brain_mode",
+        prov: Some("brain_mode"),
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "api_url",
+        prov: Some("api_url"),
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "tinyhumans_api_key",
+        prov: Some("tinyhumans_credential"),
+        requires_restart: true,
+        secret: true,
+    },
+    FieldSpec {
+        key: "openhuman_url",
+        prov: Some("openhuman_url"),
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "public_url",
+        prov: Some("public_url"),
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "tinyplace_api_url",
+        prov: Some("tinyplace_api_url"),
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "github_token",
+        prov: Some("github_token"),
+        requires_restart: true,
+        secret: true,
+    },
+    FieldSpec {
+        key: "workspace.clear_tmp_on_startup",
+        prov: None,
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "workspace.max_blob_mb",
+        prov: None,
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "workspace.storage_quota_gb",
+        prov: None,
+        requires_restart: true,
+        secret: false,
+    },
+    FieldSpec {
+        key: "workspace.tree_quota_gb",
+        prov: None,
+        requires_restart: true,
+        secret: false,
+    },
+];
+
+/// Whether `key` is one this surface will write at all. An unknown key is
+/// refused rather than passed through to `config.toml`, so a typo cannot write
+/// a dead entry that reads as configuration.
+fn spec_for(key: &str) -> Option<&'static FieldSpec> {
+    FIELDS.iter().find(|f| f.key == key)
+}
+
+// ---------------------------------------------------------------------------
+// Access control
+// ---------------------------------------------------------------------------
+
+/// Authorizes a setup call.
+///
+/// Loopback-only is necessary throughout: nothing here is ever open to a
+/// routable host. On top of that, the call is open without a session in exactly
+/// two situations, both of which are "there is nobody who could authorize it":
+///
+///   - setup has never completed, or
+///   - the host has no companies, so there is no roster to hold an admin.
+///
+/// The second is not a nicety. Setup can complete without seeding a company —
+/// an operator who only changes host settings — and gating that host behind an
+/// admin check would leave it with no company to sign in to and no way back
+/// into setup to create one. That is precisely the dead end this flow exists to
+/// remove, reintroduced one step later.
+///
+/// Otherwise the ordinary admin check applies, resolved through the sole
+/// company: setup is host-level but authority is per company, and a host
+/// serving several has no single roster that could speak for the instance.
+async fn authorize(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<(), Response> {
+    if state.config().is_local_only() && (!state.setup_complete() || state.registry().is_empty()) {
+        return Ok(());
+    }
+    let runtime = state.registry().sole().ok_or_else(|| {
+        // `sole` is `None` for an empty registry too, but that case was handled
+        // above for a loopback host — so reaching here means either several
+        // companies, or none on a routable host. Say what is true of both
+        // rather than naming a count that might be wrong.
+        ApiError::from(OpenCompanyError::Conflict(
+            "No single company on this host can authorize a host-level change. Edit \
+             config.toml directly and restart."
+                .to_string(),
+        ))
+        .into_response()
+    })?;
+    require_admin(headers, state, &runtime, peer).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// GET
+// ---------------------------------------------------------------------------
+
+async fn read(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+) -> Result<Json<SetupDto>, Response> {
+    authorize(&state, &headers, peer).await?;
+    snapshot(&state, &ProcessEnv)
+        .map(Json)
+        .map_err(|e| ApiError::from(e).into_response())
+}
+
+/// The manifest the resolution pass runs against.
+///
+/// Setup is a host-level surface and has no single company to read a manifest
+/// from, so it uses the same synthetic stand-in `opencompany doctor` does for
+/// the same reason (`src/bin/opencompany.rs`). Its `[brain].mode` and
+/// `[users].mode` take their serde defaults — `hosted` and `email` — which are
+/// precisely the values resolution would otherwise fall through to, so the
+/// manifest layer reports exactly what an unconfigured host would resolve.
+fn synthetic_manifest() -> crate::company::CompanyManifest {
+    toml::from_str("[company]\nname = \"opencompany\"\n").expect("synthetic manifest is valid")
+}
+
+/// Builds the wizard payload from the live configuration.
+fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompanyError> {
+    let dir = state.home();
+    let file = ConfigFile::load(dir)?;
+
+    // Resolution needs a manifest for the `[brain]`/`[users]` layer, and this is
+    // a host-level surface with no single company to read one from. A default
+    // manifest is what `opencompany doctor` uses for the same reason, and its
+    // `[brain].mode`/`[users].mode` defaults are exactly the values resolution
+    // would fall through to anyway.
+    let manifest = synthetic_manifest();
+    let (_, prov) = resolve(env, file.as_ref(), &manifest)?;
+
+    let fields = FIELDS
+        .iter()
+        .map(|spec| {
+            let layer = spec
+                .prov
+                .and_then(|name| prov.layer(name))
+                // A `[workspace]` key has no resolution pass: it is either in
+                // the file or it is a built-in default.
+                .unwrap_or(if workspace_key_present(file.as_ref(), spec.key) {
+                    ConfigLayer::ConfigToml
+                } else {
+                    ConfigLayer::Default
+                });
+            FieldDto {
+                key: spec.key,
+                value: if spec.secret {
+                    None
+                } else {
+                    effective_value(file.as_ref(), spec.key)
+                },
+                layer: layer.label(),
+                editable: layer != ConfigLayer::Env,
+                requires_restart: spec.requires_restart,
+                secret: spec.secret,
+            }
+        })
+        .collect();
+
+    Ok(SetupDto {
+        complete: state.setup_complete(),
+        config_path: dir
+            .join(crate::app::config::CONFIG_FILE)
+            .display()
+            .to_string(),
+        fields,
+        templates: templates(),
+        auth_modes: auth_modes(state),
+        build: build_flags(),
+        companies: state
+            .registry()
+            .list()
+            .into_iter()
+            .map(|id| id.as_ref().to_string())
+            .collect(),
+    })
+}
+
+/// The sign-in modes this host will accept.
+///
+/// `none` is withheld on a routable bind: a company with no sign-in served to
+/// anything but loopback is an unauthenticated admin console, and the runtime
+/// already refuses that combination at boot, at provisioning, and in the
+/// desktop loader. Offering it in the wizard would only produce a choice that
+/// fails on the next restart.
+fn auth_modes(state: &AppState) -> Vec<&'static str> {
+    let mut modes = vec![AuthMode::Email.as_str(), AuthMode::Wallet.as_str()];
+    if state.config().is_local_only() {
+        modes.push(AuthMode::None.as_str());
+    }
+    modes
+}
+
+/// Which optional surfaces this build carries.
+fn build_flags() -> BuildDto {
+    BuildDto {
+        acp_in_build: cfg!(feature = "acp"),
+        // No `.route("/acp", …)` exists anywhere in this tree — only the session
+        // and permission model plus the reserved path. Hard-coded false until a
+        // handler is actually mounted; a flag that guessed from the feature
+        // would tell a client to dial an endpoint that 404s.
+        acp_transport_mounted: false,
+        mcp_in_build: cfg!(feature = "mcp"),
+        harness_in_build: cfg!(feature = "openhuman"),
+        oauth_in_build: cfg!(feature = "oauth"),
+    }
+}
+
+/// The shipped company templates.
+fn templates() -> Vec<TemplateDto> {
+    crate::desktop::PRESETS
+        .iter()
+        .map(|preset| {
+            // A preset that will not parse is a packaging bug, but it must not
+            // take the whole wizard down with it: report the entry with an
+            // unknown roster rather than failing the request.
+            let parsed = preset.manifest_parsed().ok();
+            TemplateDto {
+                id: preset.id,
+                name: preset.name,
+                agent_count: parsed.as_ref().map(|m| m.agents.len()).unwrap_or(0),
+                output: parsed.and_then(|m| m.company.output.clone()),
+            }
+        })
+        .collect()
+}
+
+/// The current value of `key` as a display string, read from the file layer.
+fn effective_value(file: Option<&ConfigFile>, key: &str) -> Option<String> {
+    let file = file?;
+    match key {
+        "bind" => file.bind.clone(),
+        "auth_mode" => file.auth_mode.clone(),
+        "brain_mode" => file.brain_mode.clone(),
+        "api_url" => file.api_url.clone(),
+        "openhuman_url" => file.openhuman_url.clone(),
+        "public_url" => file.public_url.clone(),
+        "tinyplace_api_url" => file.tinyplace_api_url.clone(),
+        "workspace.clear_tmp_on_startup" => {
+            file.workspace.clear_tmp_on_startup.map(|v| v.to_string())
+        }
+        "workspace.max_blob_mb" => file.workspace.max_blob_mb.map(|v| v.to_string()),
+        "workspace.storage_quota_gb" => file.workspace.storage_quota_gb.map(|v| v.to_string()),
+        "workspace.tree_quota_gb" => file.workspace.tree_quota_gb.map(|v| v.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether a `[workspace]` key is set in the file, which is the only way those
+/// keys can be owned by anything but the built-in default.
+fn workspace_key_present(file: Option<&ConfigFile>, key: &str) -> bool {
+    effective_value(file, key).is_some()
+}
+
+// ---------------------------------------------------------------------------
+// POST
+// ---------------------------------------------------------------------------
+
+async fn apply(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(req): Json<SetupRequest>,
+) -> Result<Json<AppliedDto>, Response> {
+    authorize(&state, &headers, peer).await?;
+    apply_inner(&state, req, &ProcessEnv)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::from(e).into_response())
+}
+
+/// `+ Sync` so the returned future is `Send`, which axum requires of a handler:
+/// a `&T` is `Send` only when `T` is `Sync`, and the bare trait object is not.
+async fn apply_inner(
+    state: &AppState,
+    req: SetupRequest,
+    env: &(dyn EnvSource + Sync),
+) -> Result<AppliedDto, OpenCompanyError> {
+    let dir = state.home().to_path_buf();
+    let file = ConfigFile::load(&dir)?;
+    let manifest = synthetic_manifest();
+    let (_, prov) = resolve(env, file.as_ref(), &manifest)?;
+
+    // Validate everything before writing anything: a config half-applied is
+    // worse than one refused, because the operator has no way to tell which
+    // half landed.
+    let mut edits: Vec<(&'static str, ConfigValue)> = Vec::new();
+    let mut restart_required = Vec::new();
+    for (key, value) in &req.fields {
+        let spec = spec_for(key).ok_or_else(|| {
+            OpenCompanyError::InvalidRequest(format!("`{key}` is not a setting this flow writes."))
+        })?;
+
+        // The refusal that gives this surface its point: `config.toml` cannot
+        // outrank an environment variable, so accepting the edit would write a
+        // file, report success, and change nothing at the next boot.
+        if spec.prov.and_then(|n| prov.layer(n)) == Some(ConfigLayer::Env) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "`{key}` is set by an environment variable on this host, which outranks \
+                 config.toml. Writing it here would have no effect — change the environment \
+                 instead."
+            )));
+        }
+
+        edits.push((spec.key, parse_value(spec, value.as_deref())?));
+        if spec.requires_restart {
+            restart_required.push(spec.key.to_string());
+        }
+    }
+
+    // Validate the mode before it is written, not at the next boot: an
+    // unparseable `auth_mode` aborts startup, which would turn a typo here into
+    // a host that will not come back up.
+    let chosen_auth_mode = match req.fields.get("auth_mode") {
+        // Present and non-blank: the operator picked one.
+        Some(Some(mode)) if !mode.trim().is_empty() => {
+            // Re-tagged as a bad *request* rather than a bad *config*:
+            // `AuthMode::from_str` raises `Config`, which maps to 500 — right
+            // for a malformed file found at boot, wrong for a value just typed.
+            let parsed: AuthMode = mode
+                .trim()
+                .parse()
+                .map_err(|e: OpenCompanyError| OpenCompanyError::InvalidRequest(e.to_string()))?;
+            if !parsed.has_login() && !state.config().is_local_only() {
+                return Err(OpenCompanyError::Conflict(
+                    "`none` has no sign-in, and this host binds a routable address — it would \
+                     serve an unauthenticated admin console to anyone who can reach it."
+                        .to_string(),
+                ));
+            }
+            Some(Some(parsed))
+        }
+        // Present and cleared: back to each manifest's own `[users].mode`.
+        Some(None) => Some(None),
+        // Absent: not this operator's business, leave the host-wide mode alone.
+        _ => None,
+    };
+
+    // Make the chosen mode live **before** anything is built with it.
+    //
+    // The mode is resolved once, at build, and cached on the runtime. Writing it
+    // to `config.toml` alone therefore only takes effect at the next boot —
+    // which is why picking "no sign-in" used to leave the operator staring at a
+    // login form on a host that had just been told not to have one. Setting it
+    // here means the company seeded below is built with it, and the rebuild
+    // further down applies it to anything already registered.
+    if let Some(mode) = chosen_auth_mode {
+        state.set_auth_mode_override(mode);
+    }
+
+    // Seed the template only when the host has no company. A re-run must never
+    // hand the operator a second starter company, which is the same reason
+    // `desktop::bootstrap_companies` seeds only as a fallback.
+    let seeded = match (&req.template, state.registry().is_empty()) {
+        (Some(template), true) => {
+            let id = crate::desktop::seed_company(state, template).await?;
+            Some(id.as_ref().to_string())
+        }
+        _ => None,
+    };
+
+    // Companies that already existed still hold the old mode on their cached
+    // runtime, so rebuild them in place. `seeded` is excluded — it was just
+    // built with the new mode and rebuilding it would be pure work.
+    //
+    // A host with no rebuilder wired cannot do this, and that is the only case
+    // where `auth_mode` genuinely still needs a process restart. Reporting it
+    // per-company rather than assuming either answer is what keeps the response
+    // honest about what is actually in force.
+    let mut needs_restart_for_auth = false;
+    if chosen_auth_mode.is_some() {
+        for id in state.registry().list() {
+            if seeded.as_deref() == Some(id.as_ref()) {
+                continue;
+            }
+            match crate::runtime::rebuild_company(state, &id).await {
+                Ok(_) => {
+                    tracing::info!(company = %id, "rebuilt for the new sign-in mode");
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        company = %id, %error,
+                        "could not rebuild for the new sign-in mode; it needs a restart",
+                    );
+                    needs_restart_for_auth = true;
+                }
+            }
+        }
+    }
+    // Applied live, so telling the operator to restart for it would be a lie —
+    // and the restart notice is the one part of this screen they act on.
+    if !needs_restart_for_auth {
+        restart_required.retain(|key| key != "auth_mode");
+    }
+
+    edits.push((
+        "setup_completed_at",
+        ConfigValue::Int(crate::ports::now_millis() as i64),
+    ));
+    let path = write_config_toml(&dir, &edits)?;
+    state.mark_setup_complete();
+
+    Ok(AppliedDto {
+        complete: true,
+        config_path: path.display().to_string(),
+        restart_required,
+        seeded_company: seeded,
+    })
+}
+
+/// Converts a submitted string into the typed value its key expects.
+fn parse_value(spec: &FieldSpec, raw: Option<&str>) -> Result<ConfigValue, OpenCompanyError> {
+    // `null` — and a blank string, which is what an emptied form field sends —
+    // both mean "clear this". Writing `""` instead would be a set-but-empty
+    // value that shadows the layer below rather than deferring to it.
+    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(ConfigValue::Unset);
+    };
+    let invalid = |what: &str| {
+        OpenCompanyError::InvalidRequest(format!(
+            "`{}` must be {what} — you sent `{raw}`.",
+            spec.key
+        ))
+    };
+    Ok(match spec.key {
+        "workspace.clear_tmp_on_startup" => {
+            ConfigValue::Bool(raw.parse().map_err(|_| invalid("true or false"))?)
+        }
+        "workspace.max_blob_mb" | "workspace.storage_quota_gb" | "workspace.tree_quota_gb" => {
+            ConfigValue::Float(raw.parse().map_err(|_| invalid("a number"))?)
+        }
+        _ => ConfigValue::Str(raw.to_string()),
+    })
+}
+
+#[cfg(test)]
+mod test;
