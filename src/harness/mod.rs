@@ -908,6 +908,18 @@ pub struct HarnessPool {
     /// restart. Without this axis the override persists and is silently ignored:
     /// `ApprovalPolicy` is built once per roster, not once per call.
     policy_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the desk scoping a roster's grants resolve
+    /// through — which desks exist, who sits on them, and each one's tool
+    /// ceiling.
+    ///
+    /// Needed for the same reason as [`Self::budget_fingerprints`]: a tool belt
+    /// is wired once per roster, not once per call, so without this axis a
+    /// console desk-ceiling edit (or seating a teammate on a restricted desk)
+    /// would leave every other fingerprint stable and the fast path would keep
+    /// serving the old belt until the process restarted. A company whose desks
+    /// declare no ceilings keeps a stable fingerprint and never rebuilds on this
+    /// axis.
+    desk_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
     /// failure has already been reported (issue #449).
     ///
