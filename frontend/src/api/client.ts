@@ -304,6 +304,37 @@ export class OpenCompanyClient {
     return this.request<T>("POST", path, body);
   }
 
+  /**
+   * Whether a sign-in through this client yields a session it must hold itself.
+   *
+   * Exposed so a caller knows to *store* what {@link postSignIn} returns. It is
+   * the same question `needsCarriedSession` answers, kept on the client so no
+   * view has to re-derive it from a base url.
+   */
+  get carriesOwnSession(): boolean {
+    return needsCarriedSession(this.baseUrl);
+  }
+
+  /**
+   * A POST to a sign-in route, asking for a carrier this client can use.
+   *
+   * Separate from {@link post} so the carrier request cannot leak onto an
+   * ordinary call: the header is meaningless everywhere but a route that mints
+   * a session, and a client sending it indiscriminately would be asserting
+   * something about itself on every request it makes.
+   *
+   * On a same-origin console this is exactly `post` — no header, and the host
+   * replies with the `HttpOnly` cookie it always did.
+   */
+  postSignIn<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(
+      "POST",
+      path,
+      body,
+      this.carriesOwnSession ? { "x-opencompany-session-carrier": "header" } : undefined,
+    );
+  }
+
   /** A typed PATCH, for surfaces that live outside this class (e.g. auth). */
   patch<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>("PATCH", path, body);
