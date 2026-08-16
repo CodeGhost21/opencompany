@@ -2348,6 +2348,7 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         // this slice, so it carries today's behaviour — no hand-off tools wired.
         // Opting overlays in needs a console write surface; see the follow-up.
         delegates_to: Vec::new(),
+        context: None,
         budget_usd_daily: None,
     }
 }
@@ -5345,6 +5346,7 @@ budget_usd_daily = 0.0
             tier: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -5455,6 +5457,7 @@ budget_usd_daily = 0.0
             tier: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
         };
         let agent = build::build_agent(
