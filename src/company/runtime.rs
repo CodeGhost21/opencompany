@@ -1228,7 +1228,7 @@ impl CompanyRuntime {
                 ResolveReceipt::AlreadyResolved => {
                     return Ok(CycleRunner::new(&rt).already_resolved_report());
                 }
-                ResolveReceipt::Settled(event) => event,
+                ResolveReceipt::Settled(event) => *event,
             };
             rt.continue_turn(event).await
         })
@@ -1823,6 +1823,9 @@ impl CompanyRuntime {
             .pending()
             .into_iter()
             .map(|p| ApprovalSummary {
+                // Read before the field moves below (issue #880): the answer
+                // needs the task link *and* the effect together.
+                workflow_run_id: workflow_run_of(&p),
                 id: p.id,
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
@@ -2100,6 +2103,28 @@ impl CompanyRuntime {
         }
         Ok(())
     }
+}
+
+/// The **workflow** run waiting on a parked approval, if any (issue #880).
+///
+/// `Effect::run_id` holds two different id spaces — issue #242's task-attempt id
+/// and, on the workflow path, a workflow run id — and `generate_id` is only
+/// process-locally unique, so the value alone cannot say which it is. The park
+/// *site* can, and it is recorded: a task attempt parks inside its dispatch
+/// cycle and is linked to that card, while every workflow park goes through
+/// `park_and_journal` and is recorded explicitly `Unlinked` (#333). A chat turn
+/// is unlinked too but stamps no run id at all, so requiring both is exact.
+///
+/// Deliberately conservative in the ambiguous direction: an approval with no
+/// recorded link (`None`, i.e. a pre-#333 journal line) reports nothing rather
+/// than guessing, which is the same fallback rule #333 set for the task link.
+fn workflow_run_of(parked: &crate::runtime::journal::PendingApproval) -> Option<String> {
+    matches!(
+        parked.task,
+        Some(crate::runtime::journal::TaskLink::Unlinked)
+    )
+    .then(|| parked.effect.run_id.clone())
+    .flatten()
 }
 
 impl std::fmt::Debug for CompanyRuntime {

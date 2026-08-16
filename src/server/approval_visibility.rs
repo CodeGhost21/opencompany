@@ -158,6 +158,7 @@ mod tests {
             agent: Some("ops".to_string()),
             payload: Some(serde_json::json!({ "to": "board@example.test" })),
             thread: None,
+            workflow_run_id: None,
             broadly_grantable: false,
             contents_hidden: false,
             batch: Some("turn-1".to_string()),
