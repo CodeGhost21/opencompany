@@ -282,7 +282,13 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
           {current.id === "tools" && <ToolsStep status={status} />}
 
           {current.id === "review" && (
-            <ReviewStep changed={changed} restartKeys={restartKeys} template={template} status={status} />
+            <ReviewStep
+              changed={changed}
+              restartKeys={restartKeys}
+              template={template}
+              status={status}
+              noCompanyChosen={noCompanyChosen}
+            />
           )}
 
           {/* The plain-field steps share one renderer. `tools` adds its fields
