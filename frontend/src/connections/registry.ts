@@ -605,11 +605,22 @@ async function readIdentity(client: OpenCompanyClient): Promise<InstanceIdentity
  * gating on the credential rather than on the scheme.
  */
 function insecurelyCredentialed(connection: Connection | undefined): string | null {
-  if (!connection || !isDesktopRuntime()) return null;
-  const carries =
-    connection.credential.kind === "device" ||
-    (connection.credential.kind === "platform" && Boolean(connection.credential.token));
-  if (!carries || mayCarryACredential(connection.baseUrl)) return null;
+  if (!connection) return null;
+  // A same-origin connection is the browser's own origin, whose rules already
+  // decide this; there is no url to judge and nothing to protect it from that
+  // is not already inside the page.
+  if (connection.baseUrl === "") return null;
+  // A session is a secret **this page holds and sends**, in every runtime — so
+  // unlike the two below it is gated in the browser as well. The exposure is
+  // identical to the desktop's: a person's standing authority on a company,
+  // travelling in clear text past every device on the path.
+  const carriesInAnyRuntime = connection.credential.kind === "session";
+  const carriesOnDesktop =
+    isDesktopRuntime() &&
+    (connection.credential.kind === "device" ||
+      (connection.credential.kind === "platform" && Boolean(connection.credential.token)));
+  if (!carriesInAnyRuntime && !carriesOnDesktop) return null;
+  if (mayCarryACredential(connection.baseUrl)) return null;
   // Names the credential generically: this covers a paired device session and a
   // platform bearer from `?token=`, and the person reading it needs the reason
   // rather than which of the two it was.
