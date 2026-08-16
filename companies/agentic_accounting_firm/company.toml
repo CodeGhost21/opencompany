@@ -7,31 +7,6 @@ name = "Agentic Accounting Firm"
 output = "Books, taxes, payroll, and forecasts"
 human_role = "Sign-off on filings"
 
-[[agent]]
-id = "bookkeeper"
-role = "Bookkeeper"
-description = "Record transactions and reconcile accounts."
-
-[[agent]]
-id = "tax_preparer"
-role = "Tax Preparer"
-description = "Prepare tax filings."
-
-[[agent]]
-id = "payroll_agent"
-role = "Payroll Agent"
-description = "Run payroll and related filings."
-
-[[agent]]
-id = "forecaster"
-role = "Forecaster"
-description = "Build financial forecasts and budgets."
-
-[[agent]]
-id = "audit_prep"
-role = "Audit Preparer"
-description = "Assemble documentation for audits."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]

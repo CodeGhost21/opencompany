@@ -19,34 +19,6 @@ output = "A ranked weekly opportunity brief the operator can act on"
 human_role = "Deciding which opportunities to fund and pursue"
 handle = "signalstudio"
 
-[[agent]]
-id = "signal_scout"
-role = "Signal Scout"
-description = "Continuously gather raw market signals from web, forums, and inbound channels."
-tier = "subconscious"
-# `search` is listed alongside `web.*` because the two are not interchangeable:
-# `web.*` reads a URL the agent already has, `search` is the only way to find
-# one. It must appear here AND in `[tools].allow` below — the per-agent list
-# narrows the company-wide one, so either edit alone is a silent no-op (#312).
-tools = ["web.*", "search"]
-budget_usd_daily = 5.0
-
-[[agent]]
-id = "opportunity_analyst"
-role = "Opportunity Analyst"
-description = "Cluster signals into pains and rank the resulting opportunities by evidence and size."
-tier = "reasoning"
-tools = ["web.*", "docs.*", "search"]
-budget_usd_daily = 8.0
-
-[[agent]]
-id = "research_agent"
-role = "Research Agent"
-description = "Deep-dive the top opportunities and compile the operator's weekly brief."
-tier = "reasoning"
-tools = ["web.*", "docs.*", "search"]
-budget_usd_daily = 8.0
-
 [brain]
 mode = "hosted"
 max_passes = 12

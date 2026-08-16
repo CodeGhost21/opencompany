@@ -33,32 +33,6 @@ mode = "full"
 # `workspace.read`, and `workspace.*` covers the sub-grants but not the bare one.
 allow = ["mcp:*", "workspace", "workspace.*"]
 
-[[agent]]
-id = "ceo"
-role = "Chief Executive"
-description = "Sets direction, answers about the company, and delegates the work."
-# The operator↔company chat responder. `orchestrator` makes the CEO answer from
-# whole-company context and delegate to the desks below. `mcp:*` grants the
-# remote MCP tool servers declared in `[[mcp_server]]`.
-tier = "orchestrator"
-# `workspace.read` is read-only by design: writes need a bare `workspace` or an
-# explicit `workspace.write`, so this cannot silently overwrite operator notes.
-tools = ["mcp:*", "workspace.read"]
-
-[[agent]]
-id = "engineer"
-role = "Engineer"
-description = "Explains how things are built and proposes technical plans."
-tools = ["mcp:*", "workspace.read"]
-
-[[agent]]
-id = "writer"
-role = "Writer"
-description = "Turns rough notes into short, clear written drafts."
-# The one agent that may edit a note, so the "an agent wrote it, the operator
-# sees it" round trip is demonstrable out of the box.
-tools = ["mcp:*", "workspace"]
-
 # Desks (group chats) the orchestrator can hand a turn to. Each desk's first
 # member is its lead; `delegate_to_desk` runs that member's turn.
 [[group_chat]]

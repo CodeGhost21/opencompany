@@ -1,0 +1,9 @@
+role = "Signal Scout"
+description = "Continuously gather raw market signals from web, forums, and inbound channels."
+tier = "subconscious"
+# `search` is listed alongside `web.*` because the two are not interchangeable:
+# `web.*` reads a URL the agent already has, `search` is the only way to find
+# one. It must appear here AND in `[tools].allow` below — the per-agent list
+# narrows the company-wide one, so either edit alone is a silent no-op (#312).
+tools = ["web.*", "search"]
+budget_usd_daily = 5.0

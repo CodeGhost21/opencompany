@@ -1,0 +1,6 @@
+role = "Librarian"
+description = "Find and download primary sources. Never reads them."
+# Needs the frontier of what is worth fetching and what is already held, so it
+# does not re-download what the lab has. Not given the brief's conclusions: a
+# fetcher that knows what the lab wants to be true searches for it.
+context = ["GOAL.md", "CLAIMS.md", "THREADS.md", "DEMANDS.md"]

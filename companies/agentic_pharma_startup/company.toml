@@ -7,26 +7,6 @@ name = "Agentic Pharma Startup"
 output = "Candidate molecules and trial plans"
 human_role = "Laboratory work"
 
-[[agent]]
-id = "literature_reviewer"
-role = "Literature Reviewer"
-description = "Review and synthesize scientific literature."
-
-[[agent]]
-id = "molecule_discovery"
-role = "Molecule Discovery"
-description = "Propose candidate molecules."
-
-[[agent]]
-id = "simulation_agent"
-role = "Simulation Agent"
-description = "Run in-silico simulations and screening."
-
-[[agent]]
-id = "trial_planner"
-role = "Trial Planner"
-description = "Design and plan clinical trials."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
