@@ -329,6 +329,65 @@ mod test {
         assert_eq!(cookie(&HeaderMap::new(), "t"), None);
     }
 
+    fn carrier(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(SESSION_CARRIER_HEADER, value.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn the_header_carrier_is_opt_in() {
+        assert!(wants_header_carrier(&carrier("header")));
+        // Case and surrounding space are the client's business, not a refusal.
+        assert!(wants_header_carrier(&carrier("Header")));
+        assert!(wants_header_carrier(&carrier("  header ")));
+    }
+
+    #[test]
+    fn anything_else_means_the_cookie() {
+        // The default must be the HttpOnly carrier, so an absent, empty or
+        // unrecognised value degrades to the safer one rather than to none.
+        assert!(!wants_header_carrier(&HeaderMap::new()));
+        for value in ["", "cookie", "bearer", "headers", "header-ish", "1"] {
+            assert!(
+                !wants_header_carrier(&carrier(value)),
+                "{value:?} must not select the header carrier"
+            );
+        }
+    }
+
+    #[test]
+    fn the_session_header_value_is_what_the_parser_reads_back() {
+        // The two are each other's inverse, and a round trip is the only
+        // assertion that stays true if either side's format changes.
+        let rendered = session_header_value(&CompanyId::new("acme"), "tok").unwrap();
+        assert_eq!(rendered, "acme.tok");
+        let mut h = HeaderMap::new();
+        h.insert(SESSION_HEADER, rendered.parse().unwrap());
+        let (company, token) = session_from_header(&h).unwrap();
+        assert_eq!(company.as_ref(), "acme");
+        assert_eq!(token, "tok");
+    }
+
+    #[test]
+    fn a_company_that_cannot_name_a_cookie_cannot_name_a_header_either() {
+        // Both carriers gate on `may_carry_session`, so an id is either
+        // addressable by both or by neither. An id expressible in one carrier
+        // only would be a company reachable by desktop and not by browser.
+        for id in ["", "evil;Secure", "a.b", "with space"] {
+            let company = CompanyId::new(id);
+            assert_eq!(session_cookie_name(&company), None, "{id:?}");
+            assert_eq!(session_header_value(&company, "tok"), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_token_never_renders_a_header() {
+        // `session_from_header` refuses an empty token, so rendering one would
+        // hand back a value that cannot authenticate anything.
+        assert_eq!(session_header_value(&CompanyId::new("acme"), ""), None);
+    }
+
     #[test]
     fn set_cookie_carries_the_defensive_attributes() {
         let rendered = set_cookie("oc_session_acme", "tok", 3600, false);
