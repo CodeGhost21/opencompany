@@ -155,9 +155,18 @@ The ladder is ordered, and order is the policy:
 
 1. `blocked` — a hard prerequisite is missing or a provider is refusing
 2. `answered`, or the attempt cap is reached → `Answered` / `Reported`
-3. unverified beyond threshold → `Diversify`
-4. unproductive beyond threshold → `Diversify`
-5. otherwise → `Retry`
+3. verified but `completeness` judges the result partial against the demand's
+   `falsifies` → `Diversify`
+4. unverified beyond threshold → `Diversify`
+5. unproductive beyond threshold → `Diversify`
+6. otherwise → `Retry`
+
+Step 3 is why `completeness` is a distinct arm from `verify` in the
+[four-question fan-out](#four-questions-one-merge): a result can be verified
+true and still not be what the demand asked for, and that case must not fall
+through step 2's `Answered` or step 6's default `Retry` — retrying repeats an
+approach that was never wrong, and answering closes a demand nothing actually
+resolved.
 
 `Diversify` means change approach rather than repeat it: re-open research, ask
 for a different angle, or state a new [demand](demand-ledger.md) for what is
