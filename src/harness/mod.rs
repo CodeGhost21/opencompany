@@ -178,7 +178,7 @@ use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
     UsageMeter,
 };
-use crate::runtime::builder::{agent_effective_grants, agent_scoped_grants};
+use crate::runtime::builder::agent_scoped_grants;
 
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
