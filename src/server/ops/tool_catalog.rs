@@ -90,12 +90,35 @@ description = "Notion pages."
             .tempdir()
             .expect("tempdir");
         let manifest: CompanyManifest = toml::from_str(MANIFEST).expect("valid manifest");
-        let runtime = RuntimeBuilder::new(manifest)
-            .home(home.path())
+        let store = FsCompanyStore::new(home.path().to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .expect("save");
+        let runtime = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(id.clone())
             .build()
             .await
             .expect("runtime");
-        let state = AppState::new(AppConfig::default(), runtime).await;
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
         (home, state)
     }
 
@@ -104,6 +127,7 @@ description = "Notion pages."
             .oneshot(
                 Request::builder()
                     .uri(path)
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
                     .body(Body::empty())
                     .expect("request"),
             )
