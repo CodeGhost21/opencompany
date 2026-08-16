@@ -718,6 +718,29 @@ async fn apply_inner(
     })
 }
 
+/// Validates a submitted `bind` value the same way the boot path resolves one,
+/// before it is ever written.
+///
+/// Not a bare `SocketAddr::parse`: the boot path (`server::routes::serve_on`,
+/// via `TcpListener::bind`) resolves through `ToSocketAddrs`, which accepts a
+/// hostname like `localhost:8080` alongside a literal IP — and a stricter
+/// check here would refuse a value the host would actually have bound.
+/// `tokio::net::lookup_host` is that same resolution, run without holding a
+/// listener open. A value that resolves to zero addresses, or that fails to
+/// resolve at all (a malformed port, most commonly — `127.0.0.1:notaport`),
+/// is refused as a bad request rather than left to abort the next restart.
+async fn validate_bind(addr: &str) -> Result<(), OpenCompanyError> {
+    let mut resolved = tokio::net::lookup_host(addr).await.map_err(|e| {
+        OpenCompanyError::InvalidRequest(format!("`bind` must be a valid address:port — {e}"))
+    })?;
+    if resolved.next().is_none() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "`bind` resolved to no address at all — you sent `{addr}`."
+        )));
+    }
+    Ok(())
+}
+
 /// Converts a submitted string into the typed value its key expects.
 fn parse_value(spec: &FieldSpec, raw: Option<&str>) -> Result<ConfigValue, OpenCompanyError> {
     // `null` — and a blank string, which is what an emptied form field sends —
