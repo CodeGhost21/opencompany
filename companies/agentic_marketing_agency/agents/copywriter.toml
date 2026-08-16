@@ -22,8 +22,11 @@ not specific enough to ship.
 # fails silently and confidently.
 prompt_files = ["prompts/house-style.md"]
 
-# Live workspace documents, re-read on every roster rebuild and placed last in
-# the prompt. Unlike `prompt_files` these are operator-owned and may not exist
-# yet, so a missing one is skipped. Editing either file reaches the next turn
-# without a restart.
+# Live workspace documents, placed last in the prompt once the harness carries
+# them. Unlike `prompt_files` these are operator-owned and may not exist yet, so
+# a missing one is skipped rather than refused.
+#
+# Selection and reading are implemented; the harness wiring that spends them is
+# not yet, so this line is declarative today. See
+# docs/spec/runtime/orchestration/context-routing.md.
 context = ["Brand/Brand voice.md", "Playbooks/Campaign checklist.md"]
