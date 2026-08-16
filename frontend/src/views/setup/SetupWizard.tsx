@@ -336,7 +336,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
               Back
             </Button>
             {last ? (
-              <Button onClick={() => void submit()} disabled={saving} data-testid="setup-finish">
+              <Button
+                onClick={() => void submit()}
+                disabled={saving || noCompanyChosen}
+                data-testid="setup-finish"
+              >
                 {saving && <Loader2 className="animate-spin" />}
                 Finish setup
               </Button>
