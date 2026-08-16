@@ -163,7 +163,12 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
         overlay_policy: Some(sample_policy_override()),
-        overlay_desk_tools: Default::default(),
+        // Non-empty so a backend that drops the field is caught: an empty map
+        // survives every possible bug, including not persisting it at all.
+        overlay_desk_tools: std::collections::BTreeMap::from([(
+            "studio".to_string(),
+            vec!["docs.*".to_string(), "web".to_string()],
+        )]),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
     }
