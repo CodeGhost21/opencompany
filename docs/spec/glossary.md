@@ -67,14 +67,15 @@ How a many-agent Company converges. See
 
 > **Naming.** **Ledger** unqualified always means the money and usage journal
 > above. The orchestration files below are **derived ledgers** and MUST always
-> be named with their qualifier — *demand ledger*, *claim ledger* — in both
-> prose and code. An unqualified "the ledger" in an orchestration context is a
-> defect.
+> be named with their qualifier — *demand ledger*, *claim ledger*, *direction
+> ledger* — in both prose and code. An unqualified "the ledger" in an
+> orchestration context is a defect.
 
 | Term | Meaning |
 | --- | --- |
-| **Derived ledger** | A Markdown file written by code, never by an agent, re-rendered whole from a directory of one-file-per-item on every relevant write. It cannot drift, because it is a projection rather than a summary somebody maintains. |
-| **Claim ledger** | The derived ledger of `claim` blocks: one statement each, with its conditions, whether it holds here, and how well it is established. What closes a Demand. |
+| **Derived ledger** | A Markdown file written by code, never by an agent, re-rendered whole from a directory of one-file-per-item on every relevant write. It cannot drift, because it is a projection rather than a summary somebody maintains. There are three: the claim ledger, the direction ledger, and the demand ledger. |
+| **Claim ledger** | The derived ledger of `claim` blocks (`CLAIMS.md`): one statement each, with its conditions, whether it holds here, and how well it is established. What closes a Demand. |
+| **Direction ledger** | The derived ledger of `thread` blocks (`THREADS.md`): one open question or dead end each, with its status, what it rests on, and what blocks it. `CLAIMS.md` and `THREADS.md` are what [alignment.md](runtime/orchestration/alignment.md#what-ships) means by "two ledgers" — the two that ship under the alignment layer, distinct from the demand ledger below. |
 | **Claim** | One statement the Company holds to be true, with `status` recording how well: `verified`, `sourced`, `asserted`, `heuristic`. A claim citing a Demand id is what closes that Demand. |
 | **Demand** | A stated need: what is missing, what the asker would do with it, and what would show their current belief wrong. Stated by whoever is blocked, deduped against what the Company already knows, and closed only by a Claim that cites it. Replaces the board card as the work model. |
 | **Demand ledger** | The derived ledger of Demands. The Company's work model; the board columns are a projection of Demand state. |
