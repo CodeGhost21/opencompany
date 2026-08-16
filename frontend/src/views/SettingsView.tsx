@@ -174,7 +174,21 @@ function LifecycleControls({
   feed: CompanyFeed;
 }) {
   const [busy, setBusy] = useState(false);
-  const state = feed.status.lifecycle;
+  /**
+   * The state this control just asked for, shown until the feed confirms it.
+   *
+   * Without this the buttons lag the click by two round trips: the action
+   * itself, and then the `refresh` that re-reads the company. `busy` cleared as
+   * soon as the action returned, so in between the operator saw re-enabled
+   * buttons still offering "Pause" on a company they had just paused — which
+   * reads as a click that did not register, and invites a second one.
+   *
+   * Cleared in `finally` rather than on success, so a *failed* action reverts
+   * to whatever the feed says instead of leaving the console asserting a state
+   * the host rejected.
+   */
+  const [pending, setPending] = useState<string | null>(null);
+  const state = pending ?? feed.status.lifecycle;
   const archived = state === "archived";
   const running = state === "running";
   const paused = state === "paused";
@@ -182,14 +196,21 @@ function LifecycleControls({
   async function run(action: LifecycleAction) {
     if (busy) return;
     setBusy(true);
+    // Before the await, so the buttons move on the click rather than on the
+    // response. This is the whole point of tracking it separately.
+    setPending(resultOf(action));
     try {
       await client.lifecycle(action, company);
       toast.success(`Company ${labelFor(action)}.`);
-      void feed.refresh();
+      // Awaited, unlike before: `pending` is dropped in `finally`, and dropping
+      // it while the refresh was still in flight would flip the buttons back to
+      // the stale lifecycle for exactly as long as that request took.
+      await feed.refresh();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       toast.error(`Couldn't ${action} — ${msg}`);
     } finally {
+      setPending(null);
       setBusy(false);
     }
   }
