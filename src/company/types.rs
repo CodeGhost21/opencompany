@@ -445,6 +445,60 @@ pub struct Agent {
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,
+    /// A custom system-prompt body for this role, appended to the generated
+    /// persona sentence rather than replacing it.
+    ///
+    /// Appended, not substituted, because the generated line is what binds the
+    /// agent to *this* company and *this* role — an agent that replaced it would
+    /// lose the identity framing that makes it answer as the Copywriter at Acme
+    /// instead of falling back to the runtime's own assistant persona. What an
+    /// operator wants here is the working instruction ("write in the brand's
+    /// voice, never the agency's"), which is additive to that framing.
+    ///
+    /// Available on a `[[agent]]` entry as well as an `agents/<id>.toml` file:
+    /// one field, one consumer, so adopting a prompt does not require adopting
+    /// the bundle layout first.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Checked-in documents folded into this agent's system prompt, as paths
+    /// relative to the company bundle's `agents/` directory.
+    ///
+    /// The **static** half of the prompt-context pair. These are version
+    /// controlled beside the agent definition and never change between two
+    /// turns of a run, which is why they are read once at manifest load and
+    /// placed early in the prompt where the cache prefix stays stable. The
+    /// dynamic half is [`context`](Self::context): live workspace documents,
+    /// re-read per roster rebuild and placed last.
+    ///
+    /// A path that escapes `agents/`, or names a file that does not exist, is a
+    /// **validation error** rather than a skipped entry. This is deliberately
+    /// stricter than `context`'s missing-document rule, and for a reason the two
+    /// do not share: a workspace document is operator-owned live state that may
+    /// legitimately not exist yet, while a `prompt_files` entry names a file in
+    /// the same commit as the agent that references it. A typo there yields a
+    /// role whose prompt was written around a briefing it silently never
+    /// received.
+    #[serde(default)]
+    pub prompt_files: Vec<String>,
+    /// The `(path, body)` pairs [`prompt_files`](Self::prompt_files) resolved
+    /// to, filled by the bundle loader at manifest-load time.
+    ///
+    /// Carried on the manifest rather than read at prompt-assembly time because
+    /// `harness::build::build_agent` is synchronous and runs on every roster
+    /// rebuild; doing the file I/O there would put a disk read behind a lock on
+    /// a hot path, to load bytes that cannot have changed since the manifest was
+    /// parsed. `#[serde(skip)]` keeps it out of the on-disk record — it is
+    /// derived state, and a persisted copy would go stale against the bundle.
+    #[serde(skip)]
+    pub prompt_files_resolved: Vec<(String, String)>,
+    /// This role's epistemic classes, gating which routed documents it may be
+    /// told. See [`PROMPT_CLASSES`] for the closed set and what each excludes.
+    ///
+    /// Empty (the default) is *unclassified*: no exclusion, the correct default
+    /// for an ordinary teammate. A company that wants an exclusion states it
+    /// here rather than having it guessed from the free-text `role`.
+    #[serde(default)]
+    pub classes: Vec<String>,
 }
 
 /// The `[[agent]].tier` value that marks a roster's orchestrator.
