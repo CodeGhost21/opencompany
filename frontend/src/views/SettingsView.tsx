@@ -313,6 +313,28 @@ function InfoRow({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
+/**
+ * The lifecycle an action lands the company in.
+ *
+ * Separate from {@link labelFor} even though three of the four strings match:
+ * that one writes a sentence to a person ("Company resumed.") and this one has
+ * to equal what the host reports in `status.lifecycle`, which is why `resume`
+ * differs. Sharing one function would make the two meanings drift into each
+ * other the first time either wording changed.
+ */
+function resultOf(action: LifecycleAction): string {
+  switch (action) {
+    case "pause":
+      return "paused";
+    case "resume":
+      return "running";
+    case "suspend":
+      return "suspended";
+    case "archive":
+      return "archived";
+  }
+}
+
 function labelFor(action: LifecycleAction): string {
   switch (action) {
     case "pause":
