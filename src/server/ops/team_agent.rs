@@ -1074,7 +1074,10 @@ members = ["writer", "ceo"]
         // company grant. A ceiling that leaked to non-members would be a scoping
         // bug invisible from the desk's own screen.
         let (_, hermit) = get_agent(&state, "hermit").await;
-        assert!(strings(&hermit["tools"]["deskAllow"]).is_empty(), "{hermit}");
+        assert!(
+            strings(&hermit["tools"]["deskAllow"]).is_empty(),
+            "{hermit}"
+        );
         assert_eq!(
             strings(&hermit["tools"]["effective"]),
             vec!["workspace", "workspace.*", "composio"],

@@ -59,8 +59,8 @@ pub mod task_intent;
 // Composio toolkits in a single vocabulary. Always compiled: it is a projection
 // over the manifest, and both the console route that renders it and the
 // validation that checks a grant names something real are in the default build.
-pub mod tool_catalog;
 pub mod telegram;
+pub mod tool_catalog;
 mod types;
 mod workflow_create;
 mod workflow_file;
