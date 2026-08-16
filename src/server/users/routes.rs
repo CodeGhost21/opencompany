@@ -534,6 +534,25 @@ async fn mint_session(
     .await
     .map_err(|e| ApiError(e).into_response())?;
 
+    // The header carrier hands the token to the client and sets **no** cookie.
+    // Setting both would leave one session reachable two ways, and the cookie
+    // half would be a third-party cookie that some browsers keep and others
+    // drop — so whether logging out cleared the session would depend on the
+    // browser. One session, one carrier.
+    if cookie::wants_header_carrier(headers) {
+        let Some(session) = cookie::session_header_value(company, &plaintext) else {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "this company's id cannot carry a session header".to_string(),
+            ))
+            .into_response());
+        };
+        return Ok(Json(SignInResult {
+            user: me_result(company, user),
+            session: Some(session),
+        })
+        .into_response());
+    }
+
     let insecure = !state.config().host_base_url().starts_with("https://");
     let set = cookie::set_cookie(
         &name,
@@ -541,7 +560,10 @@ async fn mint_session(
         token::SESSION_TTL_MILLIS / 1000,
         insecure,
     );
-    let body = Json(me_result(runtime.id(), user));
+    let body = Json(SignInResult {
+        user: me_result(company, user),
+        session: None,
+    });
     Ok(([(header::SET_COOKIE, set)], body).into_response())
 }
 
