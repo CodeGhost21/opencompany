@@ -8,7 +8,7 @@
 
 import type { ConsoleConfig } from "../config";
 import type { TaskDeliverable } from "./tasks";
-import { defaultTransport } from "./transport";
+import { defaultTransport, needsCarriedSession } from "./transport";
 import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
@@ -48,10 +48,11 @@ export class OpenCompanyClient {
   readonly baseUrl: string;
   readonly defaultCompany: string | null;
   private readonly token: string | null;
+  private readonly session: string | null;
   private readonly transport: Transport;
 
   constructor(
-    config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken">,
+    config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken" | "sessionHeader">,
     // Injected so a desktop shell can route the same client through its own
     // core, and so tests can drive one without a network. Defaults to the
     // browser's `fetch`/`EventSource`, which is what every web build uses.
@@ -60,7 +61,34 @@ export class OpenCompanyClient {
     this.baseUrl = config.baseUrl;
     this.defaultCompany = config.company;
     this.token = config.operatorToken;
+    this.session = config.sessionHeader ?? null;
     this.transport = transport;
+  }
+
+  /**
+   * The credential headers every request carries, whichever kind this client
+   * holds.
+   *
+   * One method rather than the line repeated at each call site, because a
+   * request path that forgot one would not fail loudly — it would silently
+   * make an *anonymous* request, and the surfaces that read fine anonymously
+   * would look like they worked.
+   *
+   * Both may be present: a platform bearer authenticates the *hosting layer*
+   * and a session authenticates a *person*, and a hub console holding a
+   * platform token still signs its operator in per tenant.
+   */
+  private authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers["authorization"] = `Bearer ${this.token}`;
+    }
+    // Only ever set for a connection that cannot use a cookie — a console on a
+    // different origin from its host. Same-origin consoles leave this null and
+    // keep the HttpOnly cookie, which nothing here can read. See
+    // `SESSION_CARRIER_HEADER` in the host's `users/cookie.rs`.
+    if (this.session) headers["x-opencompany-session"] = this.session;
+    return headers;
   }
 
   /** Resolves the `/companies/{id}` vs single-company `/company` route prefix. */
@@ -72,10 +100,15 @@ export class OpenCompanyClient {
   /** Called on any 401, so the app can drop to the login view. */
   onUnauthorized: (() => void) | null = null;
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders(), extraHeaders);
 
     let res: TransportResponse;
     try {
@@ -128,7 +161,7 @@ export class OpenCompanyClient {
    */
   async postForm<T>(path: string, form: FormData): Promise<T> {
     const headers: Record<string, string> = {};
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders());
 
     let res: Response;
     try {
@@ -180,7 +213,7 @@ export class OpenCompanyClient {
    */
   async getDocument(path: string): Promise<{ text: string; filename?: string }> {
     const headers: Record<string, string> = {};
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders());
 
     let res: TransportResponse;
     try {
@@ -216,7 +249,7 @@ export class OpenCompanyClient {
    */
   async getBlob(path: string): Promise<Blob> {
     const headers: Record<string, string> = {};
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders());
 
     let res: Response;
     try {
@@ -261,12 +294,50 @@ export class OpenCompanyClient {
    * know which transport it is on, and every future caller would too.
    */
   subscribeToEvents(company: string | null | undefined, handlers: StreamHandlers): () => void {
-    return this.transport.subscribe(`${this.baseUrl}${this.scope(company)}/events`, handlers);
+    return this.transport.subscribe(
+      `${this.baseUrl}${this.scope(company)}/events`,
+      handlers,
+      // The same credential the request path carries. A stream authenticated
+      // differently from the requests beside it would load every view and then
+      // never update one.
+      this.authHeaders(),
+    );
   }
 
   /** A typed POST, for surfaces that live outside this class (e.g. auth). */
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>("POST", path, body);
+  }
+
+  /**
+   * Whether a sign-in through this client yields a session it must hold itself.
+   *
+   * Exposed so a caller knows to *store* what {@link postSignIn} returns. It is
+   * the same question `needsCarriedSession` answers, kept on the client so no
+   * view has to re-derive it from a base url.
+   */
+  get carriesOwnSession(): boolean {
+    return needsCarriedSession(this.baseUrl);
+  }
+
+  /**
+   * A POST to a sign-in route, asking for a carrier this client can use.
+   *
+   * Separate from {@link post} so the carrier request cannot leak onto an
+   * ordinary call: the header is meaningless everywhere but a route that mints
+   * a session, and a client sending it indiscriminately would be asserting
+   * something about itself on every request it makes.
+   *
+   * On a same-origin console this is exactly `post` — no header, and the host
+   * replies with the `HttpOnly` cookie it always did.
+   */
+  postSignIn<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(
+      "POST",
+      path,
+      body,
+      this.carriesOwnSession ? { "x-opencompany-session-carrier": "header" } : undefined,
+    );
   }
 
   /** A typed PATCH, for surfaces that live outside this class (e.g. auth). */

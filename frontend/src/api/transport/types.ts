@@ -75,6 +75,17 @@ export interface Transport {
    *
    * Throws when streaming is unavailable in this environment, which the caller
    * treats as "poll instead" rather than as an error worth surfacing.
+   *
+   * `headers` carries the same credential the request path uses. It is passed
+   * rather than left implicit because a stream that authenticated differently
+   * from the requests beside it is the subtlest possible bug: the views would
+   * load fine and simply never update, which reads as "quiet company" rather
+   * than as "unauthorized". A transport that cannot set headers must degrade
+   * loudly instead — see `BrowserTransport.subscribe`.
    */
-  subscribe(url: string, handlers: StreamHandlers): () => void;
+  subscribe(
+    url: string,
+    handlers: StreamHandlers,
+    headers?: Record<string, string>,
+  ): () => void;
 }

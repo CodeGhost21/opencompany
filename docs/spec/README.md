@@ -105,6 +105,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/repos.md](runtime/repos.md) | Bound repositories: mirror cache, credential handling, quota |
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
+| [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |
 | [security/agent-isolation.md](security/agent-isolation.md) | What confines an agent and what does not — enforced controls, the gaps, and the capability that survives every planned control |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |
 | [company-as-agent/identity.md](company-as-agent/identity.md) | Wallet, handle, Agent Card |

@@ -114,6 +114,8 @@ Supporting docs:
   sessions, invites, and chat attribution
 - [auth-modes.md](auth-modes.md) — the configured sign-in mode: `email`,
   `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
+- [hub-console.md](hub-console.md) — one console deployment operating many hosts
+  on other origins: the carried session, CORS, and what it costs
 
 ## Responsibilities
 
