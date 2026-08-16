@@ -264,6 +264,8 @@ meter and caps a dispatched card does.
   the claims.
 - A demand with an empty `falsifies` is refused with the reason.
 - A demand cannot reach `answered` except by a claim citing its id.
+- A `blocked_by` self-reference, and a `blocked_by` cycle of any length, are
+  both rejected on write.
 - No agent-reachable path moves a demand to `accepted`.
 - An agent cannot accept its own demand.
 - The column projection round-trips every on-board demand state (every state
