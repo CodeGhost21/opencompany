@@ -498,6 +498,7 @@ impl AppState {
             auth_mode_override,
             registry: CompanyRegistry::new(),
             home: std::path::PathBuf::from("."),
+            config_root: None,
             ownership: Arc::new(RwLock::new(HashMap::new())),
             stores: None,
             memory_overlay: None,
