@@ -129,10 +129,22 @@ prompt = "Weekly review and operator digest"
 
 - **`[company]`** becomes the seed of the [Charter](../company-brain/charter.md).
   `handle` is only used when `[place].discoverable = true`.
-- **`[[agent]]`** entries define the Roster. `tier` is a hint the brain may
-  use when delegating; it never selects a model (the backend maps tiers to
-  SKUs). `tools` and `budget_usd_daily` intersect with the company-wide
-  `[tools].allow` and `[budget]` — the most restrictive wins.
+- **`[[agent]]`** entries define the Roster — or, equivalently, one
+  `agents/<id>.toml` file per teammate under the company bundle, carrying the
+  same keys with the filename as the id. The two forms are **exclusive**:
+  declaring both is a validation error rather than a precedence rule, because
+  either precedence would silently discard teammates somebody wrote down. Full
+  schema, including `prompt` / `prompt_files` / `context` / `classes`, in
+  [runtime/agents.md](agents.md).
+
+  `tier` is a hint the brain may use when delegating; it never selects a model
+  (the backend maps tiers to SKUs). `tools` and `budget_usd_daily` intersect
+  with the company-wide `[tools].allow` and `[budget]` — the most restrictive
+  wins. Tool grants resolve through **three** levels,
+  `[tools].allow ∩ [[group_chat]].tools ∩ [[agent]].tools`, every one of them
+  narrow-only and an empty one a pass-through; see
+  [runtime/tools.md](tools.md), which also covers why an empty grant list means
+  "inherit" rather than "nothing".
 
   **`delegates_to`** (issue #176) is the one per-agent key that is *not* a
   narrowing of a company-wide list: it is an **opt-in**. Empty — the default,
