@@ -2215,7 +2215,15 @@ mod tests {
     /// the belt above is unchanged for every agent that does not opt in.
     #[test]
     fn dispatched_agent_has_no_delegation_tools_but_orchestrator_does() {
-        let delegation = ["query_company", "spawn_task", "delegate_to_desk"];
+        let delegation = [
+            "query_company",
+            "spawn_task",
+            "delegate_to_desk",
+            // Issue #884: the new hand-off is opt-in on exactly the same terms —
+            // an ordinary dispatched agent must not silently gain the ability to
+            // run somebody else's turn.
+            "delegate_to_teammate",
+        ];
 
         let dispatched = built_tool_names(&["*"], false);
         for tool in delegation {
@@ -2235,8 +2243,9 @@ mod tests {
     }
 
     /// (b2) Issue #176: a member the manifest opted in with `delegates_to` gets
-    /// **exactly two** tools more than it had — `spawn_task` and
-    /// `delegate_to_desk` — and not one tool of the orchestrator's authority.
+    /// **exactly the hand-off tools** more than it had — `spawn_task`,
+    /// `delegate_to_desk`, and (issue #884) `delegate_to_teammate` — and not one
+    /// tool of the orchestrator's authority.
     ///
     /// Expressed as a delta against the un-opted-in belt rather than as a second
     /// flat literal, so the feature-aware snapshot above stays the single place
@@ -2252,8 +2261,8 @@ mod tests {
         let added: Vec<&String> = delegating.iter().filter(|t| !plain.contains(t)).collect();
         assert_eq!(
             added,
-            vec!["delegate_to_desk", "spawn_task"],
-            "a delegating member's belt must differ from the plain one by exactly the two \
+            vec!["delegate_to_desk", "delegate_to_teammate", "spawn_task"],
+            "a delegating member's belt must differ from the plain one by exactly the \
              hand-off tools: {delegating:?}"
         );
         assert!(

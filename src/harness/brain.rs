@@ -8302,7 +8302,7 @@ members = ["eng1", "eng2"]
 
         let note = only_card(&provider.tasks).await.note.expect("note");
         assert!(
-            note.contains("hand-off to the \"ghost\" desk was not delivered"),
+            note.contains("hand-off to \"ghost\" was not delivered"),
             "the card must name the hand-off that did not happen: {note}"
         );
         assert!(
@@ -8342,11 +8342,11 @@ members = ["eng1", "eng2"]
         );
         let note = after.note.expect("note");
         assert!(
-            note.contains("hand-off to the \"writer\" desk was not delivered"),
+            note.contains("hand-off to \"writer\" was not delivered"),
             "the refused target must be named on the card: {note}"
         );
         assert!(
-            note.contains("not a desk this company can hand work to"),
+            note.contains("not somewhere this company can hand work to"),
             "the cause must be on the card: {note}"
         );
     }
