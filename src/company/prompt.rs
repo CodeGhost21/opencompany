@@ -264,9 +264,11 @@ mod tests {
     #[test]
     fn an_over_budget_clamp_keeps_the_leading_portion_and_marks_the_cut() {
         let clamped = clamp("abcdefghij", 4);
-        assert!(clamped.starts_with("abcd"), "{clamped}");
-        assert!(clamped.contains("truncated"), "{clamped}");
-        assert!(!clamped.contains('e'), "the tail is gone: {clamped}");
+        assert_eq!(
+            clamped,
+            format!("abcd{TRUNCATION_MARKER}"),
+            "the leading portion is kept, the tail dropped, and the cut marked"
+        );
     }
 
     /// The property a byte-based clamp gets wrong: cutting mid-codepoint would
