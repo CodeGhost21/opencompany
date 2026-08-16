@@ -173,6 +173,25 @@ pub struct MeResult {
     must_change_password: bool,
 }
 
+/// What a successful sign-in returns.
+///
+/// [`MeResult`] is flattened rather than nested so this stays byte-identical to
+/// what every login route returned before the header carrier existed — a client
+/// that never asks for one sees no `session` field and needs no change.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignInResult {
+    #[serde(flatten)]
+    user: MeResult,
+    /// The ready-made [`SESSION_HEADER`](cookie::SESSION_HEADER) value, present
+    /// **only** when the client asked for the header carrier.
+    ///
+    /// Returned exactly once, like a device pairing's token: only its hash is
+    /// stored, so a client that drops it has to sign in again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Shared failures
 // ---------------------------------------------------------------------------
