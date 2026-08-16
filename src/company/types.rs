@@ -388,9 +388,15 @@ pub struct Agent {
     /// error, because silently dropping it yields a role whose prompt was
     /// written around a document it never received.
     ///
-    /// Empty (the default) is *not* the same as "route nothing": it means this
-    /// agent takes the per-tier default. A company that wants a role to receive
-    /// no working documents at all says so by listing only what it does want.
+    /// Empty means this agent takes the per-tier default when the routing
+    /// layer lands. `Vec<String>` with `#[serde(default)]` cannot yet
+    /// distinguish an omitted `context` key from an explicit `context = []`
+    /// in TOML — both deserialize to an empty vec — so today there is no way
+    /// to say "route nothing" instead of "use the default"; both spellings
+    /// mean the same thing. `docs/spec/runtime/orchestration/alignment.md`
+    /// specifies that the two MUST be distinguished (for example by moving to
+    /// `Option<Vec<String>>`) before the routing layer starts consuming this
+    /// field, since only then does the distinction have an observable effect.
     ///
     /// **Inert until the routing layer lands.** The field is parsed and carried
     /// so a manifest can declare its routing as data today; nothing consumes it
