@@ -181,8 +181,13 @@ cadence, which is documentation about code that no longer exists.
 ### The pattern
 
 A derived ledger is a Markdown file **written by code, never by an agent**,
-re-derived whole from a directory of one-file-per-item on every relevant
-write.
+re-derived whole from a directory of source items on every relevant write. An
+item's *source* is either a dedicated file (one file per item — this is how
+`THREADS.md` is sourced) or a fenced block embedded in a workspace note that
+may hold several items (this is how `CLAIMS.md` is sourced, from ` ```claim `
+blocks in any note). Either way, the ledger addresses one item at a time by
+scanning its sources for the fenced-block or whole-file unit, never by
+treating a source file itself as the unit of retrieval.
 
 Four properties follow, and all four are the point:
 
