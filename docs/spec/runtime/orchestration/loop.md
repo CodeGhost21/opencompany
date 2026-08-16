@@ -260,7 +260,13 @@ the directive queue, specified in
 - Every school of threshold values — including any non-default `[policy].mode` —
   is covered, and a new one is covered automatically rather than by being
   remembered.
-- Only the verification arm can move a demand to `answered`.
+- Only a passing `verify` result can unlock the route to `Answered` — no
+  other arm's output can. This is not the same claim as "verification moves
+  the demand to `answered`": per the [demand ledger](demand-ledger.md#answered-is-not-accepted),
+  the `answered` *demand state* is moved only by **code**, on ledger
+  re-derivation, when a claim on disk cites the demand's id. `verify` gates
+  whether the loop is permitted to route toward producing that claim; it does
+  not itself write the ledger.
 - An attempt that times out with no report still produces a judge verdict
   informed by what is on disk.
 - Diversification triggers on consecutive unproductive attempts, not cumulative.
