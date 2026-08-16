@@ -759,7 +759,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
             overlay_policy: meta.overlay_policy,
-            overlay_desk_tools: Default::default(),
+            overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
             template_provenance: meta.template_provenance,
         }))
@@ -782,7 +782,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_workflows: record.overlay_workflows.clone(),
             overlay_budgets: record.overlay_budgets.clone(),
             overlay_policy: record.overlay_policy.clone(),
-            overlay_desk_tools: Default::default(),
+            overlay_desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             template_provenance: record.template_provenance.clone(),
         };
