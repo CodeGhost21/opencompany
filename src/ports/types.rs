@@ -2644,6 +2644,7 @@ impl OverlayBlob {
                     workflows: Vec::new(),
                     budgets: Vec::new(),
                     policy: None,
+                    desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     provenance: None,
                 })
