@@ -94,11 +94,11 @@ export function connectionRailVisible(count: number, hub = false): boolean {
   return count >= 2 || hub || isDesktopRuntime();
 }
 
-export function ConnectionRail({ connections, selected, onSelect, onAdd }: Props) {
+export function ConnectionRail({ connections, selected, onSelect, onAdd, hub }: Props) {
   const [adding, setAdding] = useState(false);
   const [url, setUrl] = useState("");
 
-  if (!connectionRailVisible(connections.length)) return null;
+  if (!connectionRailVisible(connections.length, hub)) return null;
 
   return (
     <nav
