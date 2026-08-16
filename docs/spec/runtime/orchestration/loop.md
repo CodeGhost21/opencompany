@@ -39,7 +39,8 @@ attempt ──┬──> judge ──────────┐                
                                                 ├─ retry ──┘
                                                 ├─ diversify
                                                 ├─ blocked
-                                                └─ answered
+                                                ├─ answered
+                                                └─ reported
 ```
 
 Everything after an attempt is a **fan-out, not a chain**. The arms read the
