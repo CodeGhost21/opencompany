@@ -148,11 +148,7 @@ export function ConnectionConsole({
         } else if (companies.length > 1) {
           set({ kind: "picker", companies });
         } else {
-          set({
-            kind: "error",
-            message: "No companies are running on this host.",
-            hint: "Start one with `opencompany serve --company <dir>`.",
-          });
+          set({ kind: "no-company" });
         }
       } catch (listErr) {
         // Fall back to the single-company alias (prosumer serve).
