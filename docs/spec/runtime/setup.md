@@ -111,12 +111,19 @@ shadows it.
 
 ## Who may call it
 
-Loopback-only throughout: nothing here is ever open to a routable host. On top of
-that, the call is open without a session in exactly two situations, both meaning
-"there is nobody who could authorize it":
+Unauthenticated access is loopback-only, and only in exactly two situations, both
+meaning "there is nobody who could authorize it":
 
 1. setup has never completed, **or**
 2. the host has no companies, so there is no roster to hold an admin.
+
+"Loopback-only" here means the configured bind and `public_url` say this host is
+unreachable from outside *and* the request itself backs that up: its actual TCP
+peer is loopback and it carries none of the proxy-forwarding headers
+(`X-Forwarded-For`, `X-Forwarded-Host`, `Forwarded`, `X-Real-IP`) that would mean
+something in front of this process terminated a connection it did not. Both
+checks matter — a loopback-bound listener sitting behind an undeclared reverse
+proxy would otherwise pass the first and fail only the second.
 
 Openness on a routable host would let whoever reached a fresh deployment first
 configure it; openness on a *configured* laptop would let any page in the browser
@@ -126,8 +133,13 @@ and gating that host behind an admin check would leave it with no company to sig
 in to and no way back into setup to create one, which is this flow's own dead end
 reintroduced one step later.
 
-Otherwise the ordinary admin check applies, resolved through the sole company: a
-host serving several has no single roster that could speak for the instance.
+Outside those two unauthenticated cases — a configured host with at least one
+company — the ordinary admin check applies instead: a live session belonging to
+an admin of the sole company, resolved the same way `server/users/admin.rs`
+resolves it. This path accepts an authenticated human session from anywhere, not
+just loopback; it is `require_admin`, not the loopback gate, that authorizes it.
+A host serving several companies has no single roster that could speak for the
+instance, and setup refuses outright rather than guessing which one.
 
 The console's 401 handling is excluded while the wizard is showing: on an
 unconfigured host every authenticated route answers 401, and letting that swap
