@@ -58,15 +58,45 @@ console's workflow visualisation, cancellation, and per-node retry for free.
 
 ---
 
-## Judge and verify are different questions
+## Four questions, one merge
 
-This is the split that makes the loop terminate correctly, and it is the one
-most easily collapsed into a single "did it work" call.
+This is the split that makes the loop terminate correctly, and the pair most
+easily collapsed into a single "did it work" call is judge and verify.
 
 | Arm | Asks | Can end the loop |
 | --- | --- | --- |
 | **verify** | Is the result *right*? | **yes — only this arm** |
 | **judge** | Was the attempt *conducted* in a way the next one should inherit? | no |
+| **critique** | What is wrong with, or missing from, the result as reasoning — independent of whether it is *right*? | no |
+| **completeness** | Does the result actually answer the demand's `falsifies`, or only its topic? | no |
+
+`critique` and `completeness` feed the same merge step as `judge` and
+`verify`, and share their constraint: neither can itself route the loop to
+`Answered`. They exist because "right" and "well-conducted" do not cover
+every way an attempt can fail.
+
+- **critique** asks a [critic-shaped](alignment.md#context-routing) question of
+  the result itself: does it contradict a claim already on the [claim
+  ledger](alignment.md#claimsmd--the-evidence-ledger), does it assert
+  something as established that the workspace does not support, is the
+  reasoning it gives sufficient for the conclusion it draws. Its output is a
+  list of specific objections (possibly empty), each citable, that merge folds
+  into the judge's `Steer` guidance for the next attempt — critique never
+  produces its own `Verdict`; it feeds the one `judge` produces.
+- **completeness** asks whether the attempt answers the [demand](demand-ledger.md)
+  it was dispatched against, not merely its subject: it checks the result
+  against the demand's `falsifies` field specifically, because a topically
+  relevant result that does not touch what would show the current belief
+  wrong is the "search, not a question" failure the demand ledger's shape
+  exists to rule out. Its output folds into `Route`: a `verify`-passed result
+  that `completeness` judges partial routes to `Diversify` rather than
+  `Answered`, on the reasoning that a result cannot answer a demand it does
+  not address, however verifiably true it is.
+
+`verify` and `judge` remain the only arms whose output is itself a routable
+value (`Verdict` for judge; verification's pass/fail is what unlocks `Answered`
+in the [routing ladder](#routing)); `critique` and `completeness` are inputs
+the merge step folds into those two before routing runs.
 
 The judge returns `Proceed`, `Steer`, or `Restart`, and its one-sentence
 guidance is carried into the next attempt's prompt. It scores conduct — did the
