@@ -466,16 +466,33 @@ pub enum ConfigValue {
 /// meant to read and uncomment (`docs/spec/runtime/config.md`), and a
 /// round-trip through the struct would silently delete it.
 ///
-/// The write is atomic: the document is rendered to `config.toml.tmp` in the
-/// same directory and then `rename`d over the target, so a crash mid-write
-/// cannot leave a half-written config that the next boot refuses to parse.
-/// Same-directory because `rename` is only atomic within one filesystem.
+/// The write is atomic: the document is rendered to a uniquely-named temporary
+/// file in the same directory and then `rename`d over the target, so a crash
+/// mid-write cannot leave a half-written config that the next boot refuses to
+/// parse. Same-directory because `rename` is only atomic within one
+/// filesystem.
 ///
 /// A malformed existing file is a hard error, matching [`ConfigFile::load`]:
 /// merging into a document that could not be parsed would mean overwriting
 /// whatever the operator actually had there.
+///
+/// The whole read-edit-write-rename sequence runs under [`CONFIG_WRITE_LOCK`],
+/// so two concurrent setup requests cannot each parse the same on-disk
+/// snapshot and then race to replace it — the second call's edits would
+/// otherwise silently overwrite the first's rather than merging with them.
+/// The lock is process-wide rather than per-directory: this process serves at
+/// most a handful of config roots, and a coarser lock that is trivially
+/// correct beats a per-path one that has to get eviction right. The temporary
+/// file's name is still made unique per call (process id, a monotonic call
+/// counter, and the current time), independent of the lock: it is what keeps
+/// two *processes* pointed at the same directory (a misconfiguration, but one
+/// this should not corrupt) from ever writing through the same temp path.
 pub fn write_config_toml(dir: &Path, edits: &[(&str, ConfigValue)]) -> Result<PathBuf> {
     use toml_edit::{DocumentMut, Item, Table, value};
+
+    let _guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let path = dir.join(CONFIG_FILE);
     let existing = match std::fs::read_to_string(&path) {
