@@ -114,7 +114,29 @@ pub async fn resolve_credential(
     })
 }
 
-/// Whether a non-empty per-tenant token is stored — never the token itself.
+/// Whether a non-empty **BYO override** token is stored under [`TOKEN_KEY`] —
+/// never the token itself.
+///
+/// ## This is not "can this company reach Composio" (issue #886)
+///
+/// It answers exactly one question about exactly one secret slot: did somebody
+/// paste a token into the company's own [`TOKEN_KEY`]. That is the *first* tier
+/// of three. [`resolve_credential`] falls through it to the company's own
+/// TinyHumans key and then to this instance's platform identity, and on a hosted
+/// tenant it is the third tier that answers — nobody pastes a BYO token there.
+/// So `false` from here is routinely true of a company whose Composio tools are
+/// wired and working, which is precisely what #886 was filed about: the
+/// capabilities panel reported `composioTokenConfigured: false` while agents
+/// were calling `GITHUB_*` tools successfully in the same session.
+///
+/// **If you want to know whether Composio will work, call
+/// [`resolve_credential`] and ask the returned [`Credential`] — `configured()`
+/// for the boolean, [`source`](Credential::source) for the tier.** That is the
+/// same derivation the toolbelt gates on
+/// ([`TenantComposio::resolve`](crate::harness::composio::TenantComposio::resolve)),
+/// so it cannot disagree with what the agents actually hold. Use this function
+/// only where the BYO slot itself is the subject — a console field that says
+/// whether *this company pasted a token*, not whether it has one.
 pub async fn token_configured(company: &CompanyId, secrets: &dyn SecretStore) -> Result<bool> {
     Ok(secrets
         .get(company, TOKEN_KEY)
