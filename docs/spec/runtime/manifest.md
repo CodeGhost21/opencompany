@@ -79,9 +79,17 @@ enabled = true                     # built-in chat; default true
 [channels.email]
 provider = "openhuman"             # delegate to an OpenHuman channel
 
+[[group_chat]]
+id = "creative"                    # a desk: who the human talks to
+name = "Creative studio"
+members = ["copywriter"]           # ids from the roster
+tools = ["docs.*"]                 # NEW: this desk's tool ceiling. Optional;
+                                   # empty narrows nothing. See runtime/tools.md
+
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
-allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
+allow = ["web.*", "docs.*", "search"]  # company-wide ceiling. Desks and agents
+                                   # narrow it: allow ∩ desk.tools ∩ agent.tools
                                    # `search` must be named — `*` never grants it
 search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 max_delegation_depth = 2           # how deep one message's hand-off chain may run
