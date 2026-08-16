@@ -549,8 +549,16 @@ pub fn teammate_targets(record: &CompanyRecord, caller: &str, allowed: &[String]
         .iter()
         .any(|entry| entry.trim() == crate::company::DELEGATES_TO_WILDCARD)
     {
-        for id in roster_agent_ids(record) {
-            push(&mut ids, &id);
+        // `"*"` is documented as "every desk the company has"
+        // ([`DELEGATES_TO_WILDCARD`](crate::company::DELEGATES_TO_WILDCARD)),
+        // not "every roster agent" — the orchestrator and any agent sitting on
+        // no desk are outside a desk-based grant even when it is the widest
+        // one, so this must walk `desk_ids` + `effective_desk_members` exactly
+        // as the allowlisted-desk loop below does, not `roster_agent_ids`.
+        for desk in desk_ids(record) {
+            for member in record.effective_desk_members(&desk) {
+                push(&mut ids, &member);
+            }
         }
         return ids;
     }
@@ -984,10 +992,40 @@ members = ["analyst"]
             reject_teammate_target(&record, Some("brand_strategist"), &allowed, "analyst"),
             None
         );
-        // `"*"` admits the whole roster, exactly as it does for desks.
+        // `"*"` admits every desk's members — `analyst` is on `data` — exactly
+        // as it does for desks. It does NOT admit the whole roster; see
+        // `the_wildcard_teammate_reach_is_desk_members_not_the_whole_roster`
+        // for the orchestrator/no-desk case that distinguishes the two.
         assert_eq!(
             reject_teammate_target(&record, Some("brand_strategist"), &["*".into()], "analyst"),
             None
+        );
+    }
+
+    /// `"*"` is documented as "every desk the company has"
+    /// ([`DELEGATES_TO_WILDCARD`]), not "every roster agent" — the orchestrator
+    /// (`chief`, on no desk) must stay unreachable through even the widest
+    /// grant, exactly as a wildcard `delegate_to_desk` allowlist cannot reach a
+    /// non-desk id.
+    #[test]
+    fn the_wildcard_teammate_reach_is_desk_members_not_the_whole_roster() {
+        let record = desk_record();
+        let targets = teammate_targets(&record, "brand_strategist", &["*".to_string()]);
+        assert!(
+            !targets.contains(&"chief".to_string()),
+            "the orchestrator sits on no desk and must not be reachable through a wildcard \
+             desk-based grant: {targets:?}"
+        );
+        assert_eq!(
+            targets,
+            ["seo_specialist", "copywriter", "analyst"],
+            "wildcard must resolve to every desk's members, not the raw roster: {targets:?}"
+        );
+        // The refusal path agrees: the orchestrator is not a valid target even
+        // though the caller holds the widest possible grant.
+        assert!(
+            reject_teammate_target(&record, Some("brand_strategist"), &["*".into()], "chief")
+                .is_some()
         );
     }
 
