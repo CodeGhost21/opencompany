@@ -831,3 +831,38 @@ async fn a_member_may_not_re_run_setup() {
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
+
+/// Regression: `serve --company <dir>` predates this flow entirely, so every
+/// existing deployment has companies and no `setup_completed_at`. `/spec`
+/// reporting the raw stamp sent all of them into the wizard on their next
+/// console load — and because the wizard replaces the console outright, the
+/// end-to-end suite sat waiting on selectors that would never appear, until the
+/// 30-minute job timeout killed it.
+///
+/// The two questions come apart deliberately: `/spec` answers "must the console
+/// offer setup", while `AppState::setup_complete` stays the literal stamp,
+/// because `authorize` needs "has an admin to check against", not "has been
+/// configured".
+#[tokio::test]
+async fn spec_reports_setup_complete_once_a_company_is_registered() {
+    let home_dir = home();
+    let state = fresh_state(home_dir.path());
+
+    assert!(
+        !state.spec().setup_complete,
+        "precondition: no stamp and no companies is the genuine first run"
+    );
+
+    with_company(&state, home_dir.path()).await;
+
+    assert!(
+        state.spec().setup_complete,
+        "a host already serving a company has something to open, so the \
+         console must not replace it with the first-run wizard"
+    );
+    assert!(
+        !state.setup_complete(),
+        "the raw stamp stays false — `authorize` reads it, and a host with \
+         companies authorizes through its admin rather than anonymously"
+    );
+}
