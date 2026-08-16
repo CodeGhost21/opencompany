@@ -122,9 +122,17 @@ into, not of the manifest text**:
 - Roster teammates default to **unclassified**, which imposes no exclusion and
   is the correct default: an ordinary teammate is not judging anything.
 - A company that wants an exclusion on a roster teammate states it, rather than
-  having it guessed. The manifest key for this is deliberately left to the
-  implementing change, but it MUST be an explicit declaration — a `classes`
-  list or equivalent — and never a match on `role`.
+  having it guessed. **The manifest key is `classes`**, a list taking any of
+  `evidence`, `judge` and `directive` — one per rule above, in that order. An
+  unrecognized entry is a validation error rather than an ignored string: a
+  typo'd exclusion is an exclusion that is not applied, and the whole point of
+  declaring the class is that it cannot be lost silently.
+
+An exclusion **outranks** both the tier default and an explicit `context` list.
+That is what makes a declared class a control rather than a routing line
+somebody can edit away. The universal method document is the one exemption — it
+is method, not assertion, so no class has cause to withhold it, and a role
+excluded from the method could not follow it.
 
 The rule this preserves: an exclusion applies because something *declared* the
 role's job, and a company can add one but cannot silently remove one by
