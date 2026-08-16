@@ -64,6 +64,19 @@ export interface Me {
 }
 
 /**
+ * What a successful sign-in returns.
+ *
+ * `session` is present only when the client asked the host to mint a session it
+ * would carry itself — a console on a different origin from its host, where no
+ * cookie can work. See `Credential` in `connections/types.ts`.
+ *
+ * A caller that receives one **must store it** (`adoptSession`), or the sign-in
+ * appears to succeed and the very next request is anonymous: the token comes
+ * back exactly once and only its hash is kept server-side.
+ */
+export type SignIn = Me & { session?: string };
+
+/**
  * The answer to "send me a link".
  *
  * `sent` is always true, for everyone, including addresses with no account —
