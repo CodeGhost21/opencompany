@@ -305,34 +305,11 @@ pub(crate) async fn local_owner(
     // degrading to a session or bearer check — see `resolve_principal`'s
     // `GatesRefused` arm for why falling through would make these gates
     // decorative.
-    if let Some(peer) = peer
-        && !peer.ip().is_loopback()
-    {
+    if !request_looks_local(peer, headers) {
         tracing::warn!(
             company = %runtime.id(),
-            peer = %peer,
-            "refused to resolve the none-mode local owner for a non-loopback peer"
-        );
-        return LocalOwnerOutcome::GatesRefused;
-    }
-    const FORWARDING_HEADERS: [&str; 4] = [
-        "x-forwarded-for",
-        "x-forwarded-host",
-        "forwarded",
-        // Not RFC 7239, but the header `nginx`'s own
-        // `proxy_set_header X-Real-IP $remote_addr` recipe sets, and common
-        // enough elsewhere that its absence would be a real gap.
-        "x-real-ip",
-    ];
-    if let Some(name) = FORWARDING_HEADERS
-        .iter()
-        .find(|name| headers.contains_key(**name))
-    {
-        tracing::warn!(
-            company = %runtime.id(),
-            header = %name,
-            "refused to resolve the none-mode local owner for a request carrying a \
-             proxy-forwarding header"
+            peer = ?peer,
+            "refused to resolve the none-mode local owner for a non-local request"
         );
         return LocalOwnerOutcome::GatesRefused;
     }
