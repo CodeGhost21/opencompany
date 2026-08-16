@@ -2106,6 +2106,67 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
 ///   what keeps `Some(0.0)` distinct from `None` in the hash — the very
 ///   distinction the issue insists must not collapse. `to_bits` additionally
 ///   makes the hash total over values `PartialEq` would call incomparable.
+/// The live overlay state one roster rebuild is resolved against.
+///
+/// A struct rather than the tuple this used to be: it grew past the point where
+/// positional returns stay readable, and — more to the point — the desk fields
+/// were added because desks now decide *capability*, so a caller silently
+/// binding `desk_tools` to the `desks` position would hand every teammate the
+/// wrong tool belt with nothing to catch it.
+pub(crate) struct EffectiveOverlay {
+    pub agents: Vec<OverlayAgent>,
+    pub budgets: Vec<BudgetOverride>,
+    pub policy: Option<PolicyOverride>,
+    pub desks: Vec<OverlayDesk>,
+    pub desk_members: Vec<OverlayDeskMember>,
+    pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Fingerprints the desk scoping a roster's grants are resolved through: which
+/// desks exist, who sits on them, and what each one's tool ceiling is.
+///
+/// All three axes are hashed together because all three feed one answer — an
+/// agent's effective grant. Seating a teammate on a restricted desk narrows its
+/// belt just as surely as editing that desk's ceiling does, so a fingerprint
+/// over the ceilings alone would leave a membership change invisible until the
+/// next restart, which is the staleness bug this whole fingerprint set exists to
+/// prevent.
+///
+/// Sorted before hashing, for the reason [`budget_fingerprint`] documents: the
+/// write routes push and retain rather than maintain an order, and an
+/// order-sensitive hash would drop every live agent session on a save that
+/// changed nothing an agent can observe. (`desk_tools` is a `BTreeMap` and so is
+/// already ordered by construction.)
+fn desk_scope_fingerprint(
+    desks: &[OverlayDesk],
+    members: &[OverlayDeskMember],
+    tools: &std::collections::BTreeMap<String, Vec<String>>,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+
+    let mut desk_ids: Vec<&str> = desks.iter().map(|desk| desk.id.as_str()).collect();
+    desk_ids.sort_unstable();
+    desk_ids.hash(&mut hasher);
+
+    let mut seats: Vec<(&str, &str)> = members
+        .iter()
+        .map(|seat| (seat.desk_id.as_str(), seat.agent_id.as_str()))
+        .collect();
+    seats.sort_unstable();
+    seats.hash(&mut hasher);
+
+    tools.len().hash(&mut hasher);
+    for (desk_id, ceiling) in tools {
+        desk_id.hash(&mut hasher);
+        ceiling.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
 fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
