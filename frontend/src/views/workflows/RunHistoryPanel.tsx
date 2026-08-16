@@ -357,8 +357,17 @@ function RunHistoryRow({
           className="text-2xs text-[var(--status-blocked-text)]"
           data-testid="workflow-run-blocked"
         >
+          {/* Issue #900: the verb used to be unconditionally "needs your
+              approval", even when every one of the blocked node's calls was
+              unparkable — a call nobody will ever be asked about. That read
+              as a promise of a card that does not exist, and contradicted the
+              closing sentence below whenever `parked` was 0. */}
           Not finished — {blocked.map((b) => `“${b.nodeId}”`).join(", ")}{" "}
-          {blocked.length === 1 ? "needs" : "need"} your approval, so{" "}
+          {parked > 0
+            ? blocked.length === 1
+              ? "needs your approval"
+              : "need your approval"
+            : "could not be queued for approval"}, so{" "}
           {blocked.length === 1 ? "it" : "they"} produced nothing and the steps
           after {blocked.length === 1 ? "it" : "them"} did not run.{" "}
           {parked > 0 &&
