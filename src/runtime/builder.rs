@@ -21,7 +21,7 @@ use crate::brain::{EchoBrain, HostedMedullaBrain};
 #[cfg(feature = "openhuman")]
 use crate::company::inference::{self, EnvDefault};
 use crate::company::runtime::{CompanyMail, CompanyRuntime, OpsStores};
-use crate::company::{CompanyManifest, Policy};
+use crate::company::{CompanyManifest, GroupChat, Policy};
 use crate::feedback::github::{GitHubClient, RateLimiter};
 use crate::feedback::service::FeedbackFiler;
 use crate::feedback::store::FeedbackStore;
