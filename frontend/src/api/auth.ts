@@ -156,9 +156,9 @@ export async function fetchHubProviders(
  * The token arrives in the URL as `?token=…&key=auth` after the hub completes
  * OAuth and redirects back here. It is not an identity this console can read or
  * check — it is handed straight to the host, which asks the hub whose it is and
- * then applies this company's own roster. So this returns the same `Me` a magic
- * link would, and the browser keeps nothing either way: the session comes back
- * as an HttpOnly cookie and the token is stripped from the URL.
+ * then applies this company's own roster. So this returns the same result a
+ * magic link would, and the hub's token is spent here and stripped from the URL
+ * rather than kept — whichever carrier the session itself comes back in.
  *
  * The distinguishable failures are `hub_rejected` (expired or forged — sign in
  * again), `not_a_member` (a real ecosystem account with no access here), and
