@@ -2533,6 +2533,11 @@ mod tests {
     // Issue #875: `shell`, classified by the command it was handed
     // -----------------------------------------------------------------------
 
+    // Gated to match its callers. Every test below that grades a shell command
+    // is `#[cfg(feature = "openhuman")]`, so without the feature they compile
+    // away and this helper is left with none — `dead_code` under the default
+    // lane's `-D warnings`, which is what turned the `Rust` job red.
+    #[cfg(feature = "openhuman")]
     fn shell(command: &str) -> Consequence {
         consequence_of(SHELL, &json!({ SHELL_COMMAND_KEY: command }))
     }
