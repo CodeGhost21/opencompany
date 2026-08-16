@@ -201,7 +201,10 @@ struct BundleContents {
     /// silently re-tightening (or re-loosening) the approval gate on import —
     /// the same class of loss #343 fixed for spend caps.
     overlay_policy: Option<PolicyOverride>,
-    overlay_desk_tools: Default::default(),
+    /// The operator-set per-desk tool ceilings, carried through the bundle so
+    /// export→import preserves a console-narrowed department (rather than
+    /// restoring it at the company's full grant).
+    overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids switched off, carried through the bundle so an import
     /// restores a paused workflow paused (issue #276).
     disabled_workflows: Vec<String>,
