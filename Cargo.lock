@@ -4728,6 +4728,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "regex",
  "reqwest",
  "rusqlite",
  "serde",
