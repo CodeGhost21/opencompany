@@ -721,11 +721,11 @@ mod tests {
         let home_dir = home();
         let home = home_dir.path();
         let id = CompanyId::new("acme");
-        let state = state_with_company(home).await.with_rebuilder(std::sync::Arc::new(
-            Working {
+        let state = state_with_company(home)
+            .await
+            .with_rebuilder(std::sync::Arc::new(Working {
                 home: home.to_path_buf(),
-            },
-        ));
+            }));
         state.set_boot_inputs(id.clone(), crate::runtime::BootInputs::default());
         let before = state.registry().get(&id).expect("registered");
 
@@ -755,11 +755,11 @@ mod tests {
         let home_dir = home();
         let home = home_dir.path();
         let id = CompanyId::new("acme");
-        let state = state_with_company(home).await.with_rebuilder(std::sync::Arc::new(
-            Working {
+        let state = state_with_company(home)
+            .await
+            .with_rebuilder(std::sync::Arc::new(Working {
                 home: home.to_path_buf(),
-            },
-        ));
+            }));
         state.set_boot_inputs(id, crate::runtime::BootInputs::default());
 
         for attempt in 1..=2 {
