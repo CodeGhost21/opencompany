@@ -610,6 +610,20 @@ async fn apply_inner(
         _ => None,
     };
 
+    // Persist before anything live is mutated. The module doc promises "writes
+    // it in one transaction" and `AppliedDto::complete` promises a partial
+    // apply is an error, not a result — both break if a later step (auth
+    // override, seeding, rebuild) runs before the write, because a failed
+    // write would then return an error while the live host already reflects
+    // the change. Persisting first means a write failure leaves the process
+    // exactly as it was: nothing below has run yet.
+    edits.push((
+        "setup_completed_at",
+        ConfigValue::Int(crate::ports::now_millis() as i64),
+    ));
+    let path = write_config_toml(&dir, &edits)?;
+    state.mark_setup_complete();
+
     // Make the chosen mode live **before** anything is built with it.
     //
     // The mode is resolved once, at build, and cached on the runtime. Writing it
@@ -666,13 +680,6 @@ async fn apply_inner(
     if !needs_restart_for_auth {
         restart_required.retain(|key| key != "auth_mode");
     }
-
-    edits.push((
-        "setup_completed_at",
-        ConfigValue::Int(crate::ports::now_millis() as i64),
-    ));
-    let path = write_config_toml(&dir, &edits)?;
-    state.mark_setup_complete();
 
     Ok(AppliedDto {
         complete: true,
