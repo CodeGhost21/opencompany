@@ -51,7 +51,9 @@ here is re-rendered in full on every relevant write and never edited in place.
 
 That is also what makes concurrency cheap: two agents writing distinct items
 conflict on nothing, so a single mutex around the re-render is the entire
-coordination story.
+coordination story **for derived-ledger rendering**. Writing the underlying
+per-item files and committing them are separate concerns with their own locks
+— see [alignment.md's write lock and commit lock](alignment.md#locking).
 
 ### Nothing blocks on a slow participant
 
