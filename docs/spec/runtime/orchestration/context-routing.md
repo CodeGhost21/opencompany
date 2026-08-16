@@ -71,9 +71,16 @@ working context at all.
 **Representation note.** `Agent.context` is `Option<Vec<String>>`, not a
 defaulted `Vec<String>`: `None` is an omitted key, `Some(vec![])` is an
 explicit `context = []`, and only that split lets the manifest layer carry
-the distinction above at all. The field is otherwise inert until the routing
-layer lands — `role_context` does not exist yet, so nothing reads either
-variant today.
+the distinction above at all.
+
+**Implemented** in `src/company/context_routing.rs` (`routed_documents`), which
+is always compiled and carries the table above plus the exclusions below as
+tested code. Documents are resolved against the workspace before the
+(synchronous) agent build and folded into the system prompt last, after the
+static `prompt_files` — see [runtime/agents.md](../agents.md) for the prompt
+order and why volatile material goes at the end. A routed document that changes
+moves the roster fingerprint, so an edit reaches the next turn rather than the
+next restart.
 
 ## Exclusions are load-bearing
 
