@@ -562,6 +562,7 @@ impl CompanyStore for MongoStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_policy: overlay.policy,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
@@ -4155,6 +4156,7 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             };

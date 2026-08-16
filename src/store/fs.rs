@@ -631,6 +631,7 @@ struct Meta {
     /// keeps those loading with the manifest's `[policy]` in charge.
     #[serde(default)]
     overlay_policy: Option<crate::ports::types::PolicyOverride>,
+    overlay_desk_tools: Default::default(),
     /// The workflow ids the operator has switched off (issue #276). Absent on
     /// meta files written before the pause switch existed, and
     /// `#[serde(default)]` reads that absence as "nothing is paused" — which is
@@ -659,6 +660,7 @@ impl Default for Meta {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -752,6 +754,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
             overlay_policy: meta.overlay_policy,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: meta.disabled_workflows,
             template_provenance: meta.template_provenance,
         }))
@@ -774,6 +777,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_workflows: record.overlay_workflows.clone(),
             overlay_budgets: record.overlay_budgets.clone(),
             overlay_policy: record.overlay_policy.clone(),
+            overlay_desk_tools: Default::default(),
             disabled_workflows: record.disabled_workflows.clone(),
             template_provenance: record.template_provenance.clone(),
         };
@@ -1976,6 +1980,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         };
@@ -2018,6 +2023,7 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
@@ -2075,6 +2081,7 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             })

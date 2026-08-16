@@ -129,6 +129,7 @@ struct BundleMeta {
     /// `None` — the manifest's `[policy]` decides, exactly as before.
     #[serde(default)]
     overlay_policy: Option<PolicyOverride>,
+    overlay_desk_tools: Default::default(),
     /// The workflow ids switched off at export time (issue #276). Preserved so
     /// an export→import does not silently re-arm a schedule the operator had
     /// paused — which is the one direction this bundle must never move on its
@@ -193,6 +194,7 @@ struct BundleContents {
     /// silently re-tightening (or re-loosening) the approval gate on import —
     /// the same class of loss #343 fixed for spend caps.
     overlay_policy: Option<PolicyOverride>,
+    overlay_desk_tools: Default::default(),
     /// The workflow ids switched off, carried through the bundle so an import
     /// restores a paused workflow paused (issue #276).
     disabled_workflows: Vec<String>,
@@ -248,6 +250,7 @@ impl BundleContents {
             overlay_workflows: record.overlay_workflows,
             overlay_budgets: record.overlay_budgets,
             overlay_policy: record.overlay_policy,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: record.disabled_workflows,
         })
     }
@@ -278,6 +281,7 @@ impl BundleContents {
                 overlay_workflows: self.overlay_workflows.clone(),
                 overlay_budgets: self.overlay_budgets.clone(),
                 overlay_policy: self.overlay_policy.clone(),
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: self.disabled_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
             })
@@ -323,6 +327,7 @@ impl BundleContents {
             overlay_workflows: self.overlay_workflows.clone(),
             overlay_budgets: self.overlay_budgets.clone(),
             overlay_policy: self.overlay_policy.clone(),
+            overlay_desk_tools: Default::default(),
             disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
         };
@@ -433,6 +438,7 @@ impl BundleContents {
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
             overlay_policy: meta.overlay_policy,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: meta.disabled_workflows,
         })
     }
@@ -959,6 +965,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -1038,6 +1045,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -1166,6 +1174,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -1254,6 +1263,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
         })
@@ -1367,6 +1377,7 @@ mod test {
             overlay_workflows: workflows.clone(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -1636,6 +1647,7 @@ mod test {
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })

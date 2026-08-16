@@ -163,6 +163,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
         overlay_policy: Some(sample_policy_override()),
+        overlay_desk_tools: Default::default(),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
     }
