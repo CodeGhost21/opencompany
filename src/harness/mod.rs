@@ -2485,6 +2485,10 @@ mod tests {
     use crate::ports::types::{
         ChunkAddr, ChunkHit, ChunkMeta, CompanySummary, ContextChunk, LedgerEntry,
     };
+    // The two-level resolver. Test-only now: the roster build goes through
+    // `agent_scoped_grants`, and these tests assert the desk-less case still
+    // resolves identically to what shipped before desks could scope tools.
+    use crate::runtime::builder::agent_effective_grants;
 
     fn fp_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
         use crate::ports::types::{Actor, ActorKind};
