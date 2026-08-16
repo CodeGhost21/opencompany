@@ -90,6 +90,15 @@ export class ProxyTransport implements Transport {
     };
   }
 
+  /**
+   * Opens the stream through the core.
+   *
+   * Takes no `headers`, unlike the interface allows: the core resolves this
+   * connection's credential from its own registration and the keychain, and is
+   * the only thing that ever holds a device token. Accepting one here would let
+   * the console hand the core a credential to use, which is exactly the
+   * arrangement the keychain exists to prevent.
+   */
   subscribe(url: string, handlers: StreamHandlers): () => void {
     const { invoke, Channel } = bridge();
     const channel = new Channel<string>();

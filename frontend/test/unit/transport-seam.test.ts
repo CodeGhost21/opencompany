@@ -90,6 +90,7 @@ function clientOn(
       baseUrl: config.baseUrl ?? "",
       company: config.company ?? null,
       operatorToken: config.operatorToken ?? null,
+      sessionHeader: null,
     },
     transport,
   );

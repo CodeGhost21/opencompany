@@ -31,7 +31,7 @@ function client(handler: (req: { method: string; url: string; body?: string }) =
     subscribe: () => () => {},
   };
   return new OpenCompanyClient(
-    { baseUrl: "", company: "acme", operatorToken: "t0ken" },
+    { baseUrl: "", company: "acme", operatorToken: "t0ken", sessionHeader: null },
     transport as never,
   );
 }

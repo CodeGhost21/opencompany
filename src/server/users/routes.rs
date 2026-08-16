@@ -173,6 +173,25 @@ pub struct MeResult {
     must_change_password: bool,
 }
 
+/// What a successful sign-in returns.
+///
+/// [`MeResult`] is flattened rather than nested so this stays byte-identical to
+/// what every login route returned before the header carrier existed — a client
+/// that never asks for one sees no `session` field and needs no change.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SignInResult {
+    #[serde(flatten)]
+    user: MeResult,
+    /// The ready-made [`SESSION_HEADER`](cookie::SESSION_HEADER) value, present
+    /// **only** when the client asked for the header carrier.
+    ///
+    /// Returned exactly once, like a device pairing's token: only its hash is
+    /// stored, so a client that drops it has to sign in again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Shared failures
 // ---------------------------------------------------------------------------
@@ -477,7 +496,13 @@ pub(crate) async fn create_session(
     Ok(plaintext)
 }
 
-/// Mints a browser session for `user` and renders the `Set-Cookie` response.
+/// Mints a browser session for `user` and renders it in the carrier they asked
+/// for: a `Set-Cookie` by default, or the token in the body for a client that
+/// cannot receive a cookie at all (see [`cookie::SESSION_CARRIER_HEADER`]).
+///
+/// One choke point for every browser login path — magic link, password, hub and
+/// wallet — so a carrier is added once rather than four times, and no path can
+/// acquire one without the session-minting invariants in [`create_session`].
 async fn mint_session(
     state: &AppState,
     runtime: &CompanyRuntime,
@@ -487,6 +512,9 @@ async fn mint_session(
     let company = runtime.id();
     // A company whose id cannot safely name a cookie cannot hold a session;
     // refuse rather than emit a header its id could have chosen attributes for.
+    // Checked for both carriers, not just the cookie: `session_header_value`
+    // enforces the same rule, so failing here keeps the refusal in one place
+    // and keeps the two carriers addressable by exactly the same set of ids.
     let Some(name) = cookie::session_cookie_name(company) else {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "this company's id cannot carry a session cookie".to_string(),
@@ -506,6 +534,25 @@ async fn mint_session(
     .await
     .map_err(|e| ApiError(e).into_response())?;
 
+    // The header carrier hands the token to the client and sets **no** cookie.
+    // Setting both would leave one session reachable two ways, and the cookie
+    // half would be a third-party cookie that some browsers keep and others
+    // drop — so whether logging out cleared the session would depend on the
+    // browser. One session, one carrier.
+    if cookie::wants_header_carrier(headers) {
+        let Some(session) = cookie::session_header_value(company, &plaintext) else {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "this company's id cannot carry a session header".to_string(),
+            ))
+            .into_response());
+        };
+        return Ok(Json(SignInResult {
+            user: me_result(company, user),
+            session: Some(session),
+        })
+        .into_response());
+    }
+
     let insecure = !state.config().host_base_url().starts_with("https://");
     let set = cookie::set_cookie(
         &name,
@@ -513,7 +560,10 @@ async fn mint_session(
         token::SESSION_TTL_MILLIS / 1000,
         insecure,
     );
-    let body = Json(me_result(runtime.id(), user));
+    let body = Json(SignInResult {
+        user: me_result(company, user),
+        session: None,
+    });
     Ok(([(header::SET_COOKIE, set)], body).into_response())
 }
 
