@@ -103,7 +103,7 @@ pub fn catalog(manifest: &CompanyManifest) -> Vec<CatalogEntry> {
             grant: (*namespace).to_string(),
             description: (*description).to_string(),
             covered_by_wildcard: wildcard_covers(namespace),
-            granted: crate::runtime::builder::allow_covers(allow, namespace),
+            granted: namespace_granted(allow, namespace),
         });
     }
 
