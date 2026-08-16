@@ -385,5 +385,9 @@ meter and caps a dispatched card does.
   except `dropped`), and `planning` is absent.
 - The dispatch bound holds: an agent restating one need in a loop cannot spawn
   unbounded runs.
-- A demand blocked by an unclosed demand projects to `paused`, and unblocks when
-  its blocker is answered.
+- A demand blocked by an unclosed demand projects to `paused`, and unblocks
+  when its blocker is answered, returning to the state it was in when it
+  became blocked.
+- A demand blocked by a demand that is later dropped also unblocks, the same
+  as if it had been answered — it does not stay `blocked` forever, and
+  dropping it is not automatic.
