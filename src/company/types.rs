@@ -269,7 +269,8 @@ pub const PROMPT_CLASSES: [&str; 3] = ["evidence", "judge", "directive"];
 /// `prompt_files` (and, separately, its routed `context` documents) may
 /// contribute to the system prompt.
 ///
-/// Sized as [`alignment.md`'s brief budget][brief] — 10,000 provider-billed
+/// Sized as the brief budget in
+/// `docs/spec/runtime/orchestration/alignment.md` — 10,000 provider-billed
 /// tokens — measured in codepoints as a cheap, tokenizer-free upper bound. One
 /// token typically spans several codepoints for the encodings in use, so a
 /// codepoint count is never smaller than the true token count: the clamp may cut
