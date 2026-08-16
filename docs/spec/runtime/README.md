@@ -44,6 +44,14 @@ Supporting docs:
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge
 - [manifest.md](manifest.md) — `company.toml` schema
+- [agents.md](agents.md) — how a teammate is declared: the inline `[[agent]]`
+  form and the one-file-per-teammate `agents/<id>.toml` bundle form, custom
+  prompts, checked-in briefing documents versus routed workspace documents, and
+  the `classes` routing exclusions
+- [tools.md](tools.md) — the three-level tool grant
+  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an empty grant list means
+  "inherit" rather than "nothing", the four namespaces `*` never confers, the
+  unified tool catalog, and the seed-wins rule for console desk overrides
 - [lifecycle.md](lifecycle.md) — company state machine and durability
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
   call per card, the host-gathered evidence pack, the prerequisite verdict
