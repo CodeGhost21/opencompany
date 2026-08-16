@@ -2,17 +2,19 @@
 
 *Phase P1. How many agents on one company stay pointed at one goal.*
 
-Three mechanisms here; **context routing** — which decides what each role is
-told — is its own document,
-[context-routing.md](context-routing.md). The **brief** is the one document nearly all of them are told; the
-**ledgers** are what the brief is derived from and what closes a
-[demand](demand-ledger.md); the **board** is where a role asserts something it
-cannot yet establish.
+Three of the four alignment mechanisms. The **brief** is the one document
+nearly every reasoning role is told; the **ledgers** are what the brief is
+derived from and what closes a [demand](demand-ledger.md); the **board** is
+where a role asserts something it cannot yet establish.
+
+The fourth — **context routing**, which decides what each role is told at all —
+is large enough to own a file: [context-routing.md](context-routing.md).
 
 Terms: [glossary](../../glossary.md). Principles:
 [README](README.md#the-three-principles).
 
 ---
+
 ## The brief
 
 ### What it is
