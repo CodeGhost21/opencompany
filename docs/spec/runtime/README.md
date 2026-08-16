@@ -54,9 +54,11 @@ Supporting docs:
   primitive, and containerised code tools. Also the three entities this removes
   — the kanban board as the work model, desks, and two of the three memory
   backends
-  - [orchestration/memory.md](orchestration/memory.md) — `MemoryProvider` in
-    place of `MemoryStore` + `ContextStore` + `FactStore` and a bespoke client,
-    and why the host decorator is the only safe constructor
+  - [orchestration/memory.md](orchestration/memory.md) — `MemoryProvider`
+    replacing the bespoke `CortexClient` backend, with `MemoryStore`,
+    `ContextStore` and `FactStore` kept as typed facades over the one
+    provider rather than as three independent backends, and why the host
+    decorator is the only safe constructor
   - [orchestration/alignment.md](orchestration/alignment.md) — what each role is
     told, and the ledgers that are derived rather than asserted
   - [orchestration/demand-ledger.md](orchestration/demand-ledger.md) — work
