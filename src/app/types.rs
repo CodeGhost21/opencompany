@@ -356,6 +356,23 @@ pub struct AppState {
     /// OpenCompany home root holding company bundles. Used by the tiny.place
     /// A2A inbound routes to resolve a company's Ed25519 identity.
     home: std::path::PathBuf,
+    /// The root `config.toml` — and everything the first-run setup flow
+    /// (`crate::server::setup`) reads and writes — resolves under.
+    ///
+    /// `None` means "same as [`Self::home`]", which is the aligned shape
+    /// [`crate::store::home_divergence_warning`] treats as silent: a hosted
+    /// tenant (`--home "$OPENCOMPANY_DATA_DIR"`), `OPENCOMPANY_DATA_DIR` alone,
+    /// and the untouched local default all resolve `home` and the instance's
+    /// `data_dir_from_env()` to the same path.
+    ///
+    /// Set explicitly whenever a deployment's `--home` (company bundles) and
+    /// data root (the instance workspace `config.toml` lives beside) diverge —
+    /// see `serve` in `src/bin/opencompany.rs`. Without this, startup resolves
+    /// `setup_completed_at` from the data root while setup itself resolved
+    /// `state.home()`, so a completed setup could read back as incomplete
+    /// (and vice versa) on exactly the deployments the divergence warning
+    /// already flags.
+    config_root: Option<std::path::PathBuf>,
     /// Company → owning-tenant map, populated when a company is provisioned in
     /// platform mode. Drives per-tenant quotas and cross-tenant isolation.
     ///
