@@ -189,4 +189,38 @@ describe("composeCopilotMessage", () => {
     );
     expect(empty).toMatch(/no tools are granted/i);
   });
+
+  /**
+   * Issue #900. `describeRun`'s blocked arm is the copilot's half of the same
+   * fix `RunHistoryPanel` gets on the console side: a blocked run has no
+   * `error`, is not `cancelled`, is not `running` and routed no report, so
+   * without this arm it grounded the copilot with the bare "finished" reading
+   * — the same lie #881 removed from the history panel would otherwise still
+   * reach the model here.
+   */
+  it("grounds the copilot on a blocked run instead of reading it as finished", () => {
+    const blockedRun = {
+      seq: 1,
+      atMillis: 1_700_000_000_000,
+      workflowId: "weekly_report",
+      scheduled: false,
+      runId: "run-1",
+      deliveries: [],
+      pendingApprovals: ["collect"],
+      blockedNodes: [{ nodeId: "collect", tools: ["shell"], approvalIds: ["appr-1"] }],
+      approvals: [
+        { nodeId: "collect", tool: "shell", outcome: "parked" as const, approvalId: "appr-1" },
+      ],
+    };
+    const message = composeCopilotMessage(
+      { ...context, runs: [blockedRun] },
+      "why didn't this run send anything?",
+    );
+    expect(message).toContain("BLOCKED at collect");
+    expect(message).toContain("parked 1 approval(s)");
+    expect(message).toMatch(/does NOT continue this run/);
+    // The bare "finished" reading this arm exists to replace must not also
+    // appear for this run.
+    expect(message).not.toMatch(/collect.*finished/);
+  });
 });
