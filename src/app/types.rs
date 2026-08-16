@@ -818,10 +818,13 @@ impl AppState {
 
     /// Whether the first-run setup flow has run against this data root.
     ///
-    /// `false` is what puts the console into the setup wizard instead of the
-    /// sign-in form, so it must not be confused with "has companies": a host
-    /// can be serving a company named on the command line and still never have
-    /// been through setup.
+    /// This is the raw `setup_completed_at` stamp, and it is deliberately *not*
+    /// what [`AppSpec::setup_complete`] reports: a host serving a company named
+    /// on the command line has never been through setup, yet needs no wizard.
+    /// The spec answers "does the console need to offer setup", this answers
+    /// "did setup run", and only the authorization gate wants the latter — see
+    /// `server::setup::authorize`, where an empty registry is what makes the
+    /// call anonymous, because there is then no admin to authorize against.
     pub fn setup_complete(&self) -> bool {
         self.setup_complete.load(Ordering::Relaxed)
     }
