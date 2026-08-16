@@ -23,6 +23,32 @@ export interface ConsoleConfig {
    * no longer exists — there is no shared-secret path into a company.
    */
   operatorToken: string | null;
+  /**
+   * A ready-made `x-opencompany-session` value, when this client carries its
+   * own session instead of relying on a cookie.
+   *
+   * Never resolved from the environment or the URL — only supplied per
+   * connection by `connectionConfig`, after a sign-in that asked the host for
+   * the header carrier. It lives here because it describes *how a client
+   * authenticates*, which is what this type is for; anywhere else and the
+   * client would be taking its credential from two places.
+   */
+  sessionHeader: string | null;
+  /**
+   * Whether this deployment is a **hub**: one console serving many hosts that
+   * live on other origins, rather than a console served by the host it
+   * operates.
+   *
+   * The difference is entirely in the bootstrap. An ordinary console assumes
+   * its own origin is a host and opens a connection to it; a hub's origin
+   * serves static assets and nothing else, so that assumption yields a
+   * connection which can only ever fail — the browser's exact equivalent of the
+   * dead same-origin row the desktop used to carry (issue #613).
+   *
+   * A hub holds no directory of its own. The hosts it knows are the ones
+   * somebody added, remembered in `localStorage` by `profileStore`.
+   */
+  hub: boolean;
 }
 
 declare global {
