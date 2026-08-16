@@ -58,9 +58,11 @@ A workflow is a small directed graph: `{ name, description, nodes, edges }`.
 - There is **exactly ONE `trigger`** node — what starts the workflow. Every
   other node should be reachable from it.
 
-The node kinds you may author are named in the graph contract below. Author
-only those. If the work needs something outside that set, say so in `reason`
-rather than reaching for a kind you were not given.
+The node kinds you may author are named in the graph contract at the end of
+these instructions. Author only those. If the work needs something outside that
+set, do not call `propose_workflow` — end your turn with a plain sentence naming
+what is missing, and the host records that as the reason the workflow was not
+drafted.
 
 ### Bindings: the `=` convention and the envelope
 
