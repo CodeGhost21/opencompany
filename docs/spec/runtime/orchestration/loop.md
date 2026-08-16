@@ -245,4 +245,5 @@ the directive queue, specified in
   informed by what is on disk.
 - Diversification triggers on consecutive unproductive attempts, not cumulative.
 - Reaching the attempt cap returns partial work rather than discarding it.
-- An unparsable verdict routes conservatively instead of failing the run.
+- An unparsable `Verdict` defaults to `Restart`, and an unparsable `Route`
+  defaults to `Blocked` — neither fails the run.
