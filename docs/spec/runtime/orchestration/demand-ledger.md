@@ -140,23 +140,33 @@ board — `dropped` is the one state that is, by definition, off it.
 
 ## Identity and dedup
 
-A demand's id MUST be derived from its `need` text, so the same gap stated by
-two agents is one row rather than two.
+A demand's id MUST be a **deterministic** derivation from its `need` text — a
+hash of the normalized (whitespace-collapsed, case-folded) text — so the same
+gap stated twice, byte-for-byte, produces the same id without a lookup. This
+is `DemandId` derivation, and it is separate from the dedup check below:
+identity answers "is this the same string", not "is this the same gap in
+different words", and only a deterministic function keeps `Claim.answers`
+referring to a stable id rather than one that could shift between two
+semantically-equivalent restatements.
 
-**Dedup MUST be semantic, not lexical.** The sibling runtime derives an id from
-a hash of the whitespace-stripped text and checks "do we already know this" with
-a two-distinctive-word overlap against the claim ledger. That dedupes exact
-restatements and a little more; it is the weakest part of an otherwise strong
-design, and it is weak because that runtime had no semantic retrieval to hand.
+**Dedup — recognizing that a *differently worded* demand is already known —
+MUST be semantic, not lexical.** The sibling runtime derives its id from a
+hash of the whitespace-stripped text (identity only) and separately checks "do
+we already know this" with a two-distinctive-word overlap against the claim
+ledger. That overlap check dedupes exact restatements and a little more; it is
+the weakest part of an otherwise strong design, and it is weak because that
+runtime had no semantic retrieval to hand.
 
-OpenCompany does, once [P0](memory.md) binds `MemoryRecall`. Both the identity
-and the already-known check MUST go through it. This is the one place the port
-deliberately improves on its source.
-
-The overlap threshold guarding "already answered" MUST require more than a
-single shared term. One shared word makes every claim about a subject match
-every demand about it, and answering a real gap with an unrelated claim is worse
-than not answering it — the asker stops looking.
+OpenCompany does, once [P0](memory.md) binds `MemoryRecall`. The already-known
+check — "does an existing claim already answer a gap worded like this one" —
+MUST go through `MemoryRecall` as **candidate matching**, replacing the
+sibling's lexical overlap threshold outright rather than layering semantic
+recall on top of it. A candidate claim MemoryRecall surfaces still needs the
+same relevance bar the lexical check was reaching for — a return on a subject
+is not the same as an answer to a specific `falsifies` — so the recall
+integration MUST rank or threshold candidates on relevance to the demand's
+`falsifies`, not merely its topic; this is the one place the port deliberately
+improves on its source; it does not change what `DemandId` is derived from.
 
 ### Refusal is informative
 
