@@ -313,8 +313,9 @@ the directive queue, specified in
 - Diversification also triggers on consecutive unverified attempts, not
   cumulative, via the independent `unverified_streak_limit` counter.
 - Reaching the attempt cap returns partial work rather than discarding it, and
-  routes to `Reported`, never `Answered`, unless verification independently
-  passed on the same attempt.
+  routes to `Reported`, never `Answered`, unless **both** `verify` passed and
+  `completeness` was satisfied on the same attempt — the same two conditions
+  ladder step 2 requires, stated identically so the two cannot drift apart.
 - A `Reported` route does not move the demand to `answered`; the demand stays
   in the state that dispatched the capped attempt and remains re-dispatchable.
 - `Blocked` is raised by the harness observing the attempt's outcome, not by
