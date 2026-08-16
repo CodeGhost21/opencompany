@@ -137,7 +137,7 @@ impl HarnessModel for ScriptedModel {
 /// One scripted turn of the native model: a text reply and/or a batch of tool
 /// calls. A step with `calls` continues the agent's turn (the loop runs the
 /// tools and asks again); a step with no calls ends it.
-struct NativeStep {
+pub(crate) struct NativeStep {
     text: String,
     calls: Vec<(String, Value)>,
 }
@@ -152,7 +152,7 @@ impl NativeStep {
     }
 
     /// A final turn: text, no tool calls — ends the agent's turn.
-    fn done(text: &str) -> Self {
+    pub(crate) fn done(text: &str) -> Self {
         Self {
             text: text.to_string(),
             calls: Vec::new(),
@@ -167,7 +167,7 @@ impl NativeStep {
 /// exercised). Optionally carries per-call `usage` + backend-charged USD (stashed
 /// in `raw` under `openhuman_usage_meta`, exactly as the managed backend does) so
 /// the metering path is testable.
-struct NativeCopilotModel {
+pub(crate) struct NativeCopilotModel {
     steps: StdMutex<VecDeque<NativeStep>>,
     /// The last step, repeated once the script is exhausted (drives cap-hits).
     repeat: StdMutex<NativeStep>,
@@ -178,7 +178,7 @@ struct NativeCopilotModel {
 }
 
 impl NativeCopilotModel {
-    fn scripting(steps: Vec<NativeStep>) -> Arc<Self> {
+    pub(crate) fn scripting(steps: Vec<NativeStep>) -> Arc<Self> {
         assert!(
             !steps.is_empty(),
             "a scripted model needs at least one step"
@@ -672,7 +672,7 @@ async fn runtime_with(model: Arc<ScriptedModel>) -> (tempfile::TempDir, Arc<Comp
 /// inert fixture wiring reusing the runtime's own context/store. The copilot path
 /// reads only `provider`, `provider.profile()` and `model_override`; the rest is
 /// present to satisfy the struct.
-fn agent_deps(
+pub(crate) fn agent_deps(
     runtime: &CompanyRuntime,
     model: Arc<dyn HarnessModel>,
 ) -> crate::harness::HarnessDeps {
@@ -1428,7 +1428,7 @@ async fn propose_workflow_rejects_via_each_host_gate() {
 
 /// A propose call carrying a valid graph, then a final reply — the happy path
 /// script.
-fn propose_step(summary: &str, workflow: Value) -> NativeStep {
+pub(crate) fn propose_step(summary: &str, workflow: Value) -> NativeStep {
     NativeStep::call(
         "propose_workflow",
         json!({ "summary": summary, "workflow": workflow }),

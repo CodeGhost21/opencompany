@@ -1981,4 +1981,4 @@ fn not_automatable_reason(end: &TurnEnd, diag: &[String]) -> String {
 }
 
 #[cfg(test)]
-mod test;
+pub(crate) mod test;
