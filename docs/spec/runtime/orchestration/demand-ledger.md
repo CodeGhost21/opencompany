@@ -89,6 +89,12 @@ open ──claim──> claimed ──a claim cites the id──> answered ─�
 | `blocked` | `blocked_by` names an unclosed demand | code |
 | `dropped` | withdrawn | an operator |
 
+`blocked_by` MUST be validated on write: a self-reference, or any cycle formed
+by following `blocked_by` edges transitively, MUST be rejected rather than
+recorded. An accepted cycle leaves every demand on it permanently `blocked`
+and undispatchable — the one state this ledger cannot recover from on its
+own, since nothing on either demand can ever close to break the loop.
+
 ---
 
 ## Answered is not accepted
