@@ -1,2 +1,8 @@
 role = "Scriptwriter"
 description = "Write video and post scripts."
+# Declared explicitly because the roster now lives in one file per teammate
+# (`agents/*.toml`), which is read in filename order. Before the move this
+# company tagged nobody and relied on `[[agent]]` declaration order, where this
+# teammate came first. Stating the tier keeps the same agent orchestrating
+# instead of handing the job to whoever sorts first alphabetically.
+tier = "orchestrator"
