@@ -4384,6 +4384,16 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// Issue #887's no-torn-read contract, on the other backend hosted tenants
+    /// run. A document replace is atomic, so this passed before the `fs` fix
+    /// and passes after — the contract is the port's, not one backend's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_never_tears() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_read_never_tears(s.clone()).await;
+        drop_db(&s).await;
+    }
+
     /// The sqlite pin's mirror, on the other backend hosted tenants run
     /// (issue #700).
     ///

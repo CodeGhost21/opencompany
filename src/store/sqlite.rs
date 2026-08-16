@@ -3641,6 +3641,15 @@ mod test {
         conformance::assert_workspace_folder_claims(store()).await;
     }
 
+    /// Issue #887's no-torn-read contract. This backend passed it before the
+    /// `fs` fix and passes it after — which is the point of stating it on the
+    /// port: the guarantee is owed by every backend a tenant can run, not by
+    /// whichever one happened to have it for free.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_never_tears() {
+        conformance::assert_workspace_read_never_tears(store()).await;
+    }
+
     /// Issue #700's emptiness predicate, against the backend that can actually
     /// hold the shape it has to survive.
     ///
