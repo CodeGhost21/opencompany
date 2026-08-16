@@ -97,12 +97,15 @@ describe("a configured host with no companies", () => {
   });
 
   it("still shows the ordinary picker once a company exists", async () => {
+    const company = (id: string, name: string): CompanyStatus => ({
+      id,
+      name,
+      lifecycle: "running",
+      pending_approvals: 0,
+    });
     await show(
       client({
-        companies: [
-          { id: "acme", name: "Acme" } as CompanyStatus,
-          { id: "beta", name: "Beta" } as CompanyStatus,
-        ],
+        companies: [company("acme", "Acme"), company("beta", "Beta")],
       }),
     );
 
