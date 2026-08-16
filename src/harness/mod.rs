@@ -3053,7 +3053,7 @@ description = "Builds the product."
     #[tokio::test]
     async fn roster_builds_every_manifest_agent() {
         let fx = fixture();
-        let roster = build_roster(&record(), &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&record(), &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(ids, vec!["ceo", "engineer"]);
         assert_eq!(roster[0].role, "Chief Executive");
@@ -3119,7 +3119,7 @@ description = "Builds the product."
             checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
 
-        let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
+        let roster = build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster builds with skills");
         assert_eq!(roster.len(), 2);
         // The scratch skill tree was materialized for the first roster agent.
         assert!(
@@ -3804,7 +3804,7 @@ description = "Builds the product."
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
-        let roster = build_roster(&record(), &deps, &[]).expect("roster");
+        let roster = build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
         // test's lifetime — the process ends the test anyway.
         std::mem::forget(dir);
