@@ -18,8 +18,8 @@ import type {
 import { failedNodeOf } from "./graph";
 import {
   awaitingCount,
+  decidableApprovalCount,
   isBlocked,
-  parkedApprovalCount,
   relativeTime,
   runTone,
   undeliveredCount,
@@ -221,7 +221,12 @@ function RunHistoryRow({
   // Issue #881 / #880: read once, so the chip, the badge and the terminal line
   // below cannot disagree about whether this run stopped for a person.
   const blocked = run.blockedNodes ?? [];
-  const parked = parkedApprovalCount(run);
+  // Issue #900: `decidableApprovalCount`, not `parkedApprovalCount` — this
+  // paragraph tells the operator a card is waiting, so it must count only
+  // the receipts that actually landed one. Counting a failed park here said
+  // "needs your approval" and "decide it in Approvals" about a call the very
+  // next sentence admitted nobody would ever be asked about.
+  const parked = decidableApprovalCount(run);
   // The loud half: calls nobody will ever be asked about, because the park
   // itself failed or the excess was dropped past the per-turn cap. Strictly
   // worse than a parked one — there is no card to click.

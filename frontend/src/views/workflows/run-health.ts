@@ -68,6 +68,25 @@ export function parkedApprovalCount(run: WorkflowRunOutcome): number {
 }
 
 /**
+ * The approvals this run parked that are actually sitting on the Approvals
+ * page right now (issue #900) — `outcome === "parked"` only.
+ *
+ * {@link parkedApprovalCount} deliberately folds in the parks that failed and
+ * the calls that were discarded, because those are "the rows that matter
+ * most: nobody will ever be asked about those calls" (see
+ * `WorkflowRunOutcome.approvals` in `api/workflows.ts`). That is the right
+ * receipt for "what happened to this run's gated calls" — but wrong for any
+ * copy that tells the operator something is waiting to be decided. A run
+ * whose every park failed has `parkedApprovalCount` of 1 and zero cards on
+ * Approvals; telling the operator to "decide it in Approvals" would send them
+ * to an empty page. Use this count wherever the sentence claims a card
+ * exists.
+ */
+export function decidableApprovalCount(run: WorkflowRunOutcome): number {
+  return (run.approvals ?? []).filter((a) => a.outcome === "parked").length;
+}
+
+/**
  * Whether this run stopped short because a step is waiting on a person (issue
  * #881).
  *
