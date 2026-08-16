@@ -264,6 +264,10 @@ the directive queue, specified in
 - An attempt that times out with no report still produces a judge verdict
   informed by what is on disk.
 - Diversification triggers on consecutive unproductive attempts, not cumulative.
-- Reaching the attempt cap returns partial work rather than discarding it.
+- Reaching the attempt cap returns partial work rather than discarding it, and
+  routes to `Reported`, never `Answered`, unless verification independently
+  passed on the same attempt.
+- A verified attempt whose `completeness` result is partial routes to
+  `Diversify`, not `Answered` or `Retry`.
 - An unparsable `Verdict` defaults to `Restart`, and an unparsable `Route`
   defaults to `Blocked` — neither fails the run.
