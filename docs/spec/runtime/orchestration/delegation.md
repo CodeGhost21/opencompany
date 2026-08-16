@@ -224,9 +224,10 @@ sub-graph. A company that declares no desks is unaffected.
 - Depth and cycle rejection are enforced against the live scope chain, not the
   wired belt.
 - A torn line in the directive queue costs exactly one directive; every later
-  directive still lands.
-- An append that follows a torn trailing record truncates it first, rather
-  than merging into it.
+  directive still lands at the line number it would have without the crash.
+- An append that follows a torn trailing record tombstones it first (rather
+  than merging into it, and rather than reusing its line number for the new
+  directive).
 - A torn cursor reads as zero, never as a garbage offset.
 - A receipt is written even when the consuming step failed.
 - A directive cannot mark unverified work answered, force a restart, or end a
