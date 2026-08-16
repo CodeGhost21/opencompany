@@ -147,12 +147,36 @@ pub fn catalog(manifest: &CompanyManifest) -> Vec<CatalogEntry> {
     entries
 }
 
+/// Whether a company's `allow` list grants a built-in namespace.
+///
+/// Four namespaces are **not** answerable by the generic glob matcher, and this
+/// is the one place that difference has to be honoured rather than assumed. The
+/// generic matcher says a catch-all `*` covers everything, but `media`,
+/// `composio`, `search` and `repo` each carry a rule that `*` deliberately does
+/// not confer them — they spend real money, reach a tenant's third-party
+/// accounts, or materialize a third party's source inside a sandbox, so they
+/// must be opted into by name.
+///
+/// Each of those rules already exists as its own predicate beside the manifest
+/// types. Delegating to them, rather than re-deriving the answer from `allow`,
+/// is what keeps the catalog a projection: the console cannot tell an operator
+/// they have granted something the gate will refuse.
+fn namespace_granted(allow: &[String], namespace: &str) -> bool {
+    match namespace {
+        "media" => crate::company::grants_media_explicit(allow),
+        "composio" => crate::company::grants_composio_explicit(allow),
+        "search" => crate::company::grants_search_explicit(allow),
+        "repo" => crate::company::grants_repo_explicit(allow),
+        _ => crate::runtime::builder::allow_covers(allow, namespace),
+    }
+}
+
 /// Whether a catch-all `*` grant confers `namespace`.
 ///
-/// False for the four namespaces that must be named explicitly. Each already has
-/// its own predicate in [`crate::company::types`]; this mirrors the *set* rather
-/// than re-implementing any of the matching, and the test below pins the two
-/// together so a fifth opt-in namespace cannot be added in one place only.
+/// The same four exceptions [`namespace_granted`] routes around, surfaced as
+/// data so a console rendering `*` as "everything" can say which families it
+/// does not in fact cover. The test below pins this set against the predicates
+/// themselves, so a fifth opt-in namespace cannot be added in one place only.
 fn wildcard_covers(namespace: &str) -> bool {
     !matches!(namespace, "media" | "composio" | "search" | "repo")
 }
