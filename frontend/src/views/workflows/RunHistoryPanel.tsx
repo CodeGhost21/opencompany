@@ -395,18 +395,20 @@ function RunHistoryRow({
           {run.deliveries.length > 0 && (
             <DeliveryRows deliveries={run.deliveries} />
           )}
-          // Issue #846. This is the arm that was missing, and its absence is
-          how a // run waiting on a human came to report success: a paused run
-          has no // error, no cancellation, is not `running` (the engine settled
-          it) and // routed nothing, so it fell through every branch to the
-          "Finished" line // below — while its gate sat undecided on the
-          Approvals page. // // "Not finished" is the claim, stated in the
-          operator's terms rather // than the engine's. The run object really is
-          settled; what has not // happened is the work, and the work is what
-          the operator is asking // about. Naming the nodes matters as much as
-          the state: a scheduled run // that silently did nothing is exactly the
-          failure this reads as, and // the fix is a click, so the row says
-          which click.
+          {/* Issue #846. This is the arm that was missing, and its absence is
+              how a run waiting on a human came to report success: a paused run
+              has no error, no cancellation, is not `running` (the engine
+              settled it) and routed nothing, so it fell through every branch
+              to the "Finished" line below — while its gate sat undecided on
+              the Approvals page.
+
+              "Not finished" is the claim, stated in the operator's terms
+              rather than the engine's. The run object really is settled;
+              what has not happened is the work, and the work is what the
+              operator is asking about. Naming the nodes matters as much as
+              the state: a scheduled run that silently did nothing is exactly
+              the failure this reads as, and the fix is a click, so the row
+              says which click. */}
           <p
             className="text-2xs text-[var(--status-blocked-text)]"
             data-testid="workflow-run-awaiting"
