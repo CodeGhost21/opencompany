@@ -1123,6 +1123,7 @@ impl HarnessPool {
             let budget_fingerprints = self.budget_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
             let desk_fingerprints = self.desk_fingerprints.read().await;
+            let context_fingerprints = self.context_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
