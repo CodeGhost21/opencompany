@@ -1872,11 +1872,37 @@ async fn fix_from_run(
     let overlays = overlay_workflows(&company)
         .await
         .map_err(IntoResponse::into_response)?;
+    // A source-defined workflow (seed-backed, or seed-shadowed) can never take
+    // the correction: `PUT …/workflows/{wid}` refuses it with the same 409 this
+    // mirrors (`locate_editable_overlay`). Catching it here — before the copilot
+    // turn — saves the tokens and the wait on a proposal the operator could never
+    // save; without this a tinysweeper review flagged the route as misleading the
+    // operator into drafting a fix it would then refuse.
+    if !is_editable(company.runtime.source_dir(), &overlays, &wid) {
+        return Err(ApiError(OpenCompanyError::Conflict(format!(
+            "workflow `{wid}` is defined by a file in the company source tree, so a copilot fix \
+             can't be saved for it. Edit `workflows/{wid}.toml` in the company repository instead."
+        )))
+        .into_response());
+    }
     let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
         .map_err(|e| ApiError(e).into_response())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
         })?;
+    // `workflow_spec_from_graph` below has no `on_error`/`retry` field on
+    // `WorkflowNodeSpec` (the builder never authors them — see its own doc
+    // comment), so a node that had either set loses it silently once the
+    // operator saves the correction. Correlating retry/error policy across a
+    // copilot rewrite that may rename or drop nodes is the harder problem this
+    // PR does not take on; naming it in a note at least makes the loss visible
+    // instead of silent.
+    let dropped_error_policy_nodes: Vec<String> = file
+        .nodes
+        .iter()
+        .filter(|n| n.on_error.is_some() || n.retry.is_some())
+        .map(|n| n.name.clone())
+        .collect();
     let spec = crate::company::workflow_spec_from_graph(file);
 
     // The failure to correct from: prefer what the run journaled, fall back to the
