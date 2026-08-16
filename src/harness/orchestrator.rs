@@ -7011,6 +7011,95 @@ name = "Morning"
         assert!(out.contains("worker"), "{out}");
     }
 
+    /// Issue #900 (tinysweeper `missing-test`): `summarize_run`'s blocked branch
+    /// had no coverage at all, and the doc comment on `blocked` / `paused`
+    /// (issue #881) — that a blocked node and a paused gate need separate
+    /// sentences even though both ride `pending_approvals` — was untested along
+    /// with it. One node blocks, a second is an ordinary paused gate: the
+    /// summary must name the blocked node under "Blocked, waiting on a person"
+    /// (never under "Paused for approval", which would tell the agent the run
+    /// resumes on its own) and the paused node under "Paused for approval"
+    /// only. The structural JSON counts (issue #881) must agree.
+    #[tokio::test]
+    async fn run_workflow_tool_separates_blocked_nodes_from_paused_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": [] } } }),
+            // Issue #881: the union — the blocked node's id rides here too, and
+            // `summarize_run` is what has to keep it out of the "Paused for
+            // approval" line.
+            pending_approvals: vec!["worker".to_string(), "gate".to_string()],
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "worker".to_string(),
+                tools: vec!["publish_artifact".to_string()],
+                approval_ids: vec!["appr-1".to_string()],
+                unparkable: 0,
+            }],
+            approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                node_id: Some("worker".to_string()),
+                tool: Some("publish_artifact".to_string()),
+                outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                approval_id: Some("appr-1".to_string()),
+            }],
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let refs = WorkflowRefQueue::default();
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            refs,
+            RunOutputCache::default(),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        let out = result.output_for_llm(true);
+        assert!(
+            out.contains("Blocked, waiting on a person") && out.contains("worker"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Paused for approval") && out.contains("gate"),
+            "{out}"
+        );
+        // The blocked node must not also read as an ordinary paused gate — that
+        // sentence promises the run continues once it is decided, which is
+        // false for a block (issue #881).
+        let paused_line = out
+            .lines()
+            .find(|l| l.contains("Paused for approval"))
+            .expect("a Paused for approval line");
+        assert!(!paused_line.contains("worker"), "{out}");
+
+        let payload = match &result.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data.clone(),
+            other => panic!("expected JSON payload, got {other:?}"),
+        };
+        assert_eq!(
+            payload.get("blocked_nodes").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            payload.get("approvals_parked").and_then(Value::as_u64),
+            Some(1)
+        );
+    }
+
     #[tokio::test]
     async fn run_workflow_tool_errors_when_no_runner_is_wired() {
         let dir = tempfile::tempdir().unwrap();
