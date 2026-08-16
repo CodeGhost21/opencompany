@@ -42,6 +42,16 @@ Normative, and each line is a control rather than a preference:
   path.
 - Process, memory, command-duration and output limits, all enforced.
 - Network access retained — provider, search and telemetry calls need it.
+  **This container adds no egress boundary of its own.** Whatever the pod can
+  reach, code running in this sandbox can reach, including any private or
+  link-local address the pod's network namespace can route to. Egress
+  containment is [C1 in agent-isolation.md](../../security/agent-isolation.md#the-children-of-752),
+  an open, product-level decision (default-deny egress versus the open-web
+  tools it would break — see [the unresolved
+  tension](../../security/agent-isolation.md#an-unresolved-tension-egress-policy-versus-the-web-tools))
+  that this document does not resolve and MUST NOT be described as resolved
+  here. Do not claim this sandbox contains SSRF; say what C1's state actually
+  is.
 
 ### On the memory limit
 
