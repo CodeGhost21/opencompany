@@ -1676,13 +1676,50 @@ pub(crate) async fn draft_workflow_from_description(
     // No proposal landed: fold to not-automatable with the most specific reason we
     // have — never a silent empty graph.
     let diag = diag.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let reason = match outcome {
+    // Classify the raw timeout result into TurnEnd first, then let the pure
+    // reason-wording fn map it — so every arm's wording is unit-testable without
+    // constructing a tokio Elapsed or driving a real timeout.
+    let end = match outcome {
+        Err(_elapsed) => TurnEnd::TimedOut,
+        Ok(Ok(reply)) => TurnEnd::Replied {
+            text: reply,
+            hit_cap: copilot.last_turn_hit_cap(),
+        },
+        Ok(Err(err)) => TurnEnd::Errored(err.to_string()),
+    };
+    Ok(DescriptionDraftOutcome::NotAutomatable(
+        not_automatable_reason(&end, &diag),
+    ))
+}
+
+/// How the copilot's single turn ended when it produced no accepted proposal.
+/// Classifying the raw `timeout` result into this enum keeps [`not_automatable_reason`]
+/// a pure function that every arm can be unit-tested against.
+enum TurnEnd {
+    /// The turn outran `BUILD_TIMEOUT` before it could propose.
+    TimedOut,
+    /// The agent turn itself errored (a model/build failure); carries the message.
+    Errored(String),
+    /// The agent finished its turn without proposing. `hit_cap` is whether it
+    /// exhausted its tool budget; `text` is its closing reply.
+    Replied { text: String, hit_cap: bool },
+}
+
+/// The operator-facing reason a description did not become a workflow, given how
+/// the turn ended and the diagnostic sentences the check/propose tools left.
+/// Never empty — the caller has already ruled out an accepted proposal.
+fn not_automatable_reason(end: &TurnEnd, diag: &[String]) -> String {
+    match end {
         // The turn outran the ceiling before it could propose.
-        Err(_elapsed) => "drafting the workflow ran out of time before a proposal was ready, so \
-             nothing was drafted — try again, or create it by hand"
+        TurnEnd::TimedOut => "drafting the workflow ran out of time before a proposal was ready, \
+             so nothing was drafted — try again, or create it by hand"
             .to_string(),
-        Ok(Ok(reply)) => {
-            if copilot.last_turn_hit_cap() {
+        // The agent turn itself errored (a model/build failure).
+        TurnEnd::Errored(err) => {
+            format!("drafting the workflow could not complete, so nothing was drafted: {err}")
+        }
+        TurnEnd::Replied { text, hit_cap } => {
+            if *hit_cap {
                 // The agent looped through its tool budget without an accepted
                 // proposal; carry the last gate sentences so the operator sees why.
                 let tail = if diag.is_empty() {
@@ -1703,7 +1740,7 @@ pub(crate) async fn draft_workflow_from_description(
             } else {
                 // The agent finished cleanly without proposing — it judged the work
                 // a one-off; take its own words as the reason.
-                let stated = cap(&reply, MAX_REASON_CHARS);
+                let stated = cap(text, MAX_REASON_CHARS);
                 if stated.is_empty() {
                     "this is better done once than built into a reusable workflow".to_string()
                 } else {
@@ -1711,12 +1748,7 @@ pub(crate) async fn draft_workflow_from_description(
                 }
             }
         }
-        // The agent turn itself errored (a model/build failure).
-        Ok(Err(err)) => {
-            format!("drafting the workflow could not complete, so nothing was drafted: {err}")
-        }
-    };
-    Ok(DescriptionDraftOutcome::NotAutomatable(reason))
+    }
 }
 
 #[cfg(test)]
