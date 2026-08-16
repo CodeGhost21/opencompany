@@ -22,6 +22,12 @@ mod content_test;
 // compiled and openhuman-free: the chat handler reads it in every build to keep
 // a copilot question from opening a board card, and the harness reads the same
 // function to decide that a turn runs confined.
+// Which workspace documents each role is told to reason from
+// (`docs/spec/runtime/orchestration/context-routing.md`). Always compiled: the
+// per-tier default table and the class-based exclusions are pure decisions over
+// manifest data, and the exclusions are controls — they deserve tests in every
+// build, not only where the agent runtime links.
+pub mod context_routing;
 pub mod copilot;
 // How this instance obtains its TinyHumans credential (projected, rotating
 // platform token vs a static key). Always compiled: the answer decides whether a
