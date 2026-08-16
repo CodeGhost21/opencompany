@@ -435,11 +435,13 @@ pub struct Agent {
     /// tell an omitted key from an explicit empty list apart, since both
     /// deserialize to the same empty vec.
     ///
-    /// **Inert until the routing layer lands.** The field is parsed and carried
-    /// so a manifest can declare its routing as data today; nothing consumes it
-    /// yet. It is declared now rather than later because `Agent` does not deny
-    /// unknown fields — a `context` key on an older binary is silently ignored,
-    /// which reads exactly like routing that works and does nothing.
+    /// The **dynamic** half of the prompt-context pair: these are live
+    /// operator-owned documents, re-read on every roster rebuild and placed last
+    /// in the system prompt, after the static
+    /// [`prompt_files`](Self::prompt_files). Documents are resolved by
+    /// `harness::context_routing` before the (synchronous) agent build, and a
+    /// change to one moves the roster fingerprint so it reaches the next turn
+    /// rather than the next restart.
     #[serde(default)]
     pub context: Option<Vec<String>>,
     /// Per-agent daily spend cap in USD.
