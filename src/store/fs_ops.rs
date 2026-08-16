@@ -2376,6 +2376,19 @@ mod test {
         conformance::assert_workspace_folder_claims(Arc::new(FsOps::new(&root))).await;
     }
 
+    /// Issue #887, and the backend the case was written against: this is the
+    /// one that failed it. Node content was written with a bare
+    /// `tokio::fs::write`, so a reader inside the `O_TRUNC` window saw a
+    /// prefix — visibly when the cut split a codepoint, silently when it did
+    /// not. Multi-threaded because the race is between two blocking-pool
+    /// threads, which a current-thread runtime makes far rarer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_never_tears() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_never_tears(Arc::new(FsOps::new(&root))).await;
+    }
+
     #[tokio::test]
     async fn workspace_files_land_on_disk_under_folders() {
         let root_dir = tmp_root();
