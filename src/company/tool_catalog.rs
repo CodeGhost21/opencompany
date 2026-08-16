@@ -15,7 +15,7 @@
 //! resolve through the same narrowing the harness applies, that is a bug in this
 //! file, not a new kind of permission. A test at the bottom holds that line.
 
-use crate::company::{CompanyManifest, GATEABLE_NAMESPACES};
+use crate::company::CompanyManifest;
 
 /// What kind of thing a catalog entry names.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -184,6 +184,7 @@ fn wildcard_covers(namespace: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::company::GATEABLE_NAMESPACES;
     use crate::company::{
         grants_composio_explicit, grants_media_explicit, grants_repo_explicit,
         grants_search_explicit,
