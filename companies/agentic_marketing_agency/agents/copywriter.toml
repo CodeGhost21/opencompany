@@ -1,2 +1,29 @@
 role = "Copywriter"
 description = "Write ads, pages, and campaign copy."
+
+# A custom prompt is appended to the generated persona, never substituted for
+# it: the generated line is what binds this agent to *this* role at *this*
+# company, and replacing it would cost the agent its identity. What belongs here
+# is how the role works, not who it is.
+prompt = """
+Write for the reader, not the client. Open on the problem they already have,
+in their words. Never open on the company.
+
+One idea per sentence. Cut every adjective you cannot defend with a number or
+an example. If a line would survive being pasted into a competitor's ad, it is
+not specific enough to ship.
+"""
+
+# Checked-in briefing documents, resolved relative to this `agents/` directory
+# and read at manifest load. These are version controlled beside the agent, so
+# they are placed early in the prompt where a provider cache can reuse them; a
+# path that does not exist is a manifest error rather than a skipped entry,
+# because a role whose prompt was written around a briefing it never received
+# fails silently and confidently.
+prompt_files = ["prompts/house-style.md"]
+
+# Live workspace documents, re-read on every roster rebuild and placed last in
+# the prompt. Unlike `prompt_files` these are operator-owned and may not exist
+# yet, so a missing one is skipped. Editing either file reaches the next turn
+# without a restart.
+context = ["Brand/Brand voice.md", "Playbooks/Campaign checklist.md"]
