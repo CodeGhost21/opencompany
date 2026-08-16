@@ -110,8 +110,18 @@ ledger keeps them separate rather than choosing between them:
 
 - `answered` is a **machine** transition. It says the need has an answer on
   disk, and it is derived, so it cannot be asserted by the agent that wanted it
-  to be true.
-- `accepted` is a **human** transition. It says the operator wants this.
+  to be true. Deliberately, `answered` does not gate on the citing claim's
+  `status` — a `heuristic` or `asserted` claim closes a demand exactly as an
+  `verified` one does. Requiring `verified` here would duplicate the quality
+  gate the next transition already provides and would let a demand sit
+  invisibly `claimed` while an operator has no record that *any* answer, weak
+  or strong, has surfaced. `status` stays on the claim and is what a reviewer
+  reads before the next transition.
+- `accepted` is a **human** transition. It says the operator wants this. This
+  is where evidence quality is actually judged: an operator reviewing an
+  `answered` demand reads the citing claim's `status` alongside it, and a
+  `heuristic` claim is exactly the signal that should make them hesitate
+  before accepting.
 
 An agent MUST NOT be able to move a demand to `accepted`, including its own.
 *Agents propose; the Operator disposes* ([agentic/](../../agentic/README.md)) is
