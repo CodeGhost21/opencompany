@@ -548,11 +548,13 @@ function ReviewStep({
   restartKeys,
   template,
   status,
+  noCompanyChosen,
 }: {
   changed: Record<string, string | null>;
   restartKeys: string[];
   template: string | null;
   status: SetupStatus;
+  noCompanyChosen: boolean;
 }) {
   const keys = Object.keys(changed);
   const seeding = status.companies.length === 0 && template !== null;
@@ -563,6 +565,18 @@ function ReviewStep({
         <h2 className="font-medium">Review</h2>
         <p className="text-sm text-muted-foreground">Nothing is written until you finish.</p>
       </div>
+
+      {noCompanyChosen && (
+        <Alert variant="destructive" data-testid="review-no-company-warning">
+          <AlertTriangle />
+          <AlertTitle>Pick a company template before finishing</AlertTitle>
+          <AlertDescription>
+            This host has no companies yet. Finishing without picking a template on the{" "}
+            <strong>Company</strong> step would leave a configured instance with nothing to sign
+            in to.
+          </AlertDescription>
+        </Alert>
+      )}
 
       {seeding && (
         <div className="rounded-lg border p-3 text-sm">
