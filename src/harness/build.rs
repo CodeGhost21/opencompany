@@ -668,7 +668,16 @@ pub fn build_agent(
 
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
+    // Includes the operator's inline `prompt`, appended to the generated framing.
     let mut persona = persona_prompt(company_name, manifest_agent);
+
+    // The agent's checked-in briefing documents, placed here — before every
+    // tool brief and before the routed workspace documents — because they are
+    // the most static material in the prompt after the persona itself. The
+    // prompt prefix is what a provider cache reuses across turns, so ordering
+    // static-before-volatile is what keeps an operator editing a workspace note
+    // from invalidating the briefing behind it.
+    persona.push_str(&crate::company::prompt::bundle_section(manifest_agent));
 
     // A short, STATIC brief — never a tree snapshot. A snapshot baked into the
     // system prompt would be stale the moment the operator edits a note, which
