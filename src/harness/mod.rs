@@ -1100,6 +1100,18 @@ impl HarnessPool {
         };
         let skill_fp = skill_delta_fingerprint(&skill_deltas);
 
+        // Resolve the routed workspace documents (context routing) before the
+        // fast-path check, and fingerprint their *content*. Both halves matter:
+        // resolving here is what lets the synchronous `build_agent` fold them
+        // into a persona at all, and hashing the bodies rather than the file
+        // names is what makes an operator's edit to a routed note rebuild the
+        // roster. A name-only hash would leave an edited note invisible until a
+        // restart — the same staleness bug `skill_fp` above exists to close.
+        let routed_context = self
+            .resolve_routed_context(company, deps, &overlay.agents)
+            .await;
+        let context_fp = routed_context_fingerprint(&routed_context);
+
         {
             let agents = self.agents.read().await;
             let mcp_fingerprints = self.mcp_fingerprints.read().await;
