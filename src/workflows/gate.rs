@@ -404,7 +404,6 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
         | NodeKind::Scatter
         | NodeKind::Gather
         | NodeKind::Gate
-        | NodeKind::Void
         | NodeKind::Loop
         | NodeKind::Merge
         | NodeKind::OutputParser
@@ -756,7 +755,6 @@ description = "Runs Acme."
             NodeKind::Scatter,
             NodeKind::Gather,
             NodeKind::Gate,
-            NodeKind::Void,
         ] {
             let node = kind_node("control", kind.clone());
             assert_eq!(call_of(&node), None, "{kind:?}");

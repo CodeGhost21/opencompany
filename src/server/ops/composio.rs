@@ -1596,20 +1596,21 @@ mod tests {
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["credentialSource"], "attested");
         assert_eq!(json["catalogSource"], "manifest");
-        let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        keys.sort_unstable();
         assert_eq!(
             keys,
             vec![
-                "inBuild",
-                "granted",
-                "credentialSource",
                 "backendUrl",
-                "toolkits",
-                "openMode",
-                "effectiveToolkits",
-                "effectiveCatalog",
+                "catalogNotice",
                 "catalogSource",
-                "catalogNotice"
+                "credentialSource",
+                "effectiveCatalog",
+                "effectiveToolkits",
+                "granted",
+                "inBuild",
+                "openMode",
+                "toolkits",
             ],
             "the read shape must stay exactly this: {keys:?}"
         );
