@@ -1533,6 +1533,7 @@ mod tests {
             &deps,
             &grants,
             &[],
+            &[],
             is_orchestrator,
         )
         .expect("agent builds");
@@ -1577,6 +1578,7 @@ mod tests {
             &deps,
             &grants,
             &[],
+            &[],
             false,
         )
         .expect("agent builds");
@@ -1617,6 +1619,7 @@ mod tests {
             &deps,
             &grants,
             &[],
+            &[],
             false,
         )
         .expect("agent builds");
@@ -1654,6 +1657,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
@@ -1854,6 +1858,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
