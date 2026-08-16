@@ -180,7 +180,16 @@ would make a summary into a dependency.
 
 ### Cadence
 
-The curator runs at a **defined point in the loop**, not on a wall-clock timer.
+The curator runs at a **defined point in the loop**, not on a wall-clock timer:
+**once per [attempt](demand-ledger.md), after that attempt's [routing
+decision](loop.md#routing) concludes and before the next attempt begins.**
+This point is chosen because it is the one place the [attempt
+loop](loop.md#the-shape) already guarantees sequencing — attempts against one
+demand run one after another, never concurrently — so a curator run scheduled
+there inherits that guarantee for free instead of needing one of its own.
+Concretely: the curator is the last step of an attempt's post-routing
+handling, and the loop's next attempt (if `Retry`/`Diversify` routed one)
+does not start until the curator step for the prior attempt has completed.
 
 This narrows the sibling design deliberately. Its documentation describes a
 periodic standing team on a configurable interval; its code deleted that team
