@@ -284,6 +284,21 @@ the directive queue, specified in
 - A per-attempt budget, and a separate wall-clock ceiling for the whole loop.
   These are different things: the first bounds one attempt, the second stops a
   loop that is technically progressing and will not finish.
+
+  **The ceiling routes to `Reported`, exactly as the attempt cap does**, and for
+  the same reason: both are the loop giving up on a bound rather than reaching a
+  result, so neither may produce `Answered` and neither moves the demand to
+  `answered`. The demand stays in the state that dispatched the attempt, carries
+  what the loop learned, and remains re-dispatchable.
+
+  It differs from the attempt cap in *when* it is checked. The cap is a ladder
+  step, evaluated at the routing point after an attempt completes. The ceiling
+  can expire **mid-attempt**, so it is checked at every step boundary and the
+  in-flight attempt is abandoned rather than awaited — a loop that only noticed
+  its ceiling at the next routing point would overrun it by up to one full
+  attempt budget, which on a long attempt is most of the ceiling again. Whatever
+  the abandoned attempt already wrote to the workspace stays; it is evidence,
+  and the next dispatch reads it.
 - An attempt cap, after which the loop stops and **returns what it has** rather
   than discarding it.
 - Evaluation arms run on a narrowed budget — see
