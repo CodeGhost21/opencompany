@@ -65,6 +65,14 @@ Every row above is a default, not a floor or a ceiling: a manifest's explicit
 `context` — including `[]` — always overrides it for that role, per the
 representation note below.
 
+**An agent with no `tier` defaults to `reasoning`'s row.** `tier` is optional
+and most roster entries omit it, so the table needs a defined fallback or it
+covers almost nobody. `reasoning` is the right one because it is what an
+undeclared teammate *is* — a worker doing the substantive job its description
+names. Defaulting to `orchestrator` would hand every unlabelled agent the
+routing picture, and defaulting to none would leave the ordinary case with no
+working context at all.
+
 **Representation note.** `Agent.context` is `Option<Vec<String>>`, not a
 defaulted `Vec<String>`: `None` is an omitted key, `Some(vec![])` is an
 explicit `context = []`, and only that split lets the manifest layer carry
