@@ -225,7 +225,13 @@ be a second set of constants anywhere — a threshold that exists twice is a
 threshold that will disagree with itself.
 
 Diversification MUST trigger on **consecutive** unproductive attempts, so work
-making thin but genuine progress never reaches it.
+making thin but genuine progress never reaches it. `Thresholds` carries (at
+least) two independent, consecutive-attempt counters feeding the ladder
+above: `unverified_streak_limit` (attempts in a row where `verify` did not
+pass) and `unproductive_streak_limit` (attempts in a row the judge marked
+`Restart`) — a `Proceed`/`Steer` verdict or a passing `verify` resets its
+respective counter, not the other one, since conduct and correctness are
+different axes and a fix to one does not vouch for the other.
 
 ### Restart is not a route
 
