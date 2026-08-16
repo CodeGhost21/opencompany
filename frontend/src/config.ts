@@ -2,10 +2,15 @@
 //
 // The console works against ANY OpenCompany host and ANY company. Resolution
 // order (first match wins), so the same build drops in anywhere:
-//   1. URL query params: ?api=<url>&company=<id>&token=<t>
+//   1. URL query params: ?api=<url>&company=<id>&token=<t>&hub
 //   2. window.OPENCOMPANY_CONFIG (injected in index.html for static hosting)
-//   3. Vite build-time env: VITE_OC_API / VITE_OC_COMPANY / VITE_OC_TOKEN
-//   4. Defaults: same-origin API, single-company mode (no id)
+//   3. Vite build-time env: VITE_OC_API / VITE_OC_COMPANY / VITE_OC_TOKEN /
+//      VITE_OC_HUB
+//   4. Defaults: same-origin API, single-company mode (no id), not a hub
+//
+// What this resolves is the console's **bootstrap** connection, not the set of
+// hosts it can hold — that has been a list since connections landed, and a hub
+// build (see `hub`) resolves no bootstrap connection at all.
 
 export interface ConsoleConfig {
   /** Base URL of the OpenCompany host. Empty string means same-origin. */
