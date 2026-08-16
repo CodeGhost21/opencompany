@@ -259,19 +259,18 @@ impl Tool for CheckWorkflowTool {
             }
         };
 
-        // The host owns the id, and only mints it at propose time — a draft the
-        // agent hands to `check_workflow` carries none. Fill a placeholder here so
-        // the static check runs against the graph the host WOULD build, rather
-        // than failing on a missing id and masking the binding gates the check is
-        // for. Deliberately does NOT touch the name: an omitted name is honest
-        // feedback the courtesy pass should surface.
-        if spec.id.trim().is_empty() {
-            spec.id = safe_workflow_id(
-                &spec.name,
-                &self.ctx.description,
-                &self.ctx.company.existing_ids,
-            );
-        }
+        // The host owns the id — it is minted from the name at propose time and a
+        // model-supplied id is always discarded. Mint the same host-safe id here so
+        // `check_workflow` validates the graph the host WOULD build: a check that
+        // honoured a model id could flag a duplicate/invalid id the propose pass
+        // would have overridden, misleading the agent into reworking a fine graph.
+        // Deliberately does NOT touch the name: an omitted name is honest feedback
+        // the courtesy pass should surface.
+        spec.id = safe_workflow_id(
+            &spec.name,
+            &self.ctx.description,
+            &self.ctx.company.existing_ids,
+        );
 
         let mut problems: Vec<String> = Vec::new();
 
