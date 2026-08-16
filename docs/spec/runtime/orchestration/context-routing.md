@@ -76,17 +76,26 @@ the distinction above at all.
 **Implemented** in `src/company/context_routing.rs`, always compiled and tested:
 `routed_documents` carries the table above and the exclusions below;
 `resolve_routed_documents` reads the selected notes out of a `WorkspaceStore`,
-skipping any that do not exist. Rendering into a prompt section is
+skipping any that do not exist. Rendering is
 `crate::company::prompt::context_section`.
 
-**Not yet wired into the harness.** The agent build is synchronous, so the
-resolved documents have to be fetched ahead of it and carried on `HarnessDeps`
-— the pattern `mcp_servers`, `composio` and the skill deltas already follow in
-`Harness::ensure_roster` — and folded into the persona last, after the static
-`prompt_files`. Until that lands, `context` selects documents that nothing
-spends. The remaining work is: resolve per roster member in `ensure_roster`,
-install on `fresh_deps`, fingerprint the result so an edited note rebuilds the
-roster, and append `context_section` in `build::build_agent`.
+**Wired into the harness.** `Harness::resolve_routed_context` resolves every
+roster member's documents ahead of the (synchronous) agent build — the same
+async-caller split the skill deltas use — and `build::build_agent` appends them
+**last**, after every tool brief, because they are the most volatile thing in the
+prompt and the prefix is what a provider cache reuses.
+
+Two properties, each closing a specific failure:
+
+- **An edit reaches the next turn, not the next restart.** The routed documents
+  join the roster staleness fingerprint, hashed over their **bodies** rather
+  than their names. A name-only hash would be inert exactly when it matters: the
+  routing table is manifest data and does not move when an operator edits a note.
+- **Resolution fails soft, per role.** A store error yields no documents for that
+  role rather than failing the rebuild. Routing enriches a prompt; a company
+  whose workspace read hiccuped should answer from a thinner prompt rather than
+  stop answering. An unwired store resolves to nothing, which is the pre-routing
+  behaviour exactly.
 
 ## Exclusions are load-bearing
 
