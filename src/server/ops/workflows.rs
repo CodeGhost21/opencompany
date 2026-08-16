@@ -176,6 +176,13 @@ pub fn router() -> Router<AppState> {
                 .delete(delete_workflow),
         ))
         .merge(scoped("/workflows/{wid}/run", post(run_workflow)))
+        // Issue #840 (PR-3): correct a saved workflow whose run failed, with the
+        // create-time copilot. Drafts a corrected graph from the failing graph +
+        // the run's journaled failure and hands it back for the edit dialog to
+        // hydrate — it never persists (Save still does). A sub-resource of
+        // `{wid}`, strictly more specific than the dynamic `{wid}` reads above, so
+        // registration order cannot make it lose.
+        .merge(scoped("/workflows/{wid}/fix-from-run", post(fix_from_run)))
         // Issue #276: the pause switch. A sub-resource `PUT` rather than a field
         // on the graph `PUT` above, because the two are different decisions with
         // different permissions to grow into and different bodies: replacing a
@@ -1690,6 +1697,261 @@ async fn draft_from_description(
     Err(super::not_wired("the workflow copilot"))
 }
 
+// ---------------------------------------------------------------------------
+// Fix a failed run with the copilot (issue #840, PR-3)
+// ---------------------------------------------------------------------------
+
+/// The `POST …/workflows/{wid}/fix-from-run` body (issue #840, PR-3): the failed
+/// run to correct from, plus an optional caller-supplied error hint for a run the
+/// journal never recorded a failure for (or that predates the failure journal).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixFromRunBody {
+    /// The failed run's correlation id — the `runId` the run-history row carries.
+    run_id: String,
+    /// The run's error as the row already shows it, used only when the journal has
+    /// no `WorkflowRunFinished{error}` for `run_id` to read.
+    #[serde(default)]
+    error_hint: Option<String>,
+}
+
+/// The static authoring readiness of a corrected graph (issue #840, PR-3) —
+/// **advisory only**. `ok` is whether the always-compiled tinyflows authoring
+/// gates found nothing; `advisories` names each remaining smell for the operator
+/// to look at before saving. It NEVER blocks the save (Save is still the only
+/// write), so a non-`ok` readiness rides a 200 alongside the corrected graph.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(not(feature = "openhuman"), allow(dead_code))]
+struct ReadinessNote {
+    ok: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    advisories: Vec<String>,
+}
+
+/// The fix-from-run answer (issue #840, PR-3), mirroring
+/// [`DraftFromDescriptionResponse`]: **200 in both model-answer cases** — a
+/// corrected graph to review, or an honest "this cannot be fixed by re-wiring".
+/// Only a request problem (no error to fix from → 400) or a capability gap (no
+/// brain wired → 404/409) is a non-2xx.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+// Only the `openhuman` arm constructs these variants; the default build's
+// `not_wired` arm returns the type without building either. Live under the feature
+// CI builds and tests, so this is a cfg artefact, not a dead type.
+#[cfg_attr(not(feature = "openhuman"), allow(dead_code))]
+enum FixFromRunResponse {
+    /// A corrected graph for the edit dialog to hydrate, with the static readiness
+    /// advisories over it. `workflow` is a `WorkflowGraphSpec` — the same camelCase
+    /// node/edge shape the read routes return, and it keeps the SAME id as `wid` so
+    /// the operator's Save is a new version, not an orphan.
+    Fixed {
+        automatable: bool,
+        summary: String,
+        workflow: Value,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
+        readiness: ReadinessNote,
+    },
+    /// The failure could not be fixed by re-wiring the graph with the teammates
+    /// and tools available; `reason` says why.
+    NotAutomatable { automatable: bool, reason: String },
+}
+
+/// The failure a past run recorded, scanned out of the company journal for a
+/// `run_id` (issue #840, PR-3).
+#[cfg(feature = "openhuman")]
+struct JournaledFailure {
+    /// The run's error, when it failed outright. `None` for a run that finished
+    /// clean (fixing which makes no sense unless the caller passes a hint).
+    error: Option<String>,
+    /// The id of the node whose step errored, when the per-node trail named one.
+    failed_node_id: Option<String>,
+}
+
+/// Scans the company journal for what run `run_id` recorded (issue #840, PR-3).
+/// `None` means no `WorkflowRunFinished` for that id exists — the caller falls back
+/// to a caller-supplied hint. Follows the same whole-log fold `list_runs` uses.
+#[cfg(feature = "openhuman")]
+async fn journaled_run_failure(
+    company: &ScopedCompany,
+    run_id: &str,
+) -> Result<Option<JournaledFailure>, ApiError> {
+    let stored = company
+        .runtime
+        .events()
+        .read_from(company.id(), EventSeq::new(0), usize::MAX)
+        .await
+        .map_err(ApiError)?;
+
+    let mut failed_node_id: Option<String> = None;
+    // `Some(error)` once the run's finish is seen; the outer Option distinguishes
+    // "the run finished (maybe cleanly)" from "no finish for this id at all".
+    let mut finished: Option<Option<String>> = None;
+    for stored in stored {
+        match stored.event {
+            CompanyEvent::WorkflowNodeFinished {
+                run_id: rid,
+                node_id,
+                status,
+                ..
+            } if rid == run_id && status == WorkflowNodeStatus::Error => {
+                failed_node_id = Some(node_id);
+            }
+            CompanyEvent::WorkflowRunFinished {
+                run_id: Some(rid),
+                error,
+                ..
+            } if rid == run_id => {
+                finished = Some(error);
+            }
+            _ => {}
+        }
+    }
+    Ok(finished.map(|error| JournaledFailure {
+        error,
+        failed_node_id,
+    }))
+}
+
+/// Resolves the error + failing node a fix should be grounded on from what the
+/// journal recorded and what the caller hinted (issue #840, PR-3). `None` means
+/// there is nothing to fix from: neither a journaled error nor a usable hint.
+///
+/// A pure decision, factored out of [`fix_from_run`] so the fallback matrix — a
+/// journaled error, a hint fallback, a clean run with no hint — is unit-testable
+/// without a running host.
+#[cfg(feature = "openhuman")]
+fn resolve_fix_error(
+    journaled: Option<JournaledFailure>,
+    hint: Option<String>,
+) -> Option<(String, Option<String>)> {
+    let (error, failed_node_id) = match journaled {
+        Some(j) => (j.error.or(hint), j.failed_node_id),
+        // No finish for this run id in the journal — lean entirely on the hint.
+        None => (hint, None),
+    };
+    let error = error.filter(|e| !e.trim().is_empty())?;
+    Some((error, failed_node_id))
+}
+
+/// `POST …/workflows/{wid}/fix-from-run` (both scope forms) — correct a saved
+/// workflow whose run failed, with the create-time copilot (issue #840, PR-3).
+/// Drafts a corrected graph and hands it back for the edit dialog to hydrate; it
+/// never persists, so Save (`PUT …/workflows/{wid}`) stays the only write, and the
+/// corrected graph keeps the same id so Save is a new version of the workflow.
+#[cfg(feature = "openhuman")]
+async fn fix_from_run(
+    company: ScopedCompany,
+    Path(WorkflowPath { wid }): Path<WorkflowPath>,
+    Json(body): Json<FixFromRunBody>,
+) -> Result<Json<FixFromRunResponse>, Response> {
+    // `wid` becomes a filename on the read below — reject anything that could
+    // escape `workflows/`.
+    if !safe_wid(&wid) {
+        return Err(
+            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response(),
+        );
+    }
+
+    // No builder wired: classify WHY exactly as the draft + run routes do (issues
+    // #266, #514), so the console points the operator at the same next step.
+    if company.runtime.builder().is_none() {
+        use super::inference::RunnerGap;
+        return Err(
+            match super::inference::runner_gap_for(company.runtime.as_ref()).await {
+                RunnerGap::RestartPending => super::restart_required("the workflow copilot"),
+                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot"),
+                RunnerGap::NotWired => super::not_wired("the workflow copilot"),
+            },
+        );
+    }
+
+    // Load the saved graph for `wid` (seed ∪ overlay) and convert it to the spec
+    // the copilot corrects and pins its identity to.
+    let overlays = overlay_workflows(&company)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
+        .map_err(|e| ApiError(e).into_response())?
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+        })?;
+    let spec = crate::company::workflow_spec_from_graph(file);
+
+    // The failure to correct from: prefer what the run journaled, fall back to the
+    // caller's hint. Neither → there is nothing to fix from.
+    let journaled = journaled_run_failure(&company, &body.run_id)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    let hint = body
+        .error_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(str::to_string);
+    let Some((error, failed_node_id)) = resolve_fix_error(journaled, hint) else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "this run recorded no error to fix from — reopen the run, or pass its error as a hint."
+                .to_string(),
+        ))
+        .into_response());
+    };
+    // The journal names a node id; the human-readable name comes from the saved
+    // graph the id belongs to.
+    let failed_node_name = failed_node_id
+        .as_deref()
+        .and_then(|id| spec.nodes.iter().find(|n| n.id == id))
+        .map(|n| n.name.clone());
+
+    use crate::harness::workflow_build::{
+        DescriptionDraftOutcome, RunFailureContext, fix_workflow_from_failure, workflow_readiness,
+    };
+    let failure = RunFailureContext {
+        run_id: body.run_id.clone(),
+        error,
+        failed_node_id,
+        failed_node_name,
+    };
+    match fix_workflow_from_failure(&company.runtime, &spec, &failure).await {
+        Ok(DescriptionDraftOutcome::Graph {
+            summary,
+            spec,
+            notes,
+        }) => {
+            let (ok, advisories) = workflow_readiness(&spec);
+            Ok(Json(FixFromRunResponse::Fixed {
+                automatable: true,
+                summary,
+                workflow: serde_json::to_value(&spec).unwrap_or(Value::Null),
+                notes,
+                readiness: ReadinessNote { ok, advisories },
+            }))
+        }
+        Ok(DescriptionDraftOutcome::NotAutomatable(reason)) => {
+            Ok(Json(FixFromRunResponse::NotAutomatable {
+                automatable: false,
+                reason,
+            }))
+        }
+        // A read the drafter could not proceed without — a genuine 500.
+        Err(err) => Err(ApiError(err).into_response()),
+    }
+}
+
+/// `POST …/workflows/{wid}/fix-from-run` on a build with no harness (issue #840,
+/// PR-3). The copilot needs the embedded brain, so it answers `not_wired` — the
+/// same 404 the draft route's default-build arm gives.
+#[cfg(not(feature = "openhuman"))]
+async fn fix_from_run(
+    company: ScopedCompany,
+    Path(WorkflowPath { wid }): Path<WorkflowPath>,
+    Json(body): Json<FixFromRunBody>,
+) -> Result<Json<FixFromRunResponse>, Response> {
+    let _ = (&company, &wid, &body.run_id, &body.error_hint);
+    Err(super::not_wired("the workflow copilot"))
+}
+
 /// The `GET …/workflows/tool-slugs` answer (issue #783): the wired, granted
 /// `tool_call` slugs the per-workflow copilot may ground a proposal on.
 #[derive(Debug, Serialize)]
@@ -3077,6 +3339,103 @@ mod tests {
                 ),
                 "gap response carries a known code, got: {body}"
             );
+        }
+
+        /// Issue #840 (PR-3): with a real body but no builder wired, the
+        /// fix-from-run route classifies the gap exactly as the draft + run routes
+        /// do — a `not_wired` 404 or a `restart_required` / `inference_required`
+        /// 409 — on **both** scope forms. Also proves the sub-resource route is
+        /// wired (a route-miss would be a bare 404 with no `code`). The hosted test
+        /// runtime wires no harness, so this is the gap path.
+        #[tokio::test]
+        async fn fix_from_run_reports_a_builder_gap_on_both_scope_forms() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            for uri in [
+                "/api/v1/company/workflows/weekly-digest/fix-from-run",
+                "/api/v1/companies/acme/workflows/weekly-digest/fix-from-run",
+            ] {
+                let response = router(state.clone())
+                    .oneshot(request(
+                        "POST",
+                        uri,
+                        Some(serde_json::json!({
+                            "runId": "run-1",
+                            "errorHint": "it failed at the search node"
+                        })),
+                    ))
+                    .await
+                    .unwrap();
+                let status = response.status();
+                assert!(
+                    status == StatusCode::NOT_FOUND || status == StatusCode::CONFLICT,
+                    "a builder gap is a 404/409 on {uri}, got {status}"
+                );
+                let body = json_body(response).await;
+                let code = body["code"].as_str().unwrap_or_default();
+                assert!(
+                    matches!(
+                        code,
+                        "not_wired" | "restart_required" | "inference_required"
+                    ),
+                    "gap response carries a known code on {uri}, got: {body}"
+                );
+            }
+        }
+
+        /// Issue #840 (PR-3): the fix route's error-resolution matrix — a journaled
+        /// error wins (carrying its failing node), a clean/absent run falls back to
+        /// the caller's hint, and a clean run with no usable hint is nothing to fix
+        /// from (a 400). Unit-tested on the pure helper so the whole matrix is
+        /// pinned without a running host.
+        #[cfg(feature = "openhuman")]
+        #[test]
+        fn fix_error_resolution_prefers_journal_then_hint_then_nothing() {
+            use super::super::{JournaledFailure, resolve_fix_error};
+            // A journaled error wins, carrying the failing node id.
+            assert_eq!(
+                resolve_fix_error(
+                    Some(JournaledFailure {
+                        error: Some("boom".to_string()),
+                        failed_node_id: Some("n1".to_string()),
+                    }),
+                    Some("hint".to_string()),
+                ),
+                Some(("boom".to_string(), Some("n1".to_string())))
+            );
+            // A run that finished CLEAN (no error) falls back to the hint.
+            assert_eq!(
+                resolve_fix_error(
+                    Some(JournaledFailure {
+                        error: None,
+                        failed_node_id: None,
+                    }),
+                    Some("hint".to_string()),
+                ),
+                Some(("hint".to_string(), None))
+            );
+            // No finish for this run id at all → the hint is the only source.
+            assert_eq!(
+                resolve_fix_error(None, Some("hint".to_string())),
+                Some(("hint".to_string(), None))
+            );
+            // A clean run and no hint → nothing to fix from.
+            assert_eq!(
+                resolve_fix_error(
+                    Some(JournaledFailure {
+                        error: None,
+                        failed_node_id: None,
+                    }),
+                    None
+                ),
+                None
+            );
+            // No run and no hint → nothing to fix from.
+            assert_eq!(resolve_fix_error(None, None), None);
+            // A whitespace-only hint is not usable.
+            assert_eq!(resolve_fix_error(None, Some("   ".to_string())), None);
         }
 
         /// Issue #783: the per-workflow copilot's tool-grounding read answers
