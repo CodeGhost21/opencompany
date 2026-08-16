@@ -94,7 +94,8 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
 | [runtime/orchestration/README.md](runtime/orchestration/README.md) | Making a many-agent company converge: the three collapses, the three principles, phasing |
 | [runtime/orchestration/memory.md](runtime/orchestration/memory.md) | One memory contract: `MemoryProvider` replaces three ports, and the host decorator that keeps tenants apart |
-| [runtime/orchestration/alignment.md](runtime/orchestration/alignment.md) | Context routing, the budgeted brief, the derived ledgers, the assertion board |
+| [runtime/orchestration/context-routing.md](runtime/orchestration/context-routing.md) | Which workspace documents reach which role's prompt, the load-bearing exclusions, and assembly order |
+| [runtime/orchestration/alignment.md](runtime/orchestration/alignment.md) | The budgeted brief, the derived ledgers, the assertion board |
 | [runtime/orchestration/demand-ledger.md](runtime/orchestration/demand-ledger.md) | The demand ledger as the work model (normative): dedup, closure by evidence, the column projection |
 | [runtime/orchestration/loop.md](runtime/orchestration/loop.md) | The attempt loop: the evaluation fan-out, judge vs verify, routing, and the mandatory parity sweep |
 | [runtime/orchestration/delegation.md](runtime/orchestration/delegation.md) | The join primitive, operator directives, and collapsing desks into workflows |

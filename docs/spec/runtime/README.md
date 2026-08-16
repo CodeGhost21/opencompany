@@ -59,8 +59,11 @@ Supporting docs:
     `ContextStore` and `FactStore` kept as typed facades over the one
     provider rather than as three independent backends, and why the host
     decorator is the only safe constructor
-  - [orchestration/alignment.md](orchestration/alignment.md) — what each role is
-    told, and the ledgers that are derived rather than asserted
+  - [orchestration/context-routing.md](orchestration/context-routing.md) — what
+    each role is told, why the exclusions matter as much as the entries, and
+    why assembly order is a prompt-cache decision
+  - [orchestration/alignment.md](orchestration/alignment.md) — the budgeted
+    brief, and the ledgers that are derived rather than asserted
   - [orchestration/demand-ledger.md](orchestration/demand-ledger.md) — work
     stated by whoever is blocked, deduped, and closed by evidence that cites it
     (normative)
