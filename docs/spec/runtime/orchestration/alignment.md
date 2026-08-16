@@ -455,6 +455,20 @@ a brief explaining what the board is for.
   Each fixture MUST configure the forbidden document explicitly (not rely on
   a default that happens to omit it) so the assertion is about enforcement,
   not about a default table nobody tried to override.
+- **The same three negative fixtures again, via the workspace overlay** — an
+  overlay whose *content* inlines the assertion board, the scratch, or the
+  claim ledger MUST be refused for the role each is excluded from, exactly as a
+  `context` entry naming them is.
+  These are separate fixtures rather than a note on the ones above, because
+  they exercise a different code path: the `context` fixtures prove the routing
+  layer refuses a declared *path*, and these prove the assembly step inspects
+  *content* it did not route. A suite that only covered the first would pass
+  against an implementation in which the overlay is the documented bypass of
+  every exclusion.
+- **Role classification cannot be changed by renaming** — a company that edits
+  a teammate's `role` string does not gain or lose an exclusion. The class comes
+  from the runtime's construction site or an explicit declaration, never from
+  matching the title.
 - The brief clamp cuts on a character boundary, keeps the leading portion, and
   appends the marker.
 - Assembly order puts the shared policy first, and no per-run value precedes it.
