@@ -131,6 +131,26 @@ enum Verdict { Proceed, Steer, Restart }
 enum Route   { Answered, Reported, Retry, Diversify, Blocked }
 ```
 
+**The conservative default for each:**
+
+- `Verdict::parse` defaults to **`Restart`**. An unparsable judge verdict means
+  the loop has no read on whether the attempt was conducted well, so the safe
+  assumption is the worse one: discard the direction and steer fresh, rather
+  than silently defaulting to `Proceed` and inheriting an approach nobody
+  actually endorsed.
+- `Route::parse` defaults to **`Blocked`**. An unparsable route means the loop
+  has no read on whether the work is done, so it MUST NOT guess `Answered` or
+  `Reported` — either would risk closing a demand nothing verified — and it
+  MUST NOT silently guess `Retry` or `Diversify` either, which would spend
+  budget on a state nobody chose. `Blocked` is the one route that does
+  neither: it halts and surfaces the parse failure rather than acting on a
+  value the loop could not read.
+
+Both defaults MUST be covered by the [parity sweep](#two-engines-one-policy)
+alongside every reachable named state, so a translation bug that produces an
+unrecognized wire value is caught by the same test that catches a routing
+disagreement.
+
 The ladder is ordered, and order is the policy:
 
 1. `blocked` — a hard prerequisite is missing or a provider is refusing
