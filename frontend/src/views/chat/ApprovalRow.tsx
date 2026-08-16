@@ -51,6 +51,7 @@ import {
   approvalIcon,
 } from "@/components/approval-card";
 import { Button } from "@/components/ui/button";
+import { approvedLine } from "@/lib/approval-wording";
 import { approvalAction, payloadLines } from "@/lib/language";
 import { cn } from "@/lib/utils";
 
@@ -59,8 +60,15 @@ function settledLabel(verdict: Verdict): string {
   // Mirrors the wording the Approvals page files into the transcript, and for
   // the same reason: approving is not "done", it hands the agent a single-use
   // grant and re-dispatches it. A decline IS terminal.
+  //
+  // `undefined` rather than a count, because this card is not the surface that
+  // made the request — the verdict reaches it through the witnessed map, which
+  // carries no `stillAwaiting`. It therefore cannot know whether this decision
+  // released the turn, and issue #561 is precisely about not guessing: on a
+  // turn that parked four calls, three of four approves release nothing, and
+  // this sentence claimed otherwise for every one of them.
   return verdict === "approve"
-    ? "Approved — the agent is completing the action"
+    ? approvedLine(undefined)
     : "Declined — recorded, and nothing will run";
 }
 
