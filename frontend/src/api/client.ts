@@ -100,10 +100,15 @@ export class OpenCompanyClient {
   /** Called on any 401, so the app can drop to the login view. */
   onUnauthorized: (() => void) | null = null;
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
-    Object.assign(headers, this.authHeaders());
+    Object.assign(headers, this.authHeaders(), extraHeaders);
 
     let res: TransportResponse;
     try {
