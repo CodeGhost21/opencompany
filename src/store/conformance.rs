@@ -309,6 +309,15 @@ pub async fn assert_isolation_by_company(
         !loaded.workflow_enabled("digest"),
         "the paused workflow id did not survive save/load"
     );
+    // The per-desk tool ceilings survive too. A backend that dropped this would
+    // silently widen every console-narrowed department back to the company's
+    // full grant on the next restart — a capability regression whose only
+    // symptom is an agent succeeding at something it had been denied.
+    assert_eq!(
+        loaded.effective_desk_tools("studio"),
+        vec!["docs.*".to_string(), "web".to_string()],
+        "overlay_desk_tools did not survive save/load"
+    );
     assert_eq!(
         events
             .read_from(&alpha, EventSeq::new(0), usize::MAX)
