@@ -1170,6 +1170,13 @@ async fn async_main() -> Result<()> {
             })
             .with_cors(opencompany::server::cors::CorsConfig::from_env()?)
             .with_home(home.clone())
+            // `setup_complete` above, and every `config.toml` read/write the
+            // first-run setup flow does, resolve against `data_root` — not
+            // `home`, which an explicit `--home` can point elsewhere (see
+            // `home_divergence_warning`). Recording it here is what lets
+            // `server::setup` resolve the same file rather than its own
+            // `state.home()`.
+            .with_config_root(data_root.clone())
             .with_setup_complete(setup_complete)
             .with_quota(
                 env_usize("OPENCOMPANY_MAX_COMPANIES"),
