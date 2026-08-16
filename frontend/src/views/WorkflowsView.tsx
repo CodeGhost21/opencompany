@@ -30,6 +30,7 @@ import { toast } from "sonner";
 import {
   cancelWorkflowRun,
   deleteWorkflow,
+  fixWorkflowFromRun,
   getWorkflow,
   isDetached,
   isDryRun,
@@ -37,6 +38,7 @@ import {
   listWorkflows,
   runWorkflow,
   setWorkflowEnabled,
+  type PrefilledDraft,
   type WorkflowGraph,
   type WorkflowRunOutcome,
   type WorkflowRunOutputRecord,
@@ -226,6 +228,14 @@ export function WorkflowsView({
   // state from `createOpen` rather than a mode flag, so the create path keeps
   // working exactly as it did and neither can be half-open.
   const [editOpen, setEditOpen] = useState(false);
+  // Issue #840 (PR-3): a copilot-corrected graph to open the edit dialog on. When
+  // set, the edit dialog hydrates from this correction (keeping `graph`'s version
+  // token) instead of from the saved graph, so Save writes a new version.
+  const [prefilledDraft, setPrefilledDraft] = useState<PrefilledDraft | null>(null);
+  // The failed run whose copilot fix is in flight, so its history row spins.
+  const [fixingRunSeq, setFixingRunSeq] = useState<number | null>(null);
+  // A run the copilot judged un-fixable, shown inline under that run's row.
+  const [fixReason, setFixReason] = useState<{ seq: number; reason: string } | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   // Issue #228: what past runs did, read back from the host's journal. This is
   // the half that survives a reload — before it, a manual run's delivery rows
@@ -1008,6 +1018,50 @@ export function WorkflowsView({
     setSelectedId(created.id);
     toast.success("Workflow created.");
   }, []);
+
+  // Issue #840 (PR-3): correct a failed run's workflow with the copilot. The
+  // affordance lives on the journaled failed run (keyed by runId) — the one
+  // surface that always carries the failure. On a corrected graph it opens the
+  // edit dialog hydrated from the correction (which keeps the same id, so Save is
+  // a new version); on an un-fixable failure it shows the reason inline under the
+  // run. The failed run's workflow is the selected one (the history is per
+  // selection), so the edit dialog's `graph` supplies the version token.
+  const handleFixWithCopilot = useCallback(
+    async (run: WorkflowRunOutcome) => {
+      if (!run.runId) return;
+      setFixingRunSeq(run.seq);
+      setFixReason(null);
+      try {
+        const res = await fixWorkflowFromRun(client, company, run.workflowId, {
+          runId: run.runId,
+          errorHint: run.error,
+        });
+        if (res.automatable && res.workflow) {
+          setPrefilledDraft({
+            summary: res.summary,
+            workflow: res.workflow,
+            notes: res.notes,
+            readiness: res.readiness,
+          });
+          setEditOpen(true);
+        } else {
+          setFixReason({
+            seq: run.seq,
+            reason: res.reason ?? "the copilot could not correct it.",
+          });
+        }
+      } catch (e) {
+        // A capability gap (404/409) or a network failure — surface it and leave
+        // the run row untouched; the operator can still edit by hand.
+        toast.error(
+          e instanceof Error ? e.message : "Couldn't reach the workflow copilot.",
+        );
+      } finally {
+        setFixingRunSeq(null);
+      }
+    },
+    [client, company],
+  );
 
   // Issue #371: the live canvas state, FOLDED from the frame window rather than
   // accumulated frame by frame.
@@ -1849,6 +1903,9 @@ export function WorkflowsView({
             // toggle rather than a one-way trip into overlay mode.
             setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
           }
+          onFixWithCopilot={handleFixWithCopilot}
+          fixingRunSeq={fixingRunSeq}
+          fixReason={fixReason}
         />
       )}
 
@@ -1873,10 +1930,17 @@ export function WorkflowsView({
         client={client}
         company={company}
         open={editOpen && graph !== null}
-        onOpenChange={setEditOpen}
+        onOpenChange={(o) => {
+          setEditOpen(o);
+          // Issue #840 (PR-3): a copilot correction is single-use — dropping it on
+          // close means the next plain Edit hydrates from the saved graph, not a
+          // stale correction.
+          if (!o) setPrefilledDraft(null);
+        }}
         workflow={graph}
         onSaved={handleSaved}
         onConflict={setConflict}
+        prefilledDraft={prefilledDraft}
       />
     </div>
   );
