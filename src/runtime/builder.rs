@@ -2485,6 +2485,7 @@ impl RuntimeBuilder {
                 overlay_workflows,
                 overlay_budgets,
                 overlay_policy,
+                overlay_desk_tools,
                 disabled_workflows,
                 template_provenance,
             })
