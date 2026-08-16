@@ -344,7 +344,14 @@ meter and caps a dispatched card does.
 
 ## Verification
 
-- Two agents stating the same need produce one demand.
+- Two agents stating the same need, byte-for-byte, produce one demand (id
+  equality via `DemandId` canonicalization) — and the canonicalization test
+  vectors pass.
+- Two agents stating the same need in different words produce one demand
+  (semantic dedup against open demands' `need`/`falsifies`).
+- A demand whose `DemandId` names an existing demand in any state but
+  `dropped` is refused as a duplicate and returns the existing demand,
+  including when that state is `claimed` or `blocked`.
 - A demand the claim ledger already answers is refused, and the refusal carries
   the claims.
 - A demand with an empty `falsifies` is refused with the reason.
