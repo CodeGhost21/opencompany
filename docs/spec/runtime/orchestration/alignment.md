@@ -379,3 +379,7 @@ a brief explaining what the board is for.
 - Assembly order puts the shared policy first, and no per-run value precedes it.
 - An agent cannot post to the board as another agent.
 - No code path exists from a board post to a claim.
+- A board post over the size cap is refused at the tool boundary, never
+  written truncated or split.
+- The curator step for one attempt completes before the loop starts the next
+  attempt against the same demand.
