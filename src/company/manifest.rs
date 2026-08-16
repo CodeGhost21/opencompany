@@ -667,7 +667,10 @@ mod tests {
         let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
         let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["ceo", "writer"]);
-        assert_eq!(orchestrator_id(&manifest.agents), Some("ceo"));
+        assert_eq!(
+            super::super::orchestrator_id(&manifest.agents),
+            Some("ceo")
+        );
     }
 
     /// Declaring both forms is refused rather than resolved by precedence:
