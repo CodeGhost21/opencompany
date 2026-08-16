@@ -48,6 +48,32 @@ Supporting docs:
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
   call per card, the host-gathered evidence pack, the prerequisite verdict
   taxonomy, and the no-run/no-lock concurrency argument
+- [orchestration/](orchestration/README.md) — how a many-agent company
+  *converges*: per-role context routing, a budgeted shared brief, code-derived
+  ledgers, the demand ledger that replaces the board, the attempt loop, the join
+  primitive, and containerised code tools. Also the three entities this removes
+  — the kanban board as the work model, desks, and two of the three memory
+  backends
+  - [orchestration/memory.md](orchestration/memory.md) — `MemoryProvider`
+    replacing the bespoke `CortexClient` backend, with `MemoryStore`,
+    `ContextStore` and `FactStore` kept as typed facades over the one
+    provider rather than as three independent backends, and why the host
+    decorator is the only safe constructor
+  - [orchestration/context-routing.md](orchestration/context-routing.md) — what
+    each role is told, why the exclusions matter as much as the entries, and
+    why assembly order is a prompt-cache decision
+  - [orchestration/alignment.md](orchestration/alignment.md) — the budgeted
+    brief, and the ledgers that are derived rather than asserted
+  - [orchestration/demand-ledger.md](orchestration/demand-ledger.md) — work
+    stated by whoever is blocked, deduped, and closed by evidence that cites it
+    (normative)
+  - [orchestration/loop.md](orchestration/loop.md) — attempt → evaluate → route,
+    and the parity sweep that holds the Rust ladder and its jq translation
+    together
+  - [orchestration/delegation.md](orchestration/delegation.md) — awaiting
+    delegated work, directing a run in flight, and desks as workflows
+  - [orchestration/sandbox.md](orchestration/sandbox.md) — the container
+    posture, write-path placement a shell cannot bypass, and the code library
 - [workflow-build.md](workflow-build.md) — the plan → workflow bridge: a
   `workflow`-deliverable card builds a proposed graph that lands In Review for
   approval before it exists, then apply/reject; host-authority conversion and

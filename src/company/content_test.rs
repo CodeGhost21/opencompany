@@ -100,12 +100,13 @@ fn every_company_skill_and_workspace_parses() {
 /// Whether a template belongs here is therefore a judgement about its charter —
 /// research, editorial, marketing, legal, product engineering — recorded here
 /// because it cannot be derived from content.
-const SEARCH_GRANTED_COMPANIES: [&str; 7] = [
+const SEARCH_GRANTED_COMPANIES: [&str; 8] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_research_lab",
     "agentic_software_company",
     "signals_opportunity_studio",
 ];
@@ -144,7 +145,11 @@ const SEARCH_UNGRANTED_COMPANIES: [&str; 12] = [
 
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
-/// excluded: it overrides the default down to a research-only belt on purpose.
+/// excluded: it overrides the default down to a research-only belt on purpose,
+/// and `agentic_research_lab` is excluded for the same reason — its belt is
+/// `["*", "search"]`, dropping `media` and `composio`, because a research lab
+/// has no use for image generation or third-party OAuth side effects and both
+/// are opt-in spend.
 const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
