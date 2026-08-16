@@ -13,8 +13,8 @@ use crate::ports::{decode_wallet_address, normalize_email};
 
 use super::types::{
     AUTH_MODES, BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, GATEABLE_NAMESPACES,
-    KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, TIERS,
-    TOOL_PROVIDERS,
+    KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES,
+    PROMPT_CLASSES, TIERS, TOOL_PROVIDERS,
 };
 
 /// The `delegates_to` entry that means "every desk this company has".
