@@ -1028,6 +1028,83 @@ members = ["writer", "ceo"]
         );
     }
 
+    /// With no desk declaring a ceiling — the shape of every company written
+    /// before desks could scope tools — the desk row is empty and the effective
+    /// grant is unchanged. This is the case that must not regress for anybody.
+    #[tokio::test]
+    async fn a_company_with_no_desk_ceilings_reports_an_empty_desk_row() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        for agent in ["ceo", "writer", "hermit"] {
+            let (_, body) = get_agent(&state, agent).await;
+            assert!(
+                strings(&body["tools"]["deskAllow"]).is_empty(),
+                "{agent}: {body}"
+            );
+        }
+    }
+
+    /// A desk ceiling narrows every member of that desk, and only that desk's
+    /// members — the department scoping the feature exists for.
+    #[tokio::test]
+    async fn a_desk_ceiling_narrows_its_members_and_nobody_else() {
+        let scoped = ROSTER.replace(
+            "members = [\"writer\", \"ceo\"]",
+            "members = [\"writer\", \"ceo\"]\ntools = [\"workspace.read\"]",
+        );
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), &scoped).await;
+
+        // `writer` asks for nothing, so before the desk it held the whole
+        // company allow-list. The desk cuts it to one grant.
+        let (_, writer) = get_agent(&state, "writer").await;
+        assert_eq!(
+            strings(&writer["tools"]["deskAllow"]),
+            vec!["workspace.read"],
+            "{writer}"
+        );
+        assert_eq!(
+            strings(&writer["tools"]["effective"]),
+            vec!["workspace.read"],
+            "the desk ceiling must bite on a member that requested nothing: {writer}"
+        );
+
+        // `hermit` sits on no desk, so it is untouched and still holds the
+        // company grant. A ceiling that leaked to non-members would be a scoping
+        // bug invisible from the desk's own screen.
+        let (_, hermit) = get_agent(&state, "hermit").await;
+        assert!(strings(&hermit["tools"]["deskAllow"]).is_empty(), "{hermit}");
+        assert_eq!(
+            strings(&hermit["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "{hermit}"
+        );
+    }
+
+    /// The three rows the console renders must shrink monotonically, or the card
+    /// would show a "ceiling" that is not one.
+    #[tokio::test]
+    async fn a_desk_ceiling_can_never_widen_past_the_company_grant() {
+        // The desk names a grant the company never allowed.
+        let scoped = ROSTER.replace(
+            "members = [\"writer\", \"ceo\"]",
+            "members = [\"writer\", \"ceo\"]\ntools = [\"shell\", \"workspace.read\"]",
+        );
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), &scoped).await;
+
+        let (_, writer) = get_agent(&state, "writer").await;
+        assert!(
+            !strings(&writer["tools"]["deskAllow"]).contains(&"shell".to_string()),
+            "a desk cannot grant what the company withheld: {writer}"
+        );
+        assert!(
+            !strings(&writer["tools"]["effective"]).contains(&"shell".to_string()),
+            "{writer}"
+        );
+    }
+
     /// A roster that tags nobody still has an orchestrator: the first declared
     /// agent. A console that read `tier` alone would call every teammate on such
     /// a company a worker, and be wrong about all of them.
