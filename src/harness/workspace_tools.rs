@@ -2494,6 +2494,11 @@ mod tests {
     // two: `workspace_read` wrote five distinct sentences and the step renderer
     // replaced every one of them with the classifier's catch-all.
 
+    /// The catch-all `ClassifiedFailure::Unknown` renders, from
+    /// `vendor/openhuman/src/openhuman/tools/status/ops.rs`. Every one of
+    /// `workspace_read`'s five failure exits used to collapse into this.
+    const GENERIC_CAUSE: &str = "Something went wrong with this action.";
+
     /// An obviously-fake absolute host path, in the shape
     /// [`crate::error::OpenCompanyError::StoreIo`] embeds. Planted so a leak is
     /// detectable by substring rather than by eye.
@@ -2654,6 +2659,132 @@ mod tests {
                 "{name} withheld the error without naming its code: {written}"
             );
         }
+    }
+
+    /// Assert the step shows the tool's OWN sentence: not the catch-all, and a
+    /// genuine prefix of what the tool wrote rather than a restatement of it.
+    #[track_caller]
+    fn assert_own_sentence(outcome: &ToolResult, needle: &str) {
+        assert!(outcome.is_error, "this exit is supposed to be a failure");
+        let written = outcome.output();
+        let shown = step_result(WORKSPACE_READ_TOOL, outcome)
+            .expect("a failed step must say what came back");
+
+        assert_ne!(
+            shown, GENERIC_CAUSE,
+            "the tool wrote `{written}` and the timeline threw it away"
+        );
+        assert!(
+            shown.contains(needle),
+            "expected `{needle}` in the step result, got `{shown}`"
+        );
+        // `failure_result` bounds the message at `RESULT_MAX` and marks a cut
+        // with `…`, so equality only holds for the short ones. What must hold
+        // for all five is that the shown text came out of the tool verbatim.
+        let unbounded = shown.trim_end_matches('…');
+        assert!(
+            written.starts_with(unbounded),
+            "the step must surface the tool's own text, not a paraphrase.\n\
+             tool wrote: {written}\n\
+             step shows: {shown}"
+        );
+    }
+
+    /// Issue #887's deliverable, exit by exit.
+    ///
+    /// `workspace_read` has five ways to fail and writes a different, actionable
+    /// sentence for each. Before this, all five arrived at the operator as
+    /// [`GENERIC_CAUSE`] — which is why the live turn that opened the issue could
+    /// not be diagnosed at all: the message naming the cause was the thing being
+    /// discarded.
+    #[tokio::test]
+    async fn every_read_failure_reaches_the_timeline_as_its_own_sentence() {
+        let id = CompanyId::new("acme");
+
+        // 1. The index read failed — nothing about the tree is knowable.
+        let store: Arc<dyn WorkspaceStore> =
+            Arc::new(FixedTree::failing_tree(small_tree(), planted_store_io));
+        let tool = WorkspaceReadTool::new(ws(store, id.clone()));
+        let outcome = tool
+            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .await
+            .unwrap();
+        assert_own_sentence(&outcome, "Could not read the company workspace");
+
+        // 2. The path resolves to nothing.
+        let (_dir, store) = seeded("acme").await;
+        let tool = WorkspaceReadTool::new(ws(store, id.clone()));
+        let outcome = tool
+            .execute(json!({"path": "Nope/missing.md"}))
+            .await
+            .unwrap();
+        assert_own_sentence(&outcome, "No workspace note matches");
+
+        // 3. The target is a folder, and the useful next call is a listing.
+        let (_dir, store) = seeded("acme").await;
+        let tool = WorkspaceReadTool::new(ws(store, id.clone()));
+        let outcome = tool.execute(json!({"path": "Standards"})).await.unwrap();
+        assert_own_sentence(&outcome, "is a folder, not a note");
+
+        // 4. The note was deleted between the tree read and the body read.
+        let store: Arc<dyn WorkspaceStore> =
+            Arc::new(FixedTree::failing_read(small_tree(), ReadFault::Vanished));
+        let tool = WorkspaceReadTool::new(ws(store, id.clone()));
+        let outcome = tool
+            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .await
+            .unwrap();
+        assert_own_sentence(&outcome, "was removed while you were reading it");
+
+        // 5. The body read itself failed at the store.
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree::failing_read(
+            small_tree(),
+            ReadFault::Failed(planted_store_io),
+        ));
+        let tool = WorkspaceReadTool::new(ws(store, id));
+        let outcome = tool
+            .execute(json!({"path": "Standards/Engineering standards.md"}))
+            .await
+            .unwrap();
+        assert_own_sentence(
+            &outcome,
+            "Could not read `Standards/Engineering standards.md`",
+        );
+    }
+
+    /// The one signal that tells the two candidate root causes apart.
+    ///
+    /// A duplicated ancestor makes a path ambiguous. `workspace_read` refuses —
+    /// picking one and silently reading it is how the wrong operator-owned note
+    /// gets quoted — while `workspace_list` still lists both, because listing
+    /// does not have to choose. That asymmetry (read fails, list succeeds) is
+    /// exactly the shape the live turn showed, so a refactor that "helpfully"
+    /// resolved the ambiguity would erase the evidence.
+    #[tokio::test]
+    async fn an_ambiguous_path_refuses_the_read_while_the_listing_still_succeeds() {
+        let nodes = vec![
+            file("n-one", "Charter.md", None),
+            file("n-two", "Charter.md", None),
+        ];
+        let id = CompanyId::new("acme");
+
+        let read = WorkspaceReadTool::new(ws(Arc::new(FixedTree::new(nodes.clone())), id.clone()));
+        let outcome = read.execute(json!({"path": "Charter.md"})).await.unwrap();
+        assert_own_sentence(&outcome, "is ambiguous");
+        let shown = step_result(WORKSPACE_READ_TOOL, &outcome).unwrap();
+        assert!(
+            shown.contains("n-one") && shown.contains("n-two"),
+            "the refusal must name the ids so the agent can re-issue by id: {shown}"
+        );
+
+        let list = WorkspaceListTool::new(ws(Arc::new(FixedTree::new(nodes)), id));
+        let listing = list.execute(json!({})).await.unwrap();
+        assert!(
+            !listing.is_error,
+            "listing does not have to choose, so it must not fail: {}",
+            text(&listing)
+        );
+        assert!(text(&listing).contains("Charter.md"));
     }
 
     // -- workspace_search (issue #607) ---------------------------------------
@@ -3172,6 +3303,9 @@ mod tests {
     /// How a [`FixedTree`] answers the body read, when a test asks it to fail.
     #[derive(Clone, Copy)]
     pub(super) enum ReadFault {
+        /// The node was there in the tree and is gone by the time the body read
+        /// runs — raced with an operator delete.
+        Vanished,
         /// The store itself failed. A factory rather than a value because
         /// [`crate::error::OpenCompanyError`] is not `Clone` (it carries a
         /// `std::io::Error`).
@@ -3240,6 +3374,7 @@ mod tests {
         ) -> crate::Result<Option<(WorkspaceNode, String)>> {
             match self.read_fault {
                 None => unreachable!("the listing never reads a body"),
+                Some(ReadFault::Vanished) => Ok(None),
                 Some(ReadFault::Failed(make)) => Err(make()),
             }
         }
