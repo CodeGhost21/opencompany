@@ -22,7 +22,12 @@ use crate::company::paypal::PaypalEnvironment;
 use crate::error::{OpenCompanyError, Result};
 
 /// A cached bearer token and when it stops being usable.
-#[derive(Clone, Debug)]
+// No `Debug`. This holds a live bearer token, and a derived `Debug` prints it
+// in full — one `{:?}` in a log line or a panic message is the whole
+// credential. `PaypalClient` already implements `Debug` by hand and omits this
+// field for the same reason; deriving it here would reopen the hole one level
+// down.
+#[derive(Clone)]
 struct CachedToken {
     token: String,
     /// When to stop trusting it. Deliberately earlier than PayPal's own expiry
@@ -194,12 +199,12 @@ impl PaypalClient {
         // Re-fetch before PayPal's own expiry rather than at it: a token that
         // expires mid-flight fails the call that carried it, and a minute of
         // margin costs nothing against a nine-hour lifetime.
-        let lifetime = parsed
-            .get("expires_in")
-            .and_then(Value::as_u64)
-            .unwrap_or(300)
-            .saturating_sub(60)
-            .max(30);
+        let lifetime = token_lifetime(
+            parsed
+                .get("expires_in")
+                .and_then(Value::as_u64)
+                .unwrap_or(300),
+        );
         *slot = Some(CachedToken {
             token: token.clone(),
             good_until: Instant::now() + Duration::from_secs(lifetime),
@@ -259,9 +264,42 @@ impl PaypalClient {
     }
 }
 
+/// How long to trust a token PayPal says lasts `expires_in` seconds.
+///
+/// Re-fetch before PayPal's own expiry rather than at it: a token that expires
+/// mid-flight fails the call that carried it, and a minute of margin costs
+/// nothing against a nine-hour lifetime.
+///
+/// The floor must not outlive the token it is a floor for. On a ten-second
+/// `expires_in`, `saturating_sub(60)` is 0 and a bare `.max(30)` would cache a
+/// credential three times longer than it is valid — handing out a dead token,
+/// which is the exact failure the margin exists to prevent.
+fn token_lifetime(expires_in: u64) -> u64 {
+    expires_in.saturating_sub(60).max(30).min(expires_in)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cached token must never outlive the grant it came from. The margin is
+    /// a subtraction with a floor, and a floor applied to a grant shorter than
+    /// itself inverts the whole point of the margin.
+    #[test]
+    fn a_token_is_never_trusted_past_its_own_expiry() {
+        // The ordinary case: nine hours, a minute of margin.
+        assert_eq!(token_lifetime(32400), 32340);
+        // The margin still applies well above the floor.
+        assert_eq!(token_lifetime(300), 240);
+        // Below the margin the floor would run past expiry — clamped instead.
+        for expires_in in [0, 1, 10, 30, 59, 60, 89] {
+            assert!(
+                token_lifetime(expires_in) <= expires_in,
+                "a {expires_in}s grant was trusted for {}s",
+                token_lifetime(expires_in),
+            );
+        }
+    }
 
     fn config() -> PaypalConfig {
         PaypalConfig {
