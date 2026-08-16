@@ -319,8 +319,13 @@ a brief explaining what the board is for.
 - A claim block missing `id` or `statement` is reported, never dropped.
 - A thread resting on an absent claim id, and a blocked thread with no blocker,
   are both reported.
-- The routing table gives each role exactly its declared documents and nothing
-  else — asserted per role, not sampled.
+- The routing table gives each role exactly its declared `context` documents
+  and nothing else from the routed-workspace-documents section of the
+  assembled prompt — asserted per role, not sampled. This is a claim about
+  `role_context`'s output specifically: it does not cover the shared method
+  policy or the boundary sentence, which are universal and not declared per
+  role, or the workspace overlay, which is a company-owned file outside
+  `context` entirely (see [assembly order](#assembly-order-is-a-cache-decision)).
 - The brief clamp cuts on a character boundary, keeps the leading portion, and
   appends the marker.
 - Assembly order puts the shared policy first, and no per-run value precedes it.
