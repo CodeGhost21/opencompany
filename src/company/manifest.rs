@@ -74,6 +74,7 @@ impl CompanyManifest {
     ///
     /// `path` may be a manifest file or a directory containing one. Validation
     /// collects every problem and reports them together.
+    ///
     /// When `path` resolves to a bundle carrying an `agents/` directory, the
     /// roster is read from those per-teammate files instead of from
     /// `[[agent]]` — see [`agent_file`](super::agent_file).
