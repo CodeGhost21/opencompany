@@ -44,7 +44,21 @@ export class BrowserTransport implements Transport {
     };
   }
 
-  subscribe(url: string, handlers: StreamHandlers): () => void {
+  subscribe(
+    url: string,
+    handlers: StreamHandlers,
+    headers?: Record<string, string>,
+  ): () => void {
+    // A session carried in a header cannot ride an `EventSource` — the API has
+    // no way to set one. Falling through to it anyway would open the stream
+    // *anonymously*: the host answers 401, the console quietly degrades to its
+    // poll, and a hub console would render as a company where nothing ever
+    // happens rather than as one it is not signed in to. So a credentialed
+    // stream takes the fetch lane instead.
+    if (headers && Object.keys(headers).length > 0) {
+      return streamWithFetch(url, handlers, headers);
+    }
+
     // `EventSource` throws in an environment that has none, and on a malformed
     // URL. Both mean "no stream here"; the caller falls back to its poll.
     const source = new EventSource(url, { withCredentials: true });
