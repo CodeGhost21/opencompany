@@ -48,15 +48,12 @@ context = ["GOAL.md", "INDEX.md", "CLAIMS.md"]
 An omitted `context` key takes a per-tier default. `context = []` means the role
 gets the universal document and nothing else.
 
-**Representation note.** `Agent.context` is presently `Vec<String>` with
-`#[serde(default)]`, so an omitted key and an explicit `context = []` both
-deserialize to an empty vector — the manifest layer cannot yet tell them
-apart. The field is inert until this routing layer lands (nothing reads it
-today), so the distinction above is a requirement on the eventual reader, not
-a claim about current behavior: when `role_context` starts consuming this
-field, it MUST distinguish "key absent" from "key present and empty" (for
-example by switching the type to `Option<Vec<String>>`), because until then
-every company gets the per-tier default and no company can opt out of it.
+**Representation note.** `Agent.context` is `Option<Vec<String>>`, not a
+defaulted `Vec<String>`: `None` is an omitted key, `Some(vec![])` is an
+explicit `context = []`, and only that split lets the manifest layer carry
+the distinction above at all. The field is otherwise inert until the routing
+layer lands — `role_context` does not exist yet, so nothing reads either
+variant today.
 
 ### Exclusions are load-bearing
 
