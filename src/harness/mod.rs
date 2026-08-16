@@ -2312,10 +2312,18 @@ fn repo_binding_fingerprint(bindings: &[crate::runtime::repo_manager::types::Rep
 ///
 /// `skill_deltas` are the company's operator skill overrides (fetched once by
 /// the async caller); every agent folds them into its effective skill set.
+///
+/// `routed_context` maps an agent id to the workspace documents routed into its
+/// system prompt, resolved by the async caller for the same reason
+/// `skill_deltas` is — this function is synchronous and the `WorkspaceStore` is
+/// not. An agent absent from the map gets no routed documents, which is the
+/// correct reading for a company with no workspace store wired: fail closed to
+/// the pre-routing prompt rather than to a half-populated one.
 pub(crate) fn build_roster(
     company: &CompanyRecord,
     deps: &HarnessDeps,
     skill_deltas: &[SkillState],
+    routed_context: &HashMap<String, Vec<(String, String)>>,
 ) -> crate::Result<Vec<Arc<CompanyAgent>>> {
     // Issue #562: the policy in force, not the one the manifest shipped with —
     // the same relationship `effective_budget` (issue #343) has to the manifest
