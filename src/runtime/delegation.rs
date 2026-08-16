@@ -3206,6 +3206,53 @@ members = ["designer"]
         }
     }
 
+    /// The company shape issue #884 D1 was observed on: ONE desk with three
+    /// members, so the lead has peers beside it that `delegate_to_desk` — which
+    /// only ever resolves to the lead — could never reach.
+    fn peer_record() -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "chief"
+role = "Chief of Staff"
+tier = "orchestrator"
+
+[[agent]]
+id = "brand_strategist"
+role = "Brand Strategist"
+
+[[agent]]
+id = "seo_specialist"
+role = "SEO Specialist"
+
+[[agent]]
+id = "copywriter"
+role = "Copywriter"
+
+[[group_chat]]
+id = "strategy"
+name = "Strategy desk"
+members = ["brand_strategist", "seo_specialist", "copywriter"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// A hand-off to a named teammate (issue #884).
+    fn peer_handoff(teammate: &str, instruction: &str) -> Delegation {
+        Delegation::DelegateToTeammate {
+            teammate: teammate.to_string(),
+            instruction: instruction.to_string(),
+        }
+    }
+
     /// The wired pieces one drain needs: the company record, a real task store
     /// over a temp dir, the shared queue, and the steer registry.
     struct Fixture {
@@ -3232,6 +3279,11 @@ members = ["designer"]
         /// (issue #176).
         fn nested() -> Self {
             Self::over(nested_record())
+        }
+
+        /// A fixture over the one three-person desk issue #884 D1 was seen on.
+        fn peers() -> Self {
+            Self::over(peer_record())
         }
 
         fn over(record: CompanyRecord) -> Self {
@@ -4585,6 +4637,211 @@ members = ["designer"]
         );
         assert!(turn.spawned_task.is_none());
         assert_eq!(turn.reply, "shipped the importer");
+    }
+
+    // ── Issue #884 D1: a desk lead can hand a slice to a peer ───────────────
+
+    /// **The D1 regression.** An operator posts into a three-person desk asking
+    /// for one member by name. The desk lead answers — `responder_for` resolves
+    /// a desk to its lead — reads the request correctly, and hands the slice on
+    /// with `delegate_to_teammate`. The named teammate's turn must actually run.
+    ///
+    /// Before #884 that hand-off had no tool behind it: `delegate_to_desk` only
+    /// ever resolves to the desk's lead, and handing the lead's own desk back to
+    /// itself is refused as self-delegation. The lead's only remaining move was
+    /// the refusal the issue reports — "this task isn't mine, it's addressed to
+    /// the SEO Specialist" — and the request produced nothing.
+    ///
+    /// Asserted on the **resolved agent id** that ran, never on rendered text.
+    /// The plausible wrong implementation resolves a teammate hand-off through
+    /// `desk_lead` like its sibling does, which would run the Brand Strategist a
+    /// second time and satisfy any assertion phrased about the reply.
+    #[tokio::test]
+    async fn a_desk_lead_hands_a_slice_to_the_teammate_the_operator_named() {
+        let fx = Fixture::peers();
+        let brief = "run an SEO pass over the pricing page";
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                // The desk lead's own turn: it hands the slice on.
+                Turn::tooling(
+                    "passing this to our SEO specialist",
+                    vec![peer_handoff("seo_specialist", brief)],
+                ),
+                // The teammate's turn — the one that did not exist before #884.
+                Turn::reply("done: 12 findings, 3 blocking"),
+                // The lead relays the answer back.
+                Turn::reply("SEO pass done — 12 findings, 3 blocking"),
+            ],
+        );
+
+        fx.runner(&turns)
+            .handle_operator_message(
+                "brand_strategist",
+                "SEO Specialist: run an SEO pass over the pricing page",
+                Some("strategy"),
+            )
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued],
+            "the hand-off must be accepted at the real tool boundary"
+        );
+        let agents: Vec<String> = turns.calls().into_iter().map(|(agent, _)| agent).collect();
+        assert_eq!(
+            agents,
+            [
+                "brand_strategist".to_string(),
+                "seo_specialist".to_string(),
+                "brand_strategist".to_string()
+            ],
+            "the SEO specialist's own turn must run between the lead's and its relay"
+        );
+        assert_eq!(
+            turns.calls()[1].1,
+            brief,
+            "and it must be handed the instruction, not the operator's raw message"
+        );
+        // The hand-off is tracked by construction, assigned to the teammate that
+        // ran it — the same guarantee #442 gave the desk form.
+        let cards = fx.cards().await;
+        assert!(
+            cards.iter().any(|c| c.assignee == "seo_specialist"),
+            "the hand-off must open a card owned by whoever actually did it: {cards:?}"
+        );
+        // TWO cards, and that is the seam's existing shape rather than something
+        // #884 introduces: a desk lead asked directly gets a
+        // `open_direct_work_card` for the operator's own message (#442 path
+        // one), and the hand-off opens its own on top. The pre-#884 lead could
+        // not hand off at all, so this pairing is newly *reachable* — worth
+        // knowing, but it is the same rule the desk form has always followed.
+        assert!(
+            cards.iter().any(|c| c.assignee == "brand_strategist"),
+            "the lead's own direct card is unchanged: {cards:?}"
+        );
+    }
+
+    /// A teammate removed from the roster between the tool call and the drain
+    /// cannot be handed anything, and the drain says so rather than running
+    /// somebody else — the mirror of the desk form's leadless refusal.
+    #[tokio::test]
+    async fn a_teammate_hand_off_to_a_non_roster_id_runs_nobody() {
+        let fx = Fixture::peers();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::queueing(
+                "handing it on",
+                vec![peer_handoff("ghost", "do the thing")],
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message(
+                "brand_strategist",
+                "sort out the pricing page",
+                Some("strategy"),
+            )
+            .await
+            .expect("operator message handled");
+
+        let agents: Vec<String> = turns.calls().into_iter().map(|(agent, _)| agent).collect();
+        assert_eq!(
+            agents,
+            ["brand_strategist".to_string()],
+            "an unresolvable teammate must run NO second turn — least of all the \
+             orchestrator's, which is the D2 failure one seam over"
+        );
+    }
+
+    /// A→B→A cannot ping-pong. Two guards, and this pins the one that is
+    /// reachable from a fixture: the depth cap refuses the hand-off back at the
+    /// tool boundary, in the model's own turn, and nothing is queued.
+    ///
+    /// (The cycle guard proper — "that teammate is where the work came from" —
+    /// lives on the tool's grounding and is pinned in `delegation_tools`; this
+    /// is the bound that holds even for a ring the cycle guard cannot see.)
+    #[tokio::test]
+    async fn a_teammate_cannot_hand_the_work_back_past_the_depth_cap() {
+        let fx = Fixture::peers();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling(
+                    "passing it on",
+                    vec![peer_handoff("seo_specialist", "look at the pricing page")],
+                ),
+                // B tries to hand it straight back to A, one level down.
+                Turn::tooling(
+                    "back to you",
+                    vec![peer_handoff("brand_strategist", "you take it")],
+                ),
+                Turn::reply("here is what came back"),
+            ],
+        )
+        .with_max_depth(1);
+
+        fx.runner(&turns)
+            .handle_operator_message(
+                "brand_strategist",
+                "sort out the pricing page",
+                Some("strategy"),
+            )
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![
+                orchestrator::Staged::Queued,
+                orchestrator::Staged::NoDrain(orchestrator::NoDrainReason::Depth),
+            ],
+            "the hand-off back must be refused at the bound, not queued and run"
+        );
+        let agents: Vec<String> = turns.calls().into_iter().map(|(agent, _)| agent).collect();
+        assert_eq!(
+            agents,
+            [
+                "brand_strategist".to_string(),
+                "seo_specialist".to_string(),
+                "brand_strategist".to_string()
+            ],
+            "exactly one delegated turn ran, then the relay — no third hop"
+        );
+        assert_eq!(fx.queue.queued(), 0, "nothing survived the refusal");
+    }
+
+    /// The orchestrator's own copy reaches a teammate directly too, without the
+    /// desk's lead standing in the way.
+    #[tokio::test]
+    async fn the_orchestrator_can_hand_work_to_a_non_lead_teammate() {
+        let fx = Fixture::peers();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling(
+                    "asking our copywriter",
+                    vec![peer_handoff("copywriter", "draft the launch note")],
+                ),
+                Turn::reply("draft attached"),
+                Turn::reply("here is the draft"),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", "get the launch note drafted", None)
+            .await
+            .expect("operator message handled");
+
+        let agents: Vec<String> = turns.calls().into_iter().map(|(agent, _)| agent).collect();
+        assert_eq!(
+            agents,
+            [
+                "chief".to_string(),
+                "copywriter".to_string(),
+                "chief".to_string()
+            ],
+            "the copywriter is not the strategy desk's lead, and must still be reachable"
+        );
     }
 
     /// The orchestrator's own chat turn is not tracked here. It is the front

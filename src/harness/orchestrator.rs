@@ -5849,6 +5849,262 @@ members = ["ceo"]
         );
     }
 
+    // ── delegate_to_teammate at the tool boundary (issue #884) ──────────────
+
+    /// A company whose `strategy` desk has THREE members, so its lead has peers
+    /// to reach — the shape D1 was observed on — plus an `analyst` on a desk the
+    /// lead's `delegates_to` permits and a `legal_counsel` on one it does not.
+    fn peers_record(id: &CompanyId) -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+delegates_to = ["research"]
+
+[[agent]]
+id = "editor"
+role = "Editor"
+
+[[agent]]
+id = "analyst"
+role = "Analyst"
+
+[[agent]]
+id = "legal_counsel"
+role = "Counsel"
+
+[[group_chat]]
+id = "strategy"
+name = "Strategy desk"
+members = ["writer", "editor"]
+
+[[group_chat]]
+id = "research"
+name = "Research desk"
+members = ["analyst"]
+
+[[group_chat]]
+id = "legal"
+name = "Legal desk"
+members = ["legal_counsel"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..seeded_record(id)
+        }
+    }
+
+    /// `writer`'s copy of the teammate tool: a desk lead with one peer on its
+    /// own desk and a `research` allowlist.
+    fn member_teammate_tool(
+        record: CompanyRecord,
+        queue: &DelegationQueue,
+    ) -> DelegateToTeammateTool {
+        let company = record.id.clone();
+        DelegateToTeammateTool::for_member(
+            queue.clone(),
+            company,
+            Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>,
+            MemberScope {
+                member: "writer".to_string(),
+                delegates_to: vec!["research".to_string()],
+            },
+        )
+    }
+
+    /// D1 at the boundary: the lead's hand-off to the peer beside it is
+    /// **accepted**, and queues the delegation the drain runs that teammate's
+    /// turn from.
+    #[tokio::test]
+    async fn a_lead_may_hand_work_to_a_peer_on_its_own_desk() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_teammate_tool(peers_record(&company), &queue);
+        let result = tool
+            .execute(json!({ "teammate": "editor", "instruction": "tighten the copy" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.output_for_llm(true));
+        assert_eq!(
+            queue.drain(MAX_DELEGATIONS_PER_TURN),
+            vec![Delegation::DelegateToTeammate {
+                teammate: "editor".to_string(),
+                instruction: "tighten the copy".to_string(),
+            }]
+        );
+    }
+
+    /// A key that is nobody is refused before anything is queued, and the
+    /// attempt is recorded for the drain to report on the card — the same
+    /// independence #272 gave the desk refusals.
+    #[tokio::test]
+    async fn a_teammate_that_is_not_on_the_roster_is_refused_and_recorded() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_teammate_tool(peers_record(&company), &queue);
+        let result = tool
+            .execute(json!({ "teammate": "ghost", "instruction": "do it" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{}", result.output_for_llm(true));
+        assert!(
+            result.output_for_llm(true).contains("editor"),
+            "the refusal must name who CAN be reached: {}",
+            result.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+        assert_eq!(
+            queue.drain_refusals(MAX_DELEGATIONS_PER_TURN),
+            vec!["ghost".to_string()]
+        );
+    }
+
+    /// A real teammate on neither the caller's desk nor an allowlisted one is
+    /// refused; one on an allowlisted desk is not. The allowlist is #176's, read
+    /// at teammate granularity rather than duplicated.
+    #[tokio::test]
+    async fn the_allowlist_bounds_which_teammates_a_member_may_reach() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_teammate_tool(peers_record(&company), &queue);
+
+        let refused = tool
+            .execute(json!({ "teammate": "legal_counsel", "instruction": "review it" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "{}", refused.output_for_llm(true));
+        assert_eq!(queue.queued(), 0);
+
+        // `analyst` sits on `research`, which `writer`'s `delegates_to` names.
+        let allowed = tool
+            .execute(json!({ "teammate": "analyst", "instruction": "pull the numbers" }))
+            .await
+            .expect("execute");
+        assert!(!allowed.is_error, "{}", allowed.output_for_llm(true));
+        assert_eq!(queue.queued(), 1);
+    }
+
+    /// A hand-off back to somebody already on the chain is refused as a cycle —
+    /// the A→B→A guard, at the boundary, in the model's own turn.
+    #[tokio::test]
+    async fn a_hand_off_back_up_the_teammate_chain_is_refused() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let record = peers_record(&company);
+        let tool = DelegateToTeammateTool::for_member(
+            queue.clone(),
+            company,
+            Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>,
+            MemberScope {
+                member: "editor".to_string(),
+                delegates_to: Vec::new(),
+            },
+        );
+        // `editor` is running inside a hand-off `writer` made.
+        let _scope = queue.enter_scope(crate::runtime::delegation_tools::teammate_scope_key(
+            "writer",
+        ));
+        let result = tool
+            .execute(json!({ "teammate": "writer", "instruction": "you take it back" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{}", result.output_for_llm(true));
+        assert!(
+            result.output_for_llm(true).contains("loop"),
+            "{}",
+            result.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// The depth bound applies to the teammate hand-off exactly as it does to
+    /// the desk one — the guard a ring of three the cycle check cannot see still
+    /// runs into.
+    #[tokio::test]
+    async fn the_depth_bound_stops_a_teammate_hand_off_too() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let mut record = peers_record(&company);
+        record.manifest.tools.max_delegation_depth = Some(1);
+        let tool = member_teammate_tool(record, &queue);
+        let _scope = queue.enter_scope("strategy".to_string());
+        let result = tool
+            .execute(json!({ "teammate": "editor", "instruction": "tighten the copy" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "depth 1 must stop a further hand-off");
+        assert!(
+            result
+                .output_for_llm(true)
+                .contains("as far as this company allows"),
+            "{}",
+            result.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// The orchestrator's copy is unrestricted: it reaches a teammate that is
+    /// not a desk lead, with no allowlist in the way. Grounding still applies.
+    #[tokio::test]
+    async fn the_orchestrators_teammate_tool_is_unrestricted_but_grounded() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let record = peers_record(&company);
+        let store = Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>;
+        let tool = DelegateToTeammateTool::new(queue.clone(), company, store);
+
+        let ok = tool
+            .execute(json!({ "teammate": "editor", "instruction": "tighten the copy" }))
+            .await
+            .expect("execute");
+        assert!(!ok.is_error, "{}", ok.output_for_llm(true));
+
+        let refused = tool
+            .execute(json!({ "teammate": "ghost", "instruction": "do it" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "{}", refused.output_for_llm(true));
+    }
+
+    /// Both arguments are required, and neither may be blank — a hand-off with
+    /// no instruction is a turn run on nothing.
+    #[tokio::test]
+    async fn the_teammate_tool_requires_both_arguments() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_teammate_tool(peers_record(&company), &queue);
+        assert!(tool.execute(json!({ "teammate": "editor" })).await.is_err());
+        assert!(
+            tool.execute(json!({ "instruction": "do it" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            tool.execute(json!({ "teammate": "  ", "instruction": "do it" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
     /// Issue #272: the observed failure — the orchestrator handed work to
     /// `writer`, which is a teammate rather than a desk. Nothing may be queued,
     /// and the refusal must carry the real desk ids so the model can correct
