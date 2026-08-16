@@ -279,6 +279,38 @@ export function InferenceSection({
     }
   }
 
+  /**
+   * Rebuild the company's runtime now, clearing the restart-required state.
+   *
+   * The banner used to name a restart and offer no way to perform one, which is
+   * a dead end for exactly the operator most likely to hit it: a hosted tenant
+   * cannot restart its own container, and the control plane has no button for
+   * it either.
+   *
+   * The resulting status is read from the response rather than assumed. A host
+   * that wired no rebuilder genuinely cannot do this and says so, and reporting
+   * success there would replace a visible dead end with an invisible one.
+   */
+  async function restartNow() {
+    if (busy) return;
+    setBusy("restart");
+    try {
+      const result = await restartInference(client, company);
+      if (result.status.restartRequired) {
+        // The rebuild ran and the company is still on the old brain. Follow the
+        // host's note, which names the process restart that would work.
+        toast.warning("Still needs a restart.", { description: result.note });
+      } else {
+        toast.success("Restarted. Agents think with the new provider from their next turn.");
+      }
+      setStatus(result.status);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't restart the company.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function reset() {
     if (busy) return;
     setBusy("reset");
