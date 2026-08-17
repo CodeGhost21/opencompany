@@ -1,0 +1,30 @@
+# The global baseline: what every company gets, whichever vertical it starts
+# from. See `../docs/spec/runtime/globals.md`.
+#
+# The agents and workflows beside this file are the rest of the baseline; they
+# need no entry here, because a definition that exists is a definition that
+# ships. This file carries only what cannot be a file: the tool floor, and the
+# subset of the shared skill library that is installed rather than offered.
+
+[tools]
+# Namespaces every company grants on top of its own `[tools].allow`.
+#
+# Deliberately the three namespaces an agent cannot do *any* work without — its
+# own sandbox, the documents it writes, and the company workspace it reads.
+# None of them spend money, reach a third-party account, or leave the company,
+# so a vertical that narrows its belt to almost nothing still has teammates that
+# function rather than teammates that fail their first tool call.
+#
+# `*` is deliberately NOT here: a floor nobody can drop below has to stay at
+# what is safe for every company, and `*` covers `shell`, `code`, `web` and
+# `subagent` too. A company that wants those grants them in its own
+# `[tools].allow`, as it always did.
+baseline = ["files", "docs", "workspace"]
+
+[skills]
+# Shared-library skills installed in every company, by slug.
+#
+# The rest of `../skills/` stays what it is — a registry an operator installs
+# from. These three are here because every company does research, reports its
+# week, and walks into meetings, regardless of what it sells.
+always = ["web-research", "weekly-report", "meeting-brief"]
