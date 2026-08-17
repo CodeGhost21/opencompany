@@ -43,12 +43,12 @@ context = ["GOAL.md", "INDEX.md", "CLAIMS.md"]
 ```
 
 An omitted `context` key takes a per-tier default. `context = []` means the role
-gets the universal document and nothing else.
+gets the universal documents and nothing else.
 
 **The per-tier default table**, keyed on the [tier](../../glossary.md) a
 role's `[[agent]]` entry declares (unqualified "context" below means the
-routed-workspace-documents section only, on top of the universal method
-policy every role always gets):
+routed-workspace-documents section only, on top of the universal `METHOD.md`
+and `AGENTS.md` every role always gets):
 
 | Tier | Default `context` | Why |
 | --- | --- | --- |
