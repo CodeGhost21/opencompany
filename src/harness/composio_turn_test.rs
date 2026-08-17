@@ -321,6 +321,8 @@ async fn harness(
     dir: &std::path::Path,
 ) -> (HarnessPool, HarnessDeps, CompanyRecord) {
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
             base_url: model_url,
             credential: Credential::from_value("stub-key"),
