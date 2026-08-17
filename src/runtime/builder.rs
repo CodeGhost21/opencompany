@@ -1125,6 +1125,13 @@ impl RuntimeBuilder {
             .unwrap_or_else(|| Arc::new(FsInboxStore::new(home.clone())));
         // The WS3 console ports default to a single shared fs backend.
         let fs_ops = Arc::new(FsOps::new(home.clone()));
+        // Chosen before the ops struct because two of its members need it: the
+        // ledger store itself, and the workspace guard that names a refusal
+        // after the ledger owning the file.
+        let ledgers_for_guard: Arc<dyn crate::ports::ledgers::LedgerStore> = self
+            .ledgers
+            .clone()
+            .unwrap_or_else(|| fs_ops.clone());
         let ops = match handover.as_ref() {
             // A rebuild inherits the ops it was handed, announcer and all — the
             // wrap below happens once, at first construction. Re-wrapping an
