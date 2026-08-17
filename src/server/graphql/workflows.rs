@@ -170,14 +170,10 @@ async fn enabled_ids(runtime: &Arc<CompanyRuntime>) -> async_graphql::Result<Vec
     Ok(runtime.enabled_workflow_ids().await?)
 }
 
-/// The company's runtime-authored graph bodies, read once per resolve. A
-/// company with no persisted record contributes none.
-async fn overlays(runtime: &Arc<CompanyRuntime>) -> async_graphql::Result<Vec<OverlayWorkflow>> {
-    Ok(overlays_and_globals(runtime).await?.0)
-}
-
-/// [`overlays`], with the company's `[globals].disable` from the same record
-/// load — the pair every union read needs, exactly as on the REST side.
+/// The company's runtime-authored graph bodies and its `[globals].disable`,
+/// read once per resolve from a single record load — the pair every union read
+/// needs, exactly as on the REST side. A company with no persisted record
+/// contributes neither.
 async fn overlays_and_globals(
     runtime: &Arc<CompanyRuntime>,
 ) -> async_graphql::Result<(Vec<OverlayWorkflow>, Vec<String>)> {
