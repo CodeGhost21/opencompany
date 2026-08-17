@@ -1,0 +1,47 @@
+title: ""
+labels: ["agents"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        What an agent did, why a run stalled, how work gets steered or approved,
+        and the seams into the OpenHuman launcher and TinyAgents.
+
+        A run has a journal. It is nearly always the answer, so bring it.
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should the agent have done?
+      validations:
+        required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What did it do instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where does this happen?
+      options:
+        - A task's runs
+        - Planning
+        - Approvals
+        - Workflows
+        - The OpenHuman launcher
+        - TinyAgents (tiny feature)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: journal
+    attributes:
+      label: Timeline or journal excerpt
+      description: The entries around the moment it went wrong. Redact anything the agent read that you would not post publicly.
+      render: text
+  - type: input
+    id: model
+    attributes:
+      label: Model and provider
+      description: Which model was driving the run.
