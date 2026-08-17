@@ -130,7 +130,7 @@ pub fn routed_documents(agent: &Agent) -> Vec<String> {
     let excluded = excluded_documents(&agent.classes);
 
     let chosen: Vec<String> = match agent.context.as_deref() {
-        Some(explicit) => explicit.to_vec(),
+        Some(explicit) => explicit.iter().map(|entry| entry.path().to_string()).collect(),
         None => tier_defaults(agent.tier.as_deref())
             .iter()
             .map(|doc| doc.to_string())
