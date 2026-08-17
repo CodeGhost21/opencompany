@@ -2510,4 +2510,101 @@ mod tests {
             );
         }
     }
+
+    /// [`pin_deps`] with automatic Git checkpoints enabled — the one switch
+    /// `HarnessDeps::workspace_git_enabled` flips inside `build_agent`.
+    fn enabled_git_deps(root: std::path::PathBuf) -> HarnessDeps {
+        let mut deps = pin_deps(root);
+        deps.workspace_git_enabled = true;
+        deps
+    }
+
+    /// `git log` inside the workspace, resolving through the checkpointer's
+    /// `.git` pointer, exactly as the existing checkpoint tests do.
+    fn git_log(workspace: &std::path::Path) -> String {
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(["log", "--format=%s"])
+                .current_dir(workspace)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    }
+
+    /// The enabled Git path, end to end through `build_agent`: the `docs.*`
+    /// grant wires the sandboxed `file_write`, `workspace_git_enabled: true`
+    /// decorates every tool with the checkpointer, and a tool call that writes
+    /// the workspace yields the baseline commit plus a post-call checkpoint.
+    #[tokio::test]
+    async fn workspace_git_enabled_checkpoints_a_tool_write() {
+        use crate::company::Policy;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = enabled_git_deps(dir.path().to_path_buf());
+        let company = CompanyId::new("acme");
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+        };
+        // `full` so the sandboxed write executes without a supervised prompt.
+        let policy = ApprovalPolicy::new(
+            &Policy {
+                mode: "full".to_string(),
+                ..Policy::default()
+            },
+            None,
+        );
+        let grants = vec!["docs.*".to_string()];
+        let agent = build_agent(
+            &company,
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            false,
+        )
+        .expect("agent builds");
+
+        let workspace = agent_workspace(&deps.workspace_root, &company, "desk");
+        let write = agent
+            .tools()
+            .iter()
+            .find(|tool| tool.name() == "file_write")
+            .expect("docs.* wires file_write");
+        let result = write
+            .execute(json!({"path": "answer.txt", "content": "42"}))
+            .await
+            .expect("file_write runs");
+        assert!(!result.is_error, "unexpected failure: {result:?}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("answer.txt")).unwrap(),
+            "42"
+        );
+
+        let history = git_log(&workspace);
+        assert!(
+            history.contains("checkpoint: initialize workspace"),
+            "{history}"
+        );
+        assert!(
+            history.contains("checkpoint: after file_write"),
+            "{history}"
+        );
+    }
 }
