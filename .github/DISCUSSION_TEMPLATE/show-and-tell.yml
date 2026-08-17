@@ -13,8 +13,8 @@ body:
     id: what
     attributes:
       label: What does the company do?
-      validations:
-        required: true
+    validations:
+      required: true
   - type: textarea
     id: shape
     attributes:
