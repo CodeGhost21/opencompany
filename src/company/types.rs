@@ -654,10 +654,6 @@ pub enum LedgerAccess {
     Record,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Agent {
     /// This agent's `workspace_write`/`workspace_create` scope.
     ///
