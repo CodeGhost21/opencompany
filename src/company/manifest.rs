@@ -152,10 +152,69 @@ impl CompanyManifest {
         })
     }
 
+    /// Parses a manifest that came back out of the store, applying the global
+    /// baseline to it.
+    ///
+    /// **The read path every store backend uses**, rather than a bare
+    /// `toml::from_str`, because a company is provisioned once and read
+    /// thereafter: a baseline applied only where bundles are parsed would reach
+    /// new companies and no existing one. [`apply_globals`](Self::apply_globals)
+    /// is idempotent, so re-applying it on every load is what makes a baseline
+    /// change — or a newly written `[globals].disable` — take effect on the next
+    /// read instead of at the next reprovision.
+    ///
+    /// Deliberately does **not** validate: a stored manifest was validated when
+    /// it was accepted, and failing a load over a rule that tightened since
+    /// would strand a company that is already running.
+    pub fn from_stored_toml(toml_src: &str) -> std::result::Result<Self, toml::de::Error> {
+        let mut manifest: Self = toml::from_str(toml_src)?;
+        manifest.apply_globals();
+        Ok(manifest)
+    }
+
+    /// Merges the global baseline ([`crate::globals`]) into this manifest's
+    /// roster.
+    ///
+    /// Idempotent, and safe to call on a manifest that already carries merged
+    /// globals: every teammate marked [`Agent::global`] is dropped first, then
+    /// the current baseline is re-appended. That is what lets a stored manifest
+    /// — which is serialized back out with the merged roster in it — pick up a
+    /// changed baseline and honour a `[globals].disable` entry written later.
+    ///
+    /// Two ordering rules, both protecting the same thing:
+    ///
+    /// * globals are appended **after** the company's own roster, because
+    ///   [`orchestrator_id`](super::orchestrator_id) falls back to the first
+    ///   agent declared when nobody is tagged — prepending would hand a company
+    ///   with an untagged roster to a global teammate;
+    /// * an id the company already declares is **skipped**, so a company's own
+    ///   `researcher` supersedes the global one outright rather than merging
+    ///   with it field by field.
+    pub fn apply_globals(&mut self) {
+        self.agents.retain(|agent| !agent.global);
+        for global in crate::globals::agents() {
+            if crate::globals::disabled(&self.globals.disable, "agent", &global.id) {
+                continue;
+            }
+            if self.agents.iter().any(|agent| agent.id == global.id) {
+                continue;
+            }
+            let mut agent = global.clone();
+            agent.global = true;
+            self.agents.push(agent);
+        }
+    }
+
     /// Runs [`validate`](Self::validate), reporting every problem against `path`.
-    fn into_validated(self, path: &Path) -> Result<Self> {
+    ///
+    /// The baseline is merged **after** validation, not before: a global is
+    /// already parsed and checked by [`crate::globals`], and running it through
+    /// this validator would let one malformed global fail every company on the
+    /// host rather than only itself.
+    fn into_validated(mut self, path: &Path) -> Result<Self> {
         let problems = self.validate();
         if problems.is_empty() {
+            self.apply_globals();
             Ok(self)
         } else {
             Err(OpenCompanyError::ManifestInvalid {
