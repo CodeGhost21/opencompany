@@ -994,6 +994,31 @@ pub struct ComposioTools {
     pub toolkits: Vec<String>,
 }
 
+impl Tools {
+    /// The company's grants, unioned with the global tool floor
+    /// ([`crate::globals::tool_baseline`]).
+    ///
+    /// **The read every grant decision should use.** [`allow`](Self::allow) is
+    /// what the operator authored; this is what the company actually has. The
+    /// floor is deliberately not folded into `allow` at load: `allow` is
+    /// serialized back into the store, so a merged copy would freeze one
+    /// revision of the floor into every company that was ever provisioned and
+    /// leave a namespace granted long after the baseline stopped granting it.
+    ///
+    /// A floor only ever widens — it cannot narrow what a company granted — and
+    /// carries no namespace that spends money or leaves the company, which is
+    /// what makes "no company can drop below it" safe to say.
+    pub fn effective_allow(&self) -> Vec<String> {
+        let mut allow = self.allow.clone();
+        for namespace in crate::globals::tool_baseline() {
+            if !allow.iter().any(|grant| grant == namespace) {
+                allow.push(namespace.clone());
+            }
+        }
+        allow
+    }
+}
+
 impl Default for Tools {
     fn default() -> Self {
         Self {
