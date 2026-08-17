@@ -149,7 +149,9 @@ impl WorkspaceCheckpointer {
         let mut command = Command::new("git");
         command
             .arg(format!("--git-dir={}", self.git_dir.display()))
-            .arg(format!("--work-tree={}", self.workspace.display()))
+            .arg(format!("--work-tree={}", self.workspace.display()));
+        isolate_git(&mut command);
+        command
             .args(["-c", &format!("user.name={CHECKPOINT_AUTHOR_NAME}")])
             .args(["-c", &format!("user.email={CHECKPOINT_AUTHOR_EMAIL}")]);
         command
@@ -160,15 +162,20 @@ impl WorkspaceCheckpointer {
     }
 }
 
-fn discover_git_dir(workspace: &Path) -> anyhow::Result<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--absolute-git-dir"])
-        .current_dir(workspace)
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!("could not discover the existing workspace Git directory");
-    }
-    Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()))
+/// Applies the checkpointer's configuration isolation to a Git command: no
+/// inherited global or system config, and no repository hooks.
+///
+/// Command-line `-c` overrides rank above repository config, so even a
+/// `core.hooksPath` an agent managed to write into the out-of-band repository's
+/// config is ignored, and `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL` cut off
+/// config injection through the environment. Together these keep a committed
+/// checkpoint from ever executing code (`core.hooksPath` can point into the
+/// agent workspace) in the host process (CWE-94).
+fn isolate_git(command: &mut Command) {
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args(["-c", "core.hooksPath="]);
 }
 
 fn require_success(status: ExitStatus, operation: &str) -> anyhow::Result<()> {
