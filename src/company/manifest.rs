@@ -303,45 +303,9 @@ impl CompanyManifest {
             }
         }
 
-        // `ledgers` grants (per-agent ledger access): an `access = "record"`
-        // grant that a built-in ledger's `writers` excludes is a manifest
-        // error rather than a silent tool refusal at call time — the two
-        // sources of truth (the agent's grant, the ledger's `writers`) must
-        // not disagree for a slug the manifest can actually see. A
-        // company-declared ledger is not checked here: it may not exist yet
-        // when the manifest is validated (the same reasoning as `context`'s
-        // missing-document rule), so any disagreement there surfaces as an
-        // ordinary tool refusal at call time instead.
+        // `ledgers` grants (per-agent ledger access): see `ledger_grant_problems`.
         let (builtin_ledgers, _) = crate::ledger::builtins();
-        for agent in &self.agents {
-            let label = if agent.id.is_empty() {
-                "an agent".to_string()
-            } else {
-                format!("agent `{}`", agent.id)
-            };
-            let Some(grants) = &agent.ledgers else {
-                continue;
-            };
-            for grant in grants {
-                if grant.access != crate::company::LedgerAccess::Record {
-                    continue;
-                }
-                let Some(spec) = builtin_ledgers
-                    .iter()
-                    .find(|spec| spec.slug.eq_ignore_ascii_case(grant.name.trim()))
-                else {
-                    continue;
-                };
-                if !spec.writable_by(&agent.id) {
-                    problems.push(format!(
-                        "{label} declares `ledgers` access `record` to `{}`, but that ledger's \
-                         `writers` does not name this agent — the two must agree. Either add \
-                         `{}` to `{}`'s `writers`, or change this grant to `read`.",
-                        spec.slug, agent.id, spec.slug
-                    ));
-                }
-            }
-        }
+        problems.extend(ledger_grant_problems(&self.agents, &builtin_ledgers));
 
         // Connections: a provider is required; a stated priority must be known.
         for (index, connection) in self.connections.iter().enumerate() {
