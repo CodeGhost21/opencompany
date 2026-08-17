@@ -86,7 +86,7 @@ struct AgentFile {
     #[serde(default)]
     delegates_to: Vec<String>,
     #[serde(default)]
-    context: Option<Vec<String>>,
+    context: Option<Vec<crate::company::ContextEntry>>,
     #[serde(default)]
     budget_usd_daily: Option<f64>,
     #[serde(default)]
@@ -95,6 +95,10 @@ struct AgentFile {
     prompt_files: Vec<String>,
     #[serde(default)]
     classes: Vec<String>,
+    #[serde(default)]
+    ledgers: Option<Vec<crate::company::LedgerGrant>>,
+    #[serde(default = "crate::company::types::default_can_declare_ledgers")]
+    can_declare_ledgers: bool,
 }
 
 /// Loads every agent definition under `<dir>/agents/`, in roster order.
