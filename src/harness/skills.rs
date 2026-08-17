@@ -609,6 +609,11 @@ mod tests {
         assert!(cat.contains("Web Research"), "{cat}");
         assert!(cat.contains("`web-research`"), "{cat}");
 
+        // `web-research` is also a global baseline skill, so this doubles as
+        // the precedence check: the company's bundle supersedes it, resources
+        // and all, rather than the two merging.
+        assert_eq!(doc(&eff, "web-research").name, "Web Research");
+
         // The bundle (SKILL.md + resource) is copied verbatim into the scratch.
         let out = ws.path().join("skills").join("web-research");
         assert!(out.join("SKILL.md").is_file());
@@ -703,6 +708,22 @@ mod tests {
         // broken skill.
         assert_eq!(eff.docs.len(), with_baseline(&[]));
         assert!(eff.docs.iter().all(|doc| doc.slug != "broken"));
+    }
+
+    /// A manifest opt-out drops a baseline skill, through the same disabling
+    /// delta an operator's console toggle writes.
+    #[test]
+    fn a_manifest_opt_out_drops_a_global_skill() {
+        let ws = tempfile::tempdir().unwrap();
+        let dropped = crate::globals::skills()[0].slug.clone();
+        let deltas = crate::harness::globals_skill_disables(&[format!("skill:{dropped}")]);
+
+        let eff =
+            EffectiveSkills::materialize(ws.path().to_path_buf(), None, &[], &deltas).unwrap();
+
+        assert!(eff.docs.iter().all(|doc| doc.slug != dropped));
+        assert_eq!(eff.docs.len(), crate::globals::skills().len() - 1);
+        assert!(!ws.path().join("skills").join(&dropped).exists());
     }
 
     #[test]
