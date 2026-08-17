@@ -1043,6 +1043,13 @@ mod tests {
         assert_eq!(AppConfig::default().bind, "127.0.0.1:8080");
     }
 
+    /// Automatic Git checkpoints in agent workspaces are opt-in: the host
+    /// default is off, preserving the pre-checkpoint behavior exactly.
+    #[test]
+    fn workspace_git_checkpoints_default_off() {
+        assert!(!AppConfig::default().workspace_git_enabled);
+    }
+
     fn bound_to(bind: &str) -> AppConfig {
         AppConfig {
             bind: bind.to_string(),
