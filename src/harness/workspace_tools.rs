@@ -4599,6 +4599,7 @@ mod tests {
             CompanyId::new("acme"),
             TEST_AGENT.to_string(),
             false,
+            None,
         );
         let names: Vec<&str> = read_only.iter().map(|t| t.name()).collect();
         assert_eq!(
@@ -4619,6 +4620,7 @@ mod tests {
             CompanyId::new("acme"),
             TEST_AGENT.to_string(),
             true,
+            None,
         );
         let names: Vec<&str> = writable.iter().map(|t| t.name()).collect();
         assert_eq!(
@@ -4649,6 +4651,7 @@ mod tests {
             CompanyId::new("acme"),
             TEST_AGENT.to_string(),
             true,
+            None,
         );
         assert_eq!(tools[0].permission_level(), PermissionLevel::ReadOnly);
         assert_eq!(tools[1].permission_level(), PermissionLevel::ReadOnly);
