@@ -4581,6 +4581,7 @@ mod tests {
             role: "Role".to_string(),
             description: None,
             tier: tier.map(str::to_string),
+            harness: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
             context: None,

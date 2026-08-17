@@ -44,9 +44,32 @@ pub const RUNTIME_CONFIG_KEY: &str = "inference/config";
 /// stored here (write-only via the console); the value is the raw token string.
 pub const KEY_KEY: &str = "inference/key";
 
-/// Default managed base URL (the hosted TinyHumans / Medulla OpenAI-compatible
-/// surface) when the managed provider names no `base_url`.
-pub const MANAGED_BASE_URL: &str = "https://api.tinyhumans.ai/openai/v1";
+/// The platform's OpenAI-compatible endpoint — the subscription proxy an
+/// `openrouter` company with **no** key of its own resolves against.
+///
+/// The proxy fronts OpenRouter upstream and meters the spend against the
+/// tenant's subscription, so from the workload's point of view this and
+/// [`OPENROUTER_BASE_URL`] serve the same catalogue; only who pays differs.
+pub const PLATFORM_BASE_URL: &str = "https://api.tinyhumans.ai/openai/v1";
+
+/// The provider kind removed when OpenCompany stopped exposing its own model
+/// SKUs. A manifest or stored runtime blob still naming it aliases to
+/// [`DEFAULT_PROVIDER`] rather than failing: a runtime blob is data an operator
+/// cannot hand-edit, so hard-failing on it would strand a tenant whose console
+/// wrote a value that used to be valid.
+pub const LEGACY_MANAGED: &str = "managed";
+
+/// The provider a company gets when nothing names one.
+pub const DEFAULT_PROVIDER: &str = "openrouter";
+
+/// Normalizes a provider kind: blank and the legacy `managed` both become
+/// [`DEFAULT_PROVIDER`]; anything else passes through for validation to judge.
+pub fn normalize_provider(provider: &str) -> &str {
+    match provider.trim() {
+        "" | LEGACY_MANAGED => DEFAULT_PROVIDER,
+        other => other,
+    }
+}
 
 /// OpenRouter's OpenAI-compatible base URL — used when the `openrouter`
 /// provider names no explicit `base_url`.
@@ -120,6 +143,9 @@ pub struct InferenceDecl {
     /// The outbound credential. Private — read only through
     /// [`bearer`](Self::bearer); never serialized.
     credential: Credential,
+    /// Whether this rides the platform's subscription proxy. Read through
+    /// [`is_proxied`](Self::is_proxied).
+    proxied: bool,
 }
 
 impl InferenceDecl {
@@ -145,72 +171,109 @@ impl InferenceDecl {
         self.credential.configured()
     }
 
-    /// The stable telemetry slug for this provider (`managed` / `openrouter` /
-    /// `byok` / `ollama`).
+    /// Whether this config rides the platform's subscription proxy rather than
+    /// a credential the tenant supplied.
+    ///
+    /// True only for `openrouter` with no tenant key — the default a company
+    /// starts on. It is what separates "the subscription pays" from "the tenant
+    /// pays", which is why it is recorded here rather than re-derived from the
+    /// base URL by every caller that cares.
+    pub fn is_proxied(&self) -> bool {
+        self.proxied
+    }
+
+    /// The stable telemetry slug for this config
+    /// (`subscription` / `openrouter` / `byok` / `ollama`).
+    ///
+    /// Distinguishes proxied from direct OpenRouter, because those are two
+    /// different payers and a Usage view that merged them would be telling the
+    /// operator nothing.
     pub fn telemetry_slug(&self) -> &'static str {
+        if self.proxied {
+            return "subscription";
+        }
         provider_slug(&self.provider)
     }
 }
 
-/// The stable telemetry slug for a provider kind. Unknown kinds fall back to
-/// `managed` (the safe default attribution).
+/// The stable telemetry slug for a provider kind.
+///
+/// An unknown kind reports `unknown` rather than being folded into a real
+/// provider's attribution: [`resolve_effective`] rejects one outright, so
+/// reaching here with one means something upstream is wrong, and quietly
+/// billing it to a provider that was never called would hide that.
+///
+/// This answers on the *kind* alone. Proxied OpenRouter slugs as
+/// `subscription`, which needs the credential too — see
+/// [`InferenceDecl::telemetry_slug`].
 pub fn provider_slug(provider: &str) -> &'static str {
-    match provider.trim() {
+    match normalize_provider(provider) {
         "openrouter" => "openrouter",
         "ollama" => "ollama",
         "openai_compatible" => "byok",
-        _ => "managed",
+        _ => "unknown",
     }
 }
 
-/// Resolves the effective `(base_url, credential)` for a provider.
+/// Resolves the effective `(base_url, credential, proxied)` for a provider.
 ///
-/// The `managed` kind is special: it is the *platform* brain, so it inherits the
-/// env default's base URL and credential when a source (manifest/runtime) names
-/// `managed` without supplying its own — otherwise a hand-written
-/// `provider = "managed"` would drop the platform key and 401. Every other kind
-/// uses its own configured base URL + key verbatim.
+/// **`openrouter` is dual-mode**, and that is the whole shape of the product's
+/// first-run story:
+///
+/// * **No tenant key** — the config inherits the platform endpoint and the
+///   platform credential, and the subscription pays. This is where a company
+///   starts, with nothing configured and nobody asked for a card.
+/// * **A tenant `sk-or-…`** — the config goes direct to OpenRouter on the
+///   tenant's own account.
+///
+/// The inheritance branch is the one `managed` used to own, and it moved here
+/// rather than being deleted for the same reason it existed: a config that named
+/// a provider but dropped the platform key would 401 rather than fall back.
+///
+/// Every other kind uses its own configured base URL and key verbatim — those
+/// are third-party endpoints we hold no credential for.
 fn resolve_endpoint(
     provider: &str,
     base_url_override: Option<&str>,
     key: String,
     env_default: Option<&EnvDefault>,
-) -> (String, Credential) {
+) -> (String, Credential, bool) {
     let base_url_override = base_url_override.map(str::trim).filter(|s| !s.is_empty());
-    if provider.trim() == "managed" {
+    let has_key = !key.trim().is_empty();
+
+    if normalize_provider(provider) == "openrouter" && !has_key {
         let base_url = base_url_override
             .map(str::to_string)
             .or_else(|| env_default.map(|e| e.base_url.clone()))
-            .unwrap_or_else(|| MANAGED_BASE_URL.to_string());
-        let credential = if !key.trim().is_empty() {
-            Credential::from_value(key)
-        } else {
-            env_default
-                .map(|e| e.credential.clone())
-                .unwrap_or(Credential::None)
-        };
-        (base_url, credential)
-    } else {
-        (
-            effective_base_url(provider, base_url_override),
-            Credential::from_value(key),
-        )
+            .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
+        let credential = env_default
+            .map(|e| e.credential.clone())
+            .unwrap_or(Credential::None);
+        return (base_url, credential, true);
     }
+
+    (
+        effective_base_url(provider, base_url_override),
+        Credential::from_value(key),
+        false,
+    )
 }
 
 /// The effective base URL for a provider kind, given an optional override.
 ///
-/// `managed`/`openrouter` default to their well-known endpoints; `ollama`
-/// backstops to a local default; `openai_compatible` has no default (validation
-/// requires an explicit URL).
+/// This is the **direct** endpoint for each kind. Proxied `openrouter` does not
+/// come through here — it inherits the platform endpoint in
+/// [`resolve_endpoint`], which is the only place that distinction is made.
+///
+/// `ollama` backstops to a local default; `openai_compatible` has no default
+/// (validation requires an explicit URL).
 pub fn effective_base_url(provider: &str, override_url: Option<&str>) -> String {
     let override_url = override_url.map(str::trim).filter(|s| !s.is_empty());
-    match provider.trim() {
-        "openrouter" => override_url.unwrap_or(OPENROUTER_BASE_URL).to_string(),
+    match normalize_provider(provider) {
         "ollama" => override_url.unwrap_or(OLLAMA_DEFAULT_BASE_URL).to_string(),
         "openai_compatible" => override_url.unwrap_or_default().to_string(),
-        // managed (and any unknown kind, which validation rejects separately).
-        _ => override_url.unwrap_or(MANAGED_BASE_URL).to_string(),
+        // openrouter, and any unknown kind (which `resolve_effective` rejects).
+        _ => override_url.unwrap_or(OPENROUTER_BASE_URL).to_string(),
     }
 }
 
@@ -327,9 +390,10 @@ pub async fn resolve_effective(
 ) -> Result<Option<InferenceDecl>> {
     // 1. Runtime override (console) wins.
     if let Some(runtime) = load_runtime_config(company, secrets).await? {
-        let provider = runtime.provider.trim().to_string();
+        let provider = normalize_provider(&runtime.provider).to_string();
+        reject_unknown_provider(&provider, "the stored runtime inference config")?;
         let key = load_key(company, secrets, None).await?;
-        let (base_url, credential) =
+        let (base_url, credential, proxied) =
             resolve_endpoint(&provider, runtime.base_url.as_deref(), key, env_default);
         return Ok(Some(InferenceDecl {
             provider,
@@ -337,19 +401,17 @@ pub async fn resolve_effective(
             models: runtime.models,
             source: InferenceSource::Runtime,
             credential,
+            proxied,
         }));
     }
 
     // 2. Manifest `[inference]`.
     if manifest.is_set() {
-        let provider = manifest
-            .provider
-            .as_deref()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let provider =
+            normalize_provider(manifest.provider.as_deref().unwrap_or_default()).to_string();
+        reject_unknown_provider(&provider, "`[inference].provider`")?;
         let key = load_key(company, secrets, manifest.api_key_secret.as_deref()).await?;
-        let (base_url, credential) =
+        let (base_url, credential, proxied) =
             resolve_endpoint(&provider, manifest.base_url.as_deref(), key, env_default);
         return Ok(Some(InferenceDecl {
             provider,
@@ -357,21 +419,52 @@ pub async fn resolve_effective(
             models: manifest.models.clone(),
             source: InferenceSource::Manifest,
             credential,
+            proxied,
         }));
     }
 
-    // 3. Platform-injected managed default.
+    // 3. The platform-injected default: OpenRouter, proxied on the subscription.
+    //    A company that has configured nothing lands here, which is why it must
+    //    be a working config and not a prompt for a credential.
+    //
+    //    It still runs through `resolve_endpoint` rather than assuming proxied,
+    //    because a console-set key is a configuration act even when the operator
+    //    never named a provider: the console's key field on a fresh company
+    //    writes `inference/key` and nothing else. Assuming proxied here would
+    //    take that key, store it, report it as configured — and then never send
+    //    it anywhere.
     if let Some(env) = env_default {
+        let key = load_key(company, secrets, None).await?;
+        let (base_url, credential, proxied) =
+            resolve_endpoint(DEFAULT_PROVIDER, None, key, Some(env));
         return Ok(Some(InferenceDecl {
-            provider: "managed".to_string(),
-            base_url: env.base_url.clone(),
+            provider: DEFAULT_PROVIDER.to_string(),
+            base_url,
             models: BTreeMap::new(),
             source: InferenceSource::Default,
-            credential: env.credential.clone(),
+            credential,
+            proxied,
         }));
     }
 
     Ok(None)
+}
+
+/// Fails a provider kind that is not in [`INFERENCE_PROVIDERS`].
+///
+/// The manifest validator already rejects one, but a **stored runtime blob**
+/// never passes through it: the console wrote it, possibly under an older build
+/// whose vocabulary differed. Resolving one silently would attribute its spend to
+/// whatever the fallback happened to be, so it fails loudly here instead — the
+/// one place both sources converge.
+fn reject_unknown_provider(provider: &str, whence: &str) -> Result<()> {
+    if crate::company::types::INFERENCE_PROVIDERS.contains(&provider) {
+        return Ok(());
+    }
+    Err(OpenCompanyError::Config(format!(
+        "{whence} names an unknown inference provider `{provider}` — expected one of {}.",
+        crate::company::types::INFERENCE_PROVIDERS.join(", ")
+    )))
 }
 
 /// Validates the manifest `[inference]` section, returning every problem in
@@ -406,6 +499,13 @@ fn validate_parts(
     api_key_secret: Option<&str>,
 ) -> Vec<String> {
     let mut problems = Vec::new();
+
+    // `managed` aliases rather than failing. It named a real thing until
+    // OpenCompany stopped exposing its own SKUs, and a committed manifest that
+    // still says it means "the platform's brain" — which is now proxied
+    // OpenRouter. Rejecting it would break bundles that were valid when written,
+    // to no purpose: the intent still resolves.
+    let provider = normalize_provider(provider);
 
     if !INFERENCE_PROVIDERS.contains(&provider) {
         problems.push(format!(
@@ -533,7 +633,9 @@ mod tests {
             .unwrap()
             .expect("env default resolves");
         assert_eq!(decl.source, InferenceSource::Default);
-        assert_eq!(decl.provider, "managed");
+        assert_eq!(decl.provider, DEFAULT_PROVIDER);
+        assert!(decl.is_proxied(), "the default rides the subscription");
+        assert_eq!(decl.telemetry_slug(), "subscription");
         assert_eq!(bearer(&decl).await.as_deref(), Some("env-key"));
 
         // Manifest beats env.
@@ -565,36 +667,120 @@ mod tests {
         assert_eq!(decl.source, InferenceSource::Runtime);
         assert_eq!(decl.provider, "openrouter");
         assert_eq!(decl.base_url, OPENROUTER_BASE_URL);
+        assert!(!decl.is_proxied(), "a tenant key goes direct");
+        assert_eq!(decl.telemetry_slug(), "openrouter");
         assert_eq!(bearer(&decl).await.as_deref(), Some("or-secret"));
         assert!(decl.key_configured());
     }
 
+    /// A keyless `openrouter` inherits the platform endpoint and credential
+    /// rather than dropping them — the branch `managed` used to own. Without it a
+    /// company that names its provider but holds no key of its own would 401
+    /// instead of riding the subscription.
     #[tokio::test]
-    async fn manifest_managed_inherits_env_credential() {
-        // A hand-written `provider = "managed"` must still use the platform
-        // env key + base URL rather than dropping the credential.
+    async fn keyless_openrouter_inherits_the_platform_endpoint_and_credential() {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
         let env = EnvDefault {
             base_url: "https://env.example/openai/v1".into(),
             credential: Credential::from_value("platform-key"),
         };
-        let decl = resolve_effective(&company, &inference("managed"), Some(&env), &secrets)
+        let decl = resolve_effective(&company, &inference("openrouter"), Some(&env), &secrets)
             .await
             .unwrap()
             .unwrap();
         assert_eq!(decl.source, InferenceSource::Manifest);
-        assert_eq!(decl.provider, "managed");
+        assert_eq!(decl.provider, "openrouter");
         assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert!(decl.is_proxied());
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
     }
 
+    /// A committed manifest still saying `provider = "managed"` resolves as
+    /// proxied OpenRouter rather than failing. It was valid when written, and the
+    /// intent — "the platform's brain" — is exactly what proxied OpenRouter is.
     #[tokio::test]
-    async fn console_key_beats_env_for_the_managed_provider() {
-        // Issue #585: the company's own key is the admin's to set. A key stored
-        // through the console must win over the deploy-time env credential even
-        // on the `managed` provider — otherwise the only way to pay for a tenant
-        // is an environment variable the admin cannot reach.
+    async fn a_legacy_managed_manifest_aliases_to_proxied_openrouter() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://env.example/openai/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        let decl = resolve_effective(&company, &inference(LEGACY_MANAGED), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.provider, DEFAULT_PROVIDER);
+        assert!(decl.is_proxied());
+        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
+        assert!(
+            validate_inference(&inference(LEGACY_MANAGED)).is_empty(),
+            "and it still validates"
+        );
+
+        // The same alias applies to a stored runtime blob, which an operator
+        // cannot hand-edit — the case that would otherwise strand a tenant.
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: LEGACY_MANAGED.into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.source, InferenceSource::Runtime);
+        assert_eq!(decl.provider, DEFAULT_PROVIDER);
+        assert!(decl.is_proxied());
+    }
+
+    /// A stored runtime blob naming a provider this build does not know fails
+    /// loudly rather than resolving to whatever the fallback happened to be.
+    #[tokio::test]
+    async fn an_unknown_stored_provider_is_an_error_not_a_silent_fallback() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "telepathy".into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let err = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .expect_err("unknown provider must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("telepathy"), "{msg}");
+        assert!(msg.contains("openrouter"), "names what is valid: {msg}");
+    }
+
+    /// Issue #585: the company's own key is the admin's to set, and a key stored
+    /// through the console wins over the deploy-time env credential — otherwise
+    /// the only way to pay for a tenant is an environment variable the admin
+    /// cannot reach.
+    ///
+    /// **What changed with `managed`'s removal.** Under `managed`, a console key
+    /// kept the *platform* endpoint, so an admin could bill their own account
+    /// through the proxy. `openrouter` is dual-mode instead: a key means an
+    /// OpenRouter key, so it goes direct to OpenRouter — sending an `sk-or-…` to
+    /// the platform proxy would simply be rejected. An admin who wants the
+    /// platform endpoint with a credential of their own now names
+    /// `openai_compatible` with that `base_url`.
+    #[tokio::test]
+    async fn a_console_key_wins_over_the_env_credential_and_goes_direct() {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
         let env = EnvDefault {
@@ -605,7 +791,7 @@ mod tests {
             &company,
             &secrets,
             &RuntimeInference {
-                provider: "managed".into(),
+                provider: "openrouter".into(),
                 base_url: None,
                 models: BTreeMap::new(),
             },
@@ -617,21 +803,23 @@ mod tests {
         let decl = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
             .await
             .unwrap()
-            .expect("runtime managed resolves");
+            .expect("runtime openrouter resolves");
         assert_eq!(decl.source, InferenceSource::Runtime);
-        assert_eq!(decl.provider, "managed");
+        assert_eq!(decl.provider, "openrouter");
         assert_eq!(bearer(&decl).await.as_deref(), Some("company-key"));
         assert!(decl.key_configured());
-        // The endpoint still inherits the platform's, so setting only a key does
-        // not silently move the tenant off the managed brain.
-        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+        assert!(!decl.is_proxied(), "the tenant's own account pays");
+        assert_eq!(decl.base_url, OPENROUTER_BASE_URL);
 
-        // Clearing it falls back to the env credential rather than 401ing.
+        // Clearing it falls back to the subscription rather than 401ing — the
+        // property that makes a key genuinely optional in both directions.
         clear_key(&company, &secrets).await.unwrap();
         let decl = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
             .await
             .unwrap()
-            .expect("runtime managed still resolves");
+            .expect("still resolves with no key");
+        assert!(decl.is_proxied());
+        assert_eq!(decl.base_url, "https://env.example/openai/v1");
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
     }
 
@@ -884,16 +1072,19 @@ mod tests {
 
     #[test]
     fn provider_slugs_map_as_documented() {
-        assert_eq!(provider_slug("managed"), "managed");
         assert_eq!(provider_slug("openrouter"), "openrouter");
         assert_eq!(provider_slug("openai_compatible"), "byok");
         assert_eq!(provider_slug("ollama"), "ollama");
-        assert_eq!(provider_slug("mystery"), "managed");
+        // The legacy kind slugs as what it now is, so historical usage rows and
+        // new ones aggregate together.
+        assert_eq!(provider_slug(LEGACY_MANAGED), "openrouter");
+        // An unknown kind is never folded into a real provider's attribution.
+        assert_eq!(provider_slug("mystery"), "unknown");
     }
 
     #[test]
     fn effective_base_url_defaults_per_provider() {
-        assert_eq!(effective_base_url("managed", None), MANAGED_BASE_URL);
+        assert_eq!(effective_base_url(LEGACY_MANAGED, None), OPENROUTER_BASE_URL);
         assert_eq!(effective_base_url("openrouter", None), OPENROUTER_BASE_URL);
         assert_eq!(effective_base_url("ollama", None), OLLAMA_DEFAULT_BASE_URL);
         assert_eq!(

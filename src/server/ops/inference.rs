@@ -345,12 +345,12 @@ async fn effective_status_with(
         Some(platform) => resolve_effective(runtime.id(), &manifest, Some(platform), secrets)
             .await
             .map_err(ApiError)?
-            .map_or_else(|| inference::MANAGED_BASE_URL.to_string(), |d| d.base_url),
+            .map_or_else(|| inference::PLATFORM_BASE_URL.to_string(), |d| d.base_url),
         // No platform endpoint on this deployment: nothing to inherit, so the
         // tenant resolve already holds the whole answer and the second read is
         // skipped.
         None => decl.as_ref().map_or_else(
-            || inference::MANAGED_BASE_URL.to_string(),
+            || inference::PLATFORM_BASE_URL.to_string(),
             |d| d.base_url.clone(),
         ),
     };
@@ -864,7 +864,7 @@ mod tests {
         // No platform endpoint on this deployment — the built-in constant is
         // still the only honest answer, and this arm must not regress.
         let dto = effective_status_with(&runtime, None).await.unwrap();
-        assert_eq!(dto.base_url, inference::MANAGED_BASE_URL);
+        assert_eq!(dto.base_url, inference::PLATFORM_BASE_URL);
 
         // Pointed at staging, the card follows — and *only* the URL moves.
         let dto = effective_status_with(&runtime, Some(&staging_platform()))
@@ -897,7 +897,7 @@ mod tests {
         let runtime = runtime_with(home_dir.path(), MANAGED_MANIFEST).await;
 
         let dto = effective_status_with(&runtime, None).await.unwrap();
-        assert_eq!(dto.base_url, inference::MANAGED_BASE_URL);
+        assert_eq!(dto.base_url, inference::PLATFORM_BASE_URL);
 
         let dto = effective_status_with(&runtime, Some(&staging_platform()))
             .await
@@ -947,12 +947,13 @@ mod tests {
             .unwrap();
         assert!(
             dto.key_configured,
-            "a console-set key must read as configured even on managed"
+            "a console-set key must read as configured"
         );
         // Same company, same injected platform default, opposite answer — and the
-        // endpoint is unmoved either way: paying for your own agents on the
-        // managed brain does not take you off it.
-        assert_eq!(dto.base_url, STAGING_URL);
+        // key is not merely recorded: it moves the company off the subscription
+        // proxy and onto its own OpenRouter account, which is the only way a
+        // stored `sk-or-…` could actually be used.
+        assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL);
     }
 
     #[tokio::test]
@@ -971,10 +972,32 @@ mod tests {
         assert_eq!(dto.base_url, "https://byo.example/v1");
     }
 
+    /// A third-party endpoint we hold no credential for uses its own URL
+    /// verbatim — the platform default is not a fallback for somewhere we cannot
+    /// authenticate anyway.
     #[tokio::test]
-    async fn a_non_managed_provider_ignores_the_platform_default() {
-        // Only `managed` inherits the platform endpoint; every other kind uses
-        // its own resolved URL verbatim.
+    async fn a_third_party_provider_ignores_the_platform_default() {
+        let home_dir = home();
+        let runtime = runtime_with(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [inference]\nprovider = \"ollama\"\nbase_url = \"http://localhost:11434/v1\"\n",
+        )
+        .await;
+
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, "http://localhost:11434/v1");
+        assert_eq!(dto.source, "manifest");
+    }
+
+    /// `openrouter` is dual-mode, and which mode it is in depends only on
+    /// whether the tenant holds a key. With none it rides the subscription on
+    /// the platform endpoint; that is the config a company starts on, and it
+    /// must work with nothing configured.
+    #[tokio::test]
+    async fn keyless_openrouter_rides_the_subscription_and_a_key_goes_direct() {
         let home_dir = home();
         let runtime = runtime_with(
             home_dir.path(),
@@ -982,12 +1005,21 @@ mod tests {
              [inference]\nprovider = \"openrouter\"\n",
         )
         .await;
+        let platform = staging_platform();
 
-        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+        let dto = effective_status_with(&runtime, Some(&platform)).await.unwrap();
+        assert_eq!(dto.base_url, STAGING_URL, "proxied");
+        assert_eq!(dto.slug, "subscription");
+        assert!(!dto.key_configured);
+
+        inference::store_key(runtime.id(), runtime.secrets().as_ref(), "sk-or-tenant")
             .await
             .unwrap();
-        assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL);
-        assert_eq!(dto.source, "manifest");
+
+        let dto = effective_status_with(&runtime, Some(&platform)).await.unwrap();
+        assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL, "direct");
+        assert_eq!(dto.slug, "openrouter");
+        assert!(dto.key_configured);
     }
 
     /// The probe's gate stays keyed on *tenant* config. Pointing a deployment at
@@ -1093,11 +1125,14 @@ mod tests {
         assert_eq!(resp["status"]["source"], "managed");
     }
 
-    /// Issue #585: the company's key on the *managed* brain — set, rotate, and
-    /// clear — is the whole point of the screen, and the route must never echo
-    /// any of the three tokens back.
+    /// Issue #585: the company's own key — set, rotate, and clear — is the whole
+    /// point of the screen, and the route must never echo any of the three
+    /// tokens back.
+    ///
+    /// Written against the legacy `managed` provider name on purpose: it is what
+    /// a console built before the rename still sends, and it must keep working.
     #[tokio::test]
-    async fn managed_key_can_be_set_rotated_and_cleared() {
+    async fn a_legacy_managed_key_can_be_set_rotated_and_cleared() {
         const ROTATED: &str = "sk-rotated-inference-token-ABC";
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
@@ -1112,14 +1147,15 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{raw}");
-        assert_eq!(resp["status"]["provider"], "managed");
-        assert_eq!(resp["status"]["slug"], "managed");
+        // The legacy name aliases through to what it now means.
+        assert_eq!(resp["status"]["provider"], "openrouter");
+        assert_eq!(resp["status"]["slug"], "openrouter");
         assert_eq!(resp["status"]["source"], "runtime");
         assert_eq!(resp["status"]["keyConfigured"], true);
-        // Setting only a key must not move the tenant off the managed endpoint.
+        // A key means the tenant's own OpenRouter account pays.
         assert_eq!(
             resp["status"]["baseUrl"],
-            crate::company::inference::MANAGED_BASE_URL
+            crate::company::inference::OPENROUTER_BASE_URL
         );
         assert!(!raw.contains(TOKEN), "PUT leaked the token: {raw}");
 

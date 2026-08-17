@@ -2773,6 +2773,10 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         role: overlay.role.clone(),
         description: overlay.description.clone(),
         tier: None,
+        // An operator- or orchestrator-added teammate runs on the company's
+        // default harness. There is no console field to name one, and inventing
+        // a binding here would put a teammate on a harness nobody chose.
+        harness: None,
         // Issue #661 / L5: carry the overlay's own per-teammate grant. An empty
         // list here is unchanged behaviour — `agent_effective_grants` reads it as
         // the standard company-wide grant, exactly as the hardcoded empty did.
@@ -6115,6 +6119,7 @@ budget_usd_daily = 0.0
             role: "Desk Lead".to_string(),
             description: None,
             tier: None,
+            harness: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
             context: None,
@@ -6231,6 +6236,7 @@ budget_usd_daily = 0.0
             role: "Desk Lead".to_string(),
             description: None,
             tier: None,
+            harness: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
             context: None,

@@ -659,6 +659,7 @@ mod tests {
             role: "Chief".into(),
             description: None,
             tier: None,
+            harness: None,
             tools: grants.iter().map(|g| g.to_string()).collect(),
             delegates_to: vec![],
             context: None,

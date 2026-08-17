@@ -166,6 +166,7 @@ mod tests {
             role: role.into(),
             description: None,
             tier: None,
+            harness: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
             context: None,

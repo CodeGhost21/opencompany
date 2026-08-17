@@ -453,7 +453,7 @@ fn attach_tools(
 /// tool. Mirrors the shape openhuman's own `OpenHumanBackendModel` uses against
 /// the identical `/openai/v1` backend.
 static MANAGED_PROFILE: LazyLock<ModelProfile> = LazyLock::new(|| ModelProfile {
-    provider: Some("managed".to_string()),
+    provider: Some("openrouter".to_string()),
     modalities: Modalities {
         image_in: true,
         ..Modalities::default()
@@ -835,7 +835,10 @@ impl ChatModel<()> for HostedProvider {
 
 impl HarnessModel for HostedProvider {
     fn telemetry_provider_id(&self) -> String {
-        "managed".to_string()
+        // `HostedProvider` is the platform-credentialed path by construction —
+        // it exists only where the env default supplied both endpoint and key —
+        // so its spend is the subscription's.
+        "subscription".to_string()
     }
 }
 
@@ -890,26 +893,30 @@ pub async fn request_plan(
         .bearer()
         .await
         .map_err(|e| anyhow::anyhow!("resolving the outbound inference credential: {e}"))?;
-    let headers = if decl.provider == "openrouter" {
-        vec![
-            ("HTTP-Referer", OPENROUTER_REFERER.to_string()),
-            ("X-Title", OPENROUTER_TITLE.to_string()),
-        ]
-    } else if decl.provider == "managed" {
-        // Only `"managed"` is a TinyHumans-owned endpoint. The other three
-        // `INFERENCE_PROVIDERS` (`openrouter`, `openai_compatible`, `ollama`
-        // — see `company::types::INFERENCE_PROVIDERS`) are bring-your-own-key
-        // THIRD-PARTY endpoints (OpenAI, OpenRouter, DeepSeek, a
-        // self-hosted/local Ollama); sending them our `x-sdk-name` would leak
-        // which product a tenant is running to an operator who has no
-        // relationship with TinyHumans and gains nothing from knowing it.
-        // `openrouter` already gets its own attribution headers above — those
-        // are OpenRouter's own dashboard/rankings feature, unrelated to this.
+    let mut headers = Vec::new();
+
+    // OpenRouter's own attribution headers, on BOTH the proxied and the direct
+    // path: they identify the app in OpenRouter's dashboard and rankings, which
+    // is a feature we want either way and is unrelated to who is paying.
+    if inference::normalize_provider(&decl.provider) == "openrouter" {
+        headers.push(("HTTP-Referer", OPENROUTER_REFERER.to_string()));
+        headers.push(("X-Title", OPENROUTER_TITLE.to_string()));
+    }
+
+    // The product-identity header goes ONLY to the platform's own endpoint —
+    // i.e. proxied OpenRouter. Every other resolution reaches a THIRD-PARTY
+    // endpoint (OpenRouter direct on the tenant's account, a self-hosted
+    // OpenAI-compatible server, a local Ollama); sending them our `x-sdk-name`
+    // would leak which product a tenant is running to an operator who has no
+    // relationship with TinyHumans and gains nothing from knowing it.
+    //
+    // Keyed on `is_proxied()` rather than the provider kind: after `managed`'s
+    // removal the kind no longer distinguishes our endpoint from OpenRouter's,
+    // and it is the endpoint — not the vocabulary — that this rule is about.
+    if decl.is_proxied() {
         let (name, value) = crate::product::product_identity_header();
-        vec![(name, value.to_string())]
-    } else {
-        Vec::new()
-    };
+        headers.push((name, value.to_string()));
+    }
     let mut body = serde_json::json!({
         "model": model,
         "temperature": temperature,
@@ -1010,7 +1017,9 @@ impl TenantProvider {
             manifest,
             env_default,
             client: reqwest::Client::new(),
-            slug: RwLock::new("managed"),
+            // Replaced by the resolved slug on the first turn; until then the
+            // company is on the default it booted with.
+            slug: RwLock::new("subscription"),
         }
     }
 
@@ -1444,7 +1453,7 @@ mod tests {
             credential: Credential::None,
             extra_headers: Vec::new(),
         });
-        assert_eq!(provider.telemetry_provider_id(), "managed");
+        assert_eq!(provider.telemetry_provider_id(), "subscription");
     }
 
     /// The exact `/openai/v1` staging response shape: reply text plus a standard
@@ -1994,32 +2003,36 @@ mod tests {
         assert!(plan.headers.is_empty(), "no OpenRouter headers for Ollama");
     }
 
-    /// The positive half of issue #376 (AC #1): `provider = "managed"` always
-    /// targets a TinyHumans-owned endpoint, so [`request_plan`] must attach
-    /// our `x-sdk-name: opencompany` product header alongside the tier's
-    /// other headers.
+    /// The positive half of issue #376 (AC #1): a **proxied** config targets a
+    /// TinyHumans-owned endpoint, so [`request_plan`] must attach our
+    /// `x-sdk-name: opencompany` product header alongside the tier's other
+    /// headers.
+    ///
+    /// After `managed`'s removal the provider *kind* no longer tells our
+    /// endpoint from OpenRouter's — the same `openrouter` kind reaches both.
+    /// `is_proxied()` is what distinguishes them, and this test and its negative
+    /// twin below pin both sides of that one bit.
     #[tokio::test]
-    async fn request_plan_attaches_the_product_header_for_managed() {
+    async fn request_plan_attaches_the_product_header_when_proxied() {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
         let env = crate::company::inference::EnvDefault {
             base_url: "https://env.example/openai/v1".into(),
             credential: Credential::from_value("platform-key"),
         };
-        // A hand-written `provider = "managed"` still resolves through the
-        // env default (mirrors `manifest_managed_inherits_env_credential` in
-        // `company::inference`'s own test suite) — this is the shape a real
-        // company manifest produces, not a synthetic decl.
+        // A keyless `openrouter` resolves through the env default — this is the
+        // shape a real company manifest produces, not a synthetic decl, and it
+        // is the config a company that has configured nothing runs on.
         let decl = inference::resolve_effective(
             &company,
-            &manifest_inference("managed"),
+            &manifest_inference("openrouter"),
             Some(&env),
             &secrets,
         )
         .await
         .unwrap()
-        .expect("managed resolves via the env default");
-        assert_eq!(decl.provider, "managed");
+        .expect("keyless openrouter resolves via the env default");
+        assert!(decl.is_proxied());
 
         let plan = request_plan(
             &decl,
@@ -2035,7 +2048,13 @@ mod tests {
         assert!(
             plan.headers
                 .contains(&("x-sdk-name", "opencompany".to_string())),
-            "managed provider must carry the product header: {:?}",
+            "a proxied config must carry the product header: {:?}",
+            plan.headers
+        );
+        assert!(
+            plan.headers
+                .contains(&("HTTP-Referer", OPENROUTER_REFERER.to_string())),
+            "and OpenRouter's own attribution rides the proxied path too: {:?}",
             plan.headers
         );
     }
@@ -2046,14 +2065,17 @@ mod tests {
     /// host an operator points at — OpenAI, DeepSeek, a self-hosted proxy,
     /// …). Sending them our product identity would tell a company we have no
     /// relationship with which product a tenant is running, for no benefit to
-    /// anyone. Only `"managed"` (see the test above) may ever carry the
-    /// header.
+    /// anyone. Only a **proxied** config (see the test above) may ever carry
+    /// the header — and note the first case here is the *same provider kind* as
+    /// that test, differing only in holding a tenant key. That is precisely the
+    /// distinction this rule now turns on.
     #[tokio::test]
     async fn request_plan_never_attaches_the_product_header_for_third_party_providers() {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
 
-        // openrouter: gets ITS OWN attribution headers, never ours.
+        // openrouter DIRECT (the tenant's own key): gets ITS OWN attribution
+        // headers, never ours.
         let mut or_manifest = manifest_inference("openrouter");
         or_manifest.models =
             BTreeMap::from([("chat-v1".to_string(), "deepseek/deepseek-chat".to_string())]);
