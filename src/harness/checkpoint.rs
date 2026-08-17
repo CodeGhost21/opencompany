@@ -436,4 +436,90 @@ mod test {
         assert!(String::from_utf8(status.stdout).unwrap().trim().is_empty());
         assert!(!dir.path().join("workspace.git/index.lock").exists());
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_agent_written_git_pointer_cannot_redirect_checkpoints() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // A decoy "repository" the agent's pointer names, bearing a hook that
+        // would expose host execution were the checkpointer to commit inside
+        // it.
+        let decoy = dir.path().join("decoy");
+        let decoy_hooks = decoy.join("hooks");
+        std::fs::create_dir_all(&decoy_hooks).unwrap();
+        std::fs::write(
+            decoy_hooks.join("post-commit"),
+            "#!/bin/sh\ntouch host-executed\n",
+        )
+        .unwrap();
+
+        // The agent plants its own pointer before the checkpointer initializes.
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", decoy.display()),
+        )
+        .unwrap();
+
+        let checkpointer = WorkspaceCheckpointer::initialize(&workspace).unwrap();
+        let mut tools = CheckpointingTool::wrap_all(
+            vec![Box::new(WriteTool(workspace.join("answer.txt")))],
+            checkpointer,
+        );
+        tools
+            .remove(0)
+            .execute(json!({"body": "42"}))
+            .await
+            .unwrap();
+
+        // Checkpoints land in the out-of-band repository, discovered normally
+        // through the sanitized pointer...
+        assert!(dir.path().join("workspace.git/HEAD").is_file());
+        let history = log(&workspace);
+        assert!(
+            history.contains("checkpoint: after write_fixture"),
+            "{history}"
+        );
+        // ...the planted pointer was overwritten with the real one...
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".git")).unwrap(),
+            format!("gitdir: {}\n", dir.path().join("workspace.git").display())
+        );
+        // ...the decoy repository was never initialized...
+        assert!(!decoy.join("HEAD").is_file());
+        // ...and its hook never ran in the host process.
+        assert!(!dir.path().join("host-executed").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_blocks_behind_an_in_flight_checkpoint_lock() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().join("workspace");
+        WorkspaceCheckpointer::initialize(&workspace).unwrap();
+
+        // Hold the per-git-dir checkpoint lock, then re-initialize on a thread
+        // associated with the runtime: `initialize` must serialize behind the
+        // same lock the per-call checkpoint path holds rather than racing it
+        // into the Git index.
+        let lock = path_lock(&dir.path().join("workspace.git"));
+        let _guard = lock.lock().await;
+
+        let entered = tokio::runtime::Handle::current();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _enter = entered.enter();
+            let _ = tx.send(WorkspaceCheckpointer::initialize(&workspace).is_ok());
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            rx.try_recv().is_err(),
+            "re-initialize raced past the in-flight checkpoint lock"
+        );
+
+        drop(_guard);
+        assert!(rx.recv().expect("re-initialize completes").is_ok());
+        thread.join().expect("lock thread");
+    }
 }
