@@ -4879,7 +4879,11 @@ mod tests {
         let out = text(&result);
         assert!(out.contains("write scope"), "{out}");
 
-        let (node, body) = store.read(&id, "n-eng").await.unwrap().expect("still there");
+        let (node, body) = store
+            .read(&id, "n-eng")
+            .await
+            .unwrap()
+            .expect("still there");
         assert_eq!(node.updated_at_millis, 2_000, "untouched");
         assert_eq!(body, "# Engineering\nReview every PR.");
     }
@@ -4889,9 +4893,8 @@ mod tests {
     async fn workspace_write_allows_a_path_inside_the_declared_write_scope() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        let workspace = ws(store.clone(), id.clone()).with_write_scope(Some(vec![
-            "Standards/Engineering standards.md".to_string(),
-        ]));
+        let workspace = ws(store.clone(), id.clone())
+            .with_write_scope(Some(vec!["Standards/Engineering standards.md".to_string()]));
         let tool = WorkspaceWriteTool::new(workspace);
 
         let result = tool

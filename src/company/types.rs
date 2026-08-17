@@ -1516,7 +1516,10 @@ mod test {
         .expect("parse toml");
         assert_eq!(
             populated.context,
-            Some(vec![ContextEntry::from("GOAL.md"), ContextEntry::from("CLAIMS.md")])
+            Some(vec![
+                ContextEntry::from("GOAL.md"),
+                ContextEntry::from("CLAIMS.md")
+            ])
         );
 
         // The distinction survives a JSON round-trip too, since the routing
@@ -1533,12 +1536,15 @@ mod test {
     #[test]
     fn write_scope_is_none_unless_a_context_entry_declares_write() {
         let omitted: Agent = toml::from_str("id = \"critic\"\nrole = \"Critic\"\n").unwrap();
-        assert_eq!(omitted.write_scope(), None, "an omitted context key is unconfined");
+        assert_eq!(
+            omitted.write_scope(),
+            None,
+            "an omitted context key is unconfined"
+        );
 
-        let read_only: Agent = toml::from_str(
-            "id = \"critic\"\nrole = \"Critic\"\ncontext = [\"Brand/Voice.md\"]\n",
-        )
-        .unwrap();
+        let read_only: Agent =
+            toml::from_str("id = \"critic\"\nrole = \"Critic\"\ncontext = [\"Brand/Voice.md\"]\n")
+                .unwrap();
         assert_eq!(
             read_only.write_scope(),
             None,
@@ -1566,8 +1572,14 @@ mod test {
     #[test]
     fn ledger_access_defaults_to_unrestricted_record() {
         let unrestricted: Agent = toml::from_str("id = \"critic\"\nrole = \"Critic\"\n").unwrap();
-        assert_eq!(unrestricted.ledger_access("tasks"), Some(LedgerAccess::Record));
-        assert_eq!(unrestricted.ledger_access("anything"), Some(LedgerAccess::Record));
+        assert_eq!(
+            unrestricted.ledger_access("tasks"),
+            Some(LedgerAccess::Record)
+        );
+        assert_eq!(
+            unrestricted.ledger_access("anything"),
+            Some(LedgerAccess::Record)
+        );
 
         let scoped: Agent = toml::from_str(
             r#"
@@ -1582,7 +1594,11 @@ mod test {
         .unwrap();
         assert_eq!(scoped.ledger_access("tasks"), Some(LedgerAccess::Record));
         assert_eq!(scoped.ledger_access("DECISIONS"), Some(LedgerAccess::Read));
-        assert_eq!(scoped.ledger_access("goals"), None, "an undeclared slug is unreachable");
+        assert_eq!(
+            scoped.ledger_access("goals"),
+            None,
+            "an undeclared slug is unreachable"
+        );
     }
 
     /// A bare `{ name = "tasks" }` grant, with no `access` key, defaults to

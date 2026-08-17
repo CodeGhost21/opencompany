@@ -145,7 +145,10 @@ pub fn routed_documents(agent: &Agent) -> Vec<String> {
     let excluded = excluded_documents(&agent.classes);
 
     let chosen: Vec<String> = match agent.context.as_deref() {
-        Some(explicit) => explicit.iter().map(|entry| entry.path().to_string()).collect(),
+        Some(explicit) => explicit
+            .iter()
+            .map(|entry| entry.path().to_string())
+            .collect(),
         None => tier_defaults(agent.tier.as_deref())
             .iter()
             .map(|doc| doc.to_string())
@@ -164,7 +167,9 @@ pub fn routed_documents(agent: &Agent) -> Vec<String> {
         // anything about the work in progress, so no class has a reason to
         // withhold either — and a role excluded from the method or the
         // working agreement could not follow it.
-        if !UNIVERSAL_DOCUMENTS.contains(&document.as_str()) && excluded.contains(&document.as_str()) {
+        if !UNIVERSAL_DOCUMENTS.contains(&document.as_str())
+            && excluded.contains(&document.as_str())
+        {
             continue;
         }
         if seen.insert(document.clone()) {
@@ -338,7 +343,10 @@ mod tests {
     fn an_explicit_context_overrides_the_tier_default() {
         let mut a = agent(Some("orchestrator"));
         a.context = Some(vec!["GOAL.md".into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, "GOAL.md"]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, "GOAL.md"]
+        );
     }
 
     #[test]
@@ -377,7 +385,10 @@ mod tests {
         let mut a = agent(None);
         a.classes = vec!["judge".into()];
         a.context = Some(vec![SCRATCH.into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     #[test]
@@ -390,7 +401,10 @@ mod tests {
             CLAIMS.into(),
             BRIEF.into(),
         ]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     /// The method policy is exempt: it is how the company works, not something
@@ -407,14 +421,20 @@ mod tests {
     fn a_document_listed_twice_is_routed_once() {
         let mut a = agent(None);
         a.context = Some(vec![UNIVERSAL_DOCUMENT.into(), BRIEF.into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     #[test]
     fn blank_context_entries_are_ignored() {
         let mut a = agent(None);
         a.context = Some(vec!["".into(), "  ".into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     /// An unknown class imposes no exclusion. Manifest validation refuses one
