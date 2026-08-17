@@ -101,6 +101,8 @@ async fn main() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let meter = Arc::new(CapturingMeter::default());
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(cfg)),
         provider_slug: "managed".to_string(),
         context: Arc::new(FsContextStore::new(dir.path())),
