@@ -31,6 +31,71 @@ use crate::ledger::{
 };
 use crate::ports::now_millis;
 
+/// Everything a ledger operation needs, without a whole [`CompanyRuntime`].
+///
+/// The routes have a runtime and the agent tools do not — they are built per
+/// turn from the stores directly — so the service takes the three handles it
+/// actually uses rather than the runtime. That is what lets the tools and the
+/// routes share **one** implementation of the rules in this module's docs,
+/// instead of the tools growing a second, slightly different copy.
+#[derive(Clone)]
+pub struct Ledgers {
+    company: crate::ports::types::CompanyId,
+    ledgers: Arc<dyn crate::ports::ledgers::LedgerStore>,
+    /// Read only to project the native task board. A context without one reads
+    /// `tasks` as empty, which is right for a caller that has no board rather
+    /// than a reason to fail.
+    tasks: Option<Arc<dyn crate::ports::tasks::TaskStore>>,
+    /// Written only to publish a derived file. A context without one records
+    /// perfectly well and simply publishes nothing.
+    workspace: Option<Arc<dyn crate::ports::workspace::WorkspaceStore>>,
+}
+
+impl Ledgers {
+    /// A context over the ledger store alone.
+    pub fn new(
+        company: crate::ports::types::CompanyId,
+        ledgers: Arc<dyn crate::ports::ledgers::LedgerStore>,
+    ) -> Self {
+        Self {
+            company,
+            ledgers,
+            tasks: None,
+            workspace: None,
+        }
+    }
+
+    /// Wires the board, so the `tasks` ledger reads.
+    #[must_use]
+    pub fn with_tasks(mut self, tasks: Arc<dyn crate::ports::tasks::TaskStore>) -> Self {
+        self.tasks = Some(tasks);
+        self
+    }
+
+    /// Wires the workspace, so writes publish their `derived/` file.
+    #[must_use]
+    pub fn with_workspace(
+        mut self,
+        workspace: Arc<dyn crate::ports::workspace::WorkspaceStore>,
+    ) -> Self {
+        self.workspace = Some(workspace);
+        self
+    }
+
+    /// The company these ledgers belong to.
+    pub fn company(&self) -> &crate::ports::types::CompanyId {
+        &self.company
+    }
+}
+
+impl From<&CompanyRuntime> for Ledgers {
+    fn from(runtime: &CompanyRuntime) -> Self {
+        Ledgers::new(runtime.id().clone(), runtime.ledgers().clone())
+            .with_tasks(runtime.tasks().clone())
+            .with_workspace(runtime.workspace().clone())
+    }
+}
+
 /// Builds the company's registry: the built-ins plus whatever it declared.
 ///
 /// # Errors
@@ -38,8 +103,8 @@ use crate::ports::now_millis;
 /// Returns whatever the store returns. A declaration that will not load is a
 /// [`Registry::faults`] entry rather than an error — a company that wrote one
 /// bad ledger must still reach its board.
-pub async fn registry(runtime: &CompanyRuntime) -> Result<Registry> {
-    let declared = runtime.ledgers().list_specs(runtime.id()).await?;
+pub async fn registry(ctx: &Ledgers) -> Result<Registry> {
+    let declared = ctx.ledgers.list_specs(&ctx.company).await?;
     Ok(Registry::build(declared))
 }
 
@@ -52,14 +117,14 @@ pub async fn registry(runtime: &CompanyRuntime) -> Result<Registry> {
 /// # Errors
 ///
 /// Returns whatever the store returns.
-pub async fn entries(runtime: &CompanyRuntime, spec: &LedgerSpec) -> Result<Entries> {
+pub async fn entries(ctx: &Ledgers, spec: &LedgerSpec) -> Result<Entries> {
     match spec.source {
-        LedgerSource::Native => {
-            let tasks = runtime.tasks().list(runtime.id()).await?;
-            Ok(native::entries_from_tasks(&tasks))
-        }
+        LedgerSource::Native => match &ctx.tasks {
+            Some(tasks) => Ok(native::entries_from_tasks(&tasks.list(&ctx.company).await?)),
+            None => Ok(Entries::default()),
+        },
         LedgerSource::Events => {
-            let events = runtime.ledgers().events(runtime.id(), &spec.slug).await?;
+            let events = ctx.ledgers.events(&ctx.company, &spec.slug).await?;
             Ok(engine::fold(spec, &events))
         }
     }
@@ -70,8 +135,8 @@ pub async fn entries(runtime: &CompanyRuntime, spec: &LedgerSpec) -> Result<Entr
 /// # Errors
 ///
 /// Returns whatever the store returns.
-pub async fn render(runtime: &CompanyRuntime, spec: &LedgerSpec) -> Result<String> {
-    Ok(engine::render(spec, &entries(runtime, spec).await?))
+pub async fn render(ctx: &Ledgers, spec: &LedgerSpec) -> Result<String> {
+    Ok(engine::render(spec, &entries(ctx, spec).await?))
 }
 
 /// Every ledger's index, for a turn that needs to know what the company records.
@@ -83,13 +148,13 @@ pub async fn render(runtime: &CompanyRuntime, spec: &LedgerSpec) -> Result<Strin
 /// # Errors
 ///
 /// Returns whatever the store returns.
-pub async fn briefing(runtime: &CompanyRuntime, registry: &Registry) -> Result<String> {
+pub async fn briefing(ctx: &Ledgers, registry: &Registry) -> Result<String> {
     let mut out = String::from(
         "## The company's ledgers\n\nEach of these is a durable record with its own rows. Read one \
          with `read_ledger`; record into one with `record_entry`.\n\n",
     );
     for spec in registry.specs() {
-        let entries = entries(runtime, spec).await?;
+        let entries = entries(ctx, spec).await?;
         out.push_str(&engine::index(spec, &entries));
         out.push('\n');
     }
@@ -132,8 +197,8 @@ pub struct Query {
 ///
 /// Returns whatever the store returns, or
 /// [`OpenCompanyError::InvalidRequest`] when `sort` is not an order name.
-pub async fn read(runtime: &CompanyRuntime, spec: &LedgerSpec, query: &Query) -> Result<Read> {
-    let folded = entries(runtime, spec).await?;
+pub async fn read(ctx: &Ledgers, spec: &LedgerSpec, query: &Query) -> Result<Read> {
+    let folded = entries(ctx, spec).await?;
     let order = match query.sort.as_deref() {
         Some(name) => parse_order(name)?,
         None => spec.default_order(),
@@ -181,7 +246,7 @@ pub async fn read(runtime: &CompanyRuntime, spec: &LedgerSpec, query: &Query) ->
 /// does not declare, or when it closes a row into a status that demands a
 /// reason without giving one.
 pub async fn record(
-    runtime: &CompanyRuntime,
+    ctx: &Ledgers,
     spec: &LedgerSpec,
     author: &LedgerAuthor,
     id: &str,
@@ -238,7 +303,7 @@ pub async fn record(
                 .and_then(|value| value.as_deref())
                 .unwrap_or_default();
             if arriving.trim().is_empty() {
-                let existing = entries(runtime, spec).await?;
+                let existing = entries(ctx, spec).await?;
                 let held = existing
                     .find(id)
                     .map(|entry| entry.get(REASON_FIELD).to_string())
@@ -262,9 +327,9 @@ pub async fn record(
         at_millis: now_millis(),
         fields,
     };
-    runtime.ledgers().append(runtime.id(), &event).await?;
-    let folded = entries(runtime, spec).await?;
-    publish(runtime, spec, &folded).await;
+    ctx.ledgers.append(&ctx.company, &event).await?;
+    let folded = entries(ctx, spec).await?;
+    publish(ctx, spec, &folded).await;
     folded.find(id).cloned().ok_or_else(|| {
         OpenCompanyError::NotFound(format!(
             "recorded `{id}` on `{}` but the fold did not return it",
@@ -285,7 +350,7 @@ pub async fn record(
 /// As [`record`], plus [`OpenCompanyError::InvalidRequest`] when `status` is
 /// not one of the ledger's closing statuses.
 pub async fn close(
-    runtime: &CompanyRuntime,
+    ctx: &Ledgers,
     spec: &LedgerSpec,
     author: &LedgerAuthor,
     id: &str,
@@ -319,7 +384,7 @@ pub async fn close(
     if !reason.trim().is_empty() {
         fields.insert(REASON_FIELD.to_string(), Some(reason.trim().to_string()));
     }
-    record(runtime, spec, author, id, fields).await
+    record(ctx, spec, author, id, fields).await
 }
 
 /// Declares a new ledger.
@@ -333,17 +398,17 @@ pub async fn close(
 ///
 /// Returns [`OpenCompanyError::InvalidRequest`] when the declaration is
 /// malformed, collides with an existing ledger, or is past the cap.
-pub async fn define(runtime: &CompanyRuntime, document: &serde_json::Value) -> Result<LedgerSpec> {
+pub async fn define(ctx: &Ledgers, document: &serde_json::Value) -> Result<LedgerSpec> {
     let spec = crate::ledger::parse(document, false)?;
-    let registry = registry(runtime).await?;
+    let registry = registry(ctx).await?;
     registry.admits(&spec)?;
-    runtime.ledgers().put_spec(runtime.id(), &spec).await?;
+    ctx.ledgers.put_spec(&ctx.company, &spec).await?;
     // Rendered immediately, empty, so the ledger is visible in `derived/` from
     // the moment it exists rather than from its first row. A folder that gains
     // a file only once somebody writes to it reads as though the ledger was
     // never created.
-    let folded = entries(runtime, &spec).await?;
-    publish(runtime, &spec, &folded).await;
+    let folded = entries(ctx, &spec).await?;
+    publish(ctx, &spec, &folded).await;
     Ok(spec)
 }
 
@@ -360,13 +425,13 @@ pub async fn define(runtime: &CompanyRuntime, document: &serde_json::Value) -> R
 /// or the slug names a built-in, and [`OpenCompanyError::NotFound`] when
 /// nothing carries that slug.
 pub async fn retire(
-    runtime: &CompanyRuntime,
+    ctx: &Ledgers,
     author: &LedgerAuthor,
     slug: &str,
     purge: bool,
 ) -> Result<()> {
     refuse_non_human(author, "retire a ledger")?;
-    let registry = registry(runtime).await?;
+    let registry = registry(ctx).await?;
     let spec = registry.require(slug)?;
     if spec.builtin {
         return Err(OpenCompanyError::InvalidRequest(format!(
@@ -375,12 +440,9 @@ pub async fn retire(
             spec.slug
         )));
     }
-    runtime.ledgers().delete_spec(runtime.id(), &spec.slug).await?;
+    ctx.ledgers.delete_spec(&ctx.company, &spec.slug).await?;
     if purge {
-        runtime
-            .ledgers()
-            .purge_ledger(runtime.id(), &spec.slug)
-            .await?;
+        ctx.ledgers.purge_ledger(&ctx.company, &spec.slug).await?;
     }
     Ok(())
 }
@@ -396,7 +458,7 @@ pub async fn retire(
 /// or the ledger is native (its rows are deleted through the surface that owns
 /// them).
 pub async fn delete_entry(
-    runtime: &CompanyRuntime,
+    ctx: &Ledgers,
     spec: &LedgerSpec,
     author: &LedgerAuthor,
     id: &str,
@@ -408,13 +470,13 @@ pub async fn delete_entry(
             spec.slug, spec.written_by
         )));
     }
-    let removed = runtime
-        .ledgers()
-        .purge_entry(runtime.id(), &spec.slug, id.trim())
+    let removed = ctx
+        .ledgers
+        .purge_entry(&ctx.company, &spec.slug, id.trim())
         .await?;
     if removed {
-        let folded = entries(runtime, spec).await?;
-        publish(runtime, spec, &folded).await;
+        let folded = entries(ctx, spec).await?;
+        publish(ctx, spec, &folded).await;
     }
     Ok(removed)
 }
@@ -430,12 +492,12 @@ pub async fn delete_entry(
 /// # Errors
 ///
 /// Returns whatever the store returns.
-pub async fn republish_all(runtime: &CompanyRuntime) -> Result<usize> {
-    let registry = registry(runtime).await?;
+pub async fn republish_all(ctx: &Ledgers) -> Result<usize> {
+    let registry = registry(ctx).await?;
     let mut written = 0;
     for spec in registry.specs() {
-        let folded = entries(runtime, spec).await?;
-        publish(runtime, spec, &folded).await;
+        let folded = entries(ctx, spec).await?;
+        publish(ctx, spec, &folded).await;
         written += 1;
     }
     Ok(written)
@@ -490,12 +552,14 @@ fn normalize_fields(
 /// *was* recorded into a call that reports failure, because that is the one
 /// outcome the caller cannot recover from: it will retry, and the retry will
 /// record the row a second time.
-async fn publish(runtime: &CompanyRuntime, spec: &LedgerSpec, folded: &Entries) {
+async fn publish(ctx: &Ledgers, spec: &LedgerSpec, folded: &Entries) {
+    let Some(workspace) = &ctx.workspace else {
+        return;
+    };
     let body = engine::render(spec, folded);
-    let workspace: Arc<dyn crate::ports::workspace::WorkspaceStore> = runtime.workspace().clone();
-    if let Err(error) = derived::publish(workspace.as_ref(), runtime.id(), spec, &body).await {
+    if let Err(error) = derived::publish(workspace.as_ref(), &ctx.company, spec, &body).await {
         tracing::warn!(
-            company = %runtime.id(),
+            company = %ctx.company,
             ledger = %spec.slug,
             %error,
             "ledger recorded but its derived file could not be written"
