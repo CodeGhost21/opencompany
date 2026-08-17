@@ -170,6 +170,30 @@ async fn spec_for(ctx: &Ledgers, arguments: &Value) -> Result<LedgerSpec, String
         .map_err(|error| format!("{error}"))
 }
 
+/// Refuses `slug` when `grants` does not give at least `need`.
+///
+/// `Record` implies `Read` — recording requires reading nothing extra. Named
+/// so every ledger tool refuses in the same words, whether the reason is "not
+/// in your declared list" or "declared read-only for you".
+fn require_access(
+    grants: &Option<Vec<LedgerGrant>>,
+    slug: &str,
+    need: LedgerAccess,
+) -> Result<(), String> {
+    match ledger_access(grants, slug) {
+        Some(LedgerAccess::Record) => Ok(()),
+        Some(LedgerAccess::Read) if need == LedgerAccess::Read => Ok(()),
+        Some(LedgerAccess::Read) => Err(format!(
+            "Refused: your manifest grants only read access to `{slug}`. Recording or closing a \
+             row needs `record` access — ask the operator to change your `ledgers` grant."
+        )),
+        None => Err(format!(
+            "Refused: `{slug}` is not in your declared `ledgers` grant. `list_ledgers` names what \
+             you can reach."
+        )),
+    }
+}
+
 fn text(arguments: &Value, key: &str) -> String {
     arguments
         .get(key)
