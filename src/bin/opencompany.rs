@@ -311,7 +311,7 @@ fn company_builder(
     // How humans sign in, when the host names it for every company it serves
     // (`OPENCOMPANY_AUTH_MODE` / `config.toml`). `None` leaves each manifest's
     // `[users].mode` to answer, which is the normal case.
-    .with_auth_mode_override(state.config().auth_mode_override)
+    .with_auth_mode_override(state.auth_mode_override())
     .with_skills_registry(state.shared_skill_registry()?)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
@@ -1137,6 +1137,14 @@ async fn async_main() -> Result<()> {
                     None => None,
                 }
             };
+            // Read before `config_file` is consumed for `bind` just below.
+            // Whether this data root has been through the first-run setup flow
+            // (`server::setup`); absent — a fresh root, or one predating the
+            // flow — leaves it false, which is what puts the console into the
+            // wizard instead of a sign-in form for a host nobody configured.
+            let setup_complete = config_file
+                .as_ref()
+                .is_some_and(|c| c.setup_completed_at.is_some());
             let (bind, bind_source) = opencompany::app::config::resolve_serve_bind(
                 bind,
                 &ProcessEnv,
@@ -1162,6 +1170,14 @@ async fn async_main() -> Result<()> {
             })
             .with_cors(opencompany::server::cors::CorsConfig::from_env()?)
             .with_home(home.clone())
+            // `setup_complete` above, and every `config.toml` read/write the
+            // first-run setup flow does, resolve against `data_root` — not
+            // `home`, which an explicit `--home` can point elsewhere (see
+            // `home_divergence_warning`). Recording it here is what lets
+            // `server::setup` resolve the same file rather than its own
+            // `state.home()`.
+            .with_config_root(data_root.clone())
+            .with_setup_complete(setup_complete)
             .with_quota(
                 env_usize("OPENCOMPANY_MAX_COMPANIES"),
                 env_usize("OPENCOMPANY_MAX_COMPANIES_PER_TENANT"),
@@ -1295,7 +1311,36 @@ async fn async_main() -> Result<()> {
                 spawn_telegram_poller(&state, &id, &shutdown, &mut scheduler_handles);
             }
             if companies.is_empty() {
-                println!("serving with no companies; pass --company <dir> to load one");
+                // Nothing was named on the command line, so adopt whatever this
+                // data root already holds. A company can reach a root without
+                // ever being named on a command line — the first-run setup flow
+                // (`server::setup`) seeds one — and without this an operator who
+                // completed setup, was told to restart for their settings to
+                // take effect, and did, came back to an empty host with their
+                // company sitting unread on disk.
+                //
+                // Adopting creates nothing: an empty root still starts empty,
+                // rather than inventing the starter company that only the
+                // packaged desktop's `bootstrap_companies` seeds.
+                let adopted = opencompany::desktop::adopt_companies(&state).await?;
+                for (id, manifest) in &adopted {
+                    let slug = id.as_ref();
+                    if let Some(handle) =
+                        spawn_scheduler(&state, slug, &manifest.schedules, &shutdown)
+                    {
+                        scheduler_handles.push(handle);
+                    }
+                    spawn_mailbox_poller(&state, slug, &shutdown, &mut scheduler_handles);
+                    spawn_telegram_poller(&state, slug, &shutdown, &mut scheduler_handles);
+                    println!(
+                        "adopted company `{slug}` ({}) from {}",
+                        manifest.company.name,
+                        home.display()
+                    );
+                }
+                if adopted.is_empty() {
+                    println!("serving with no companies; pass --company <dir> to load one");
+                }
             }
 
             // One workflow scheduler for the whole process, started even with no

@@ -51,6 +51,8 @@ pub mod audit;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
+#[cfg(feature = "chargebee")]
+pub mod chargebee;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
 /// agent, and why every cut it makes describes itself. Pure and un-gated (the
@@ -79,6 +81,14 @@ pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
 pub mod orchestrator;
+/// Chargebee billing tools (issue #788), wired per company from its own
+/// SecretStore. Always compiled so the credential resolution and the fail-closed
+/// decision are testable at default features; only the tools are gated.
+/// PayPal wallet + transaction tools (issue #789), wired per company from its
+/// own SecretStore. Always compiled so credential resolution and the
+/// fail-closed decision are testable at default features.
+#[cfg(feature = "paypal")]
+pub mod paypal;
 /// Issue #337: the planning station — one tool-less model call per card entering
 /// `planning`, with the host gathering the evidence and verifying every
 /// prerequisite the model claims. See [`planning`].
@@ -416,6 +426,21 @@ pub struct HarnessDeps {
     /// else this instance's platform identity. With neither, no tools are wired —
     /// never a borrowed identity.
     pub composio: Option<composio::TenantComposio>,
+
+    /// The per-company Chargebee connection (issue #788). `None` (the default at
+    /// every construction site) fails closed — no billing tools are wired.
+    /// Resolved from that company's own secret store, never from the
+    /// environment: two companies on one host bill two different sites.
+    /// `HarnessPool::ensure` re-resolves it each turn, so a key set or rotated in
+    /// the console takes effect next turn with no restart.
+    #[cfg(feature = "chargebee")]
+    pub chargebee: Option<chargebee::TenantChargebee>,
+
+    /// The per-company PayPal connection (issue #789). `None` fails closed —
+    /// no wallet tools are wired. Resolved from that company's own secret store
+    /// and re-resolved each turn, like `chargebee`.
+    #[cfg(feature = "paypal")]
+    pub paypal: Option<paypal::TenantPaypal>,
     /// The MANAGED web-search backend (issue #238). `None` (the default at every
     /// construction site but the production runtime builder) **fails closed** —
     /// no `web_search` tool is wired and agents behave exactly as before.
@@ -863,6 +888,14 @@ pub struct HarnessPool {
     /// store wired the config is the static [`HarnessDeps::composio`], whose
     /// fingerprint never moves.
     composio_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the billing connections (Chargebee #788, PayPal #789) the
+    /// cached roster was built from, keyed by company.
+    ///
+    /// Without this axis a credential saved from the console reaches nothing
+    /// until a restart — the roster is cached, so `build_agent` is never called
+    /// again to notice it. That was live for both integrations until the tools
+    /// were observed missing from an agent whose settings page said "Connected".
+    billing_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Fingerprint of the company's bound-repository set the cached roster was
     /// built from, keyed by company (issue #245). Drives repository freshness:
     /// [`ensure`](Self::ensure) re-reads the binding index from the
@@ -977,6 +1010,7 @@ impl HarnessPool {
             overlay_fingerprints: RwLock::new(HashMap::new()),
             capability_fingerprints: RwLock::new(HashMap::new()),
             composio_fingerprints: RwLock::new(HashMap::new()),
+            billing_fingerprints: RwLock::new(HashMap::new()),
             repo_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
@@ -1092,6 +1126,29 @@ impl HarnessPool {
         let composio_config = self.resolve_composio(company, deps).await;
         let composio_fp = composio::TenantComposio::fingerprint(&composio_config);
 
+        // Re-resolve + fingerprint the billing connections (#788, #789) for the
+        // same reason as Composio above: both are set from the console, so a
+        // roster that never re-reads them leaves an agent without billing tools
+        // on a company whose settings page reads "Connected".
+        #[cfg(feature = "chargebee")]
+        let chargebee_config = self.resolve_chargebee(company, deps).await;
+        #[cfg(feature = "paypal")]
+        let paypal_config = self.resolve_paypal(company, deps).await;
+        // A build without either feature has no billing axis to go stale on, so
+        // the fingerprint is a constant and this company never rebuilds on it.
+        let billing_fp = {
+            use std::hash::Hasher;
+            // `mut` is only exercised when a billing feature is compiled in; a
+            // build with neither writes nothing and the hasher stays untouched.
+            #[cfg_attr(not(any(feature = "chargebee", feature = "paypal")), allow(unused_mut))]
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            #[cfg(feature = "chargebee")]
+            hasher.write_u64(chargebee::TenantChargebee::fingerprint(&chargebee_config));
+            #[cfg(feature = "paypal")]
+            hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
+            hasher.finish()
+        };
+
         // Re-read + fingerprint the company's bound repositories (issue #245):
         // one index document, read live, so a bind / rotate / revoke reaches the
         // agent on the next turn. Only companies that explicitly grant `repo`
@@ -1132,6 +1189,7 @@ impl HarnessPool {
             let overlay_fingerprints = self.overlay_fingerprints.read().await;
             let capability_fingerprints = self.capability_fingerprints.read().await;
             let composio_fingerprints = self.composio_fingerprints.read().await;
+            let billing_fingerprints = self.billing_fingerprints.read().await;
             let repo_fingerprints = self.repo_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
@@ -1143,6 +1201,7 @@ impl HarnessPool {
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
                 && capability_fingerprints.get(&company.id) == Some(&capability_fp)
                 && composio_fingerprints.get(&company.id) == Some(&composio_fp)
+                && billing_fingerprints.get(&company.id) == Some(&billing_fp)
                 && repo_fingerprints.get(&company.id) == Some(&repo_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
@@ -1167,6 +1226,14 @@ impl HarnessPool {
         // Install the freshly-resolved Composio config the same way, so a token
         // set/rotate/clear reaches the rebuilt agents (issue #110).
         fresh_deps.composio = composio_config;
+        #[cfg(feature = "chargebee")]
+        {
+            fresh_deps.chargebee = chargebee_config;
+        }
+        #[cfg(feature = "paypal")]
+        {
+            fresh_deps.paypal = paypal_config;
+        }
         // And the freshly-read bindings (issue #245), so a repository bound or
         // revoked in the console is what the rebuilt agents' tools resolve
         // against — including the descriptions that name what is bound.
@@ -1229,6 +1296,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), composio_fp);
+        self.billing_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), billing_fp);
         self.repo_fingerprints
             .write()
             .await
@@ -1324,6 +1395,75 @@ impl HarnessPool {
                 .await
             }
             None => deps.composio.clone(),
+        }
+    }
+
+    /// Re-reads the company's Chargebee connection from the secret store, so a
+    /// key saved or rotated in Settings → Billing reaches the agent on its next
+    /// turn rather than at the next restart (issue #788).
+    ///
+    /// Only companies that **explicitly** grant `chargebee` read at all. With no
+    /// secret store wired this keeps the boot-resolved
+    /// [`HarnessDeps::chargebee`] — which was itself resolved from *this*
+    /// company's secret store by the runtime builder, so the fallback cannot
+    /// reach another tenant's credential.
+    ///
+    /// A transient **read error** keeps that connection too, with a warning,
+    /// rather than un-wiring the billing tools — the same direction
+    /// [`Self::resolve_repo_bindings`] and [`Self::resolve_effective_mcp`]
+    /// degrade in, and the safe one here for a specific reason: a stale
+    /// Chargebee credential is refused by Chargebee, which the agent surfaces as
+    /// a tool error it can report, whereas a tool that has vanished is invisible
+    /// to the agent — it simply stops being able to invoice and says nothing.
+    /// An absent credential still resolves to `None`; only the error case holds.
+    #[cfg(feature = "chargebee")]
+    async fn resolve_chargebee(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<chargebee::TenantChargebee> {
+        if !crate::company::grants_chargebee_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.chargebee.clone();
+        };
+        match chargebee::TenantChargebee::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[chargebee] could not read the billing credential; keeping the last known \
+                     connection: {err}"
+                );
+                deps.chargebee.clone()
+            }
+        }
+    }
+
+    /// The PayPal equivalent (issue #789), for the same reasons.
+    #[cfg(feature = "paypal")]
+    async fn resolve_paypal(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<paypal::TenantPaypal> {
+        if !crate::company::grants_paypal_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.paypal.clone();
+        };
+        match paypal::TenantPaypal::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[paypal] could not read the billing credential; keeping the last known \
+                     connection: {err}"
+                );
+                deps.paypal.clone()
+            }
         }
     }
 
@@ -1544,6 +1684,15 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn budget_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.budget_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current billing-connection fingerprint for a company (test-only), so
+    /// a credential-freshness test can assert the roster was rebuilt after a key
+    /// was saved or rotated in Settings → Billing rather than inferring it from
+    /// the tool list (issues #788, #789).
+    #[cfg(test)]
+    pub async fn billing_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.billing_fingerprints.read().await.get(company).copied()
     }
 
     /// The current desk-scope fingerprint for a company (test-only), so a
@@ -3049,6 +3198,10 @@ description = "Builds the product."
                 plan: None,
                 media: None,
                 composio: None,
+                #[cfg(feature = "chargebee")]
+                chargebee: None,
+                #[cfg(feature = "paypal")]
+                paypal: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 run_supervisor: crate::runtime::RunSupervisor::default(),
                 delivery: None,
@@ -3254,6 +3407,10 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3941,6 +4098,10 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4119,6 +4280,10 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4367,6 +4532,151 @@ description = "Builds the product."
             pool.repo_fingerprint_of(&rec.id).await,
             Some(before),
             "an ungranted company must not read the index, let alone rebuild on it"
+        );
+    }
+
+    // --- Billing-credential freshness (issues #788, #789) -------------------
+
+    /// Saving or rotating a key in Settings → Billing must reach the agent on
+    /// its next turn.
+    ///
+    /// The fingerprint is the observable that makes "no restart" testable: a
+    /// credential that fails to move it leaves the roster cached, and the agent
+    /// keeps authenticating with the old key — or holds no billing tools at all
+    /// — until the process restarts. That failure is invisible from the tool
+    /// list alone, which is why this asserts the fingerprint directly.
+    #[tokio::test]
+    #[cfg(feature = "chargebee")]
+    async fn ensure_rebuilds_when_a_chargebee_credential_is_saved_or_rotated() {
+        use crate::chargebee::types::{API_KEY_SECRET, SITE_SECRET};
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let dir = tempfile::tempdir().unwrap();
+        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        deps.secrets = Some(secrets.clone());
+
+        // The explicit grant is what opens this axis. A `*` wildcard does not
+        // confer it — see the module docs.
+        let mut rec = record();
+        rec.manifest.tools.allow = vec!["chargebee".to_string()];
+
+        let write = |key: &'static str, value: &'static str| {
+            let secrets = secrets.clone();
+            async move {
+                secrets
+                    .set(
+                        &CompanyId::new("acme"),
+                        key,
+                        crate::ports::types::SecretValue(value.to_string()),
+                    )
+                    .await
+                    .expect("write secret");
+            }
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("first ensure");
+        let unset = pool
+            .billing_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprint");
+
+        // Stability first, so every change assertion below cannot pass by
+        // coincidence.
+        pool.ensure(&rec, &deps).await.expect("redundant ensure");
+        assert_eq!(
+            pool.billing_fingerprint_of(&rec.id).await,
+            Some(unset),
+            "an unchanged credential must not move the fingerprint"
+        );
+
+        // Half a credential is not a connection, so it must not move either —
+        // the pair is meaningless apart.
+        write(SITE_SECRET, "acme-test").await;
+        pool.ensure(&rec, &deps).await.expect("half ensure");
+        assert_eq!(
+            pool.billing_fingerprint_of(&rec.id).await,
+            Some(unset),
+            "a site with no key is still no connection"
+        );
+
+        // Connect.
+        write(API_KEY_SECRET, "cb_first").await;
+        pool.ensure(&rec, &deps).await.expect("post-connect ensure");
+        let connected = pool
+            .billing_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprint");
+        assert_ne!(unset, connected, "saving a credential must rebuild");
+
+        // Rotate: same site, new key. This is the one a fingerprint over the
+        // site alone would miss, leaving the agent on the revoked key.
+        write(API_KEY_SECRET, "cb_rotated").await;
+        pool.ensure(&rec, &deps).await.expect("post-rotate ensure");
+        let rotated = pool
+            .billing_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprint");
+        assert_ne!(
+            connected, rotated,
+            "a rotation must rebuild even though the site is identical"
+        );
+
+        // Disconnect.
+        write(API_KEY_SECRET, "").await;
+        pool.ensure(&rec, &deps).await.expect("post-clear ensure");
+        assert_eq!(
+            pool.billing_fingerprint_of(&rec.id).await,
+            Some(unset),
+            "clearing the key must land back on the unconnected fingerprint"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "same company, rebuilt in place — not a new residency"
+        );
+    }
+
+    /// A company that does not explicitly grant `chargebee` never reads the
+    /// billing secrets, so this axis is inert for it — and a credential sitting
+    /// in its store confers nothing. Fail closed, as the module docs promise.
+    #[tokio::test]
+    #[cfg(feature = "chargebee")]
+    async fn a_company_without_the_chargebee_grant_never_moves_on_this_axis() {
+        use crate::chargebee::types::{API_KEY_SECRET, SITE_SECRET};
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let dir = tempfile::tempdir().unwrap();
+        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        deps.secrets = Some(secrets.clone());
+
+        // A wildcard, deliberately: it must NOT confer billing.
+        let mut rec = record();
+        rec.manifest.tools.allow = vec!["*".to_string()];
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("first ensure");
+        let before = pool
+            .billing_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprint");
+
+        for (key, value) in [(SITE_SECRET, "acme-test"), (API_KEY_SECRET, "cb_key")] {
+            secrets
+                .set(
+                    &CompanyId::new("acme"),
+                    key,
+                    crate::ports::types::SecretValue(value.to_string()),
+                )
+                .await
+                .expect("write secret");
+        }
+
+        pool.ensure(&rec, &deps).await.expect("post-write ensure");
+        assert_eq!(
+            pool.billing_fingerprint_of(&rec.id).await,
+            Some(before),
+            "an ungranted company must not read the billing secrets, let alone rebuild on them"
         );
     }
 
@@ -4637,6 +4947,10 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4809,6 +5123,10 @@ description = "Sets direction."
             plan: Some(plan),
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4961,6 +5279,10 @@ description = "Sets direction."
             plan,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -5917,5 +6239,235 @@ budget_usd_daily = 0.0
             );
         }
         assert!(checked > 0, "no executable tool was on the belt to check");
+    }
+
+    // --- Per-company billing resolution (issues #788, #789) -----------------
+    //
+    // `resolve_chargebee` / `resolve_paypal` are what actually decide whether a
+    // company's agents get billing tools on a given turn — `HarnessPool::ensure`
+    // re-resolves them every turn, and `RuntimeBuilder::build` runs the same
+    // three-way decision once at boot. All three branches are silent when they
+    // go wrong: a dropped grant check wires tools the manifest never allowed, and
+    // a read error collapsed into "no credential" disconnects a working
+    // integration on one transient store hiccup.
+
+    /// A secret store that reads back what was seeded, or fails every read.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    #[derive(Default)]
+    struct BillingSecrets {
+        map: StdMutex<std::collections::HashMap<String, String>>,
+        fail: bool,
+    }
+
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    #[async_trait]
+    impl SecretStore for BillingSecrets {
+        async fn get(
+            &self,
+            _c: &CompanyId,
+            key: &str,
+        ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+            if self.fail {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "the secret store is unreachable".into(),
+                ));
+            }
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|v| crate::ports::types::SecretValue(v.clone())))
+        }
+        async fn set(
+            &self,
+            _c: &CompanyId,
+            key: &str,
+            value: crate::ports::types::SecretValue,
+        ) -> crate::Result<()> {
+            self.map.lock().unwrap().insert(key.to_string(), value.0);
+            Ok(())
+        }
+    }
+
+    /// A company whose manifest allows exactly `grants`.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    fn record_granting(grants: &[&str]) -> CompanyRecord {
+        let mut rec = record();
+        rec.manifest.tools.allow = grants.iter().map(|g| g.to_string()).collect();
+        rec
+    }
+
+    /// The inert fixture deps, with a secret store and a "last known" connection.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    fn billing_deps(dir: &std::path::Path, secrets: Arc<dyn SecretStore>) -> HarnessDeps {
+        let mut deps = deps_with_plan(dir, Arc::new(MockContext::default()), None, None);
+        deps.secrets = Some(secrets);
+        deps
+    }
+
+    #[cfg(feature = "chargebee")]
+    #[tokio::test]
+    async fn chargebee_resolves_only_for_a_company_that_grants_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets::default());
+        secrets
+            .set(
+                &CompanyId::new("acme"),
+                crate::chargebee::types::SITE_SECRET,
+                crate::ports::types::SecretValue("acme-test".into()),
+            )
+            .await
+            .expect("seed");
+        secrets
+            .set(
+                &CompanyId::new("acme"),
+                crate::chargebee::types::API_KEY_SECRET,
+                crate::ports::types::SecretValue("cb_key".into()),
+            )
+            .await
+            .expect("seed");
+        let deps = billing_deps(dir.path(), secrets);
+        let pool = HarnessPool::new();
+
+        // Granted and configured: the credential resolves.
+        let granted = pool
+            .resolve_chargebee(&record_granting(&["chargebee"]), &deps)
+            .await
+            .expect("a granted, configured company resolves");
+        assert_eq!(granted.site(), "acme-test");
+
+        // Same credentials, no grant. The store is untouched — the gate is the
+        // manifest, so a company that never opted in gets no tools however well
+        // configured the host happens to be.
+        assert!(
+            pool.resolve_chargebee(&record_granting(&[]), &deps)
+                .await
+                .is_none(),
+            "an ungranted company must resolve nothing"
+        );
+
+        // And a wildcard is not a grant: these tools send invoices to real
+        // people, so they are opted into by name rather than riding in on the
+        // `*` somebody set for file and shell tools.
+        assert!(
+            pool.resolve_chargebee(&record_granting(&["*"]), &deps)
+                .await
+                .is_none(),
+            "a catch-all grant must not confer chargebee"
+        );
+    }
+
+    #[cfg(feature = "chargebee")]
+    #[tokio::test]
+    async fn a_chargebee_store_hiccup_keeps_the_last_known_connection() {
+        // The distinction this pins: absence wires no tools, but a READ FAILURE
+        // keeps whatever was already resolved. Collapsing the two would drop a
+        // working company's billing tools mid-conversation on one bad read, and
+        // silently — the agent would simply stop being able to invoice.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets {
+            fail: true,
+            ..Default::default()
+        });
+        let mut deps = billing_deps(dir.path(), secrets);
+        let last_known = crate::harness::chargebee::TenantChargebee::resolve(
+            &(Arc::new(BillingSecrets {
+                map: StdMutex::new(
+                    [
+                        (
+                            crate::chargebee::types::SITE_SECRET.to_string(),
+                            "acme-test".to_string(),
+                        ),
+                        (
+                            crate::chargebee::types::API_KEY_SECRET.to_string(),
+                            "cb_key".to_string(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                fail: false,
+            }) as Arc<dyn SecretStore>),
+            &CompanyId::new("acme"),
+        )
+        .await
+        .expect("the seeded store reads")
+        .expect("both halves present");
+        deps.chargebee = Some(last_known);
+
+        let kept = pool_resolve_chargebee(&deps).await;
+        assert_eq!(
+            kept.map(|c| c.site().to_string()).as_deref(),
+            Some("acme-test"),
+            "a transient read failure must not disconnect a working integration"
+        );
+    }
+
+    #[cfg(feature = "chargebee")]
+    async fn pool_resolve_chargebee(
+        deps: &HarnessDeps,
+    ) -> Option<crate::harness::chargebee::TenantChargebee> {
+        HarnessPool::new()
+            .resolve_chargebee(&record_granting(&["chargebee"]), deps)
+            .await
+    }
+
+    #[cfg(feature = "paypal")]
+    #[tokio::test]
+    async fn paypal_resolves_only_for_a_company_that_grants_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets::default());
+        for (key, value) in [
+            (crate::company::paypal::CLIENT_ID_SECRET, "AY_id"),
+            (crate::company::paypal::CLIENT_SECRET_SECRET, "EL_secret"),
+        ] {
+            secrets
+                .set(
+                    &CompanyId::new("acme"),
+                    key,
+                    crate::ports::types::SecretValue(value.into()),
+                )
+                .await
+                .expect("seed");
+        }
+        let deps = billing_deps(dir.path(), secrets);
+        let pool = HarnessPool::new();
+
+        assert!(
+            pool.resolve_paypal(&record_granting(&["paypal"]), &deps)
+                .await
+                .is_some(),
+            "a granted, configured company resolves"
+        );
+        assert!(
+            pool.resolve_paypal(&record_granting(&[]), &deps)
+                .await
+                .is_none(),
+            "an ungranted company must resolve nothing"
+        );
+        assert!(
+            pool.resolve_paypal(&record_granting(&["*"]), &deps)
+                .await
+                .is_none(),
+            "a catch-all grant must not confer paypal"
+        );
+    }
+
+    #[cfg(feature = "paypal")]
+    #[tokio::test]
+    async fn a_paypal_grant_with_no_credential_wires_nothing_rather_than_failing() {
+        // Fail closed: a manifest that grants `paypal` on a host where nobody
+        // has saved a credential must wire no tools, not tools that fail on
+        // first use — an agent that HAS a wallet tool tells the operator the
+        // balance is unavailable, rather than that it cannot read wallets.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = billing_deps(dir.path(), Arc::new(BillingSecrets::default()));
+        assert!(
+            HarnessPool::new()
+                .resolve_paypal(&record_granting(&["paypal"]), &deps)
+                .await
+                .is_none()
+        );
     }
 }

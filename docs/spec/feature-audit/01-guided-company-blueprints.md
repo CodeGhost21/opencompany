@@ -35,9 +35,21 @@ runtime path that turns that design into the normal onboarding experience.
 - Expose the same review contract through platform provisioning without
   allowing headless callers to skip acceptance.
 
+## Status
+
+The **static-template** half of this is built: a first-run setup flow in the
+console picks a shipped template, chooses the sign-in mode, configures the brain
+credential and host settings, and writes them — see
+[runtime/setup.md](../runtime/setup.md). What remains is the conversational
+half: the freeform description, the follow-up interview, the generated Blueprint
+with its rationale and provenance, and revision before acceptance. The fallback
+this spec calls for ("static template onboarding when the preferred brain is
+unavailable") is therefore now the path that exists.
+
 ## Product surfaces
 
-- A first-run setup flow in the console.
+- A first-run setup flow in the console. **Built** — `src/server/setup.rs`,
+  `frontend/src/views/setup/`.
 - A review screen with team, responsibilities, approvals, schedule, budget,
   required connections, and rationale.
 - A resumable onboarding conversation.

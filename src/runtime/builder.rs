@@ -2106,6 +2106,60 @@ impl RuntimeBuilder {
                             // (fail closed). `HarnessPool::ensure` re-resolves this
                             // each turn so a console token change takes effect
                             // without restart.
+                            // Issue #788: the per-company Chargebee connection,
+                            // resolved from THIS company's secret store — never
+                            // the environment, because two companies on one host
+                            // bill two different sites. Only companies that
+                            // explicitly grant `chargebee` resolve at all; with
+                            // either half of the pair missing it stays `None`
+                            // (fail closed). `HarnessPool::ensure` re-resolves it
+                            // each turn, so a key saved in the console's Billing
+                            // settings takes effect without a restart.
+                            // Issue #789: the per-company PayPal connection,
+                            // resolved from this company's own secret store for
+                            // the same reason chargebee is.
+                            //
+                            // A store read error degrades to `None` HERE, unlike
+                            // in `HarnessPool::resolve_*`, which keeps the last
+                            // known connection: at boot there is no last known
+                            // one to keep. It is warned rather than fatal —
+                            // refusing to start the company over an unreadable
+                            // billing credential would take down every other
+                            // tool it has — and the next turn re-resolves.
+                            #[cfg(feature = "paypal")]
+                            let paypal_config = if crate::company::grants_paypal_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::paypal::TenantPaypal::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[paypal] could not read the billing credential at \
+                                             boot; wiring no PayPal tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
+                            #[cfg(feature = "chargebee")]
+                            let chargebee_config = if crate::company::grants_chargebee_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::chargebee::TenantChargebee::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[chargebee] could not read the billing credential at \
+                                             boot; wiring no Chargebee tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2278,6 +2332,10 @@ impl RuntimeBuilder {
                                 // resolved above (token from the secret store,
                                 // never an env/platform key). `None` fails closed.
                                 composio: composio_config,
+                                #[cfg(feature = "chargebee")]
+                                chargebee: chargebee_config,
+                                #[cfg(feature = "paypal")]
+                                paypal: paypal_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's

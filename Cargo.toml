@@ -51,6 +51,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 toml = "1"
+# The *writing* half of `config.toml`, for the first-run setup flow
+# (`src/server/setup.rs`). `toml::to_string` would round-trip the `ConfigFile` struct
+# and in doing so delete every comment in the file — including the commented
+# `[[default_mcp_server]]` PLACEHOLDER block that `docs/spec/runtime/config.md` treats
+# as the shipped source of truth for what an install registers. `toml_edit` mutates the
+# parsed document in place, so an operator's comments, key order and formatting all
+# survive a write. Pinned to the version `toml` itself builds on, so the dependency
+# graph gains no second copy.
+toml_edit = "0.25"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -450,6 +459,16 @@ telegram = ["dep:reqwest"]
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).
 oauth = ["dep:reqwest"]
+# Issue #788: Chargebee billing integrated as backend service code, surfaced to
+# agents as callable tools. NOT a separate MCP server and NOT a second binary —
+# the integration lives in the tenant workload so the credential can be
+# per-company, held in that company's own SecretStore. The only gated dependency
+# is the shared `reqwest` client the REST calls use; `src/chargebee/` compiles
+# only under this feature, so the default build is unaffected.
+chargebee = ["dep:reqwest"]
+# Issue #789: PayPal wallet + transaction reads, same shape as `chargebee`
+# above — backend service code, per-company credentials, only `reqwest` gated.
+paypal = ["dep:reqwest"]
 
 [patch.crates-io]
 # opencompany's own vendored tinyagents (2.1.0). Satisfies openhuman's `^2.1`.

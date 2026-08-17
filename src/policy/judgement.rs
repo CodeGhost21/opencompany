@@ -1057,7 +1057,10 @@ mod tests {
     /// everywhere — every test above could still pass while the split was gone.
     #[test]
     fn the_two_paths_actually_differ() {
-        let args = json!({ "command": "echo hi" });
+        // An ACTING command. Since issue #875 the agent path reads the command
+        // rather than the tool name, so a read is judged silent on BOTH paths
+        // and would collapse this assertion without the split having changed.
+        let args = json!({ "command": "rm -rf ." });
         assert_ne!(
             judge_agent("shell", &args),
             judge_node("shell", &args),

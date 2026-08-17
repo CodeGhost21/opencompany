@@ -128,11 +128,14 @@ fn record() -> CompanyRecord {
         overlay_agents: Vec::new(),
         overlay_desk_members: Vec::new(),
         overlay_desk_order: Vec::new(),
+        // Added by #902's desk-level tool ceiling after this fixture was
+        // written. Empty means no desk narrows anything, which is what this
+        // test's manifest already describes.
+        overlay_desk_tools: Default::default(),
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
-        overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
     }
