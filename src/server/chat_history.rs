@@ -12,9 +12,6 @@ use std::collections::{HashMap, HashSet};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
-use crate::ports::tasks::{
-    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
-};
 use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq, StoredEvent, TurnStep};
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
@@ -149,23 +146,20 @@ pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
 /// `harness::lifecycle::relay_text` takes — a newer host naming a column this
 /// build has not heard of should read a little raw, never render blank.
 ///
+/// The label is [`crate::ledger::board`]'s, not a fourth copy of it. This
+/// function used to carry its own `match` from id to label — one of three on
+/// the host and a fourth in the console — and each was a place a renamed column
+/// could half-land.
+///
 /// Pinned by tests on both sides of the wire: the console has its own
 /// `dispatchMarkerText` (`frontend/src/lib/chat.ts`), because the live SSE
-/// frame carries the raw column id rather than prose. Two spellings of one
-/// sentence can only *reword* a marker across a reload — never double it, since
-/// the dedupe is on identity — but the tests couple them anyway, on the same
-/// terms `BOARD_COLUMNS` and the console's `TASK_COLUMNS` are coupled.
+/// frame carries the raw column id rather than prose and a marker renders
+/// synchronously from it, with no ledger read to await. That copy is the one
+/// remaining exception, and it is the safe one: two spellings of a sentence can
+/// only *reword* a marker across a reload — never double it, since the dedupe
+/// is on identity, and never lose a card.
 pub fn dispatch_marker_text(column: &str) -> String {
-    let landing = match column {
-        COLUMN_TODO => "To-do",
-        COLUMN_PLANNING => "Planning",
-        COLUMN_IN_PROGRESS => "In progress",
-        COLUMN_PAUSED => "Paused",
-        COLUMN_IN_REVIEW => "In review",
-        COLUMN_DONE => "Done",
-        other => other,
-    };
-    format!("finished → {landing}")
+    format!("finished → {}", crate::ports::tasks::column_label(column))
 }
 
 /// Who is reading a desk history. `mine` is relative to this.
@@ -631,6 +625,10 @@ pub async fn history_total_for_desk(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::{
+        COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING,
+        COLUMN_TODO,
+    };
     use crate::ports::types::Actor;
 
     fn agent_reply(chat_id: &str) -> CompanyEvent {

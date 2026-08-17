@@ -23,6 +23,7 @@ use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::inbox::InboxStore;
 use crate::ports::journal::JournalStore;
+use crate::ports::ledgers::LedgerStore;
 use crate::ports::login_codes::LoginCodeStore;
 use crate::ports::memory::MemoryStore;
 use crate::ports::notifications::NotificationStore;
@@ -204,6 +205,8 @@ pub struct StorageHandles {
     pub secrets: Arc<dyn SecretStore>,
     pub inbox: Arc<dyn InboxStore>,
     pub tasks: Arc<dyn TaskStore>,
+    /// The company's declared ledgers and their append-only event logs.
+    pub ledgers: Arc<dyn LedgerStore>,
     pub workspace: Arc<dyn WorkspaceStore>,
     pub facts: Arc<dyn FactStore>,
     pub artifacts: Arc<dyn ArtifactStore>,
@@ -479,6 +482,7 @@ fn open_sqlite(data_dir: &Path) -> Result<Option<StorageHandles>> {
         secrets: store.clone(),
         inbox: store.clone(),
         tasks: store.clone(),
+        ledgers: store.clone(),
         workspace: store.clone(),
         facts: store.clone(),
         artifacts: store.clone(),
@@ -522,6 +526,7 @@ async fn open_mongodb(settings: &StorageSettings) -> Result<Option<StorageHandle
         secrets: store.clone(),
         inbox: store.clone(),
         tasks: store.clone(),
+        ledgers: store.clone(),
         workspace: store.clone(),
         facts: store.clone(),
         artifacts: store.clone(),

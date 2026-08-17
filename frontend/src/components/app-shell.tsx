@@ -7,6 +7,7 @@ import {
   Network,
   Settings2,
   ShieldCheck,
+  BookText,
   SquareKanban,
   Workflow,
 } from "lucide-react";
@@ -77,6 +78,7 @@ import {
 import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
+import { LedgersView } from "@/views/LedgersView";
 import { TasksView } from "@/views/TasksView";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
@@ -104,6 +106,7 @@ export type View =
   | "conversation"
   | "inbox"
   | "tasks"
+  | "ledgers"
   | "team"
   | "workspace"
   | "memory"
@@ -128,7 +131,16 @@ const NAV: NavItem[] = [
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
+  // The board, restored and now driven by the `tasks` ledger: its columns,
+  // their order and their labels are the host's declaration, and the cards are
+  // the task records. It keeps its own entry because it is the surface an
+  // operator lives in, and because a card carries far more than a ledger row.
   { view: "tasks", label: "Tasks", icon: SquareKanban },
+  // Everything else the company records — goals, decisions, and whatever axis
+  // this workspace declared. The board appears here too, as the `tasks`
+  // ledger, so this screen is the whole record rather than most of it; the
+  // two render through the same component.
+  { view: "ledgers", label: "Ledgers", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
@@ -1235,10 +1247,8 @@ export function AppShell({
               client={client}
               company={company}
               // Issue #464: the board learns that work appeared. The same
-              // counter the chat's in-flight strip reads — it is bumped by
-              // every task event, now including the host's board-write
-              // announcement — so a card opened from chat lands on the board
-              // without a reload rather than on the fallback poll's schedule.
+              // counter the chat's in-flight strip reads, so a card opened from
+              // chat lands on the board without a reload.
               taskEventTick={taskEventTick}
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
@@ -1247,6 +1257,22 @@ export function AppShell({
                 setActiveThreadId(threadId);
                 setView("conversation");
               }}
+            />
+          )}
+          {view === "ledgers" && (
+            <LedgersView
+              client={client}
+              company={company}
+              // `#/ledgers/<slug>` opens that ledger. Unvalidated here, like
+              // every other sub-page: only this view knows which slugs exist,
+              // and it resolves an unknown one against the host rather than
+              // guessing.
+              sub={sub}
+              onOpenLedger={(slug) => navigate("ledgers", slug ?? undefined)}
+              // A board card leaves for its own screen. The board renders
+              // here; the card's timeline, plan, discussion and attempts stay
+              // where they already work.
+              onOpenCard={(id) => navigate("tasks", id)}
             />
           )}
           {view === "team" && (

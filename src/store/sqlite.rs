@@ -123,6 +123,24 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_ms INTEGER NOT NULL,
     PRIMARY KEY (company_id, id)
 );
+CREATE TABLE IF NOT EXISTS ledger_specs (
+    company_id TEXT NOT NULL,
+    slug       TEXT NOT NULL,
+    spec_json  TEXT NOT NULL,
+    PRIMARY KEY (company_id, slug)
+);
+-- Append-only: `seq` is the fold's ordering and the only thing it may rely on.
+-- A timestamp would not do — it is written by whichever replica is running, and
+-- a clock that steps backwards would reorder the board.
+CREATE TABLE IF NOT EXISTS ledger_events (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id TEXT NOT NULL,
+    ledger     TEXT NOT NULL,
+    entry_id   TEXT NOT NULL,
+    event_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ledger_events_by_ledger
+    ON ledger_events (company_id, ledger, seq);
 CREATE TABLE IF NOT EXISTS facts (
     company_id TEXT NOT NULL,
     id         TEXT NOT NULL,
@@ -1205,6 +1223,108 @@ impl crate::ports::tasks::TaskStore for SqliteStore {
             .execute(
                 "DELETE FROM tasks WHERE company_id = ?1 AND id = ?2",
                 params![company.as_ref(), id],
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LedgerStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::ledgers::LedgerStore for SqliteStore {
+    async fn list_specs(&self, company: &CompanyId) -> Result<Vec<crate::ledger::LedgerSpec>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT spec_json FROM ledger_specs WHERE company_id = ?1 ORDER BY slug")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref()], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str(&row.map_err(sql_err)?)?);
+        }
+        Ok(out)
+    }
+
+    async fn put_spec(&self, company: &CompanyId, spec: &crate::ledger::LedgerSpec) -> Result<()> {
+        let json = serde_json::to_string(spec)?;
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO ledger_specs (company_id, slug, spec_json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(company_id, slug) DO UPDATE SET spec_json = excluded.spec_json",
+            params![company.as_ref(), spec.slug, json],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn delete_spec(&self, company: &CompanyId, slug: &str) -> Result<bool> {
+        let conn = self.conn();
+        // The events stay. See `LedgerStore::delete_spec`.
+        let n = conn
+            .execute(
+                "DELETE FROM ledger_specs WHERE company_id = ?1 AND slug = ?2",
+                params![company.as_ref(), slug],
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
+    }
+
+    async fn append(&self, company: &CompanyId, event: &crate::ledger::LedgerEvent) -> Result<()> {
+        let json = serde_json::to_string(event)?;
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO ledger_events (company_id, ledger, entry_id, event_json) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![company.as_ref(), event.ledger, event.id, json],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn events(
+        &self,
+        company: &CompanyId,
+        ledger: &str,
+    ) -> Result<Vec<crate::ledger::LedgerEvent>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT event_json FROM ledger_events WHERE company_id = ?1 AND ledger = ?2 \
+                 ORDER BY seq",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), ledger], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str(&row.map_err(sql_err)?)?);
+        }
+        Ok(out)
+    }
+
+    async fn purge_entry(&self, company: &CompanyId, ledger: &str, entry: &str) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "DELETE FROM ledger_events WHERE company_id = ?1 AND ledger = ?2 AND entry_id = ?3",
+                params![company.as_ref(), ledger, entry],
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
+    }
+
+    async fn purge_ledger(&self, company: &CompanyId, ledger: &str) -> Result<bool> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "DELETE FROM ledger_events WHERE company_id = ?1 AND ledger = ?2",
+                params![company.as_ref(), ledger],
             )
             .map_err(sql_err)?;
         Ok(n > 0)

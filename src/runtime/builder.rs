@@ -390,6 +390,7 @@ pub struct RuntimeBuilder {
     /// manifest to answer.
     auth_mode_override: Option<AuthMode>,
     tasks: Option<Arc<dyn TaskStore>>,
+    ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
     /// Issue #553: the byte limits the workspace is held to. Defaults to a
     /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
@@ -507,6 +508,7 @@ impl RuntimeBuilder {
             bootstrap_admin: None,
             auth_mode_override: None,
             tasks: None,
+            ledgers: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
             storage_kind: crate::store::StorageKind::default(),
@@ -631,6 +633,7 @@ impl RuntimeBuilder {
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
         self.tasks = Some(handles.tasks.clone());
+        self.ledgers = Some(handles.ledgers.clone());
         self.workspace = Some(handles.workspace.clone());
         self.facts = Some(handles.facts.clone());
         self.artifacts = Some(handles.artifacts.clone());
@@ -682,6 +685,13 @@ impl RuntimeBuilder {
     }
 
     /// Swaps the task board store (default: fs-backed).
+    /// Injects the ledger store.
+    #[must_use]
+    pub fn with_ledgers(mut self, ledgers: Arc<dyn crate::ports::ledgers::LedgerStore>) -> Self {
+        self.ledgers = Some(ledgers);
+        self
+    }
+
     pub fn with_tasks(mut self, tasks: Arc<dyn TaskStore>) -> Self {
         self.tasks = Some(tasks);
         self
@@ -1115,6 +1125,11 @@ impl RuntimeBuilder {
             .unwrap_or_else(|| Arc::new(FsInboxStore::new(home.clone())));
         // The WS3 console ports default to a single shared fs backend.
         let fs_ops = Arc::new(FsOps::new(home.clone()));
+        // Chosen before the ops struct because two of its members need it: the
+        // ledger store itself, and the workspace guard that names a refusal
+        // after the ledger owning the file.
+        let ledgers_for_guard: Arc<dyn crate::ports::ledgers::LedgerStore> =
+            self.ledgers.clone().unwrap_or_else(|| fs_ops.clone());
         let ops = match handover.as_ref() {
             // A rebuild inherits the ops it was handed, announcer and all — the
             // wrap below happens once, at first construction. Re-wrapping an
@@ -1138,13 +1153,22 @@ impl RuntimeBuilder {
                 // wrapped INSIDE the announcer so a refused write is never
                 // announced — the feed must not claim a file appeared that the
                 // quota rejected. See [`QuotaEnforcedWorkspace`].
+                // And the `derived/` folder refuses a hand-written edit,
+                // wrapped INSIDE both so a refused edit is never announced and
+                // never charged — and so that every writer, console or agent or
+                // workflow node, obeys without knowing it does. See
+                // [`DerivedGuardWorkspace`].
                 workspace: Arc::new(WorkspaceAnnouncer::new(
                     Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
-                        self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                        Arc::new(crate::runtime::DerivedGuardWorkspace::new(
+                            self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                            ledgers_for_guard.clone(),
+                        )),
                         self.workspace_quota,
                     )),
                     events.clone(),
                 )),
+                ledgers: ledgers_for_guard.clone(),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
@@ -2174,6 +2198,21 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // Resolved to data here because `build_agent` is
+                            // synchronous. A store that cannot answer yields an
+                            // empty registry, which costs the prompt its
+                            // catalogue and leaves every tool working.
+                            let ledger_registry = crate::ledger::Registry::build(
+                                ops.ledgers.list_specs(&id).await.unwrap_or_else(|error| {
+                                    tracing::warn!(
+                                        company = %id,
+                                        %error,
+                                        "could not read this company's ledger declarations; \
+                                         agents get the built-ins only"
+                                    );
+                                    Vec::new()
+                                }),
+                            );
                             let deps = HarnessDeps {
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
@@ -2207,6 +2246,8 @@ impl RuntimeBuilder {
                                 model_override,
                                 tasks: Some(ops.tasks.clone()),
                                 artifacts: Some(ops.artifacts.clone()),
+                                ledgers: Some(ops.ledgers.clone()),
+                                ledger_registry,
                                 // Skill read surface (#28): the operator delta
                                 // store + the company source dir (`companies/<name>`,
                                 // held as `seed_dir`) whose `skills/` subtree

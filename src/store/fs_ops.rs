@@ -25,8 +25,10 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
+use crate::ledger::{LedgerEvent, LedgerSpec};
 use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
+use crate::ports::ledgers::LedgerStore;
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::now_millis;
 use crate::ports::run_output::{
@@ -109,6 +111,98 @@ impl TaskStore for FsOps {
         }
         write_atomic(&path, &serde_json::to_string(&tasks)?).await?;
         Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LedgerStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl LedgerStore for FsOps {
+    async fn list_specs(&self, company: &CompanyId) -> Result<Vec<LedgerSpec>> {
+        load_json_vec::<LedgerSpec>(&self.bundle(company).ledgers_json()).await
+    }
+
+    async fn put_spec(&self, company: &CompanyId, spec: &LedgerSpec) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.ledgers_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut specs = load_json_vec::<LedgerSpec>(&path).await?;
+        match specs.iter_mut().find(|held| held.slug == spec.slug) {
+            Some(existing) => *existing = spec.clone(),
+            None => specs.push(spec.clone()),
+        }
+        write_atomic(&path, &serde_json::to_string(&specs)?).await
+    }
+
+    async fn delete_spec(&self, company: &CompanyId, slug: &str) -> Result<bool> {
+        let path = self.bundle(company).ledgers_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut specs = load_json_vec::<LedgerSpec>(&path).await?;
+        let before = specs.len();
+        specs.retain(|spec| spec.slug != slug);
+        if specs.len() == before {
+            return Ok(false);
+        }
+        // The event log is deliberately untouched. See `LedgerStore::delete_spec`.
+        write_atomic(&path, &serde_json::to_string(&specs)?).await?;
+        Ok(true)
+    }
+
+    async fn append(&self, company: &CompanyId, event: &LedgerEvent) -> Result<()> {
+        let bundle = self.bundle(company);
+        let dir = bundle.ledgers_dir();
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|source| io_err(&dir, source))?;
+        // One `write_all` of one complete line under `O_APPEND`: concurrent
+        // writers interleave whole lines and never halves of one, so no lock is
+        // needed here at all.
+        append_line(
+            &bundle.ledger_events_jsonl(&event.ledger),
+            &serde_json::to_string(event)?,
+        )
+        .await
+    }
+
+    async fn events(&self, company: &CompanyId, ledger: &str) -> Result<Vec<LedgerEvent>> {
+        read_jsonl::<LedgerEvent>(&self.bundle(company).ledger_events_jsonl(ledger)).await
+    }
+
+    async fn purge_entry(&self, company: &CompanyId, ledger: &str, entry: &str) -> Result<bool> {
+        let path = self.bundle(company).ledger_events_jsonl(ledger);
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let events = read_jsonl::<LedgerEvent>(&path).await?;
+        let kept: Vec<&LedgerEvent> = events.iter().filter(|held| held.id != entry).collect();
+        if kept.len() == events.len() {
+            return Ok(false);
+        }
+        // Rewritten rather than tombstoned: this is the one operation that is
+        // meant to leave nothing behind, and a tombstone that still carried the
+        // row's text would make "deleted" mean "hidden from one renderer".
+        let mut body = String::new();
+        for event in kept {
+            body.push_str(&serde_json::to_string(event)?);
+            body.push('\n');
+        }
+        write_atomic(&path, &body).await?;
+        Ok(true)
+    }
+
+    async fn purge_ledger(&self, company: &CompanyId, ledger: &str) -> Result<bool> {
+        let path = self.bundle(company).ledger_events_jsonl(ledger);
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(io_err(&path, error)),
+        }
     }
 }
 

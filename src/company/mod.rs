@@ -36,6 +36,11 @@ pub mod billing;
 pub mod credentials;
 pub mod dns;
 pub mod inference;
+/// Dynamic ledgers: the one place a ledger is read, written, declared or
+/// retired. Every surface routes through it, because the rules that matter —
+/// only a person deletes, a close says why, the derived file follows the
+/// write — only hold if exactly one code path enforces them.
+pub mod ledgers;
 mod manifest;
 pub mod mcp;
 pub mod paypal;

@@ -45,7 +45,8 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { computeTaskPatch } from "@/lib/task-edit";
-import { TASK_COLUMNS } from "@/lib/tasks-sample";
+import { labelFor } from "@/lib/board-columns";
+import { useBoardColumns } from "@/hooks/use-board-columns";
 import { toast } from "sonner";
 import { AssigneeSelect } from "./AssigneeSelect";
 
@@ -90,6 +91,9 @@ export function TaskEditDialog({
   client: OpenCompanyClient;
   company: string | null;
 }) {
+  // From the `tasks` ledger, so this select can never offer a column the host's
+  // write boundary would refuse — which is what a second, local list allowed.
+  const columns = useBoardColumns(client, company);
   const [draft, setDraft] = useState<PatchTask>({});
   const [busy, setBusy] = useState(false);
 
@@ -199,12 +203,12 @@ export function TaskEditDialog({
                       progress"). */}
                   <SelectValue>
                     {(selected) =>
-                      TASK_COLUMNS.find((c) => c.id === selected)?.label ?? String(selected ?? "")
+                      selected ? labelFor(columns, String(selected)) : ""
                     }
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  {TASK_COLUMNS.map((c) => (
+                  {columns.map((c) => (
                     <SelectItem key={c.id} value={c.id}>
                       {c.label}
                     </SelectItem>

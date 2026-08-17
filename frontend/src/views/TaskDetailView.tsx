@@ -111,7 +111,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { effectDone } from "@/lib/language";
-import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
+
+import { labelFor, PRIORITY_STYLES, type TaskColumn } from "@/lib/board-columns";
+import { useBoardColumns } from "@/hooks/use-board-columns";
 import { toast } from "sonner";
 import { ArtifactsTab } from "./ArtifactsTab";
 import { TaskPlanBrief, tallyPrerequisites } from "./TaskPlanBrief";
@@ -129,9 +131,16 @@ function priorityStyle(priority: string): string {
   );
 }
 
-/** The column id → human label ("in_progress" → "In progress"), tolerating unknowns. */
-function columnLabel(column: string): string {
-  return TASK_COLUMNS.find((c) => c.id === column)?.label ?? column;
+/**
+ * The column id → human label ("in_progress" → "In progress").
+ *
+ * Takes the columns because they come from the `tasks` ledger now rather than
+ * from a list this module could read at import time. `labelFor` humanises an
+ * id the host has not named, so a card whose column predates this build still
+ * reads as words.
+ */
+function columnLabel(columns: TaskColumn[], column: string): string {
+  return labelFor(columns, column);
 }
 
 /**
@@ -282,6 +291,9 @@ export function TaskDetailView({
   /** Tell the board a card was deleted. */
   onDeleted: (id: string) => void;
 }) {
+  // The board's columns, so this screen and the board label a status the same
+  // way without either keeping a list. See `lib/board-columns`.
+  const columns = useBoardColumns(client, company);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [inflight, setInflight] = useState<InflightRun | null>(null);
   const [loading, setLoading] = useState(true);
@@ -453,6 +465,7 @@ export function TaskDetailView({
               task={detail.task}
               worked={worked}
               waiting={waiting}
+              columns={columns}
             />
 
             <ControlBar
@@ -472,7 +485,11 @@ export function TaskDetailView({
               onOpenThread={onOpenThread}
             />
 
-            <LineageRail lineage={detail.lineage} onNavigate={onNavigate} />
+            <LineageRail
+              lineage={detail.lineage}
+              onNavigate={onNavigate}
+              columns={columns}
+            />
 
             <AwaitingApprovalRow approvals={detail.approvals} now={now} />
 
@@ -603,10 +620,15 @@ function DetailHeader({
   task,
   worked,
   waiting,
+  columns,
 }: {
   task: Task;
   worked: { millis: number; live: boolean } | null;
   waiting: { millis: number; live: boolean } | null;
+  /** The board's columns, for the status badge's label. Passed rather than
+      read here: they come from the `tasks` ledger, so the one component that
+      can fetch them is the one that already holds the client. */
+  columns: TaskColumn[];
 }) {
   const hasDispatch = worked !== null && (worked.millis > 0 || worked.live);
   // Issue #465: "Not yet dispatched" is only sayable where it can still be true.
@@ -639,7 +661,7 @@ function DetailHeader({
         <span className="inline-flex items-center gap-1.5">
           <span className="font-medium text-foreground">Status</span>
           <Badge variant="secondary" className="font-normal">
-            {columnLabel(task.column)}
+            {columnLabel(columns, task.column)}
           </Badge>
         </span>
         {/* Issue #580: this card builds a reusable workflow rather than doing
@@ -1035,9 +1057,11 @@ function OriginThreadRow({
 function LineageRail({
   lineage,
   onNavigate,
+  columns,
 }: {
   lineage: TaskDetail["lineage"];
   onNavigate: (id: string) => void;
+  columns: TaskColumn[];
 }) {
   if (!lineage.parent && lineage.children.length === 0) return null;
   return (
@@ -1056,7 +1080,7 @@ function LineageRail({
               {lineage.parent.title}
             </span>
             <Badge variant="secondary" className="shrink-0 font-normal">
-              {columnLabel(lineage.parent.column)}
+              {columnLabel(columns, lineage.parent.column)}
             </Badge>
           </button>
         )}
@@ -1072,7 +1096,7 @@ function LineageRail({
             <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate">{child.title}</span>
             <Badge variant="secondary" className="shrink-0 font-normal">
-              {columnLabel(child.column)}
+              {columnLabel(columns, child.column)}
             </Badge>
           </button>
         ))}

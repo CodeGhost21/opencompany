@@ -75,6 +75,7 @@ pub mod cost;
 /// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
 #[cfg(feature = "tinycortex")]
 pub mod embeddings;
+pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;
 pub mod mcp_probe;
@@ -243,6 +244,23 @@ pub struct HarnessDeps {
     /// written either way, so an unwired artifact store loses nothing that
     /// existed previously.
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
+    /// The company's ledgers, so an agent can read what has already been
+    /// decided, goaled or ruled out, record what it decides, and declare an axis
+    /// nobody anticipated. `None` builds no ledger tools at all — which is right
+    /// for a path with no company behind it, and is what every construction site
+    /// that predates them does.
+    pub ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
+    /// The company's ledgers as they stood when the agent was built, for the
+    /// prompt catalogue.
+    ///
+    /// Resolved to **data** before deps construction because `build_agent` is
+    /// synchronous, the same shape the MCP servers already take. A ledger
+    /// declared mid-run is therefore reachable by every tool immediately (the
+    /// `ledger` argument is checked against the live registry at call time) and
+    /// appears in the *prompt* only from the next build — which is the honest
+    /// limit: system prompts are assembled once, and nothing can retroactively
+    /// edit one already in flight.
+    pub ledger_registry: crate::ledger::Registry,
     /// The company's skill-delta store, so a built agent can see its effective
     /// skill set (company-dir skills ∪ operator deltas ∪ custom docs) as read
     /// tools + a prompt catalogue. `None` leaves the agent skill-less (the chat
@@ -3165,6 +3183,8 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                ledgers: None,
+                ledger_registry: Default::default(),
                 provider: Arc::new(MockProvider::new("mock: ")),
                 provider_slug: "mock".to_string(),
                 context: Arc::new(MockContext::default()),
@@ -3374,6 +3394,8 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
@@ -4065,6 +4087,8 @@ description = "Builds the product."
     fn scripted_agent(outcomes: Vec<Result<String, String>>) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(outcomes)),
             provider_slug: "scripted".to_string(),
             context: Arc::new(MockContext::default()),
@@ -4247,6 +4271,8 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
@@ -4914,6 +4940,8 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
@@ -5090,6 +5118,8 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
@@ -5247,6 +5277,8 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context,

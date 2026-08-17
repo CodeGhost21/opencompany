@@ -124,6 +124,8 @@ use crate::server::ops::smtp::SmtpCredentials;
 pub struct OpsStores {
     /// The durable task board.
     pub tasks: Arc<dyn TaskStore>,
+    /// The company's declared ledgers and their append-only event logs.
+    pub ledgers: Arc<dyn crate::ports::ledgers::LedgerStore>,
     /// The durable workspace file tree.
     pub workspace: Arc<dyn WorkspaceStore>,
     /// The durable memory-facts view.
@@ -655,6 +657,11 @@ impl CompanyRuntime {
     /// This company's task board.
     pub fn tasks(&self) -> &Arc<dyn TaskStore> {
         &self.ops.tasks
+    }
+
+    /// The company's ledger store.
+    pub fn ledgers(&self) -> &Arc<dyn crate::ports::ledgers::LedgerStore> {
+        &self.ops.ledgers
     }
 
     /// Upserts a board task and edge-fires the board's two automatic entries:
@@ -2303,6 +2310,8 @@ mod tests {
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> crate::harness::HarnessDeps {
         crate::harness::HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(crate::harness::provider::MockProvider::default()),
             provider_slug: "mock".to_string(),
             context: runtime.context.clone(),

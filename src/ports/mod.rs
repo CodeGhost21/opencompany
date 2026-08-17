@@ -18,6 +18,7 @@ pub mod events;
 pub mod facts;
 pub mod inbox;
 pub mod journal;
+pub mod ledgers;
 pub mod login_codes;
 pub mod memory;
 pub mod notifications;
@@ -52,6 +53,7 @@ pub use facts::{FactKind, FactRecord, FactStore};
 pub use ids::{AGENT_SLUG_FALLBACK, agent_slug, generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
 pub use journal::{Durability, JournalStore};
+pub use ledgers::LedgerStore;
 pub use login_codes::{LoginCodeRecord, LoginCodeStore};
 pub use memory::MemoryStore;
 pub use notifications::{Notification, NotificationStore, NotificationView, Subject, SubjectKind};
@@ -125,6 +127,7 @@ mod test {
         _run_output: &dyn crate::ports::run_output::WorkflowRunOutputStore,
         _workflow_runner: &dyn crate::ports::workflow_runner::WorkflowRunner,
         _journal: &dyn crate::ports::journal::JournalStore,
+        _ledgers: &dyn crate::ports::ledgers::LedgerStore,
     ) {
     }
 

@@ -252,6 +252,8 @@ fn build_brain(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
             base_url,
             credential: Credential::from_value("stub-key"),

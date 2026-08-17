@@ -7,6 +7,8 @@ under `src/`. Public module surfaces live in source module directories:
 
 - `src/app/`: runtime configuration and shared Axum state
 - `src/server/`: Axum router and HTTP handlers
+- `src/ledger/`: dynamic ledgers — declared record shapes, the append-only fold,
+  and the `derived/` folder they render into (`docs/spec/runtime/ledgers.md`)
 - `src/openhuman/`: launcher and integration seams for the vendored OpenHuman checkout
 - `src/tiny/`: optional TinyAgents crate feature/status surface
 

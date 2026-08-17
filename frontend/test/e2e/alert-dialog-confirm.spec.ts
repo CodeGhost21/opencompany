@@ -98,7 +98,10 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   await page.locator("#new-prompt").fill(title);
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  const card = page.locator('[role="button"]').filter({ hasText: title });
+  // `draggable` identifies a card whichever board is rendering it: the shared
+  // `LedgerBoard` puts the attribute on the wrapper it drags, so this holds for
+  // the task board and for a declared ledger's columns alike.
+  const card = page.locator("[draggable=true]").filter({ hasText: title });
   await expect(card).toBeVisible({ timeout: 30_000 });
 
   // Open the card's detail screen, then its edit dialog, then ask to delete.
@@ -129,7 +132,7 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   // dialog must not have cost us the action.
   release("continue");
   await page.goto("/#/tasks");
-  await expect(page.locator('[role="button"]').filter({ hasText: title })).toHaveCount(
+  await expect(page.locator("[draggable=true]").filter({ hasText: title })).toHaveCount(
     0,
     { timeout: 30_000 },
   );

@@ -93,8 +93,7 @@ pub const COLUMN_IN_REVIEW: &str = "in_review";
 /// The terminal column — nothing dispatches out of it.
 pub const COLUMN_DONE: &str = "done";
 
-/// Every column the board renders, in board order — the host's half of the
-/// console's `TASK_COLUMNS` (`frontend/src/lib/tasks-sample.ts`).
+/// Every column the board renders, in board order.
 ///
 /// A card's `column` is a plain string on the wire, so before #205 a typo'd or
 /// invented column was persisted verbatim and then simply never rendered: the
@@ -108,14 +107,15 @@ pub const COLUMN_DONE: &str = "done";
 /// goes back to `todo` with the reason on its note rather than into a second
 /// not-started column. Issue #337 then made `planning` live: entering it runs
 /// one planning pass and settles the card (see [`COLUMN_PLANNING`]).
-pub const BOARD_COLUMNS: [&str; 6] = [
-    COLUMN_TODO,
-    COLUMN_PLANNING,
-    COLUMN_IN_PROGRESS,
-    COLUMN_PAUSED,
-    COLUMN_IN_REVIEW,
-    COLUMN_DONE,
-];
+///
+/// **Derived, no longer declared.** It used to be a second literal list beside
+/// [`crate::ledger::board::COLUMNS`], with the console keeping a third; the
+/// board's own `TASK_COLUMNS` comment admitted what that cost — *"a Rust test
+/// cannot see the TS list, so a column added on one side and not the other
+/// keeps this green."* Now the table is the declaration, this is a `const fn`
+/// projection of it, and the console reads its labels off the `tasks` ledger.
+/// One edit adds a column everywhere.
+pub const BOARD_COLUMNS: [&str; crate::ledger::board::COLUMNS.len()] = crate::ledger::board::ids();
 
 /// The column id issue #206 used for the unqueued pool, removed by #301.
 ///
@@ -229,29 +229,22 @@ pub fn column_for_settled_run(status: RunStatus) -> Option<&'static str> {
 
 /// The human label for a column id (`in_progress` → `In progress`).
 ///
-/// The board's ids are wire words; anything a person reads needs the label. The
-/// console has carried these in `TASK_COLUMNS`
-/// (`frontend/src/lib/tasks-sample.ts`) since #205 — this is the host's half,
-/// added for the exported task record (issue #352), which is read by people who
+/// The board's ids are wire words; anything a person reads needs the label.
+/// Added for the exported task record (issue #352), which is read by people who
 /// have never seen the board and must not be shown `in_review`.
 ///
-/// Like [`BOARD_COLUMNS`], the two lists are a hand-maintained mirror: a Rust
-/// test cannot see the TS one, so a renamed label is a deliberate two-place
-/// edit. An unknown id falls back to itself rather than to a guess, so a column
-/// added on one side still prints something truthful.
+/// Read out of [`crate::ledger::board::COLUMNS`] rather than out of a `match`
+/// beside it, so a renamed label is one edit and cannot half-land. The console
+/// no longer keeps a copy at all — it reads the same labels off the `tasks`
+/// ledger, which is built from the same table.
+///
+/// An unknown id falls back to itself rather than to a guess, so a stored card
+/// carrying a column this build does not know still prints something truthful.
 ///
 /// `pub(crate)`: presentation is not part of the port's contract, and the only
 /// consumer is the exported record. Widen it if a second surface needs it.
 pub(crate) fn column_label(column: &str) -> &str {
-    match column {
-        COLUMN_TODO => "To-do",
-        COLUMN_PLANNING => "Planning",
-        COLUMN_IN_PROGRESS => "In progress",
-        COLUMN_PAUSED => "Paused",
-        COLUMN_IN_REVIEW => "In review",
-        COLUMN_DONE => "Done",
-        other => other,
-    }
+    crate::ledger::board::column(column).map_or(column, |held| held.label)
 }
 
 // ---------------------------------------------------------------------------
