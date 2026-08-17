@@ -266,7 +266,7 @@ pub async fn record(
     let folded = entries(runtime, spec).await?;
     publish(runtime, spec, &folded).await;
     folded.find(id).cloned().ok_or_else(|| {
-        OpenCompanyError::Internal(format!(
+        OpenCompanyError::NotFound(format!(
             "recorded `{id}` on `{}` but the fold did not return it",
             spec.slug
         ))
