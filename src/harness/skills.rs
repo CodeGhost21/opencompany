@@ -780,7 +780,11 @@ mod tests {
             &[registry, empty_body],
         )
         .unwrap();
-        assert_eq!(eff.docs.len(), 2, "both console deltas materialize");
+        assert_eq!(
+            eff.docs.len(),
+            with_baseline(&["web-research", "quick-note"]),
+            "both console deltas materialize"
+        );
 
         let tools = eff.read_tools();
         let list = tools
