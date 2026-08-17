@@ -14,7 +14,7 @@ use std::sync::Arc;
 use async_graphql::{Context, ID, SimpleObject};
 
 use crate::company::runtime::CompanyRuntime;
-use crate::company::{WorkflowFile, list_workflows_union, load_workflow_union};
+use crate::company::{WorkflowFile, list_workflows_with_globals, load_workflow_with_globals};
 use crate::ports::types::OverlayWorkflow;
 
 /// A one-line workflow summary for the workflows list.
@@ -157,9 +157,10 @@ impl From<WorkflowFile> for WorkflowGql {
 fn load_one(
     runtime: &Arc<CompanyRuntime>,
     overlays: &[OverlayWorkflow],
+    disable: &[String],
     id: &str,
 ) -> Option<WorkflowFile> {
-    load_workflow_union(runtime.source_dir(), overlays, id)
+    load_workflow_with_globals(runtime.source_dir(), overlays, disable, id)
         .ok()
         .flatten()
 }
@@ -172,11 +173,19 @@ async fn enabled_ids(runtime: &Arc<CompanyRuntime>) -> async_graphql::Result<Vec
 /// The company's runtime-authored graph bodies, read once per resolve. A
 /// company with no persisted record contributes none.
 async fn overlays(runtime: &Arc<CompanyRuntime>) -> async_graphql::Result<Vec<OverlayWorkflow>> {
+    Ok(overlays_and_globals(runtime).await?.0)
+}
+
+/// [`overlays`], with the company's `[globals].disable` from the same record
+/// load — the pair every union read needs, exactly as on the REST side.
+async fn overlays_and_globals(
+    runtime: &Arc<CompanyRuntime>,
+) -> async_graphql::Result<(Vec<OverlayWorkflow>, Vec<String>)> {
     Ok(runtime
         .store()
         .load(runtime.id())
         .await?
-        .map(|record| record.overlay_workflows)
+        .map(|record| (record.overlay_workflows, record.manifest.globals.disable))
         .unwrap_or_default())
 }
 
@@ -204,16 +213,19 @@ pub(crate) async fn resolve_summaries(
     _ctx: &Context<'_>,
     runtime: &Arc<CompanyRuntime>,
 ) -> async_graphql::Result<Vec<WorkflowSummaryGql>> {
-    let overlays = overlays(runtime).await?;
+    let (overlays, globals_disable) = overlays_and_globals(runtime).await?;
     let enabled = enabled_ids(runtime).await?;
     let enabled_set: HashSet<&str> = enabled.iter().map(String::as_str).collect();
 
     let mut summaries = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for file in list_workflows_union(runtime.source_dir(), &overlays) {
+    for file in list_workflows_with_globals(runtime.source_dir(), &overlays, &globals_disable) {
         seen.insert(file.id.clone());
         summaries.push(WorkflowSummaryGql {
-            enabled: enabled_set.contains(file.id.as_str()),
+            // A global graph is armed by being in the baseline at all — it has
+            // no `[workflows].enabled` entry to be named in, and the REST picker
+            // reports it enabled for the same reason.
+            enabled: file.global || enabled_set.contains(file.id.as_str()),
             id: ID(file.id),
             name: file.name,
         });
