@@ -17,7 +17,7 @@ the same reason `src/ledger/registry.rs` carries its built-in ledgers as code.
 
 ## A company always wins
 
-Globals are a floor, never a ceiling. On an id collision the company's own
+On an id collision the company's own
 definition supersedes the global one outright — its `agents/researcher.toml`
 replaces this directory's, its `workflows/weekly_review.toml` replaces this
 directory's. Nothing merges field-by-field, because a half-global teammate is
