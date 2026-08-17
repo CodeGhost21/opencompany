@@ -134,6 +134,14 @@ pub struct WorkflowFile {
     pub nodes: Vec<WorkflowNodeDef>,
     /// Directed edges between nodes, in file order.
     pub edges: Vec<WorkflowEdgeDef>,
+    /// Whether this graph came from the global baseline ([`crate::globals`])
+    /// rather than the company's own `workflows/` directory or its saved
+    /// overlays.
+    ///
+    /// Provenance, for a console that has to say where a graph a company never
+    /// wrote came from. It changes no behaviour here: precedence is decided by
+    /// id, in [`load_workflow_union`] and [`list_workflows_union`].
+    pub global: bool,
 }
 
 impl WorkflowFile {
@@ -550,6 +558,9 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
         id: raw.id,
         name: raw.name,
         description: raw.description,
+        // Set by whoever merges the baseline in; this parser reads company
+        // graphs and global ones through the same path.
+        global: false,
         nodes: raw
             .nodes
             .into_iter()
