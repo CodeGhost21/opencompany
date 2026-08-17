@@ -196,8 +196,12 @@ test("a card drags from In review to Done, and the board scrolls to get there", 
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   // Ride the right edge and let the board bring Done to the pointer.
+  // Vertically at the board's middle, not a fixed offset below the card. The
+  // board is only as tall as the pane leaves it, and a pointer held below its
+  // bottom edge is a pointer off the board — where its `dragover` never fires.
+  const rideY = edge.y + edge.height / 2;
   for (let tick = 0; tick < 25; tick += 1) {
-    await page.mouse.move(rightEdge - (tick % 2), box.y + 160);
+    await page.mouse.move(rightEdge - (tick % 2), rideY);
     await page.waitForTimeout(60);
   }
   const rode = await board(page).evaluate((el) => el.scrollLeft);

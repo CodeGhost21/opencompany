@@ -462,7 +462,7 @@ export function LedgersView({
           ))}
         </nav>
 
-        <section className="min-w-0 flex-1 space-y-3 overflow-y-auto">
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
           {!ledger ? (
             <p className="text-sm text-muted-foreground">
               This company has no ledgers yet.
@@ -605,7 +605,7 @@ export function LedgersView({
                   }
                 />
               ) : (
-                <div className="space-y-2">
+                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto">
                   {read?.entries.map((entry) => (
                     <EntryCard
                       key={entry.id}
@@ -935,14 +935,18 @@ function BoardMode({
               if (entry) onMove(entry, column.id);
             }}
             className={cn(
-              "flex w-72 shrink-0 flex-col gap-2 rounded-lg border p-2",
+              "flex min-h-0 w-72 shrink-0 flex-col gap-2 rounded-lg border p-2",
               over === column.id ? "border-primary bg-accent/50" : "bg-muted/30",
             )}
           >
-            <header className="flex items-center justify-between px-1">
+            <header className="flex shrink-0 items-center justify-between px-1">
               <span className="text-sm font-medium">{column.label}</span>
               <Badge variant="secondary">{held.length}</Badge>
             </header>
+            {/* The stack scrolls; the column does not grow. A column that grew
+                with its contents would make the board as tall as its busiest
+                list and leave the quiet ones as thin drop targets. */}
+            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
             {held.map((entry) => (
               <button
                 key={entry.id}
@@ -996,6 +1000,7 @@ function BoardMode({
                 Nothing here
               </p>
             )}
+            </div>
           </div>
         );
       })}
