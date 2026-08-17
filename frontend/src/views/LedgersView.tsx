@@ -45,7 +45,8 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { patchTask } from "@/api/tasks";
-import { columnsOf } from "@/lib/board-columns";
+import { CreateTaskDialog } from "@/views/CreateTaskDialog";
+import { BOARD_LEDGER, columnsOf } from "@/lib/board-columns";
 import {
   byline,
   composableFields,
@@ -150,6 +151,15 @@ export function LedgersView({
    * fields is actually for; the board truncates by construction.
    */
   const [mode, setMode] = useState<"board" | "list">("board");
+  /**
+   * The board's own create dialog, for the native `tasks` ledger only.
+   *
+   * Every other ledger takes `record_entry`, which this screen's compose form
+   * already is. The board does not — entering a column fires work — so opening
+   * a card keeps its own `POST …/tasks` path and its own dialog, which is the
+   * one lifted out of the deleted board screen rather than rewritten here.
+   */
+  const [creatingCard, setCreatingCard] = useState(false);
 
   const ledger = useMemo(
     () => ledgers.find((held) => held.slug === selected) ?? null,
@@ -502,7 +512,7 @@ export function LedgersView({
                   <FileText className="mr-2 size-4" />
                   Rendered file
                 </Button>
-                {isWritable(ledger) && (
+                {isWritable(ledger) ? (
                   <Button
                     size="sm"
                     onClick={() =>
@@ -517,6 +527,13 @@ export function LedgersView({
                     <Plus className="mr-2 size-4" />
                     Record
                   </Button>
+                ) : (
+                  ledger.slug === BOARD_LEDGER && (
+                    <Button size="sm" onClick={() => setCreatingCard(true)}>
+                      <Plus className="mr-2 size-4" />
+                      Add task
+                    </Button>
+                  )
                 )}
                 {!ledger.builtin && (
                   <Button
@@ -663,6 +680,20 @@ export function LedgersView({
               toast.error(e instanceof Error ? e.message : String(e));
             }
           }}
+        />
+      )}
+
+      {ledger && (
+        <CreateTaskDialog
+          open={creatingCard}
+          onClose={() => setCreatingCard(false)}
+          onCreated={() => {
+            setCreatingCard(false);
+            void refreshRead();
+            void refreshList();
+          }}
+          client={client}
+          company={company}
         />
       )}
 
