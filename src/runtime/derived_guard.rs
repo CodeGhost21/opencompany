@@ -37,7 +37,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -200,7 +199,7 @@ impl WorkspaceStore for DerivedGuardWorkspace {
         &self,
         company: &CompanyId,
         node: &WorkspaceNode,
-        bytes: Bytes,
+        bytes: &[u8],
     ) -> Result<WorkspaceNode> {
         if let Some(path) = self
             .guarded_target(company, node.parent_id.as_deref(), &node.name)
@@ -217,16 +216,23 @@ impl WorkspaceStore for DerivedGuardWorkspace {
         &self,
         company: &CompanyId,
         id: &str,
-        bytes: Bytes,
+        bytes: &[u8],
+        mime: Option<&str>,
         author: WorkspaceOrigin,
     ) -> Result<WorkspaceNode> {
         if let Some(path) = self.guarded_node(company, id).await? {
             return Err(self.refuse(company, &path).await);
         }
-        self.inner.write_binary(company, id, bytes, author).await
+        self.inner
+            .write_binary(company, id, bytes, mime, author)
+            .await
     }
 
-    async fn read_bytes(&self, company: &CompanyId, id: &str) -> Result<Option<BlobStream>> {
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, BlobStream)>> {
         self.inner.read_bytes(company, id).await
     }
 
