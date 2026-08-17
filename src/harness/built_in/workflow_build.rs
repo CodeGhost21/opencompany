@@ -1816,7 +1816,7 @@ async fn run_copilot(
     // Meter the turn regardless of how it ended — the agent's own usage carries
     // backend-charged USD, so a charged turn records a non-zero cost even when the
     // model produced no proposal.
-    let turn = crate::harness::read_turn_usage(&copilot);
+    let turn = crate::harness::built_in::read_turn_usage(&copilot);
     let usage = TokenUsage {
         input: turn.input_tokens,
         output: turn.output_tokens,
