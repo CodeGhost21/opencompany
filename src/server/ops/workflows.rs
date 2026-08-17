@@ -4062,7 +4062,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let listed = json_body(response).await;
-            let items = listed.as_array().expect("array");
+            let items = own_rows(&listed);
             assert_eq!(items.len(), 1, "body: {listed}");
             assert_eq!(items[0]["id"], "greeter");
             assert_eq!(items[0]["name"], "Greeter");
@@ -5297,7 +5297,7 @@ mod tests {
                 .unwrap();
             let items = json_body(response).await;
             assert_eq!(
-                items.as_array().unwrap().len(),
+                own_rows(&items).len(),
                 0,
                 "a deleted workflow must not come back on restart: {items}"
             );

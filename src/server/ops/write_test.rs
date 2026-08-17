@@ -2516,11 +2516,15 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     // named `null` (the console falls back to the role).
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
+    // The company's own teammate; the global baseline is appended to every
+    // roster and is not what this test is about.
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 1);
-    assert_eq!(roster[0]["id"], "ceo");
-    assert_eq!(roster[0]["role"], "Chief");
-    assert!(roster[0]["name"].is_null());
+    let ceo = roster
+        .iter()
+        .find(|row| row["id"] == "ceo")
+        .expect("the manifest teammate is listed");
+    assert_eq!(ceo["role"], "Chief");
+    assert!(ceo["name"].is_null());
 
     // Add an overlay teammate.
     let (status, member) = send(
