@@ -20,7 +20,8 @@ use serde_json::Value;
 
 use oh::agent::tool_policy::GeneratedToolRuntimeContext;
 use oh::tools::traits::{
-    PermissionLevel, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope, ToolTimeout,
+    PermissionLevel, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope, ToolSpec,
+    ToolTimeout,
 };
 use openhuman_core::openhuman as oh;
 
