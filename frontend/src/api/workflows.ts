@@ -741,6 +741,78 @@ export function draftWorkflowFromDescription(
 }
 
 /**
+ * The static authoring readiness of a copilot-corrected graph (issue #840, PR-3)
+ * — **advisory only**.
+ *
+ * `ok` is whether the host's always-compiled authoring gates found nothing;
+ * `advisories` names each remaining smell to look at before saving. It never
+ * blocks the save, so a non-`ok` readiness rides a 200 alongside the graph — the
+ * console renders it read-only, not as an error.
+ */
+export interface WorkflowReadiness {
+  ok: boolean;
+  /** Each remaining authoring smell, in prosumer language. Omitted when `ok`. */
+  advisories?: string[];
+}
+
+/**
+ * What the copilot drafted when correcting a workflow whose run failed (issue
+ * #840, PR-3). Mirrors {@link WorkflowDraftFromDescription}: exactly one shape,
+ * told apart by `automatable` — a corrected `workflow` to review (keeping the
+ * SAME id, so Save is a new version), or a `reason` the failure cannot be fixed
+ * by re-wiring. Carries {@link WorkflowReadiness} on the corrected graph.
+ */
+export interface WorkflowFixFromRun {
+  automatable: boolean;
+  /** A one-line gloss of the correction. Present when `automatable`. */
+  summary?: string;
+  /** The corrected graph, same id as the failing workflow. Present when `automatable`. */
+  workflow?: WorkflowGraph;
+  /** Host corrections the operator should see (a role→id rewrite, etc.). */
+  notes?: string[];
+  /** Why the failure cannot be fixed by re-wiring. Present when not `automatable`. */
+  reason?: string;
+  /** Static readiness advisories over the corrected graph. Present when `automatable`. */
+  readiness?: WorkflowReadiness;
+}
+
+/**
+ * A copilot-corrected graph handed straight to the edit dialog to hydrate (issue
+ * #840, PR-3), bypassing the description→draft round trip. The dialog loads the
+ * `workflow` nodes/edges/name directly and shows the summary/notes/readiness
+ * banners read-only.
+ */
+export interface PrefilledDraft {
+  summary?: string;
+  workflow: WorkflowGraph;
+  notes?: string[];
+  readiness?: WorkflowReadiness;
+}
+
+/**
+ * Corrects a saved workflow whose run failed, with the copilot (issue #840,
+ * PR-3) — the engine behind the run-history "Fix with copilot" affordance.
+ *
+ * **Nothing is persisted.** The host drafts a corrected graph — keeping the same
+ * id, so the operator's Save (`PUT …/workflows/{wid}`) is a new *version*, not an
+ * orphan — validates it, and hands it back for review in the edit dialog. A build
+ * with no embedded brain answers a capability gap the same way the run route does
+ * (`not_wired` 404, `restart_required` / `inference_required` 409). A run with no
+ * recorded error and no `errorHint` is a `400`.
+ */
+export function fixWorkflowFromRun(
+  client: OpenCompanyClient,
+  company: string | null,
+  wid: string,
+  args: { runId: string; errorHint?: string },
+): Promise<WorkflowFixFromRun> {
+  return client.post<WorkflowFixFromRun>(
+    `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/fix-from-run`,
+    { runId: args.runId, errorHint: args.errorHint },
+  );
+}
+
+/**
  * Replaces a saved workflow graph wholesale (issue #259) — the fix for a
  * workflow being write-once, so a typo'd cron or a node pointed at the wrong
  * teammate can be corrected instead of abandoned.

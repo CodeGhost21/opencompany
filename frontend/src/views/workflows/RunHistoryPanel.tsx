@@ -154,6 +154,9 @@ export function RunHistoryPanel({
   onClose,
   selectedRunSeq,
   onSelectRun,
+  onFixWithCopilot,
+  fixingRunSeq,
+  fixReason,
 }: {
   runs: WorkflowRunOutcome[];
   workflowName: string;
@@ -162,7 +165,25 @@ export function RunHistoryPanel({
   selectedRunSeq: number | null;
   /** Overlay this run's per-node states on the canvas (issue #371). */
   onSelectRun: (run: WorkflowRunOutcome) => void;
+  /**
+   * Correct this failed run's workflow with the copilot (issue #840, PR-3). When
+   * absent (no brain wired, or a host without the route) the affordance is not
+   * offered at all.
+   */
+  onFixWithCopilot?: (run: WorkflowRunOutcome) => void;
+  /** The run whose copilot fix is in flight, so its row shows a spinner. */
+  fixingRunSeq?: number | null;
+  /** A run the copilot judged un-fixable, shown inline under that run's row. */
+  fixReason?: { seq: number; reason: string } | null;
 }) {
+  // Only one fix may be in flight at a time: `handleFixWithCopilot` sets a
+  // single `prefilledDraft`/`editOpen` slot, so a second Fix started on a
+  // different row of this same panel while the first is still running would
+  // race it for that slot — whichever resolves last silently wins, which
+  // could show the operator the wrong run's correction. Disabling every row's
+  // button (not just the in-flight one's) while `fixingRunSeq` is set turns
+  // that race into "wait your turn".
+  const anyFixInFlight = fixingRunSeq != null;
   return (
     <div className="border-t bg-card/60" data-testid="workflow-run-history">
       <div className="flex items-center justify-between px-4 py-2">
@@ -193,6 +214,10 @@ export function RunHistoryPanel({
                 run={run}
                 selected={run.seq === selectedRunSeq}
                 onSelect={() => onSelectRun(run)}
+                onFixWithCopilot={onFixWithCopilot}
+                fixing={fixingRunSeq === run.seq}
+                fixDisabled={anyFixInFlight}
+                fixReason={fixReason?.seq === run.seq ? fixReason.reason : null}
               />
             ))}
           </div>
@@ -211,10 +236,22 @@ function RunHistoryRow({
   run,
   selected,
   onSelect,
+  onFixWithCopilot,
+  fixing,
+  fixDisabled,
+  fixReason,
 }: {
   run: WorkflowRunOutcome;
   selected: boolean;
   onSelect: () => void;
+  /** Correct this run's workflow with the copilot (issue #840, PR-3). */
+  onFixWithCopilot?: (run: WorkflowRunOutcome) => void;
+  /** Whether this row's copilot fix is currently in flight. */
+  fixing?: boolean;
+  /** A DIFFERENT row's fix is in flight — disabled without the "Fixing…" label. */
+  fixDisabled?: boolean;
+  /** The copilot's reason this failure could not be fixed by re-wiring, if any. */
+  fixReason?: string | null;
 }) {
   const tone = runTone(run);
   const nodes = run.nodes ?? [];
@@ -320,6 +357,33 @@ function RunHistoryRow({
               ? `This run failed at “${failedNode}”: `
               : "This run failed: "}
             {run.error}
+            {/* Issue #840 (PR-3): correct the workflow with the copilot. Offered
+                only on the journaled failed run (keyed by runId) — the one
+                surface that always carries the failure, unlike the sync run
+                result — and only when the parent wired a handler (a brain is
+                available). */}
+            {onFixWithCopilot && run.runId && (
+              <div className="mt-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 px-2 text-3xs"
+                  disabled={fixing || fixDisabled}
+                  onClick={() => onFixWithCopilot(run)}
+                  data-testid="workflow-run-fix-with-copilot"
+                >
+                  {fixing ? "Fixing…" : "Fix with copilot"}
+                </Button>
+                {fixReason && (
+                  <p
+                    className="mt-1 text-2xs text-muted-foreground"
+                    data-testid="workflow-run-fix-not-automatable"
+                  >
+                    The copilot couldn't fix this by re-wiring the workflow: {fixReason}
+                  </p>
+                )}
+              </div>
+            )}
           </AlertDescription>
         </Alert>
       ) : run.cancelled ? (
