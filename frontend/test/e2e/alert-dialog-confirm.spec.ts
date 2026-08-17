@@ -98,7 +98,12 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   await page.locator("#new-prompt").fill(title);
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  const card = page.locator('[role="button"]').filter({ hasText: title });
+  // A board card is a real `<button draggable>` now that the board renders as
+  // the `tasks` ledger's columns. The old locator was the CSS selector
+  // `[role="button"]`, which matches an explicit *attribute* and not an
+  // implicit ARIA role — it found the previous markup's `<div role="button">`
+  // and finds nothing here. `draggable` is what identifies a card either way.
+  const card = page.locator("[draggable=true]").filter({ hasText: title });
   await expect(card).toBeVisible({ timeout: 30_000 });
 
   // Open the card's detail screen, then its edit dialog, then ask to delete.
@@ -129,7 +134,7 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   // dialog must not have cost us the action.
   release("continue");
   await page.goto("/#/ledgers/tasks");
-  await expect(page.locator('[role="button"]').filter({ hasText: title })).toHaveCount(
+  await expect(page.locator("[draggable=true]").filter({ hasText: title })).toHaveCount(
     0,
     { timeout: 30_000 },
   );
