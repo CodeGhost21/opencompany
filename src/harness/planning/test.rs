@@ -24,6 +24,7 @@ use tinyagents::{Result as TaResult, TinyAgentsError};
 use super::*;
 use crate::company::CompanyManifest;
 use crate::ports::types::CompanyId;
+use tempfile;
 
 // ---------------------------------------------------------------------------
 // A scripted model
@@ -221,7 +222,7 @@ fn evidence() -> Evidence {
         ],
         skills: vec!["writing".to_string()],
         mail_configured: false,
-        composio_token: true,
+        composio_credential: true,
     }
 }
 
@@ -505,12 +506,203 @@ fn composio_distinguishes_no_credential_from_no_account() {
     assert_eq!(verify_composio(&e, "github").0, PrereqStatus::Missing);
 
     let mut e = evidence();
-    e.composio_token = false;
+    e.composio_credential = false;
     let (status, note) = verify_composio(&e, "gmail");
     assert_eq!(status, PrereqStatus::Missing);
     assert!(
         note.contains("no Composio credential"),
         "the operator needs to know which of the two things is missing: {note}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #886: the evidence pack's Composio credential is the resolver's answer
+// ---------------------------------------------------------------------------
+
+/// An in-memory secret store, mirroring the fixtures in `company::composio` and
+/// `company::company_key`.
+#[derive(Default)]
+struct MemSecrets {
+    map: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+#[async_trait]
+impl crate::ports::SecretStore for MemSecrets {
+    async fn get(
+        &self,
+        _c: &CompanyId,
+        key: &str,
+    ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+        Ok(self
+            .map
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|v| crate::ports::types::SecretValue(v.clone())))
+    }
+    async fn set(
+        &self,
+        _c: &CompanyId,
+        key: &str,
+        value: crate::ports::types::SecretValue,
+    ) -> crate::Result<()> {
+        self.map.lock().unwrap().insert(key.to_string(), value.0);
+        Ok(())
+    }
+}
+
+/// A store whose reads always fail.
+struct BrokenSecrets;
+
+#[async_trait]
+impl crate::ports::SecretStore for BrokenSecrets {
+    async fn get(
+        &self,
+        _c: &CompanyId,
+        _key: &str,
+    ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+        Err(crate::error::OpenCompanyError::Store("boom".into()))
+    }
+    async fn set(
+        &self,
+        _c: &CompanyId,
+        _key: &str,
+        _value: crate::ports::types::SecretValue,
+    ) -> crate::Result<()> {
+        Err(crate::error::OpenCompanyError::Store("boom".into()))
+    }
+}
+
+/// The instance identity a hosted pod carries. Built directly, so the matrix
+/// never touches the process environment.
+fn platform_identity(
+    path: impl Into<std::path::PathBuf>,
+) -> Arc<crate::company::TinyhumansTokenSource> {
+    Arc::new(crate::company::TinyhumansTokenSource::projected_file(path))
+}
+
+/// The hosted shape, which is the whole of issue #886: **no** BYO
+/// `composio/token` is stored, and the pod's platform identity is what the
+/// toolbelt resolves. The evidence pack must say a credential exists.
+///
+/// The old probe read only the BYO slot, so it answered `false` here — and the
+/// verdicts below then announced "no Composio account can be reached" about a
+/// company whose GitHub connector was working in the same session.
+#[tokio::test]
+async fn a_hosted_tenant_with_no_pasted_token_still_has_a_composio_credential() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+
+    // Create a temp file with a test token so the projected_file source has
+    // a path that exists, matching the pattern used in server/ops/composio.rs.
+    let token_dir = tempfile::Builder::new()
+        .prefix("oc-harness-test-")
+        .tempdir()
+        .expect("tempdir");
+    let token_path = token_dir.path().join("token");
+    std::fs::write(&token_path, "test-tinyhumans-token").expect("write token");
+
+    // The one-tier probe the field used to be. Kept in the assertion because it
+    // is the contradiction the issue reported, not merely a historical note.
+    assert!(
+        !crate::company::composio::token_configured(&company, &secrets)
+            .await
+            .unwrap(),
+        "nobody pastes a BYO token on a hosted tenant"
+    );
+    assert!(
+        composio_credential_configured(&company, &secrets, Some(platform_identity(&token_path)))
+            .await,
+        "the platform identity is a Composio credential — it is what wires the tools"
+    );
+}
+
+/// The rest of the tier matrix, including the genuinely-credential-less case
+/// the `missing` verdict is *supposed* to be reserved for.
+#[tokio::test]
+async fn the_credential_probe_walks_every_tier() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+
+    // Create a temp file with a test token so the projected_file source has
+    // a path that exists, matching the pattern used in server/ops/composio.rs.
+    let token_dir = tempfile::Builder::new()
+        .prefix("oc-harness-test-")
+        .tempdir()
+        .expect("tempdir");
+    let token_path = token_dir.path().join("token");
+    std::fs::write(&token_path, "test-tinyhumans-token").expect("write token");
+
+    // Nothing stored, no instance identity — the only shape that is really
+    // credential-less.
+    assert!(!composio_credential_configured(&company, &secrets, None).await);
+
+    // The company's own TinyHumans key answers with no instance identity at all.
+    crate::company::company_key::store_key(&company, &secrets, "th_company")
+        .await
+        .unwrap();
+    assert!(composio_credential_configured(&company, &secrets, None).await);
+
+    // A pasted BYO token also answers on its own.
+    let byo = MemSecrets::default();
+    crate::company::composio::store_token(&company, &byo, "cmp_byo")
+        .await
+        .unwrap();
+    assert!(composio_credential_configured(&company, &byo, None).await);
+
+    // An unreadable store fails closed rather than aborting the pass.
+    assert!(
+        !composio_credential_configured(
+            &company,
+            &BrokenSecrets,
+            Some(platform_identity(&token_path))
+        )
+        .await
+    );
+}
+
+/// The operator-facing sentence, end to end on the hosted shape.
+///
+/// `verify_composio`'s no-credential arm was written for the right concept and
+/// only ever got the wrong boolean — but the sentence it emits is the actual
+/// harm the issue reports ("no Composio account can be reached" printed onto a
+/// card for a company whose GitHub connector worked), so it is pinned against
+/// the real function rather than a restatement of it.
+#[tokio::test]
+async fn a_hosted_tenant_stops_being_told_no_composio_account_can_be_reached() {
+    let company = CompanyId::new("acme");
+    let secrets = MemSecrets::default();
+
+    // Create a temp file with a test token so the projected_file source has
+    // a path that exists, matching the pattern used in server/ops/composio.rs.
+    let token_dir = tempfile::Builder::new()
+        .prefix("oc-harness-test-")
+        .tempdir()
+        .expect("tempdir");
+    let token_path = token_dir.path().join("token");
+    std::fs::write(&token_path, "test-tinyhumans-token").expect("write token");
+
+    let mut e = evidence();
+    e.composio_credential =
+        composio_credential_configured(&company, &secrets, Some(platform_identity(&token_path)))
+            .await;
+
+    // A provider that IS connected through Composio is satisfied.
+    assert_eq!(verify_composio(&e, "notion").0, PrereqStatus::Satisfied);
+
+    // One that is not still reports the honest gap — the missing *account*,
+    // not a missing credential. That distinction is the whole value of the
+    // verdict: one sends the operator to connect a provider, the other to paste
+    // a token they do not need.
+    let (status, note) = verify_composio(&e, "gmail");
+    assert_eq!(status, PrereqStatus::Missing);
+    assert!(
+        note.contains("no Composio account is connected"),
+        "the gap is the account, not the credential: {note}"
+    );
+    assert!(
+        !note.contains("no Composio credential"),
+        "a hosted tenant has a credential; saying otherwise is issue #886: {note}"
     );
 }
 
