@@ -7,6 +7,7 @@ import {
   Network,
   Settings2,
   ShieldCheck,
+  BookText,
   SquareKanban,
   Workflow,
 } from "lucide-react";
@@ -77,6 +78,7 @@ import {
 import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
+import { LedgersView } from "@/views/LedgersView";
 import { TasksView } from "@/views/TasksView";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
@@ -104,6 +106,7 @@ export type View =
   | "conversation"
   | "inbox"
   | "tasks"
+  | "ledgers"
   | "team"
   | "workspace"
   | "memory"
@@ -129,6 +132,11 @@ const NAV: NavItem[] = [
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
   { view: "tasks", label: "Tasks", icon: SquareKanban },
+  // The company's own record — goals, decisions, and whatever axis this
+  // workspace declared. The board sits beside it rather than inside it: a
+  // card's column fires dispatch and a planning pass, so it keeps its own
+  // screen, and appears in Ledgers as a read-only row anybody can search.
+  { view: "ledgers", label: "Ledgers", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
@@ -1247,6 +1255,18 @@ export function AppShell({
                 setActiveThreadId(threadId);
                 setView("conversation");
               }}
+            />
+          )}
+          {view === "ledgers" && (
+            <LedgersView
+              client={client}
+              company={company}
+              // `#/ledgers/<slug>` opens that ledger. Unvalidated here, like
+              // every other sub-page: only this view knows which slugs exist,
+              // and it resolves an unknown one against the host rather than
+              // guessing.
+              sub={sub}
+              onOpenLedger={(slug) => navigate("ledgers", slug ?? undefined)}
             />
           )}
           {view === "team" && (
