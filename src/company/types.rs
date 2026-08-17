@@ -473,8 +473,13 @@ pub struct Agent {
     /// `harness::context_routing` before the (synchronous) agent build, and a
     /// change to one moves the roster fingerprint so it reaches the next turn
     /// rather than the next restart.
+    ///
+    /// An entry is either a bare path (routes the document into the prompt,
+    /// read-only — the pre-existing shorthand) or `{ path, access = "write" }`,
+    /// which additionally grants this agent `workspace_write`/`workspace_create`
+    /// on that path. See [`ContextEntry`] and [`Agent::write_scope`].
     #[serde(default)]
-    pub context: Option<Vec<String>>,
+    pub context: Option<Vec<ContextEntry>>,
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,
