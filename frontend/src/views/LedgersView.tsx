@@ -447,33 +447,56 @@ export function LedgersView({ client, company, sub, onOpenLedger }: Props) {
                 </p>
               )}
 
-              <div className="space-y-2">
-                {read?.entries.map((entry) => (
-                  <EntryCard
-                    key={entry.id}
-                    entry={entry}
-                    ledger={ledger}
-                    onAmend={() =>
-                      setComposing({
-                        id: entry.id,
-                        fields: { ...entry.fields },
-                        status: entry.status,
-                        closing: false,
-                      })
-                    }
-                    onClose={() =>
-                      setComposing({
-                        id: entry.id,
-                        fields: { ...entry.fields },
-                        status:
-                          ledger.statuses.find((s) => s.closed)?.name ?? "",
-                        closing: true,
-                      })
-                    }
-                    onDelete={() => setConfirmDelete(entry)}
-                  />
-                ))}
-              </div>
+              {mode === "board" && read ? (
+                <BoardMode
+                  ledger={ledger}
+                  entries={read.entries}
+                  onMove={(entry, status) => void move(entry, status)}
+                  onOpen={(entry) =>
+                    ledger.source === "native" && onOpenCard
+                      ? onOpenCard(entry.id)
+                      : setComposing({
+                          id: entry.id,
+                          fields: { ...entry.fields },
+                          status: entry.status,
+                          closing: false,
+                        })
+                  }
+                />
+              ) : (
+                <div className="space-y-2">
+                  {read?.entries.map((entry) => (
+                    <EntryCard
+                      key={entry.id}
+                      entry={entry}
+                      ledger={ledger}
+                      onOpen={
+                        ledger.source === "native" && onOpenCard
+                          ? () => onOpenCard(entry.id)
+                          : undefined
+                      }
+                      onAmend={() =>
+                        setComposing({
+                          id: entry.id,
+                          fields: { ...entry.fields },
+                          status: entry.status,
+                          closing: false,
+                        })
+                      }
+                      onClose={() =>
+                        setComposing({
+                          id: entry.id,
+                          fields: { ...entry.fields },
+                          status:
+                            ledger.statuses.find((s) => s.closed)?.name ?? "",
+                          closing: true,
+                        })
+                      }
+                      onDelete={() => setConfirmDelete(entry)}
+                    />
+                  ))}
+                </div>
+              )}
 
               {read && read.matched > read.entries.length && (
                 <p className="text-xs text-muted-foreground">
