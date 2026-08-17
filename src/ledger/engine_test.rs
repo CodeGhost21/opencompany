@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::*;
 use crate::ledger::spec::parse;
-use crate::ledger::types::LedgerAuthor;
+use crate::ledger::types::{AuthorKind, LedgerAuthor};
 
 fn spec() -> LedgerSpec {
     parse(

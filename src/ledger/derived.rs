@@ -116,7 +116,7 @@ pub async fn publish(
         .into_iter()
         .find(|node| {
             node.kind == NodeKind::File
-                && node.parent_id.as_deref() == Some(folder.node.id.as_str())
+                && node.parent_id.as_deref() == Some(folder.node().id.as_str())
                 && node.name == name
         });
     match existing {
@@ -127,10 +127,10 @@ pub async fn publish(
         }
         None => {
             let node = WorkspaceNode {
-                id: generate_id("wsn"),
+                id: generate_id(),
                 name: name.to_string(),
                 kind: NodeKind::File,
-                parent_id: Some(folder.node.id.clone()),
+                parent_id: Some(folder.node().id.clone()),
                 updated_at_millis: now_millis(),
                 // `Seed` rather than an operator or an agent, deliberately: the
                 // file's author is the runtime's derivation, and stamping
