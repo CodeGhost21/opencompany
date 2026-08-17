@@ -25,6 +25,11 @@ interface Props {
   company: string | null;
 }
 
+/** The message out of a rejected request, whatever it was rejected with. */
+function reason(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * Settings → Billing: the company's Chargebee connection (issue #788, #527).
  *
@@ -64,6 +69,7 @@ export function BillingView({ client, company }: Props) {
   const [webhookSecret, setWebhookSecret] = useState("");
 
   const [paypal, setPaypal] = useState<PaypalStatus | null>(null);
+  const [paypalError, setPaypalError] = useState<string | null>(null);
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [environment, setEnvironment] = useState("sandbox");
@@ -80,21 +86,38 @@ export function BillingView({ client, company }: Props) {
   // other company's secret store. It also makes `company` constant for this
   // instance's lifetime, so a slow response from a previous company cannot land
   // on a later one's view — there is no later one to land on.
+  // Chargebee and PayPal are unrelated integrations, and they are loaded
+  // independently for that reason. Under `Promise.all` a single rejection took
+  // the whole page to an error card, so a PayPal read that failed — a host built
+  // without the feature answering oddly, a slow store, one bad request — left an
+  // operator unable to reach the Chargebee form at all, for a problem that had
+  // nothing to do with Chargebee. Each side now reports its own failure and the
+  // other still renders.
   const load = useCallback(async () => {
-    try {
-      const [next, pp] = await Promise.all([
-        getBilling(client, company),
-        getPaypal(client, company),
-      ]);
-      setStatus(next);
-      setPaypal(pp);
+    const [billing, pp] = await Promise.allSettled([
+      getBilling(client, company),
+      getPaypal(client, company),
+    ]);
+
+    if (billing.status === "fulfilled") {
+      setStatus(billing.value);
       setLoadError(null);
       // Seed the site box with what is stored — it is the one non-secret field,
       // and an operator correcting a typo should not have to retype it.
-      setSite(next.site ?? "");
-      setEnvironment(pp.environment || "sandbox");
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
+      setSite(billing.value.site ?? "");
+    } else {
+      setLoadError(reason(billing.reason));
+    }
+
+    if (pp.status === "fulfilled") {
+      setPaypal(pp.value);
+      setPaypalError(null);
+      setEnvironment(pp.value.environment || "sandbox");
+    } else {
+      // Not fatal to the page: the PayPal card says so where the PayPal card is,
+      // and the Chargebee half above is untouched.
+      setPaypal(null);
+      setPaypalError(reason(pp.reason));
     }
   }, [client, company]);
 
@@ -452,6 +475,21 @@ export function BillingView({ client, company }: Props) {
               ) : null}
             </div>
 
+            {/* PayPal failed to load while Chargebee did. Said here rather than
+              as a page-level error: the Chargebee form above is unaffected and
+              still usable, which is the whole reason the two load apart. The
+              form below is hidden because saving against an unknown state would
+              be guessing — there is no `environment` to compare against, so a
+              Save would post fields the operator did not change. */}
+            {paypalError ? (
+              <Alert variant="destructive" data-testid="paypal-load-error">
+                <TriangleAlert className="size-4" />
+                <AlertDescription>
+                  Could not load the PayPal connection: {paypalError}
+                </AlertDescription>
+              </Alert>
+            ) : null}
+
             {paypal && !paypal.inBuild ? (
               <Alert data-testid="paypal-not-in-build">
                 <TriangleAlert className="size-4" />
@@ -473,82 +511,89 @@ export function BillingView({ client, company }: Props) {
               </Alert>
             ) : null}
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="pp-id">Client ID</Label>
-                <Input
-                  id="pp-id"
-                  data-testid="paypal-client-id"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={
-                    paypal?.clientIdConfigured
-                      ? "Configured — type to replace"
-                      : "From developer.paypal.com → Apps & Credentials"
-                  }
-                  value={clientId}
-                  onChange={(e) => setClientId(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="pp-secret">Client secret</Label>
-                <Input
-                  id="pp-secret"
-                  data-testid="paypal-client-secret"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={
-                    paypal?.clientSecretConfigured
-                      ? "Configured — type to replace"
-                      : "Secret"
-                  }
-                  value={clientSecret}
-                  onChange={(e) => setClientSecret(e.target.value)}
-                />
-              </div>
-            </div>
+            {paypalError ? null : (
+              <>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="pp-id">Client ID</Label>
+                    <Input
+                      id="pp-id"
+                      data-testid="paypal-client-id"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={
+                        paypal?.clientIdConfigured
+                          ? "Configured — type to replace"
+                          : "From developer.paypal.com → Apps & Credentials"
+                      }
+                      value={clientId}
+                      onChange={(e) => setClientId(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="pp-secret">Client secret</Label>
+                    <Input
+                      id="pp-secret"
+                      data-testid="paypal-client-secret"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={
+                        paypal?.clientSecretConfigured
+                          ? "Configured — type to replace"
+                          : "Secret"
+                      }
+                      value={clientSecret}
+                      onChange={(e) => setClientSecret(e.target.value)}
+                    />
+                  </div>
+                </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="pp-env">Environment</Label>
-              <select
-                id="pp-env"
-                data-testid="paypal-environment"
-                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
-                value={environment}
-                onChange={(e) => setEnvironment(e.target.value)}
-              >
-                <option value="sandbox">
-                  Sandbox — developer.paypal.com test accounts
-                </option>
-                <option value="live">Live — real money</option>
-              </select>
-              <p className="text-xs text-muted-foreground">
-                Sandbox and live credentials are not interchangeable. Picking
-                the wrong one fails with &ldquo;invalid client&rdquo;, which
-                reads like a typo.
-              </p>
-            </div>
+                <div className="space-y-2">
+                  <Label htmlFor="pp-env">Environment</Label>
+                  <select
+                    id="pp-env"
+                    data-testid="paypal-environment"
+                    className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                    value={environment}
+                    onChange={(e) => setEnvironment(e.target.value)}
+                  >
+                    <option value="sandbox">
+                      Sandbox — developer.paypal.com test accounts
+                    </option>
+                    <option value="live">Live — real money</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Sandbox and live credentials are not interchangeable.
+                    Picking the wrong one fails with &ldquo;invalid
+                    client&rdquo;, which reads like a typo.
+                  </p>
+                </div>
 
-            <div className="flex gap-2">
-              <Button
-                onClick={onSavePaypal}
-                disabled={busy}
-                data-testid="paypal-save"
-              >
-                {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-                Save
-              </Button>
-              {paypal?.clientIdConfigured || paypal?.clientSecretConfigured ? (
-                <Button
-                  variant="ghost"
-                  onClick={onClearPaypal}
-                  disabled={busy}
-                  data-testid="paypal-clear"
-                >
-                  Disconnect
-                </Button>
-              ) : null}
-            </div>
+                <div className="flex gap-2">
+                  <Button
+                    onClick={onSavePaypal}
+                    disabled={busy}
+                    data-testid="paypal-save"
+                  >
+                    {busy ? (
+                      <Loader2 className="mr-2 size-4 animate-spin" />
+                    ) : null}
+                    Save
+                  </Button>
+                  {paypal?.clientIdConfigured ||
+                  paypal?.clientSecretConfigured ? (
+                    <Button
+                      variant="ghost"
+                      onClick={onClearPaypal}
+                      disabled={busy}
+                      data-testid="paypal-clear"
+                    >
+                      Disconnect
+                    </Button>
+                  ) : null}
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
       </div>
