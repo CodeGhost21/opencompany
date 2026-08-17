@@ -17,7 +17,12 @@ import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { createTask, type Task, type TaskDeliverable } from "@/api/tasks";
+import {
+  createTask,
+  type CreateTask,
+  type Task,
+  type TaskDeliverable,
+} from "@/api/tasks";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
