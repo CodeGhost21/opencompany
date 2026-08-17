@@ -2179,6 +2179,7 @@ impl RuntimeBuilder {
                                 model_override,
                                 tasks: Some(ops.tasks.clone()),
                                 artifacts: Some(ops.artifacts.clone()),
+                                ledgers: Some(ops.ledgers.clone()),
                                 // Skill read surface (#28): the operator delta
                                 // store + the company source dir (`companies/<name>`,
                                 // held as `seed_dir`) whose `skills/` subtree

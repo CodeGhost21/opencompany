@@ -404,7 +404,7 @@ impl Tool for RecordEntry {
     }
 
     fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Consequence
+        PermissionLevel::Write
     }
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<ToolResult> {
@@ -475,7 +475,7 @@ impl Tool for CloseEntry {
     }
 
     fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Consequence
+        PermissionLevel::Write
     }
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<ToolResult> {
@@ -596,7 +596,7 @@ impl Tool for DefineLedger {
     }
 
     fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Consequence
+        PermissionLevel::Write
     }
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<ToolResult> {
