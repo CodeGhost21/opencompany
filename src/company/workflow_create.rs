@@ -878,7 +878,8 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
         // `search` family needs an EXPLICIT `search` grant — a `*` wildcard never
         // confers it — while every other namespace uses the ordinary grant-glob
         // intersection, exactly the split `WorkflowToolInvoker::invoke` enforces.
-        let grants = &record.manifest.tools.allow;
+        // Plus the global tool floor — see `Tools::effective_allow`.
+        let grants = &record.manifest.tools.effective_allow();
         let granted = if namespace == "search" {
             crate::company::grants_search_explicit(grants)
         } else {

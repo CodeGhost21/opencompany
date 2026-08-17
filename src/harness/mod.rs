@@ -2648,7 +2648,10 @@ pub(crate) fn build_roster(
     let effective = company.effective_policy();
     let policy: &Policy = &effective;
     let company_name = &company.manifest.company.name;
-    let allow = &company.manifest.tools.allow;
+    // `effective_allow`: the company's grants plus the global tool floor, so a
+    // company that narrowed its belt still has teammates that can reach their
+    // own sandbox, their documents, and the workspace.
+    let allow = &company.manifest.tools.effective_allow();
     // The orchestrator agent (tier `orchestrator`, else the first agent) receives
     // the delegating-orchestrator persona + tools (issue #53).
     let orchestrator = orchestrator::orchestrator_id(&company.manifest.agents);

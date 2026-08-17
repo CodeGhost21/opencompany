@@ -738,7 +738,7 @@ async fn deliver_one(
             // FIRST and independently of whether mail is even wired, so a
             // missing grant is always reported as a denial rather than being
             // masked by an unrelated configuration gap.
-            if !crate::harness::build::grants_cover(&record.manifest.tools.allow, "email") {
+            if !crate::harness::build::grants_cover(&record.manifest.tools.effective_allow(), "email") {
                 tracing::warn!(
                     company = %record.id,
                     node = %node_id,
