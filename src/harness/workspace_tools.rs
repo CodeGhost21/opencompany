@@ -1561,6 +1561,15 @@ impl Tool for WorkspaceWriteTool {
             Err(e) => return Ok(ToolResult::error(e.message())),
         };
 
+        if !self.workspace.write_allowed(&entry.path) {
+            return Ok(ToolResult::error(format!(
+                "Refused: `{}` is outside your declared write scope. Your manifest confines \
+                 `workspace_write` to specific paths — ask the operator to add this one, or work \
+                 in `Agents/<your agent id>/`, which is always writable.",
+                entry.path
+            )));
+        }
+
         if entry.node.kind == NodeKind::Folder {
             return Ok(ToolResult::error(format!(
                 "Refused: `{}` is a folder, not a note. Only notes have a body to overwrite.",
