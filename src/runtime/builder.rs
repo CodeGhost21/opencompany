@@ -3069,6 +3069,29 @@ mod test {
             .expect("tempdir")
     }
 
+    /// Automatic Git checkpoints are opt-in and stay off unless the operator
+    /// flips the switch. The default is asserted here so a silent change to the
+    /// host default — which would start shelling out to `git` in every agent
+    /// workspace — cannot slip past.
+    #[test]
+    fn workspace_git_checkpoints_default_off_and_switchable() {
+        let home = tmp_home("opencompany-workspace-git-");
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+                .expect("manifest");
+        let builder = RuntimeBuilder::new(home.path().to_path_buf(), manifest);
+        assert!(
+            !builder.workspace_git_enabled,
+            "workspace Git checkpoints must default to off"
+        );
+        let enabled = builder.with_workspace_git_enabled(true);
+        assert!(enabled.workspace_git_enabled);
+        assert!(
+            !enabled.with_workspace_git_enabled(false).workspace_git_enabled,
+            "the switch must also be able to turn checkpoints back off"
+        );
+    }
+
     mod scoped_grants {
         use super::*;
 
