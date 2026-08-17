@@ -265,7 +265,7 @@ place of a compose box, rather than offering a form whose save the host refuses.
 The compose form reads `needsReason` off the declaration and asks for the reason
 *before* the save — the same rule the host enforces, met earlier.
 
-### The board renders here, and the standalone screen is gone
+### One board component, two entry points
 
 Any ledger with statuses renders as columns — one per status, in declaration
 order, labelled by the host. That falls out rather than being designed: a status
@@ -275,34 +275,54 @@ hiring pipeline is which call a drop makes. A native ledger's drop goes through
 ordinary `record_entry` merge. A drop into a status that demands a reason opens
 the compose form instead of writing, since the host refuses a silent close.
 
-`TasksView` is **deleted**, not unmounted. What it did splits three ways:
+`views/LedgerBoard.tsx` is that board, and it is the **only** one. It owns the
+columns, the counts and the drag mechanics; the card is a `renderCard` slot.
+Two screens use it:
 
-| what it did | where it is now |
-| --- | --- |
-| the Kanban board | the `tasks` ledger's columns, in Ledgers |
-| the "Add task" prompt box | `views/CreateTaskDialog.tsx`, offered by Ledgers on the board only |
-| hosting the card detail | the shell, at `#/tasks/<id>` |
+| screen | rows | card |
+| --- | --- | --- |
+| `#/tasks` (`TasksView`) | `Task` records from `…/tasks` | priority, assignee, plan badge, output link, Resume |
+| `#/ledgers/<slug>` (`LedgersView`) | `LedgerEntry` rows | title, owner, id |
 
-**`#/tasks/<id>` survives and is the point.** A card carries far more than a
-ledger row — a timeline, a plan brief, a discussion, its attempts, a workflow
-proposal, the steer controls — and none of that has anywhere to live on a
-column. Reproducing it in Ledgers would be a worse second copy, so the detail
-screen kept its route and lost its host; a board card links to it. `#/tasks`
-with no id forwards to the board's new address rather than rendering an empty
-frame, because an operator with the old bookmark should be told where it went.
+**The card is a slot, not a role-driven renderer.** That was tried and is wrong:
+a task card carries a priority, a plan badge, an output link and a Resume
+button, none of which is a ledger field and all of which come off the `Task`
+record rather than the ledger's projection of it. A generic renderer would have
+had to drop them or grow a special case per ledger, and the second is the slot
+with more steps.
 
-Creation keeps its own dialog rather than becoming a ledger compose form: the
-board's compose path is `POST …/tasks`, and `record_entry` is refused for this
-ledger precisely because entering a column fires work. Its labels and element
-ids are unchanged (`Add task`, `New task`, `#new-prompt`) — moving a dialog
-between screens should not rewrite the vocabulary an operator, or a test,
-already knows.
+Which column a row is in is a `statusOf` accessor rather than a required
+property, because the two sides spell it differently — a `Task` says `column`,
+a `LedgerEntry` says `status` — and a board renaming its callers' fields is a
+board deciding what their data is called.
 
-`board-columns` went with the screen — the two-language mirror it guarded no
-longer exists, and its labels are pinned in Rust now. `board-drag` was **ported**
-rather than deleted, because none of the three failures behind issue #334
-stopped being possible when the board changed screens: the board still scrolls
-itself while a drag sits on its edge, a drop that misses every column still says
-so, and the trailing gutter still exists. Specs that merely navigated through
-`#/tasks` were repointed to `#/ledgers/tasks`; the ones that drive `#/tasks/<id>`
-are untouched.
+The history here is worth keeping, because it is the argument for the shared
+component. The board screen was first deleted and re-implemented inline in the
+Ledgers section, and that re-implementation silently lost all three of issue
+#334's fixes: the edge auto-scroll, the miss message, and the trailing gutter.
+Nothing failed — there was no test on the new path — until the ported drag spec
+was actually run. The board is one component now so that cannot happen again.
+
+### What the ledger drives, and what it does not
+
+**Drives**: the columns, their order, their labels, which one closes a card, and
+therefore what "outstanding" counts. `TasksView` declares no column.
+
+**Does not drive**: what is *on* a card. A task is a `Task` — a priority, an
+assignee, a plan brief, a published output, a deliverable kind — and the
+ledger's native projection deliberately does not carry any of it. So the board
+screen still reads `…/tasks` for its rows. The ledger supplies the shape of the
+board; the task store supplies what is on it.
+
+Creation keeps its own dialog (`views/CreateTaskDialog.tsx`) rather than becoming
+a ledger compose form: the board's write path is `POST …/tasks`, and
+`record_entry` is refused for this ledger precisely because entering a column
+fires work.
+
+`#/tasks/<id>` remains the card detail — a timeline, a plan brief, a discussion,
+its attempts, a workflow proposal, the steer controls — none of which has
+anywhere to live on a column, and none of which Ledgers tries to reproduce.
+
+Both entry points are covered end to end: `board-columns.spec.ts` drives the task
+board's own screen (columns, order, intake), and `board-drag.spec.ts` drives the
+ledger board (the three #334 fixes, on the newer layout).
