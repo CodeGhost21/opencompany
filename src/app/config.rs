@@ -1808,6 +1808,29 @@ mod test {
         assert!(leftover.is_empty(), "left behind: {leftover:?}");
     }
 
+    /// A write that fails after the temp file's directory disappears out from
+    /// under it must not leave anything behind, and must report the failure
+    /// rather than panic — the failure half of
+    /// `writing_leaves_no_temp_file_behind` above, forced deterministically
+    /// (absent-parent, like `store::fs::durable_append_reports_an_unwritable_path`)
+    /// rather than by injecting a permission failure, which behaves
+    /// differently depending on whether the test runs as root.
+    #[test]
+    fn a_write_that_fails_leaves_no_temp_file_behind() {
+        let dir = write_dir("write-fails");
+        let root = dir.path().join("gone");
+        // `existing` reads NotFound as "no config yet" and proceeds, so the
+        // failure below comes from the temp file's own `std::fs::write`
+        // rather than from the initial read.
+        let err = write_config_toml(&root, &[("bind", ConfigValue::Str("0.0.0.0:9000".into()))])
+            .unwrap_err();
+        assert_eq!(err.code(), "config_error");
+        assert!(
+            !root.exists(),
+            "a write into a missing directory must not create it or anything in it"
+        );
+    }
+
     /// Two writers racing the same directory must not clobber each other: each
     /// call's edits land, and neither call's temp file collides with the
     /// other's — the bug CodeRabbit flagged on #908 (`config.rs:549`).
