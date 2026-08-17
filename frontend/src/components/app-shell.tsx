@@ -78,7 +78,7 @@ import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView } from "@/views/LedgersView";
-import { TasksView } from "@/views/TasksView";
+import { TaskDetailView } from "@/views/TaskDetailView";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
@@ -1244,25 +1244,40 @@ export function AppShell({
             />
           )}
           {view === "inbox" && <InboxView client={client} company={company} />}
-          {view === "tasks" && (
-            <TasksView
-              client={client}
-              company={company}
-              // Issue #464: the board learns that work appeared. The same
-              // counter the chat's in-flight strip reads — it is bumped by
-              // every task event, now including the host's board-write
-              // announcement — so a card opened from chat lands on the board
-              // without a reload rather than on the fallback poll's schedule.
-              taskEventTick={taskEventTick}
-              // Issue #246: the card → chat half of the round trip. A card
-              // opened from a conversation remembers which one, so its detail
-              // screen can put the operator back in that thread.
-              onOpenThread={(threadId) => {
-                setActiveThreadId(threadId);
-                setView("conversation");
-              }}
-            />
-          )}
+          {/* `#/tasks/<id>` — one card, opened. The board screen that used to
+              host this is gone: the board is the `tasks` ledger and renders in
+              Ledgers, but a *card* carries a timeline, a plan brief, a
+              discussion, its attempts, a workflow proposal and the steer
+              controls, none of which a ledger row has anywhere to put. So the
+              detail screen kept its route and lost its host.
+
+              `#/tasks` with no id has nothing left to show, so it forwards to
+              the board's new address rather than rendering an empty frame. */}
+          {view === "tasks" &&
+            (sub ? (
+              <TaskDetailView
+                client={client}
+                company={company}
+                taskId={sub}
+                focus={taskFocus}
+                onBack={() => navigate("ledgers", "tasks")}
+                onNavigate={(id) => navigate("tasks", id)}
+                // Issue #246: the card → chat half of the round trip. A card
+                // opened from a conversation remembers which one, so its detail
+                // screen can put the operator back in that thread.
+                onOpenThread={(threadId) => {
+                  setActiveThreadId(threadId);
+                  setView("conversation");
+                }}
+                // The board re-reads itself when it is next shown, so a save or
+                // a delete here needs no reconciliation callback of its own —
+                // the list this used to update no longer exists.
+                onSaved={() => {}}
+                onDeleted={() => navigate("ledgers", "tasks")}
+              />
+            ) : (
+              <BoardMoved onGo={() => navigate("ledgers", "tasks")} />
+            ))}
           {view === "ledgers" && (
             <LedgersView
               client={client}
