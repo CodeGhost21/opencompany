@@ -52,7 +52,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { startVisiblePolling } from "@/lib/visible-poll";
-import { ADD_TASK_COLUMN, labelFor, PRIORITY_STYLES } from "@/lib/board-columns";
+import { labelFor, PRIORITY_STYLES } from "@/lib/board-columns";
 import { useBoardColumns } from "@/hooks/use-board-columns";
 import {
   extraOutputCount,
@@ -111,20 +111,6 @@ const POLL_MS = 4000;
  * these handlers — does not, and the `dragId` fallback covers that case.
  */
 const CARD_MIME = "application/x-opencompany-task";
-
-/**
- * How near the board's left or right edge a drag has to come before the board
- * starts scrolling itself, and how fast it goes once hard against that edge.
- *
- * The board is a horizontal scroller and, at six columns, wider than an
- * ordinary window: the last column sits off the right edge. HTML5
- * drag-and-drop does not scroll a nested scroll container on its own — a drag
- * parked on the edge moves it zero pixels — so without this the far column
- * cannot be reached by the very gesture the board's own hint recommends.
- */
-const EDGE_BAND_PX = 72;
-const EDGE_SPEED_PX = 16;
-
 
 function priorityStyle(priority: string): string {
   return PRIORITY_STYLES[priority as keyof typeof PRIORITY_STYLES] ?? PRIORITY_STYLES.low;
