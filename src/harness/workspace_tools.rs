@@ -32,21 +32,34 @@
 //! session cache, so a note edited in the console between two turns changes
 //! what the agent quotes on the next turn with no agent rebuild.
 //!
-//! # Agents write unconfined — and why that is the right call (issue #551)
+//! # Agents write unconfined by default — and per-path scope is opt-in (issue #551, revisited)
 //!
-//! There is no prefix gate here. An agent may create and overwrite anywhere in
-//! the company's tree, exactly as `workspace_write` always could. Confining
+//! There is still no prefix gate by default. An agent may create and overwrite
+//! anywhere in the company's tree, exactly as `workspace_write` always could,
+//! unless its manifest opts into a narrower scope — see below. Confining
 //! *create* to `Agents/<id>/` while leaving *overwrite* free would protect
 //! nothing — overwriting an existing standard is the strictly more destructive
-//! of the two operations — so the confinement would be theatre with a
-//! maintenance cost.
+//! of the two operations — so a confinement that stopped at create alone would
+//! be theatre with a maintenance cost.
 //!
-//! What replaces it is a steering-plus-attribution pair. [`workspace_brief`]
-//! and the tool descriptions name `Agents/<your agent id>/` as the default home
-//! for anything an agent produces and mark shared guidance as something to
-//! touch only on purpose; and every node records who created it and who last
-//! wrote it (issue #326), so a mess is legible and reversible rather than
-//! anonymous.
+//! What replaces that as the default is a steering-plus-attribution pair.
+//! [`workspace_brief`] and the tool descriptions name `Agents/<your agent id>/`
+//! as the default home for anything an agent produces and mark shared guidance
+//! as something to touch only on purpose; and every node records who created
+//! it and who last wrote it (issue #326), so a mess is legible and reversible
+//! rather than anonymous.
+//!
+//! A manifest may narrow this for one agent by declaring at least one
+//! `context` entry with `access = "write"` (see
+//! [`crate::company::Agent::write_scope`]). That agent's `workspace_write` and
+//! `workspace_create` are then confined to exactly the paths it declared, plus
+//! its own `Agents/<id>/` home, which stays writable regardless — a role given
+//! a real access list keeps its ability to produce and revise its own work.
+//! **This is opt-in, not the default**: a manifest that declares no write
+//! entry is unaffected, so every company written before this existed keeps the
+//! unconfined behaviour above. A role written to scope real risk — e.g. a
+//! narrow specialist that should touch only its own briefs — can now have that
+//! enforced rather than merely asked for in a description.
 //!
 //! Issue #671 added the other half of that bargain. An agent that can only
 //! produce leaves every superseded draft in place forever, under whatever name
