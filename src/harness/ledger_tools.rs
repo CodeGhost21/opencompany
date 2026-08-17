@@ -570,6 +570,10 @@ impl Tool for CloseEntry {
             Ok(spec) => spec,
             Err(message) => return Ok(ToolResult::error(message)),
         };
+        if let Err(message) = require_access(&self.ledger_grants, &spec.slug, LedgerAccess::Record)
+        {
+            return Ok(ToolResult::error(message));
+        }
         match ledgers::close(
             &self.ctx,
             &spec,
