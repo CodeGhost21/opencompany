@@ -654,15 +654,27 @@ impl RuntimeBuilder {
             .with_inbox(handles.inbox.clone())
     }
 
-    /// Overlays just the memory + context ports from a selected memory engine
+    /// Overlays the memory ports from a selected memory engine
     /// (`OPENCOMPANY_MEMORY`, see [`crate::store::select`]).
     ///
     /// Applied *after* [`with_stores`](Self::with_stores) (or over the fs
-    /// defaults), so a dedicated memory engine such as TinyCortex backs recall
-    /// while the base backend keeps every other durable port.
+    /// defaults), so a dedicated memory engine backs recall while the base
+    /// backend keeps every other durable port.
+    ///
+    /// Memory and context always come from the overlay. `FactStore` comes from
+    /// it only when the engine serves facts as well — the embedded engine
+    /// implements memory + context alone and leaves facts on the base backend,
+    /// while an engine bound through the `MemoryProvider` contract covers all
+    /// three ports. Taking whichever the overlay offers is what keeps one
+    /// company's memory on one engine instead of split across two (issue #914).
     pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
-        self.with_memory(overlay.memory.clone())
-            .with_context(overlay.context.clone())
+        let builder = self
+            .with_memory(overlay.memory.clone())
+            .with_context(overlay.context.clone());
+        match &overlay.facts {
+            Some(facts) => builder.with_facts(facts.clone()),
+            None => builder,
+        }
     }
 
     /// Swaps just the runtime journal's durable sink (default: the company

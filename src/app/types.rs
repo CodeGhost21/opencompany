@@ -838,6 +838,27 @@ impl AppState {
             display_name: self.config.instance_name.clone(),
             capabilities: self.capabilities(),
             storage: self.storage_kind.as_str(),
+            memory: self.memory_spec(),
+        }
+    }
+
+    /// What memory engine is live, for [`AppSpec::memory`].
+    ///
+    /// No overlay means the base storage backend serves memory — the
+    /// `OPENCOMPANY_MEMORY=store` default — so there is no separate engine to
+    /// name and nothing was negotiated.
+    fn memory_spec(&self) -> MemorySpec {
+        match &self.memory_overlay {
+            None => MemorySpec {
+                backend: crate::store::MemoryBackend::Store.as_str(),
+                driver_id: None,
+                capabilities: Vec::new(),
+            },
+            Some(overlay) => MemorySpec {
+                backend: overlay.descriptor.backend.as_str(),
+                driver_id: Some(overlay.descriptor.driver_id.clone()),
+                capabilities: overlay.descriptor.capabilities.clone(),
+            },
         }
     }
 
@@ -894,6 +915,33 @@ pub struct AppSpec {
     /// The storage backend kind. Deliberately the kind alone: `/spec` is
     /// unauthenticated, so a path or connection string here would be a gift.
     pub storage: &'static str,
+    /// Which memory engine is live, and what it can do (issue #914).
+    pub memory: MemorySpec,
+}
+
+/// The bound memory engine, as `/spec` reports it.
+///
+/// Carries the engine's *identity* and its negotiated capabilities, and nothing
+/// else. The endpoint and the credential are deliberately absent for the same
+/// reason [`AppSpec::storage`] is a kind rather than a connection string: this
+/// route is unauthenticated. `driver_id` is safe by the contract's own reading —
+/// it names an engine, it is not a secret.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct MemorySpec {
+    /// `store` | `embedded` | `remote` | `null`.
+    pub backend: &'static str,
+    /// The bound engine's own name, when one is bound through the provider
+    /// contract. Absent for `store`, where the base backend serves memory and
+    /// there is no separate engine to name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver_id: Option<String>,
+    /// The capability families negotiated at bind time.
+    ///
+    /// Empty means "not negotiated" — either the base backend serves memory, or
+    /// the in-pod engine is driven directly rather than through a bound
+    /// provider. An operator reads this to see what a hosted engine does *not*
+    /// support before a cycle discovers it.
+    pub capabilities: Vec<String>,
 }
 
 #[cfg(test)]
