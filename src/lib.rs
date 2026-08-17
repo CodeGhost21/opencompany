@@ -20,6 +20,11 @@ pub mod feedback;
 /// echo-brained, offline behaviour unchanged.
 #[cfg(feature = "openhuman")]
 pub mod harness;
+/// Dynamic ledgers: the company's own record — goals, decisions, and whatever
+/// axis a workspace declares — as a folded append-only log rendered into the
+/// `derived/` folder. The task board is registered here as a native ledger so
+/// one discovery surface reaches every one of them.
+pub mod ledger;
 /// WS5: pure Usage & Finances projections over the runtime's accounting data
 /// (usage samples, ledger, `[budget]`). No I/O; WS2 wraps these in GraphQL.
 pub mod metering;
