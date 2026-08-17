@@ -573,9 +573,19 @@ pub fn write_config_toml(dir: &Path, edits: &[(&str, ConfigValue)]) -> Result<Pa
     }
 
     let tmp = dir.join(unique_tmp_name());
-    std::fs::write(&tmp, doc.to_string())
-        .map_err(|e| OpenCompanyError::Config(format!("could not write {}: {e}", tmp.display())))?;
+    std::fs::write(&tmp, doc.to_string()).map_err(|e| {
+        // `write` can fail after partially creating the file (for example, a
+        // write that fails mid-way rather than at open). Clear it so a
+        // failed apply never leaves a stray file for the next boot, or the
+        // next write, to trip over. Best-effort: if this also fails there is
+        // nothing more to do, and the original write error is what matters.
+        let _ = std::fs::remove_file(&tmp);
+        OpenCompanyError::Config(format!("could not write {}: {e}", tmp.display()))
+    })?;
     std::fs::rename(&tmp, &path).map_err(|e| {
+        // The write above succeeded, so the temp file exists; `rename` can
+        // still fail (for example if `path` is replaced by a directory).
+        let _ = std::fs::remove_file(&tmp);
         OpenCompanyError::Config(format!(
             "could not replace {} with {}: {e}",
             path.display(),
