@@ -121,10 +121,22 @@ export function liveReplyIdentity(event: { seq: number }): { messageId: string }
 }
 
 /**
- * How the console labels each board column in a marker. Must stay in step with
- * the host's `dispatch_marker_text` (`src/server/chat_history.rs`) and with
- * `TASK_COLUMNS` (`./tasks-sample.ts`), which is where the same labels render
- * on the board itself.
+ * How the console labels each board column in a marker.
+ *
+ * **The one label copy that survives**, and it is deliberate. Everywhere else
+ * the console now reads labels off the `tasks` ledger
+ * (`lib/board-columns.ts`), which the host builds from its single column table.
+ * A marker cannot: it is rendered synchronously from a **thin** SSE frame
+ * carrying a raw column id, in a transcript that may have no ledger read behind
+ * it at all, and awaiting one would leave a marker line blank or flickering
+ * mid-conversation.
+ *
+ * What makes that acceptable is the blast radius. Drift here can only *reword*
+ * one marker; it cannot lose a card, refuse a write, or leave a column
+ * unrendered, which is what the board's own copy could do and why that one is
+ * gone. It stays in step with the host's `dispatch_marker_text`
+ * (`src/server/chat_history.rs`), and unit tests on both sides pin the same
+ * literals.
  */
 const COLUMN_LABELS: Record<string, string> = {
   todo: "To-do",
