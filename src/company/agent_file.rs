@@ -237,6 +237,9 @@ fn parse_agent_file(
         prompt_files: file.prompt_files,
         prompt_files_resolved,
         classes: file.classes,
+        // Provenance is set by whoever merges the baseline in, never by a file:
+        // this same parser reads both a company's `agents/` and `globals/`.
+        global: false,
     })
 }
 
