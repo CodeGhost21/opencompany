@@ -26,7 +26,7 @@
 // `#/tasks/<id>`, which carries the timeline, plan, discussion and attempts
 // this screen does not try to reproduce.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   BookText,
@@ -46,6 +46,7 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import { patchTask } from "@/api/tasks";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
+import { LedgerBoard } from "@/views/LedgerBoard";
 import { BOARD_LEDGER, columnsOf, labelFor } from "@/lib/board-columns";
 import {
   byline,
@@ -746,56 +747,18 @@ export function LedgersView({
 }
 
 /**
- * How near the board's left or right edge a drag has to come before the board
- * starts scrolling itself, and how fast it goes once hard against that edge.
+ * A ledger as columns, over the shared board.
  *
- * The board is a horizontal scroller and, at six columns, wider than an
- * ordinary window: the last column sits off the right edge. HTML5
- * drag-and-drop does not scroll a nested scroll container on its own — a drag
- * parked on the edge moves it zero pixels — so without this the far column
- * cannot be reached by the very gesture the board recommends. Issue #334, and
- * it followed the board here from the screen that used to host it.
- */
-const EDGE_BAND_PX = 72;
-const EDGE_SPEED_PX = 16;
-
-/**
- * What a drag carries.
+ * Everything about the *gesture* — the columns, the counts, the edge scroll, the
+ * miss, the gutter — is [`LedgerBoard`](./LedgerBoard)'s, which the task board
+ * uses too. What is here is only what a *ledger row* looks like, which is the
+ * one thing the two boards genuinely disagree about: a task card carries a
+ * priority, an assignee and a plan badge off its `Task` record, and a ledger row
+ * carries whatever fields its declaration named.
  *
- * Every read and write of it is optional-chained. A real drag always carries a
- * `dataTransfer`; a synthesized `DragEvent` — which is how the e2e suite drives
- * these handlers — does not, and the ref fallback covers that case.
- */
-const CARD_MIME = "application/x-opencompany-task";
-
-/**
- * A ledger as columns: one per declared status, in declaration order.
- *
- * Declaration order is deliberate and is the host's. A console that sorted
- * these itself — alphabetically, or by count — would put Done beside To-do the
- * first time somebody added a column, and the left-to-right reading that makes
- * a board a board would be gone.
- *
- * Every ledger with a status can render this way, not just the board. That
- * falls out rather than being designed: a status list *is* a lifecycle, and the
- * only thing that differs between the board and a hiring pipeline is which call
- * the drop makes — which the parent decides, not this component.
- *
- * # Three things about the gesture that are not incidental
- *
- * Issue #334 was reported as *"a card cannot be moved out of In review"*, and
- * three separate things produced it. All three are handled here, because the
- * board moving screens did not make any of them stop being true:
- *
- * 1. **The board scrolls itself while a drag sits on its edge.** Nothing else
- *    scrolls a nested container mid-drag, so a column parked off-screen is
- *    otherwise unreachable by the gesture.
- * 2. **A drop that misses every column says so.** The pixels between and around
- *    the columns used to swallow the whole gesture without a word, which is
- *    indistinguishable from a frozen app.
- * 3. **The trailing gutter exists.** A flex scroll container drops its
- *    `padding-inline-end`, so without the spacer the last column hugs the edge
- *    and a near miss is the common case rather than the rare one.
+ * This is the second attempt. The first re-implemented the board inline and
+ * lost all three of issue #334's fixes on the way, which is exactly the failure
+ * a shared component exists to prevent.
  */
 function BoardMode({
   ledger,
@@ -807,207 +770,47 @@ function BoardMode({
   ledger: LedgerSummary;
   entries: LedgerEntry[];
   onMove: (entry: LedgerEntry, status: string) => void;
-  /** A drop that landed on no column at all. */
   onMiss: () => void;
   onOpen: (entry: LedgerEntry) => void;
 }) {
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [over, setOver] = useState<string | null>(null);
-  const boardRef = useRef<HTMLDivElement | null>(null);
-  // Both refs rather than state: this is driven by `dragover` at pointer rate
-  // and must not re-render the board on every move.
-  const edgeSpeed = useRef(0);
-  const edgeFrame = useRef<number | null>(null);
-  const columns = columnsOf(ledger);
-
-  const stopEdgeScroll = useCallback(() => {
-    edgeSpeed.current = 0;
-    if (edgeFrame.current !== null) {
-      cancelAnimationFrame(edgeFrame.current);
-      edgeFrame.current = null;
-    }
-  }, []);
-
-  /**
-   * Aims the board's self-scroll at wherever the drag currently is: full speed
-   * hard against an edge, easing to nothing at the band's inner lip, and off
-   * entirely across the middle of the board.
-   */
-  const edgeScrollTo = useCallback(
-    (clientX: number) => {
-      const board = boardRef.current;
-      if (!board) return;
-      const { left, right } = board.getBoundingClientRect();
-      const ramp = (depth: number) => Math.min(1, Math.max(0, 1 - depth / EDGE_BAND_PX));
-      let speed = 0;
-      if (clientX < left + EDGE_BAND_PX) speed = -EDGE_SPEED_PX * ramp(clientX - left);
-      else if (clientX > right - EDGE_BAND_PX) speed = EDGE_SPEED_PX * ramp(right - clientX);
-      if (speed === 0) {
-        stopEdgeScroll();
-        return;
-      }
-      edgeSpeed.current = speed;
-      if (edgeFrame.current !== null) return;
-      const step = () => {
-        const el = boardRef.current;
-        if (!el || edgeSpeed.current === 0) {
-          edgeFrame.current = null;
-          return;
-        }
-        el.scrollLeft += edgeSpeed.current;
-        edgeFrame.current = requestAnimationFrame(step);
-      };
-      edgeFrame.current = requestAnimationFrame(step);
-    },
-    [stopEdgeScroll],
-  );
-
-  // A drag interrupted by anything that unmounts the board — switching ledgers,
-  // opening a card — must not leave a frame running against a detached node.
-  useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
-
-  if (columns.length === 0) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        This ledger declares no statuses, so it has no columns. Switch to the
-        list.
-      </p>
-    );
-  }
-
   return (
-    <div
-      ref={boardRef}
-      data-testid="ledger-board"
-      onDragOver={(event) => {
-        // The columns preventDefault as well; this handler also covers the
-        // pixels between and around them, so the board keeps scrolling while a
-        // drag crosses a gap on its way to a far column.
-        event.preventDefault();
-        edgeScrollTo(event.clientX);
-      }}
-      onDragLeave={(event) => {
-        // Only when the pointer has genuinely left the board, not while it
-        // moves between two of the board's own children.
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-          stopEdgeScroll();
-        }
-      }}
-      onDrop={(event) => {
-        // Columns claim their own drops and stop them here, so anything that
-        // reaches this handler landed on dead board pixels: the gap between two
-        // columns, the leading padding, the trailing gutter.
-        event.preventDefault();
-        stopEdgeScroll();
-        const id = event.dataTransfer?.getData(CARD_MIME) || dragId;
-        setDragId(null);
-        setOver(null);
-        if (id) onMiss();
-      }}
-      className="flex min-h-0 flex-1 gap-3 overflow-x-auto pb-4"
-    >
-      {columns.map((column) => {
-        const held = entries.filter((entry) => entry.status === column.id);
-        return (
-          <div
-            key={column.id}
-            onDragOver={(event) => {
-              event.preventDefault();
-              // Runs before the board's own dragover (this is the inner
-              // handler), and the board leaves it alone — so the cursor says
-              // "move" over a column and nothing over the dead pixels.
-              if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-              setOver(column.id);
-            }}
-            onDragLeave={() =>
-              setOver((current) => (current === column.id ? null : current))
-            }
-            onDrop={(event) => {
-              event.preventDefault();
-              // Claim the drop, so anything still reaching the board's own
-              // handler is known to have missed every column.
-              event.stopPropagation();
-              stopEdgeScroll();
-              const id = event.dataTransfer?.getData(CARD_MIME) || dragId;
-              setDragId(null);
-              setOver(null);
-              const entry = entries.find((candidate) => candidate.id === id);
-              if (entry) onMove(entry, column.id);
-            }}
-            className={cn(
-              "flex min-h-0 w-72 shrink-0 flex-col gap-2 rounded-lg border p-2",
-              over === column.id ? "border-primary bg-accent/50" : "bg-muted/30",
-            )}
-          >
-            <header className="flex shrink-0 items-center justify-between px-1">
-              <span className="text-sm font-medium">{column.label}</span>
-              <Badge variant="secondary">{held.length}</Badge>
-            </header>
-            {/* The stack scrolls; the column does not grow. A column that grew
-                with its contents would make the board as tall as its busiest
-                list and leave the quiet ones as thin drop targets. */}
-            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
-            {held.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                draggable
-                onDragStart={(event) => {
-                  setDragId(entry.id);
-                  if (event.dataTransfer) {
-                    event.dataTransfer.effectAllowed = "move";
-                    // The id is what a drop reads back. The `text/plain` copy is
-                    // what makes the drag well-formed for browsers that abort
-                    // one carrying no data at all.
-                    event.dataTransfer.setData(CARD_MIME, entry.id);
-                    event.dataTransfer.setData("text/plain", entry.title || entry.id);
-                  }
-                }}
-                onDragEnd={() => {
-                  setDragId(null);
-                  setOver(null);
-                  stopEdgeScroll();
-                }}
-                onClick={() => onOpen(entry)}
-                className={cn(
-                  "rounded-md border bg-card p-2 text-left text-sm shadow-sm transition-opacity",
-                  dragId === entry.id && "opacity-50",
-                )}
-              >
-                <span className="line-clamp-2 font-medium">
-                  {entry.title || entry.id}
-                </span>
-                {/* One field beneath the title, not all of them: a board is
-                    scanned, and a card carrying every prose field is a list
-                    with extra steps. The list mode is where a row is read.
+    <LedgerBoard
+      columns={columnsOf(ledger)}
+      rows={entries}
+      statusOf={(entry) => entry.status}
+      onMove={onMove}
+      onMiss={onMiss}
+      renderCard={(entry, dragging) => (
+        <button
+          type="button"
+          onClick={() => onOpen(entry)}
+          className={cn(
+            "w-full cursor-grab rounded-lg border bg-card p-3 text-left shadow-sm transition-shadow hover:shadow active:cursor-grabbing",
+            dragging && "opacity-50",
+          )}
+        >
+          <span className="line-clamp-2 text-sm font-medium leading-snug">
+            {entry.title || entry.id}
+          </span>
+          {/* One line beneath the title, not every field: a board is scanned,
+              and a card carrying all of them is a list with extra steps. The
+              list mode is where a row is read.
 
-                    `data-owner` is set only when the ledger declares an owner
-                    field AND this row filled it in — so "unassigned" is
-                    machine-checkable rather than inferred from the absence of
-                    a span, which the id fallback would otherwise occupy. */}
-                <span
-                  className="mt-1 block truncate text-xs text-muted-foreground"
-                  {...(ownerOf(entry, ledger)
-                    ? { "data-owner": ownerOf(entry, ledger) }
-                    : {})}
-                >
-                  {ownerOf(entry, ledger) || entry.id}
-                </span>
-              </button>
-            ))}
-            {held.length === 0 && (
-              <p className="px-1 py-4 text-center text-xs text-muted-foreground">
-                Nothing here
-              </p>
-            )}
-            </div>
-          </div>
-        );
-      })}
-      {/* Trailing gutter: flex scroll containers drop their padding-inline-end,
-          so this spacer keeps ~16px of breathing room past the last column. */}
-      <div aria-hidden className="w-4 shrink-0" />
-    </div>
+              `data-owner` is set only when the ledger declares an owner field
+              AND this row filled it in — so "unassigned" is machine-checkable
+              rather than inferred from the absence of a span, which the id
+              fallback would otherwise occupy. */}
+          <span
+            className="mt-1 block truncate text-xs text-muted-foreground"
+            {...(ownerOf(entry, ledger)
+              ? { "data-owner": ownerOf(entry, ledger) }
+              : {})}
+          >
+            {ownerOf(entry, ledger) || entry.id}
+          </span>
+        </button>
+      )}
+    />
   );
 }
 
