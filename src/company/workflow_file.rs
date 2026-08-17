@@ -786,6 +786,27 @@ pub fn list_workflows_with_globals(
     overlays: &[crate::ports::types::OverlayWorkflow],
     disable: &[String],
 ) -> Vec<WorkflowFile> {
+    let mut files = list_company_workflows_union(source_dir, overlays);
+    let seen: std::collections::HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
+    for workflow in crate::globals::workflows() {
+        if seen.contains(&workflow.id)
+            || crate::globals::disabled(disable, "workflow", &workflow.id)
+        {
+            continue;
+        }
+        let mut workflow = workflow.clone();
+        workflow.global = true;
+        files.push(workflow);
+    }
+    files
+}
+
+/// The company's own two sources — seed files, then saved overlays — and no
+/// baseline. [`list_workflows_union`] is exactly this, named for its callers.
+fn list_company_workflows_union(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+) -> Vec<WorkflowFile> {
     let mut files = list_source_workflows(source_dir);
     let mut seen: std::collections::HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
 
@@ -809,16 +830,6 @@ pub fn list_workflows_with_globals(
         }
     }
 
-    for workflow in crate::globals::workflows() {
-        if seen.contains(&workflow.id)
-            || crate::globals::disabled(disable, "workflow", &workflow.id)
-        {
-            continue;
-        }
-        let mut workflow = workflow.clone();
-        workflow.global = true;
-        files.push(workflow);
-    }
     files
 }
 
