@@ -1200,7 +1200,9 @@ members = ["writer", "ceo"]
         let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
         assert_eq!(status, StatusCode::OK, "{roster}");
         let rows = roster.as_array().unwrap();
-        assert_eq!(rows.len(), 4, "{roster}");
+        // Three manifest teammates, the overlay one, and the global baseline
+        // appended to every roster.
+        assert_eq!(rows.len(), 4 + crate::globals::agents().len(), "{roster}");
 
         for row in rows {
             let id = row["id"].as_str().unwrap();

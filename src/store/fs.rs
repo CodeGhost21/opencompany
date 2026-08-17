@@ -1998,7 +1998,21 @@ mod test {
         let loaded = store.load(&id).await.unwrap().expect("record exists");
         assert_eq!(loaded.manifest.company.name, "Acme");
         assert_eq!(loaded.lifecycle, "running");
-        assert_eq!(loaded.manifest.agents.len(), 1);
+        // One authored teammate, plus the global baseline the load path merges
+        // into every stored manifest.
+        assert_eq!(
+            loaded
+                .manifest
+                .agents
+                .iter()
+                .filter(|agent| !agent.global)
+                .count(),
+            1
+        );
+        assert_eq!(
+            loaded.manifest.agents.len(),
+            1 + crate::globals::agents().len()
+        );
 
         let summaries = store.list().await.unwrap();
         assert_eq!(summaries.len(), 1);

@@ -217,11 +217,22 @@ async fn team_lists_manifest_teammates() {
         r#"{"query":"{ company(id:\"acme\"){ team { id role name inboxEnabled } } }"}"#,
     )
     .await;
+    // The global baseline is appended to every roster; this test is about the
+    // company's own teammate, so it reads the row rather than the whole list.
     let team = value["data"]["company"]["team"].as_array().unwrap();
-    assert_eq!(team.len(), 1);
-    assert_eq!(team[0]["id"], "maya");
-    assert_eq!(team[0]["role"], "Marketing Lead");
-    assert!(team[0]["name"].is_null());
+    let maya = team
+        .iter()
+        .find(|row| row["id"] == "maya")
+        .expect("maya is on the roster");
+    assert_eq!(maya["role"], "Marketing Lead");
+    assert!(maya["name"].is_null());
+    for global in crate::globals::agents() {
+        assert!(
+            team.iter().any(|row| row["id"] == global.id.as_str()),
+            "the baseline teammate `{}` is missing from the roster",
+            global.id
+        );
+    }
 }
 
 /// Issue #343: the GraphQL roster resolves the **effective** cap and its

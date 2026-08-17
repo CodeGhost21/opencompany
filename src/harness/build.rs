@@ -2376,6 +2376,11 @@ mod tests {
             "shell",
             "web_fetch",
         ];
+        // The global baseline installs skills in every company (issue: global
+        // agents/skills/workflows), so the three skill read tools are on every
+        // belt now — including a company with no skills source of its own.
+        expected.extend(["describe_skill", "list_skills", "read_skill_resource"]);
+        expected.sort();
         // Mirrors the unconditional `#[cfg(feature = "mcp")]` push in
         // `build_agent`. These two are intrinsic (unmapped by `namespace_of`),
         // so no grant gates them — enabling the feature is the whole condition.
