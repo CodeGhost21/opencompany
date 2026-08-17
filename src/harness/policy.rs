@@ -4960,6 +4960,73 @@ mod tests {
         assert_eq!(decision_name(&d), "allow");
     }
 
+    /// Issue #875: the gate an operator actually meets, end to end.
+    ///
+    /// The classification lives in `policy::consequence`; this is the assertion
+    /// that it reaches the decision — an agent grepping its own workspace runs,
+    /// and the same tool acting still parks, in both acting tiers.
+    #[tokio::test]
+    async fn a_read_shell_command_runs_and_an_acting_one_parks() {
+        for tier in ["supervised", "auto"] {
+            let p = policy(tier, &[], None);
+            let read = p
+                .check(&request(
+                    "shell",
+                    serde_json::json!({ "command": "grep -c foo session_raw/a.jsonl" }),
+                ))
+                .await;
+            assert_eq!(
+                decision_name(&read),
+                "allow",
+                "{tier}: a grep of the agent's own workspace must not interrupt an operator"
+            );
+
+            let act = p
+                .check(&request(
+                    "shell",
+                    serde_json::json!({ "command": "rm -rf /tmp/x" }),
+                ))
+                .await;
+            assert_eq!(decision_name(&act), "park", "{tier}: an act still parks");
+        }
+
+        // `readonly` is the tier that promises nothing changes. A read is still
+        // a read there, and an act is still refused outright.
+        let ro = policy("readonly", &[], None);
+        assert_eq!(
+            decision_name(
+                &ro.check(&request(
+                    "shell",
+                    serde_json::json!({ "command": "ls -la" })
+                ))
+                .await
+            ),
+            "allow"
+        );
+        assert_eq!(
+            decision_name(
+                &ro.check(&request(
+                    "shell",
+                    serde_json::json!({ "command": "rm -rf ." })
+                ))
+                .await
+            ),
+            "deny"
+        );
+    }
+
+    /// The operator's own always-ask list is keyed on the tool name, and it sits
+    /// above the classifier — so an operator who asks to be told about `shell`
+    /// is told about every shell call, read or not.
+    #[tokio::test]
+    async fn always_approve_still_catches_a_read() {
+        let p = policy("auto", &["shell"], None);
+        let d = p
+            .check(&request("shell", serde_json::json!({ "command": "ls" })))
+            .await;
+        assert_eq!(decision_name(&d), "park");
+    }
+
     /// The opt-out scopes ONE arm. This is the assertion that keeps it from
     /// becoming a way to run a workflow node past the whole chain.
     ///
@@ -4982,7 +5049,10 @@ mod tests {
             ("supervised", &[], "shell", "park"),
         ];
         for (mode, always, tool, expected) in cases {
-            let args = serde_json::json!({ "command": "ls" });
+            // An ACTING command, and since issue #875 that matters: `shell` is
+            // classified by what it was handed, so a read would now be decided
+            // by the classifier rather than by the arm this test is about.
+            let args = serde_json::json!({ "command": "rm -rf ." });
             let agent_path = policy(mode, always, None)
                 .check(&request(tool, args.clone()))
                 .await;

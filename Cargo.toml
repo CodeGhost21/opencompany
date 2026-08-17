@@ -51,6 +51,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 toml = "1"
+# The *writing* half of `config.toml`, for the first-run setup flow
+# (`src/server/setup.rs`). `toml::to_string` would round-trip the `ConfigFile` struct
+# and in doing so delete every comment in the file — including the commented
+# `[[default_mcp_server]]` PLACEHOLDER block that `docs/spec/runtime/config.md` treats
+# as the shipped source of truth for what an install registers. `toml_edit` mutates the
+# parsed document in place, so an operator's comments, key order and formatting all
+# survive a write. Pinned to the version `toml` itself builds on, so the dependency
+# graph gains no second copy.
+toml_edit = "0.25"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

@@ -108,11 +108,38 @@ struct AgentFile {
 /// filename, and that the documents it names exist and can be read.
 pub fn load_agents(dir: &Path) -> Result<Vec<Agent>> {
     let agents_dir = dir.join(AGENTS_DIR);
+    let names: Vec<String> = agent_file_paths(&agents_dir)
+        .iter()
+        .filter_map(|path| path.file_name()?.to_str().map(str::to_string))
+        .collect();
+
+    load_agents_from(&agents_dir, &names, &|rel| {
+        std::fs::read_to_string(agents_dir.join(rel)).map_err(|err| err.kind())
+    })
+}
+
+/// [`load_agents`], reading through `read` instead of the filesystem.
+///
+/// A packaged desktop install carries no `companies/` directory, so its bundles
+/// are embedded in the binary — and `include_str!` cannot glob, which is why
+/// `build.rs` generates the table. Both callers must produce *identical*
+/// rosters, so they share this function rather than each parsing agent files
+/// their own way: a second parser is a second set of rules, and the roster is
+/// where a silent divergence stays invisible until a teammate fails to answer.
+///
+/// `names` is the roster file list, already sorted — order decides which
+/// teammate orchestrates when none is tagged. `read` resolves a path relative
+/// to `agents/`, for both roster files and the documents `prompt_files` names.
+pub(crate) fn load_agents_from(
+    agents_dir: &Path,
+    names: &[String],
+    read: &dyn Fn(&str) -> std::result::Result<String, std::io::ErrorKind>,
+) -> Result<Vec<Agent>> {
     let mut agents = Vec::new();
     let mut problems = Vec::new();
 
-    for path in agent_file_paths(&agents_dir) {
-        match parse_agent_file(&agents_dir, &path) {
+    for name in names {
+        match parse_agent_file(name, read) {
             Ok(agent) => agents.push(agent),
             Err(mut file_problems) => problems.append(&mut file_problems),
         }
@@ -126,23 +153,37 @@ pub fn load_agents(dir: &Path) -> Result<Vec<Agent>> {
         Ok(agents)
     } else {
         Err(OpenCompanyError::ManifestInvalid {
-            path: agents_dir,
+            path: agents_dir.to_path_buf(),
             problems,
         })
     }
 }
 
+/// The roster files of an embedded bundle, in the order `build.rs` recorded.
+///
+/// Only the immediate directory holds teammates: a `.toml` in a subdirectory is
+/// a briefing document `prompt_files` names, and parsing it as an agent is
+/// exactly the mistake [`agent_file_paths`] avoids on disk.
+pub(crate) fn embedded_roster_names(files: &[(&str, &str)]) -> Vec<String> {
+    let mut names: Vec<String> = files
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !name.contains('/') && name.ends_with(".toml"))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names
+}
+
 /// Parses one agent file, returning every problem it has rather than the first.
-fn parse_agent_file(agents_dir: &Path, path: &Path) -> std::result::Result<Agent, Vec<String>> {
-    let stem = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or_default()
-        .to_string();
+fn parse_agent_file(
+    name: &str,
+    read: &dyn Fn(&str) -> std::result::Result<String, std::io::ErrorKind>,
+) -> std::result::Result<Agent, Vec<String>> {
+    let stem = name.strip_suffix(".toml").unwrap_or(name).to_string();
     let label = format!("agent file `{AGENTS_DIR}/{stem}.toml`");
 
-    let text = std::fs::read_to_string(path)
-        .map_err(|err| vec![format!("{label} could not be read — {err}.")])?;
+    let text = read(name).map_err(|err| vec![format!("{label} could not be read — {err:?}.")])?;
     let file: AgentFile = toml::from_str(&text)
         .map_err(|err| vec![format!("{label} is not valid TOML — {}.", err.message())])?;
 
@@ -171,7 +212,7 @@ fn parse_agent_file(agents_dir: &Path, path: &Path) -> std::result::Result<Agent
         problems.push(format!("{label} is missing a `role`."));
     }
 
-    let prompt_files_resolved = match resolve_prompt_files(agents_dir, &label, &file.prompt_files) {
+    let prompt_files_resolved = match resolve_prompt_files(read, &label, &file.prompt_files) {
         Ok(resolved) => resolved,
         Err(mut file_problems) => {
             problems.append(&mut file_problems);
@@ -209,7 +250,7 @@ fn parse_agent_file(agents_dir: &Path, path: &Path) -> std::result::Result<Agent
 /// that parses on one host must parse on every host. Absolute paths and `..`
 /// are both rejected outright — an agent's briefing lives beside the agent.
 fn resolve_prompt_files(
-    agents_dir: &Path,
+    read: &dyn Fn(&str) -> std::result::Result<String, std::io::ErrorKind>,
     label: &str,
     entries: &[String],
 ) -> std::result::Result<Vec<(String, String)>, Vec<String>> {
@@ -229,14 +270,13 @@ fn resolve_prompt_files(
             continue;
         }
 
-        let path = agents_dir.join(rel);
-        match std::fs::read_to_string(&path) {
+        match read(entry) {
             Ok(body) => resolved.push((entry.clone(), body)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => problems.push(format!(
+            Err(std::io::ErrorKind::NotFound) => problems.push(format!(
                 "{label} names `prompt_files` entry `{entry}`, which does not exist — create `{AGENTS_DIR}/{entry}` or remove the entry."
             )),
             Err(err) => problems.push(format!(
-                "{label} could not read `prompt_files` entry `{entry}` — {err}."
+                "{label} could not read `prompt_files` entry `{entry}` — {err:?}."
             )),
         }
     }

@@ -130,6 +130,26 @@ rather than by what it is called, and because the widening is exactly what the
 operator chooses when they select the tier. It is written down so that a later
 edit loosening `Grantable` knows it is loosening two things.
 
+Three tools answer the reach question from their **arguments** rather than from
+their name, because the name is too coarse to be the answer. `composio_execute`
+reads the action slug (issue #441), `web_fetch` reads the URL's host (issue #673),
+and `shell` reads the command itself (issue #875).
+
+`shell` is the one an operator feels. Classifying the name meant `grep -c foo
+*.log` and `rm -rf /` were the same input, so an agent that investigates by
+grepping its own workspace bought an approval card per command — under `auto`,
+whose contract says it stops only before what leaves the company, and a grep
+does not. The grading is the vendored runtime's own
+`SecurityPolicy::classify_command`, the classifier OpenHuman gates its shell
+tool with: it splits the command into unquoted segments, classifies each against
+a curated safe-read allowlist, takes the **maximum** — so `grep x && rm -rf /`
+is destructive, not a read — and lifts a redirect or a `tee` to a write.
+Anything it does not recognise is a write. Only a provable read is downgraded to
+`Reach::Nothing`; every other class keeps `Reach::Consequence` and
+`Standing::PerCall`, so it parks exactly as before and can hold no standing
+grant. A self-declared `category` argument may raise the class and never lower
+it, and a call whose command cannot be read stays gated.
+
 Two boundaries `auto` deliberately does not draw:
 
 - **`Reach::Money` does not park.** `web_search` is billed but changes nothing,

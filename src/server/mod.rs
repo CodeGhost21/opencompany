@@ -26,6 +26,8 @@ pub mod ops;
 pub mod platform_auth;
 pub mod provision;
 mod routes;
+/// The first-run setup flow: one surface that configures an instance.
+pub mod setup;
 pub mod users;
 
 #[cfg(test)]
