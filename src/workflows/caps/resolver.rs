@@ -231,7 +231,8 @@ impl StoreWorkflowResolver {
             }
             // An unresolvable / invalid child is not itself a cycle — it will
             // fail loudly when the engine resolves it. Skip it in the scan.
-            let Ok(Some(file)) = load_workflow_union(source_dir.as_deref(), &overlays, &current)
+            let Ok(Some(file)) =
+                load_workflow_with_globals(source_dir.as_deref(), &overlays, &globals_disable, &current)
             else {
                 continue;
             };
@@ -271,13 +272,19 @@ impl WorkflowResolver for StoreWorkflowResolver {
                     "sub_workflow '{workflow_id}': could not read saved workflows: {err}"
                 ))
             })?
-            .map(|record| record.overlay_workflows)
+            .map(|record| (record.overlay_workflows, record.manifest.globals.disable))
             .unwrap_or_default();
+        let (overlays, globals_disable) = overlays;
 
         // (c) Load the child from the seed ∪ overlay union, re-running full
         // OpenCompany parse + validation on it (the same rules a hand-authored
         // or console-created graph passes).
-        let file = load_workflow_union(self.source_dir.as_deref(), &overlays, workflow_id)
+        let file = load_workflow_with_globals(
+            self.source_dir.as_deref(),
+            &overlays,
+            &globals_disable,
+            workflow_id,
+        )
             .map_err(|err| EngineError::Capability(format!("sub_workflow '{workflow_id}': {err}")))?
             .ok_or_else(|| {
                 EngineError::Capability(format!(

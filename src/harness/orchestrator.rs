@@ -1446,8 +1446,15 @@ impl Tool for QueryCompanyTool {
             .as_ref()
             .map(|r| r.overlay_workflows.clone())
             .unwrap_or_default();
-        let mut workflows: Vec<(String, String)> =
-            list_workflows_union(self.workflow_source_dir.as_deref(), &overlay_workflows)
+        let globals_disable = record
+            .as_ref()
+            .map(|r| r.manifest.globals.disable.clone())
+            .unwrap_or_default();
+        let mut workflows: Vec<(String, String)> = list_workflows_with_globals(
+            self.workflow_source_dir.as_deref(),
+            &overlay_workflows,
+            &globals_disable,
+        )
                 .into_iter()
                 .map(|f| (f.id, f.name))
                 .collect();
@@ -3476,8 +3483,10 @@ impl Tool for RunWorkflowTool {
         // Load the saved graph from the seed ∪ overlay union, so a workflow the
         // console (or this agent) created on a hosted tenant runs the same as a
         // committed one.
-        let overlays = match self.store.load(&self.company).await {
-            Ok(record) => record.map(|r| r.overlay_workflows).unwrap_or_default(),
+        let (overlays, globals_disable) = match self.store.load(&self.company).await {
+            Ok(record) => record
+                .map(|r| (r.overlay_workflows, r.manifest.globals.disable))
+                .unwrap_or_default(),
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: record load failed");
                 return Ok(ToolResult::error(format!(
@@ -3488,7 +3497,12 @@ impl Tool for RunWorkflowTool {
         // Mirror the REST run route: an id neither source has is a clean
         // "unknown id" rather than a raw read error (which would also leak the
         // on-disk path into agent-visible text).
-        let file = match load_workflow_union(self.source_dir.as_deref(), &overlays, &wid) {
+        let file = match load_workflow_with_globals(
+            self.source_dir.as_deref(),
+            &overlays,
+            &globals_disable,
+            &wid,
+        ) {
             Ok(file) => file,
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: load failed");

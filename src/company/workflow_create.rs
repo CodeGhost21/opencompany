@@ -1483,7 +1483,12 @@ pub(crate) async fn set_company_workflow_enabled(
     // host cannot read is exactly the kind an operator most wants to stop, and
     // refusing would leave them nothing to do about it. It just journals under
     // its id.
-    let name = crate::company::load_workflow_union(source_dir, &record.overlay_workflows, wid)
+    let name = crate::company::load_workflow_with_globals(
+        source_dir,
+        &record.overlay_workflows,
+        &record.manifest.globals.disable,
+        wid,
+    )
         .ok()
         .flatten()
         .map(|file| file.name)

@@ -169,8 +169,20 @@ impl WorkflowAdmin {
     /// This company's runtime-authored graph bodies, or the agent-facing error
     /// to return when the record cannot be read.
     async fn overlays(&self) -> Result<Vec<OverlayWorkflow>, ToolResult> {
+        Ok(self.overlays_and_globals().await?.0)
+    }
+
+    /// [`overlays`](Self::overlays), with the company's `[globals].disable`
+    /// beside them.
+    ///
+    /// Read from the same record load, because the two are read together: a
+    /// union that saw the overlays but not the opt-out would answer with a
+    /// global graph this company disabled.
+    async fn overlays_and_globals(&self) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ToolResult> {
         match self.store.load(&self.company).await {
-            Ok(record) => Ok(record.map(|r| r.overlay_workflows).unwrap_or_default()),
+            Ok(record) => Ok(record
+                .map(|r| (r.overlay_workflows, r.manifest.globals.disable))
+                .unwrap_or_default()),
             Err(err) => Err(ToolResult::error(format!(
                 "Couldn't read this company's saved workflows: {err}"
             ))),
@@ -407,7 +419,13 @@ impl Tool for ReadWorkflowTool {
         // No overlay body: either a seed graph (readable through the union) or
         // an id this company does not answer for at all.
         let Some(raw) = raw else {
-            return Ok(self.read_seed_or_unknown(&overlays, &wid).await);
+            let disable = self
+                .admin
+                .overlays_and_globals()
+                .await
+                .map(|(_, disable)| disable)
+                .unwrap_or_default();
+            return Ok(self.read_seed_or_unknown(&overlays, &disable, &wid).await);
         };
 
         let projection = project_workflow_spec(&raw);
@@ -420,8 +438,18 @@ impl ReadWorkflowTool {
     /// Answer for an id with no overlay body: read it through the seed ∪
     /// overlay union so a source-defined graph is still *readable* (it is only
     /// unwritable), and give the unknown case `run_workflow`'s own steer.
-    async fn read_seed_or_unknown(&self, overlays: &[OverlayWorkflow], wid: &str) -> ToolResult {
-        let file = match load_workflow_union(self.admin.source_dir.as_deref(), overlays, wid) {
+    async fn read_seed_or_unknown(
+        &self,
+        overlays: &[OverlayWorkflow],
+        disable: &[String],
+        wid: &str,
+    ) -> ToolResult {
+        let file = match load_workflow_with_globals(
+            self.admin.source_dir.as_deref(),
+            overlays,
+            disable,
+            wid,
+        ) {
             Ok(file) => file,
             Err(err) => {
                 return ToolResult::error(format!("Couldn't load workflow `{wid}`: {err}"));

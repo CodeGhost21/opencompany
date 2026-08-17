@@ -801,7 +801,11 @@ async fn gather_company_evidence(runtime: &Arc<CompanyRuntime>) -> crate::Result
         }))
         .collect();
 
-    let workflows = list_workflows_union(runtime.source_dir(), &record.overlay_workflows);
+    let workflows = list_workflows_with_globals(
+        runtime.source_dir(),
+        &record.overlay_workflows,
+        &record.manifest.globals.disable,
+    );
     let existing_names: Vec<String> = workflows.iter().map(|w| w.name.clone()).collect();
     let existing_ids: HashSet<String> = workflows.into_iter().map(|w| w.id).collect();
 
