@@ -1333,7 +1333,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
     // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
-    // `Agents/` root (issue #551). The manifest here has an agent and it gets
+    // `Agents/` root and operator-only `secrets/README.md`. The manifest here has an agent and it gets
     // no folder — a member folder is minted on first use, not on joining the
     // roster. `Desks/` is absent for the same reason since issue #645: nothing
     // writes into it, so it is minted on first use rather than scaffolded.
@@ -1341,8 +1341,8 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["Agents"],
-        "a fresh company starts with the one system root and nothing else"
+        vec!["Agents", "README.md", "secrets"],
+        "a fresh company starts with its system scaffold and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
 
@@ -1548,7 +1548,10 @@ async fn workspace_reads_are_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(provisioned_names(&tree_b), vec!["Agents"]);
+    assert_eq!(
+        provisioned_names(&tree_b),
+        vec!["Agents", "README.md", "secrets"]
+    );
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
     let (status, _) = send_auth(
@@ -1826,8 +1829,10 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
         vec![
             "Agents".to_string(),
             "README.md".to_string(),
+            "README.md".to_string(),
             "cmo".to_string(),
             "launch-brief.md".to_string(),
+            "secrets".to_string(),
         ],
         "the folder holding a deliverable, the operator's note and the root all stay"
     );
