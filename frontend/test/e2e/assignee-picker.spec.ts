@@ -73,7 +73,10 @@ async function pickAssignee(page: Page, trigger: string, option: RegExp | string
 
 /** The board card whose title matches, once the board has rendered it. */
 function card(page: Page, title: string) {
-  return page.locator("div[draggable=true]").filter({ hasText: title }).first();
+  // The board renders inside the Ledgers screen now and its cards are
+  // `<button draggable>` rather than `<div draggable>`; the attribute is what
+  // identifies a card either way.
+  return page.locator("[draggable=true]").filter({ hasText: title }).first();
 }
 
 test("the edit dialog offers Unassigned, desks and teammates instead of a text field", async ({
@@ -165,8 +168,11 @@ test("a card can be assigned to a teammate, and created for nobody at all", asyn
 
   const nobody = card(page, forNobody);
   await expect(nobody).toBeVisible({ timeout: 15_000 });
-  // No assignee row rendered at all.
-  await expect(nobody.locator("span.truncate")).toHaveCount(0);
+  // No assignee on the card at all. Asserted on `data-owner`, which the board
+  // sets only when a row actually names one — a card with no owner still
+  // renders a subtitle (its id), so counting spans would now pass for the
+  // wrong reason.
+  await expect(nobody.locator("[data-owner]")).toHaveCount(0);
 });
 
 test("renaming a card does not resubmit its assignee", async ({ page, request }) => {

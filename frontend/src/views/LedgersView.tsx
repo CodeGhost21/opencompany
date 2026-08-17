@@ -809,12 +809,20 @@ function BoardMode({
                 </span>
                 {/* One field beneath the title, not all of them: a board is
                     scanned, and a card carrying every prose field is a list
-                    with extra steps. The list mode is where a row is read. */}
-                {subtitleOf(entry, ledger) && (
-                  <span className="mt-1 block truncate text-xs text-muted-foreground">
-                    {subtitleOf(entry, ledger)}
-                  </span>
-                )}
+                    with extra steps. The list mode is where a row is read.
+
+                    `data-owner` is set only when the ledger declares an owner
+                    field AND this row filled it in — so "unassigned" is
+                    machine-checkable rather than inferred from the absence of
+                    a span, which the id fallback would otherwise occupy. */}
+                <span
+                  className="mt-1 block truncate text-xs text-muted-foreground"
+                  {...(ownerOf(entry, ledger)
+                    ? { "data-owner": ownerOf(entry, ledger) }
+                    : {})}
+                >
+                  {ownerOf(entry, ledger) || entry.id}
+                </span>
               </button>
             ))}
             {held.length === 0 && (
@@ -830,17 +838,16 @@ function BoardMode({
 }
 
 /**
- * The one line a board card carries under its title: its owner if the ledger
- * declares one, else its id.
+ * Who owns a row, if the ledger declares an owner field and the row filled it
+ * in. Empty otherwise — the card then falls back to its id.
  *
- * Its **id**, and not the first prose field, when there is no owner. A board
- * card has to be identifiable at a glance so somebody can say which one they
- * mean, and a truncated sentence of detail identifies nothing.
+ * Its **id**, and not the first prose field. A board card has to be
+ * identifiable at a glance so somebody can say which one they mean, and a
+ * truncated sentence of detail identifies nothing.
  */
-function subtitleOf(entry: LedgerEntry, ledger: LedgerSummary): string {
+function ownerOf(entry: LedgerEntry, ledger: LedgerSummary): string {
   const owner = ledger.fields.find((field) => field.role === "owner");
-  const value = owner ? entry.fields[owner.name]?.trim() : "";
-  return value || entry.id;
+  return (owner ? entry.fields[owner.name]?.trim() : "") ?? "";
 }
 
 function EntryCard({
