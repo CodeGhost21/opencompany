@@ -622,7 +622,10 @@ pub(crate) fn is_snake_case(id: &str) -> bool {
 /// disagreement there surfaces as an ordinary tool refusal at call time
 /// instead. A free function, not a `CompanyManifest` method, so it can be
 /// pointed at a synthetic ledger list in a test without a real registry.
-fn ledger_grant_problems(agents: &[crate::company::Agent], builtin_ledgers: &[LedgerSpec]) -> Vec<String> {
+fn ledger_grant_problems(
+    agents: &[crate::company::Agent],
+    builtin_ledgers: &[crate::ledger::LedgerSpec],
+) -> Vec<String> {
     let mut problems = Vec::new();
     for agent in agents {
         let label = if agent.id.is_empty() {
