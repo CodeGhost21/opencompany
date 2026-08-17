@@ -625,6 +625,10 @@ pub async fn history_total_for_desk(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::{
+        COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING,
+        COLUMN_TODO,
+    };
     use crate::ports::types::Actor;
 
     fn agent_reply(chat_id: &str) -> CompanyEvent {
