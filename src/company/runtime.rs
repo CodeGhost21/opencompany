@@ -2314,6 +2314,7 @@ mod tests {
             ledger_registry: Default::default(),
             provider: Arc::new(crate::harness::provider::MockProvider::default()),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: runtime.context.clone(),
             store: runtime.store.clone(),
             meter,

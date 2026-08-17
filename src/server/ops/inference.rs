@@ -1007,7 +1007,9 @@ mod tests {
         .await;
         let platform = staging_platform();
 
-        let dto = effective_status_with(&runtime, Some(&platform)).await.unwrap();
+        let dto = effective_status_with(&runtime, Some(&platform))
+            .await
+            .unwrap();
         assert_eq!(dto.base_url, STAGING_URL, "proxied");
         assert_eq!(dto.slug, "subscription");
         assert!(!dto.key_configured);
@@ -1016,7 +1018,9 @@ mod tests {
             .await
             .unwrap();
 
-        let dto = effective_status_with(&runtime, Some(&platform)).await.unwrap();
+        let dto = effective_status_with(&runtime, Some(&platform))
+            .await
+            .unwrap();
         assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL, "direct");
         assert_eq!(dto.slug, "openrouter");
         assert!(dto.key_configured);

@@ -192,8 +192,20 @@ pub struct HarnessDeps {
     /// plus the telemetry slug the cost hook reads live per turn; it upcasts to
     /// `Arc<dyn ChatModel<()>>` at the openhuman `AgentBuilder::chat_model` seam.
     pub provider: Arc<dyn HarnessModel>,
-    /// Stable provider slug attributed to usage samples (e.g. `managed`).
+    /// Stable provider slug attributed to usage samples (e.g. `subscription`).
     pub provider_slug: String,
+    /// Which agents this pool builds, when it serves one named harness rather
+    /// than the whole company.
+    ///
+    /// `None` — the whole roster, which is every pre-harness caller and the
+    /// single-harness case.
+    ///
+    /// `Some(ids)` — only those agents. A company running two `built_in`
+    /// harnesses gets one pool per harness, each holding its own
+    /// [`provider`](Self::provider); without this filter every pool would build
+    /// every agent, so a ten-agent roster on three harnesses would stand up
+    /// thirty live agents to use ten.
+    pub serves: Option<std::collections::HashSet<String>>,
     /// Context store backing every agent's [`OcMemory`](memory::OcMemory).
     pub context: Arc<dyn ContextStore>,
     /// Company store the cost hook appends ledger entries to.
@@ -2233,6 +2245,20 @@ impl HarnessPool {
     pub async fn resident_companies(&self) -> usize {
         self.agents.read().await.len()
     }
+
+    /// The agent ids this pool currently holds for `company`, in roster order.
+    ///
+    /// Observability for the per-harness split: a pool serving one named harness
+    /// should hold only that harness's agents, and this is how that is checked
+    /// without reaching into the lock.
+    pub async fn agent_ids(&self, company: &CompanyId) -> Vec<String> {
+        self.agents
+            .read()
+            .await
+            .get(company)
+            .map(|agents| agents.iter().map(|a| a.agent_id.clone()).collect())
+            .unwrap_or_default()
+    }
 }
 
 /// A stable fingerprint of an effective MCP server set, used to detect a console
@@ -2624,6 +2650,17 @@ fn repo_binding_fingerprint(bindings: &[crate::runtime::repo_manager::types::Rep
 /// not. An agent absent from the map gets no routed documents, which is the
 /// correct reading for a company with no workspace store wired: fail closed to
 /// the pre-routing prompt rather than to a half-populated one.
+/// Whether `deps` builds `agent_id`.
+///
+/// `serves: None` is the whole roster — every pre-harness caller, and the
+/// single-harness case that is still the overwhelming majority.
+fn serves(deps: &HarnessDeps, agent_id: &str) -> bool {
+    match deps.serves.as_ref() {
+        None => true,
+        Some(ids) => ids.contains(agent_id),
+    }
+}
+
 pub(crate) fn build_roster(
     company: &CompanyRecord,
     deps: &HarnessDeps,
@@ -2649,6 +2686,13 @@ pub(crate) fn build_roster(
         Vec::with_capacity(company.manifest.agents.len() + company.overlay_agents.len());
 
     for manifest_agent in &company.manifest.agents {
+        // When these deps serve one named harness, build only the agents bound
+        // to it — every other agent is another pool's, holding another
+        // provider. Skipping here rather than filtering afterwards is what keeps
+        // the unbuilt agents from ever standing up a model client.
+        if !serves(deps, &manifest_agent.id) {
+            continue;
+        }
         // Issue #343: the cap in force, not the one the manifest shipped with.
         // `effective_budget` is an operator override when one is stored and the
         // manifest value otherwise, so a console cap change reaches BOTH readers
@@ -2708,6 +2752,9 @@ pub(crate) fn build_roster(
         .collect();
     for overlay in &company.overlay_agents {
         if manifest_ids.contains(overlay.id.as_str()) {
+            continue;
+        }
+        if !serves(deps, &overlay.id) {
             continue;
         }
         let manifest_agent = overlay_agent_to_manifest(overlay);
@@ -3188,6 +3235,7 @@ description = "Builds the product."
                 ledger_registry: Default::default(),
                 provider: Arc::new(MockProvider::new("mock: ")),
                 provider_slug: "mock".to_string(),
+                serves: None,
                 context: Arc::new(MockContext::default()),
                 store: store.clone(),
                 meter: Some(meter.clone()),
@@ -3400,6 +3448,7 @@ description = "Builds the product."
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
@@ -3717,6 +3766,34 @@ description = "Builds the product."
             .await
             .unwrap();
         assert_eq!(stored.len(), 2, "the second turn stores its outcome too");
+    }
+
+    /// A pool serving one named harness builds only the agents bound to it.
+    ///
+    /// This is what makes one-pool-per-harness affordable: without the filter a
+    /// ten-agent roster on three harnesses would stand up thirty live agents,
+    /// each holding a model client, to use ten.
+    #[tokio::test]
+    async fn a_scoped_pool_builds_only_the_agents_it_serves() {
+        let fx = fixture();
+        let rec = record();
+        assert!(
+            rec.manifest.agents.len() >= 2,
+            "the fixture must have someone to leave out"
+        );
+
+        // Unfiltered: the whole roster, exactly as before this field existed.
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &fx.deps).await.expect("ensure");
+        let all = pool.agent_ids(&rec.id).await;
+        assert_eq!(all.len(), rec.manifest.agents.len());
+
+        // Scoped to one agent: only that one is built.
+        let mut scoped = fixture();
+        scoped.deps.serves = Some(HashSet::from(["ceo".to_string()]));
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &scoped.deps).await.expect("ensure");
+        assert_eq!(pool.agent_ids(&rec.id).await, vec!["ceo".to_string()]);
     }
 
     #[tokio::test]
@@ -4094,6 +4171,7 @@ description = "Builds the product."
             ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(outcomes)),
             provider_slug: "scripted".to_string(),
+            serves: None,
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
@@ -4279,6 +4357,7 @@ description = "Builds the product."
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
@@ -4949,6 +5028,7 @@ description = "Builds the product."
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(MockContext::default()),
             store: live_store.clone(),
             meter: None,
@@ -5128,6 +5208,7 @@ description = "Sets direction."
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
@@ -5288,6 +5369,7 @@ description = "Sets direction."
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context,
             store: Arc::new(RecordingStore::default()),
             meter,

@@ -946,10 +946,13 @@ pub fn build_agent(
     // always kept.
     let tools = toolbelt::filter_by_capabilities(tools, &deps.capabilities);
     let tools = if deps.workspace_git_enabled {
-        match crate::harness::built_in::checkpoint::WorkspaceCheckpointer::initialize_off_worker(&workspace) {
-            Ok(checkpointer) => {
-                crate::harness::built_in::checkpoint::CheckpointingTool::wrap_all(tools, checkpointer)
-            }
+        match crate::harness::built_in::checkpoint::WorkspaceCheckpointer::initialize_off_worker(
+            &workspace,
+        ) {
+            Ok(checkpointer) => crate::harness::built_in::checkpoint::CheckpointingTool::wrap_all(
+                tools,
+                checkpointer,
+            ),
             Err(error) => {
                 tracing::warn!(
                     company = %company,
@@ -1546,6 +1549,7 @@ mod tests {
             ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
+            serves: None,
             context: Arc::new(PinContext),
             store: Arc::new(PinStore),
             meter: None,

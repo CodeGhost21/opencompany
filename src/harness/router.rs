@@ -109,9 +109,10 @@ impl HarnessRouter {
         if let Some(engine) = self.engines.get(harness) {
             return Ok(engine);
         }
-        let detail = self.unavailable.get(harness).map(String::as_str).unwrap_or(
-            "no engine was wired for it — this host cannot run turns on this harness",
-        );
+        let detail =
+            self.unavailable.get(harness).map(String::as_str).unwrap_or(
+                "no engine was wired for it — this host cannot run turns on this harness",
+            );
         Err(OpenCompanyError::Config(format!(
             "agent `{agent_id}` is bound to harness `{harness}`, but {detail}."
         )))
@@ -238,7 +239,10 @@ mod tests {
             .with_engine("deep", deep.clone())
             .bind("researcher", "deep");
 
-        let out = router.run(&company(), "researcher", "hi", None).await.unwrap();
+        let out = router
+            .run(&company(), "researcher", "hi", None)
+            .await
+            .unwrap();
         assert_eq!(out.reply, "deep");
 
         let out = router.run(&company(), "ceo", "hi", None).await.unwrap();
@@ -291,7 +295,10 @@ mod tests {
         let embedded = SpyEngine::new("embedded");
         let router = HarnessRouter::new("embedded")
             .with_engine("embedded", embedded.clone())
-            .with_unavailable("my_laptop", "this build was compiled without the `acp` feature")
+            .with_unavailable(
+                "my_laptop",
+                "this build was compiled without the `acp` feature",
+            )
             .bind("coder", "my_laptop");
 
         let err = router
@@ -323,6 +330,11 @@ mod tests {
         assert_eq!(err, "e");
 
         let router = router.bind("ghost_bound", "nowhere");
-        assert!(router.run(&company(), "ghost_bound", "hi", None).await.is_err());
+        assert!(
+            router
+                .run(&company(), "ghost_bound", "hi", None)
+                .await
+                .is_err()
+        );
     }
 }

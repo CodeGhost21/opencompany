@@ -1000,6 +1000,11 @@ pub struct TenantProvider {
     /// the config the last turn actually used (cost attribution follows the
     /// switch).
     slug: RwLock<&'static str>,
+    /// Which harness's config and credential slots this provider resolves
+    /// against. Two `built_in` harnesses on one company each get their own
+    /// provider, differing only in this — which is what lets one ride the
+    /// subscription while the other runs on a key of its own.
+    scope: inference::HarnessScope,
 }
 
 impl TenantProvider {
@@ -1020,17 +1025,31 @@ impl TenantProvider {
             // Replaced by the resolved slug on the first turn; until then the
             // company is on the default it booted with.
             slug: RwLock::new("subscription"),
+            scope: inference::HarnessScope::default(),
         }
+    }
+
+    /// Points this provider at one named harness's own config and credential
+    /// slots. Without it, every provider reads the company's default harness.
+    pub fn with_scope(mut self, scope: inference::HarnessScope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    /// The harness this provider resolves for.
+    pub fn harness_id(&self) -> &str {
+        &self.scope.id
     }
 
     /// Re-resolves the effective config from the secret store and updates the
     /// cached telemetry slug. Errors when no provider is configured at all.
     async fn resolve(&self) -> anyhow::Result<InferenceDecl> {
-        let decl = inference::resolve_effective(
+        let decl = inference::resolve_effective_scoped(
             &self.company,
             &self.manifest,
             self.env_default.as_ref(),
             self.secrets.as_ref(),
+            &self.scope,
         )
         .await
         .map_err(|e| anyhow::anyhow!("resolving inference config: {e}"))?

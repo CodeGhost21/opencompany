@@ -2241,6 +2241,7 @@ impl RuntimeBuilder {
                                 // Static fallback only; `HarnessPool::run` reads
                                 // the live slug from the provider per turn.
                                 provider_slug: "managed".to_string(),
+                                serves: None,
                                 context: context.clone(),
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),

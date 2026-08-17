@@ -113,7 +113,9 @@ impl CompanyManifest {
             .find(|a| a.id == agent_id)
             .and_then(|a| a.harness.clone());
         let want = named.unwrap_or_else(|| self.default_harness_id());
-        self.effective_harnesses().into_iter().find(|h| h.id == want)
+        self.effective_harnesses()
+            .into_iter()
+            .find(|h| h.id == want)
     }
 
     /// Reads, parses, and validates a manifest from `path`.
@@ -678,7 +680,13 @@ impl CompanyManifest {
                 }
             }
             "runner" => {
-                if acp.runner.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+                if acp
+                    .runner
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+                {
                     problems.push(format!(
                         "`[[harness]]` `{id}` uses `transport = \"runner\"` but names no `runner`."
                     ));
@@ -1877,7 +1885,9 @@ provider = "openrouter"
             "{problems:?}"
         );
         assert!(
-            problems.iter().any(|p| p.contains("`a`") && p.contains("`b`")),
+            problems
+                .iter()
+                .any(|p| p.contains("`a`") && p.contains("`b`")),
             "names the candidates: {problems:?}"
         );
 
@@ -1922,7 +1932,11 @@ provider = "openrouter"
             "{BASE}\n[[harness]]\nid = \"a\"\nkind = \"telepathy\"\ndefault = true\n"
         ));
         let problems = harness_problems(&manifest);
-        assert_eq!(problems.len(), 1, "one problem, not a cascade: {problems:?}");
+        assert_eq!(
+            problems.len(),
+            1,
+            "one problem, not a cascade: {problems:?}"
+        );
         assert!(problems[0].contains("telepathy") && problems[0].contains("built_in"));
     }
 

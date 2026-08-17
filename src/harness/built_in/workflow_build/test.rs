@@ -681,6 +681,7 @@ pub(crate) fn agent_deps(
         ledger_registry: Default::default(),
         provider: model,
         provider_slug: "managed".to_string(),
+        serves: None,
         context: runtime.context.clone(),
         store: runtime.store().clone(),
         meter: None,

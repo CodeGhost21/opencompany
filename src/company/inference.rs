@@ -44,6 +44,81 @@ pub const RUNTIME_CONFIG_KEY: &str = "inference/config";
 /// stored here (write-only via the console); the value is the raw token string.
 pub const KEY_KEY: &str = "inference/key";
 
+/// The [`SecretStore`](crate::ports::SecretStore) key holding the runtime
+/// inference override for `harness_id`.
+///
+/// The **default** harness keeps the flat legacy key. That is not cosmetic: a
+/// tenant's stored console override and credential already live at
+/// [`RUNTIME_CONFIG_KEY`] / [`KEY_KEY`], and the store has no rename — so
+/// namespacing every harness would silently orphan the config of every company
+/// already running, which is the one migration this design cannot afford.
+///
+/// Non-default harnesses namespace under `harness/<id>/`, so two `built_in`
+/// harnesses can hold two different OpenRouter accounts.
+pub fn runtime_config_key(harness_id: &str, is_default: bool) -> String {
+    if is_default {
+        return RUNTIME_CONFIG_KEY.to_string();
+    }
+    format!("harness/{harness_id}/{RUNTIME_CONFIG_KEY}")
+}
+
+/// The credential key for `harness_id`. Same default-harness rule as
+/// [`runtime_config_key`].
+pub fn harness_key_key(harness_id: &str, is_default: bool) -> String {
+    if is_default {
+        return KEY_KEY.to_string();
+    }
+    format!("harness/{harness_id}/{KEY_KEY}")
+}
+
+/// Which harness's secrets a resolution reads, and whether that harness is the
+/// company default (which keeps the flat legacy keys).
+///
+/// Passed as one value rather than two loose arguments because the pair is only
+/// ever meaningful together — an id without the default flag cannot name a key.
+#[derive(Clone, Debug)]
+pub struct HarnessScope {
+    /// The harness id.
+    pub id: String,
+    /// Whether it is the company's default harness.
+    pub is_default: bool,
+}
+
+impl HarnessScope {
+    /// The scope for a company's default harness — what every pre-existing
+    /// caller means, and what keeps them reading the flat keys.
+    pub fn default_harness(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            is_default: true,
+        }
+    }
+
+    /// A named, non-default harness.
+    pub fn named(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            is_default: false,
+        }
+    }
+
+    /// This scope's runtime-config secret key.
+    pub fn config_key(&self) -> String {
+        runtime_config_key(&self.id, self.is_default)
+    }
+
+    /// This scope's credential secret key.
+    pub fn key_key(&self) -> String {
+        harness_key_key(&self.id, self.is_default)
+    }
+}
+
+impl Default for HarnessScope {
+    fn default() -> Self {
+        Self::default_harness(crate::company::types::IMPLICIT_HARNESS_ID)
+    }
+}
+
 /// The platform's OpenAI-compatible endpoint — the subscription proxy an
 /// `openrouter` company with **no** key of its own resolves against.
 ///
@@ -283,7 +358,16 @@ pub async fn load_runtime_config(
     company: &CompanyId,
     secrets: &dyn SecretStore,
 ) -> Result<Option<RuntimeInference>> {
-    let Some(SecretValue(raw)) = secrets.get(company, RUNTIME_CONFIG_KEY).await? else {
+    load_runtime_config_scoped(company, secrets, &HarnessScope::default()).await
+}
+
+/// [`load_runtime_config`] for one harness's own slot.
+pub async fn load_runtime_config_scoped(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<Option<RuntimeInference>> {
+    let Some(SecretValue(raw)) = secrets.get(company, &scope.config_key()).await? else {
         return Ok(None);
     };
     if raw.trim().is_empty() {
@@ -304,10 +388,20 @@ pub async fn save_runtime_config(
     secrets: &dyn SecretStore,
     config: &RuntimeInference,
 ) -> Result<()> {
+    save_runtime_config_scoped(company, secrets, config, &HarnessScope::default()).await
+}
+
+/// [`save_runtime_config`] for one harness's own slot.
+pub async fn save_runtime_config_scoped(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    config: &RuntimeInference,
+    scope: &HarnessScope,
+) -> Result<()> {
     let raw = serde_json::to_string(config)
         .map_err(|e| OpenCompanyError::Store(format!("serializing inference config: {e}")))?;
     secrets
-        .set(company, RUNTIME_CONFIG_KEY, SecretValue(raw))
+        .set(company, &scope.config_key(), SecretValue(raw))
         .await
 }
 
@@ -315,8 +409,17 @@ pub async fn save_runtime_config(
 /// manifest/managed). Best-effort — the store has no delete, so an empty value
 /// reads back as unset.
 pub async fn clear_runtime_config(company: &CompanyId, secrets: &dyn SecretStore) -> Result<()> {
+    clear_runtime_config_scoped(company, secrets, &HarnessScope::default()).await
+}
+
+/// [`clear_runtime_config`] for one harness's own slot.
+pub async fn clear_runtime_config_scoped(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<()> {
     secrets
-        .set(company, RUNTIME_CONFIG_KEY, SecretValue(String::new()))
+        .set(company, &scope.config_key(), SecretValue(String::new()))
         .await
 }
 
@@ -331,7 +434,17 @@ pub async fn load_key(
     secrets: &dyn SecretStore,
     override_key: Option<&str>,
 ) -> Result<String> {
-    if let Some(SecretValue(raw)) = secrets.get(company, KEY_KEY).await?
+    load_key_scoped(company, secrets, override_key, &HarnessScope::default()).await
+}
+
+/// [`load_key`] for one harness's own credential slot.
+pub async fn load_key_scoped(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    override_key: Option<&str>,
+    scope: &HarnessScope,
+) -> Result<String> {
+    if let Some(SecretValue(raw)) = secrets.get(company, &scope.key_key()).await?
         && !raw.trim().is_empty()
     {
         return Ok(raw);
@@ -347,8 +460,18 @@ pub async fn load_key(
 
 /// Writes the company's outbound inference credential (write-only intake).
 pub async fn store_key(company: &CompanyId, secrets: &dyn SecretStore, key: &str) -> Result<()> {
+    store_key_scoped(company, secrets, key, &HarnessScope::default()).await
+}
+
+/// [`store_key`] for one harness's own credential slot.
+pub async fn store_key_scoped(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    key: &str,
+    scope: &HarnessScope,
+) -> Result<()> {
     secrets
-        .set(company, KEY_KEY, SecretValue(key.to_string()))
+        .set(company, &scope.key_key(), SecretValue(key.to_string()))
         .await
 }
 
@@ -388,11 +511,38 @@ pub async fn resolve_effective(
     env_default: Option<&EnvDefault>,
     secrets: &dyn SecretStore,
 ) -> Result<Option<InferenceDecl>> {
+    resolve_effective_scoped(
+        company,
+        manifest,
+        env_default,
+        secrets,
+        &HarnessScope::default(),
+    )
+    .await
+}
+
+/// [`resolve_effective`] against one harness's own config and credential slots.
+///
+/// `manifest` is that harness's `[harness.inference]`, or the company-level
+/// `[inference]` when it declares none — the caller picks, because only it knows
+/// which fallback applies.
+///
+/// The precedence within a harness is unchanged (runtime > manifest > env
+/// default); what differs is only *which* secret keys the runtime and credential
+/// tiers read. Two `built_in` harnesses therefore resolve independently, which
+/// is what lets one run on the subscription while the other runs on a key.
+pub async fn resolve_effective_scoped(
+    company: &CompanyId,
+    manifest: &Inference,
+    env_default: Option<&EnvDefault>,
+    secrets: &dyn SecretStore,
+    scope: &HarnessScope,
+) -> Result<Option<InferenceDecl>> {
     // 1. Runtime override (console) wins.
-    if let Some(runtime) = load_runtime_config(company, secrets).await? {
+    if let Some(runtime) = load_runtime_config_scoped(company, secrets, scope).await? {
         let provider = normalize_provider(&runtime.provider).to_string();
         reject_unknown_provider(&provider, "the stored runtime inference config")?;
-        let key = load_key(company, secrets, None).await?;
+        let key = load_key_scoped(company, secrets, None, scope).await?;
         let (base_url, credential, proxied) =
             resolve_endpoint(&provider, runtime.base_url.as_deref(), key, env_default);
         return Ok(Some(InferenceDecl {
@@ -410,7 +560,8 @@ pub async fn resolve_effective(
         let provider =
             normalize_provider(manifest.provider.as_deref().unwrap_or_default()).to_string();
         reject_unknown_provider(&provider, "`[inference].provider`")?;
-        let key = load_key(company, secrets, manifest.api_key_secret.as_deref()).await?;
+        let key =
+            load_key_scoped(company, secrets, manifest.api_key_secret.as_deref(), scope).await?;
         let (base_url, credential, proxied) =
             resolve_endpoint(&provider, manifest.base_url.as_deref(), key, env_default);
         return Ok(Some(InferenceDecl {
@@ -434,7 +585,7 @@ pub async fn resolve_effective(
     //    take that key, store it, report it as configured — and then never send
     //    it anywhere.
     if let Some(env) = env_default {
-        let key = load_key(company, secrets, None).await?;
+        let key = load_key_scoped(company, secrets, None, scope).await?;
         let (base_url, credential, proxied) =
             resolve_endpoint(DEFAULT_PROVIDER, None, key, Some(env));
         return Ok(Some(InferenceDecl {
@@ -1070,6 +1221,101 @@ mod tests {
         );
     }
 
+    /// The isolation property named harnesses exist for: two `built_in`
+    /// harnesses on one company resolve independently, so one can ride the
+    /// subscription while the other runs on a key of its own.
+    #[tokio::test]
+    async fn two_harnesses_on_one_company_resolve_independently() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://env.example/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        let embedded = HarnessScope::default_harness("embedded");
+        let deep = HarnessScope::named("deep");
+
+        // Only `deep` gets a key.
+        store_key_scoped(&company, &secrets, "sk-or-deep", &deep)
+            .await
+            .unwrap();
+
+        let d = resolve_effective_scoped(
+            &company,
+            &inference("openrouter"),
+            Some(&env),
+            &secrets,
+            &deep,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!d.is_proxied(), "deep pays its own way");
+        assert_eq!(d.base_url, OPENROUTER_BASE_URL);
+        assert_eq!(bearer(&d).await.as_deref(), Some("sk-or-deep"));
+
+        let e = resolve_effective_scoped(
+            &company,
+            &inference("openrouter"),
+            Some(&env),
+            &secrets,
+            &embedded,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(e.is_proxied(), "embedded is untouched by deep's key");
+        assert_eq!(e.base_url, "https://env.example/v1");
+        assert_eq!(bearer(&e).await.as_deref(), Some("platform-key"));
+    }
+
+    /// The default harness keeps the flat legacy keys, so a tenant whose console
+    /// already wrote `inference/key` keeps working with no migration — the store
+    /// has no rename, so getting this wrong would orphan every running company.
+    #[tokio::test]
+    async fn the_default_harness_reads_the_legacy_flat_keys() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+
+        // Written the pre-harness way.
+        store_key(&company, &secrets, "legacy-key").await.unwrap();
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "openrouter".into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Read back through the scoped path, as the default harness.
+        let scope = HarnessScope::default_harness("embedded");
+        assert_eq!(scope.key_key(), KEY_KEY);
+        assert_eq!(scope.config_key(), RUNTIME_CONFIG_KEY);
+
+        let decl =
+            resolve_effective_scoped(&company, &Inference::default(), None, &secrets, &scope)
+                .await
+                .unwrap()
+                .expect("the legacy config resolves");
+        assert_eq!(decl.source, InferenceSource::Runtime);
+        assert_eq!(bearer(&decl).await.as_deref(), Some("legacy-key"));
+
+        // A named harness namespaces instead, and sees none of it.
+        let named = HarnessScope::named("deep");
+        assert_eq!(named.key_key(), "harness/deep/inference/key");
+        assert_eq!(named.config_key(), "harness/deep/inference/config");
+        assert!(
+            load_runtime_config_scoped(&company, &secrets, &named)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn provider_slugs_map_as_documented() {
         assert_eq!(provider_slug("openrouter"), "openrouter");
@@ -1084,7 +1330,10 @@ mod tests {
 
     #[test]
     fn effective_base_url_defaults_per_provider() {
-        assert_eq!(effective_base_url(LEGACY_MANAGED, None), OPENROUTER_BASE_URL);
+        assert_eq!(
+            effective_base_url(LEGACY_MANAGED, None),
+            OPENROUTER_BASE_URL
+        );
         assert_eq!(effective_base_url("openrouter", None), OPENROUTER_BASE_URL);
         assert_eq!(effective_base_url("ollama", None), OLLAMA_DEFAULT_BASE_URL);
         assert_eq!(

@@ -260,6 +260,7 @@ fn build_brain(
             extra_headers: Vec::new(),
         })),
         provider_slug: "managed".to_string(),
+        serves: None,
         context: Arc::new(FsContextStore::new(dir)),
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
