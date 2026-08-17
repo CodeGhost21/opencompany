@@ -1855,6 +1855,15 @@ impl Tool for WorkspaceCreateTool {
             Err(why) => return Ok(ToolResult::error(format!("Invalid `path`: {why}."))),
         };
         let normalized = segments.join("/");
+
+        if !self.workspace.write_allowed(&normalized) {
+            return Ok(ToolResult::error(format!(
+                "Refused: `{normalized}` is outside your declared write scope. Your manifest \
+                 confines `workspace_create` to specific paths — ask the operator to add this \
+                 one, or work in `Agents/<your agent id>/`, which is always writable."
+            )));
+        }
+
         let (parent_segments, name) = segments.split_at(segments.len() - 1);
         let name = name[0];
 
