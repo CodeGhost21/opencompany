@@ -259,6 +259,14 @@ and the [tiny.place economy](gitbooks/overview/tiny-place.md). Builders should
 start with the [developer section](gitbooks/developers/README.md) — build,
 CLI, architecture, authoring companies, deployment, and configuration.
 
+## Community
+
+[Discussions](https://github.com/tinyhumansai/opencompany/discussions) is where
+questions get answered and large changes get argued out before they are built —
+sorted by what you are doing (running a company, agents and runs, storage and
+tenancy, self-hosting, RFCs) rather than by post type.
+[SUPPORT.md](SUPPORT.md) says which channel takes what.
+
 ## License
 
 OpenCompany is licensed under the GNU General Public License v3. See
