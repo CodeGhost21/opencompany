@@ -147,9 +147,10 @@ into, not of the manifest text**:
 
 An exclusion **outranks** both the tier default and an explicit `context` list.
 That is what makes a declared class a control rather than a routing line
-somebody can edit away. The universal method document is the one exemption — it
-is method, not assertion, so no class has cause to withhold it, and a role
-excluded from the method could not follow it.
+somebody can edit away. The two universal documents are the exemption — neither
+asserts anything about the work in progress, so no class has cause to withhold
+either, and a role excluded from the method or the working agreement could not
+follow it.
 
 The rule this preserves: an exclusion applies because something *declared* the
 role's job, and a company can add one but cannot silently remove one by
