@@ -684,7 +684,7 @@ pub fn load_workflow_union(
     overlays: &[crate::ports::types::OverlayWorkflow],
     id: &str,
 ) -> Result<Option<WorkflowFile>> {
-    load_workflow_with_globals(source_dir, overlays, &[], id)
+    load_company_workflow_union(source_dir, overlays, id)
 }
 
 /// [`load_workflow_union`], honouring a company's `[globals].disable`.
@@ -772,7 +772,7 @@ pub fn list_workflows_union(
     source_dir: Option<&Path>,
     overlays: &[crate::ports::types::OverlayWorkflow],
 ) -> Vec<WorkflowFile> {
-    list_workflows_with_globals(source_dir, overlays, &[])
+    list_company_workflows_union(source_dir, overlays)
 }
 
 /// [`list_workflows_union`], honouring a company's `[globals].disable`.
