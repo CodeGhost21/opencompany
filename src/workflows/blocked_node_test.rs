@@ -129,6 +129,7 @@ fn record() -> CompanyRecord {
         overlay_desk_members: Vec::new(),
         overlay_desk_order: Vec::new(),
         overlay_desks: Vec::new(),
+        overlay_desk_tools: Default::default(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
         overlay_policy: None,
