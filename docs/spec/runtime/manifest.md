@@ -64,12 +64,28 @@ wallets = ["7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"]
 mode = "hosted"                    # hosted (default) | sidecar
 max_passes = 12                    # passed through to Medulla
 
-[inference]                        # NEW: per-tenant Bring-Your-Own-Key (#56)
-provider = "openrouter"            # managed (default) | openrouter | openai_compatible | ollama
+[[harness]]                        # named execution engines — see harnesses.md
+id = "embedded"                    # snake_case, unique
+kind = "built_in"                  # built_in (default) | acp
+default = true                     # exactly one entry, when any is declared
+
+[harness.inference]                # attaches to the [[harness]] above
+provider = "openrouter"
+
+# [[harness]]
+# id = "my_laptop"
+# kind = "acp"
+# [harness.acp]
+# transport = "local"              # local | runner
+# agent = "claude"                 # claude | codex | goose
+
+[inference]                        # per-tenant BYOK (#56) — the fallback for a
+provider = "openrouter"            # harness declaring no [harness.inference].
+                                   # openrouter (default) | openai_compatible | ollama
 # base_url = "https://openrouter.ai/api/v1"  # required for ollama/openai_compatible; defaulted otherwise
 # api_key_secret = "byo/openrouter"          # names a secret-store KEY — never the token itself
 
-[inference.models]                 # abstract tier → concrete provider model id
+[inference.models]                 # abstract tier → concrete OpenRouter model id
 "chat-v1" = "deepseek/deepseek-chat"
 "reasoning-v1" = "deepseek/deepseek-r1"
 
@@ -237,33 +253,40 @@ prompt = "Weekly review and operator digest"
   [`CompanyRecord::effective_budget`]: ../../../src/ports/types.rs
 - **`[brain]`** selects the `Brain` implementation. `hosted` requires a
   TinyHumans credential at runtime; `sidecar` requires the `sidecar` feature.
-- **`[inference]`** (issue #56 — BYOK) routes the company's agents through a
-  chosen model provider. Absent (the default) keeps the managed TinyHumans
-  brain. `provider` is one of `managed` / `openrouter` / `openai_compatible` /
-  `ollama`; `base_url` is required for the latter two. `api_key_secret` names a
-  **secret-store key** — never the token, which is written write-only through
-  the console (Connections → Inference). `[inference.models]` maps an abstract
-  cognition tier (`chat-v1`, `reasoning-v1`, `agentic-v1`, `vision-v1`) to a
-  concrete provider model id; an unmapped tier passes through verbatim.
-  Precedence is **runtime console override > manifest `[inference]` > managed
+- **`[[harness]]`** declares the company's named execution engines; the full
+  story is [harnesses.md](harnesses.md). Each entry has a unique `id` and a
+  `kind` (`built_in` | `acp`), and exactly one sets `default = true`. An agent
+  binds with `harness = "<id>"`, or takes the default. **Absent entirely** — the
+  case for every bundle under `companies/` — means one implicit `built_in`
+  harness on the company-level `[inference]`, so the table is purely additive. A
+  section on the wrong kind (`[harness.inference]` on an `acp` entry, or
+  `[harness.acp]` on a `built_in` one) is a validation error, not an ignored
+  key.
+- **`[inference]`** (issue #56 — BYOK) routes agents through a chosen model
+  provider, and is the fallback for a harness declaring no
+  `[harness.inference]`. `provider` is one of `openrouter` (the default) /
+  `openai_compatible` / `ollama`; `base_url` is required for the latter two.
+  `api_key_secret` names a **secret-store key** — never the token, which is
+  written write-only through the console (Connections → Inference).
+  `[inference.models]` maps an abstract cognition tier (`chat-v1`,
+  `reasoning-v1`, `agentic-v1`, `vision-v1`) to a concrete OpenRouter model id.
+  `openrouter` is **dual-mode** — keyless rides the subscription, a tenant
+  `sk-or-…` goes direct — and the removed `managed` kind aliases to it. Full
+  detail, including the per-harness secret slots, is in
+  [providers.md](providers.md).
+  Precedence is **runtime console override > manifest > platform
   default**, and a per-tenant provider re-resolves it every turn — so a console
   switch takes effect on the agents' next turn with **no restart**.
   That holds only once the company is already on the harness cognition path.
   *Which brain a company runs* is decided once, when the runtime is built: a
-  company that resolved no inference source at boot gets the offline echo brain
-  and an unwired workflow runner, and a credential saved afterwards reaches
-  neither. The status route reports that state as `restartRequired` — a resolved
-  config next to a non-harness `cognition` — and the console says "restart"
-  instead of "next turn" for it (issue #266).
-  Since issue #290 that save **rebuilds the company's runtime in place** rather
-  than asking for a restart the operator may have no way to perform: a hosted
-  tenant's unit of restart is its container, and the control plane has no button
-  for it. `PUT …/inference` quiesces the running runtime, hands its live state to
-  a successor, and swaps the registry — see
-  [runtime rebuild](rebuild.md). `restartRequired` remains on the read shape and
-  stays honest: it is still `true` on a host that wired no rebuilder, which is
-  when a restart genuinely is the only route.
-  Saving `managed` from the console is a *revert* (`DELETE …/inference`) and
+  company that resolved no inference source at boot gets the offline echo brain,
+  and a credential saved afterwards does not reach it. The status route reports
+  that as `restartRequired` (issue #266). Since issue #290 the save **rebuilds
+  the runtime in place** rather than asking for a restart a hosted operator has
+  no way to perform — see [runtime rebuild](rebuild.md). `restartRequired` stays
+  honest: still `true` on a host that wired no rebuilder.
+  Saving the platform default from the console is a *revert*
+  (`DELETE …/inference`) and
   carries no credential, so the console refuses that save while a key is still
   typed in the form rather than dropping it and reporting success (issue #265).
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
