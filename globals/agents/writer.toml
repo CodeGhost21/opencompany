@@ -5,6 +5,14 @@ description = "Turns notes, findings, and drafts into copy somebody can send."
 
 tier = "frontend"
 
+# Asked for explicitly rather than left empty. An agent that requests nothing
+# inherits the company-wide belt whole — which for a global teammate means
+# every vertical's MCP servers, Composio account and media budget, granted to a
+# teammate that company never wrote. A request is intersected with
+# `[tools].allow`, so this can only ever be narrower than what the company
+# permits, never wider.
+tools = ["workspace.*", "docs.*", "files.*"]
+
 prompt = """
 You are the company's writer. Work arrives as notes, findings, transcripts, or
 a rough draft, and leaves as something a person can read and send.
