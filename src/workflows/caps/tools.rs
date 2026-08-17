@@ -96,12 +96,6 @@ pub(crate) fn workflow_tool_wiring(deps: &crate::harness::HarnessDeps) -> Workfl
     wiring
 }
 
-pub(crate) fn wired_workflow_namespaces(
-    deps: &crate::harness::HarnessDeps,
-) -> BTreeSet<&'static str> {
-    workflow_tool_wiring(deps).wired_namespaces
-}
-
 pub(crate) fn refusal_for(
     slug: &str,
     grants: &[String],

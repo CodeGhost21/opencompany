@@ -942,47 +942,46 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
     Ok(())
 }
 
-/// The granted `tool_call` slugs this company may author and pass create-time
-/// validation (issue #753). Deployment wiring is intentionally not checked:
-/// author-now-wire-later remains legal, while prompt grounding uses the
-/// effective sibling below.
+/// Whether `[tools].allow` grants the namespace `info` belongs to.
 ///
-/// It is the exact companion of [`validate_tool_call_node`]'s grant half: a slug
-/// survives here iff that gate would accept it — its namespace covered by
+/// The exact companion of [`validate_tool_call_node`]'s grant half: a slug
+/// passes here iff that gate would accept it — its namespace covered by
 /// `[tools].allow`, with the priced `search` family requiring an **explicit**
-/// `search` grant (a `*` wildcard never confers it). So the tools the copilot
-/// shows the model are precisely the ones a proposed `tool_call` node will clear
-/// at courtesy validation, and the two cannot drift: both read
+/// `search` grant (a `*` wildcard never confers it). Both read
 /// [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) (itself pinned to
-/// `namespace_of`) and both apply the same grant rule.
-///
-/// Gated with the copilot it serves — the only caller is
-/// `crate::harness::workflow_build`, and the grant helpers live behind the
-/// `openhuman` feature, so in the default build this would be dead code over
-/// symbols that are not compiled.
+/// `namespace_of`) and apply this one rule, so the tools a caller is shown and
+/// the ones a proposed `tool_call` node clears at courtesy validation cannot
+/// drift.
 #[cfg(feature = "openhuman")]
-pub(crate) fn workflow_callable_tool_slugs(record: &CompanyRecord) -> Vec<String> {
-    let grants = &record.manifest.tools.allow;
-    // Reads the rich [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) since #813
-    // (the same grant rule, just the catalogue as the source), so the slugs the
-    // copilot grounds on and the ones it can validate come from one table.
-    crate::workflows::caps::WORKFLOW_TOOL_CATALOG
-        .iter()
-        .filter(|info| {
-            if info.namespace == "search" {
-                crate::company::grants_search_explicit(grants)
-            } else {
-                crate::harness::build::grants_cover(grants, info.namespace)
-            }
-        })
-        .map(|info| info.slug.to_string())
-        .collect()
+fn grants_workflow_tool(
+    grants: &[String],
+    info: &crate::workflows::caps::WorkflowToolInfo,
+) -> bool {
+    if info.namespace == "search" {
+        crate::company::grants_search_explicit(grants)
+    } else {
+        crate::harness::build::grants_cover(grants, info.namespace)
+    }
 }
 
-/// The tools the create-time copilot may ground on: catalogue, company grant,
-/// and deployment wiring all agree. Create validation intentionally remains
-/// permissive for a granted-but-unwired tool so an operator may author now and
-/// wire the provider later; this narrower set is prompt grounding only.
+/// The tools a caller may ground a proposal on: catalogue, company grant, and
+/// deployment wiring all agree (issues #753, #874). Both copilot surfaces read
+/// it — the in-process create/fix builder and `GET …/workflows/tool-slugs` — so
+/// neither can offer a tool the run would refuse.
+///
+/// `wired` is `None` when the deployment's wiring is not knowable (no harness
+/// deps): the grant filter then stands alone, which is the widest honest answer
+/// rather than a claim that nothing is wired.
+///
+/// Create validation intentionally remains **permissive** for a
+/// granted-but-unwired tool so an operator may author now and wire the provider
+/// later; this narrower set is grounding only, and
+/// [`workflow_granted_but_unwired_tool_slugs`] names the difference so the gap
+/// is reported rather than silently dropped.
+///
+/// Gated with the copilot it serves — the grant helpers live behind the
+/// `openhuman` feature, so in the default build this would be dead code over
+/// symbols that are not compiled.
 #[cfg(feature = "openhuman")]
 pub(crate) fn workflow_effective_tool_slugs(
     record: &CompanyRecord,
@@ -992,17 +991,26 @@ pub(crate) fn workflow_effective_tool_slugs(
     crate::workflows::caps::WORKFLOW_TOOL_CATALOG
         .iter()
         .filter(|info| {
-            let granted = if info.namespace == "search" {
-                crate::company::grants_search_explicit(grants)
-            } else {
-                crate::harness::build::grants_cover(grants, info.namespace)
-            };
-            granted && wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
+            grants_workflow_tool(grants, info)
+                && wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
         })
         .map(|info| info.slug.to_string())
         .collect()
 }
 
+/// The exact complement of [`workflow_effective_tool_slugs`] within the granted
+/// set: tools this company holds a grant for that cannot run on **this**
+/// deployment.
+///
+/// Reported rather than silently dropped (issue #874) so a reader can tell "this
+/// company is not allowed that tool" — absent from both lists — from "allowed,
+/// but nobody has configured the provider here". A copilot grounded on both
+/// answers "that needs web search, which is not wired here" instead of either
+/// proposing a doomed node or denying the tool exists.
+///
+/// Empty when `wired` is `None`: with the deployment unknowable, "which of these
+/// are unwired" has no honest answer, and every granted slug stays in the
+/// effective list.
 #[cfg(feature = "openhuman")]
 pub(crate) fn workflow_granted_but_unwired_tool_slugs(
     record: &CompanyRecord,
@@ -1012,12 +1020,8 @@ pub(crate) fn workflow_granted_but_unwired_tool_slugs(
     crate::workflows::caps::WORKFLOW_TOOL_CATALOG
         .iter()
         .filter(|info| {
-            let granted = if info.namespace == "search" {
-                crate::company::grants_search_explicit(grants)
-            } else {
-                crate::harness::build::grants_cover(grants, info.namespace)
-            };
-            granted && !wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
+            grants_workflow_tool(grants, info)
+                && !wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
         })
         .map(|info| info.slug.to_string())
         .collect()

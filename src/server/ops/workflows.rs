@@ -124,12 +124,13 @@ pub fn router() -> Router<AppState> {
             "/workflows/draft-from-description",
             post(draft_from_description),
         ))
-        // Issue #783: the wired, granted `tool_call` slugs this company can reach
-        // from a workflow, so the per-workflow copilot can ground a proposal on
-        // real tools instead of guessing (`github_integration` and the like).
-        // Reads the SAME `workflow_callable_tool_slugs` the create-time copilot
-        // grounds on (issue #753), so the two cannot drift. A static prefix
-        // registered here with the others and BEFORE the dynamic
+        // Issue #783: the `tool_call` slugs this company can reach from a
+        // workflow, so the per-workflow copilot can ground a proposal on real
+        // tools instead of guessing (`github_integration` and the like). Reads
+        // the SAME `workflow_effective_tool_slugs` the create-time copilot
+        // grounds on (issues #753, #874), so the two cannot drift — and, since
+        // #874, so neither offers a tool this deployment has not wired. A static
+        // prefix registered here with the others and BEFORE the dynamic
         // `/workflows/{wid}` below — `tool-slugs` is a syntactically valid `wid`.
         .merge(scoped("/workflows/tool-slugs", get(workflow_tool_slugs)))
         // Issue #813: the chat channels actually wired for this running company,
@@ -2008,22 +2009,58 @@ async fn fix_from_run(
     Err(super::not_wired("the workflow copilot"))
 }
 
-/// The `GET …/workflows/tool-slugs` answer (issue #783): the wired, granted
-/// `tool_call` slugs the per-workflow copilot may ground a proposal on.
+/// The `GET …/workflows/tool-slugs` answer (issues #783, #874): the tools the
+/// per-workflow copilot may ground a proposal on, and — separately — the ones
+/// this company holds a grant for that cannot run on this deployment.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkflowToolSlugsResponse {
-    /// The slugs a proposed `tool_call` node may name — every one of them will
-    /// clear the same grant gate `update_workflow` applies on write.
+    /// The **effective** slugs: granted by `[tools].allow` *and* wired here, so
+    /// a proposed `tool_call` naming one has a chance of running. This is the
+    /// only list a prompt should be grounded on.
     slugs: Vec<String>,
+    /// Granted, but not wired on this deployment (issue #874). Reported rather
+    /// than silently dropped so a reader can tell "this company is not allowed
+    /// that tool" (absent from both lists) from "allowed, nobody has configured
+    /// the provider yet" (here) — and so authoring ahead of wiring, which
+    /// create validation still permits, remains a visible option.
+    ///
+    /// Empty when the wiring is not knowable (no harness deps attached): the
+    /// honest answer to "which of these are unwired" is then "cannot say", and
+    /// `slugs` degrades to the grant-only set rather than emptying out.
+    unwired: Vec<UnwiredWorkflowTool>,
+}
+
+/// One granted-but-unwired tool, with the reason it cannot run here (issue
+/// #874) — the same distinction
+/// [`refusal_for`](crate::workflows::caps) draws at run time, moved forward to
+/// the moment the console asks, instead of arriving as a failed run.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnwiredWorkflowTool {
+    slug: String,
+    /// A stable machine token — `searchBackendNotConfigured` or
+    /// `capabilityTierFiltered` — for a client that wants to branch.
+    reason: &'static str,
+    /// The same sentence in prose, for a client that just wants to show it.
+    detail: &'static str,
 }
 
 /// `GET …/workflows/tool-slugs` (both scope forms) — the per-workflow copilot's
-/// tool grounding (issue #783). Answers the exact slug set
-/// [`workflow_callable_tool_slugs`](crate::company::workflow_callable_tool_slugs)
-/// computes for the create-time copilot (issue #753), so the two grounding
-/// surfaces cannot drift and a slug shown here is one a proposed `tool_call`
-/// clears at courtesy validation.
+/// tool grounding (issue #783), narrowed to the **effective** set by issue #874.
+///
+/// Answers what
+/// [`workflow_effective_tool_slugs`](crate::company::workflow_effective_tool_slugs)
+/// computes — catalogue, company grant and deployment wiring all agreeing — so
+/// this route and the in-process create/fix copilot
+/// (`crate::harness::workflow_build`) ground on one set and cannot drift.
+///
+/// It deliberately does **not** answer the wider *grant-only* set that
+/// create/save validation accepts. That gate stays permissive on purpose so an
+/// operator may author now and wire the provider later, and this route does not
+/// change it. Serving the grant-only set here was issue #874 — a
+/// granted-but-unwired `web_search` was offered to the copilot, which authored a
+/// node that failed at the first run.
 #[cfg(feature = "openhuman")]
 async fn workflow_tool_slugs(
     company: ScopedCompany,
@@ -2040,8 +2077,45 @@ async fn workflow_tool_slugs(
             ))
             .into_response()
         })?;
+    // `None` — no harness deps on this runtime — means the wiring is unknowable,
+    // not that nothing is wired. Both helpers below read it that way: `slugs`
+    // falls back to the grant-only set and `unwired` stays empty, which is the
+    // pre-#874 answer. That keeps a harness-less host honest instead of telling
+    // the copilot every granted tool is broken.
+    let wiring = company.runtime.workflow_tool_wiring(&record).await;
+    let wired = wiring.as_ref().map(|w| &w.wired_namespaces);
+    let unwired = crate::company::workflow_granted_but_unwired_tool_slugs(&record, wired)
+        .into_iter()
+        .map(|slug| {
+            // Every slug here came out of `WORKFLOW_TOOL_CATALOG`, whose entries
+            // are pinned to `namespace_of`, and it is unwired precisely because
+            // its namespace is in `missing` — so both lookups resolve. The
+            // fallback is a defensive default, not an expected branch.
+            let reason = crate::workflows::caps::workflow_tool_info(&slug)
+                .map(|info| info.namespace)
+                .and_then(|ns| wiring.as_ref().and_then(|w| w.missing.get(ns)).copied());
+            let (reason, detail) = match reason {
+                Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured) => (
+                    "searchBackendNotConfigured",
+                    "granted, but no managed search backend is configured on this deployment; \
+                     ask the platform operator to configure search",
+                ),
+                _ => (
+                    "capabilityTierFiltered",
+                    "granted, but the deployment's capability tier filtered it; ask the platform \
+                     operator to raise the capability tier",
+                ),
+            };
+            UnwiredWorkflowTool {
+                slug,
+                reason,
+                detail,
+            }
+        })
+        .collect();
     Ok(Json(WorkflowToolSlugsResponse {
-        slugs: crate::company::workflow_callable_tool_slugs(&record),
+        slugs: crate::company::workflow_effective_tool_slugs(&record, wired),
+        unwired,
     }))
 }
 
@@ -2054,7 +2128,10 @@ async fn workflow_tool_slugs(
     company: ScopedCompany,
 ) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
     let _ = &company;
-    Ok(Json(WorkflowToolSlugsResponse { slugs: Vec::new() }))
+    Ok(Json(WorkflowToolSlugsResponse {
+        slugs: Vec::new(),
+        unwired: Vec::new(),
+    }))
 }
 
 /// The `GET …/workflows/wired-channels` answer (issue #813): the chat channel
@@ -3833,11 +3910,17 @@ mod tests {
         }
 
         /// Issue #783: the per-workflow copilot's tool-grounding read answers
-        /// `200 {"slugs":[…]}` on **both** scope forms — which also proves the
-        /// static prefix is wired ahead of the dynamic `/workflows/{wid}` (a
-        /// route-miss, or a `tool-slugs` swallowed as a `wid`, would not be this
-        /// shape). The blank tenant grants no tools, so the list is empty here;
-        /// the point pinned is the contract shape and that the route exists.
+        /// `200 {"slugs":[…],"unwired":[…]}` on **both** scope forms — which also
+        /// proves the static prefix is wired ahead of the dynamic
+        /// `/workflows/{wid}` (a route-miss, or a `tool-slugs` swallowed as a
+        /// `wid`, would not be this shape). The blank tenant grants no tools, so
+        /// both lists are empty here; the point pinned is the contract shape and
+        /// that the route exists.
+        ///
+        /// Issue #874 added `unwired` and it is pinned here as **always present**,
+        /// because the console reads it unconditionally: a body that omitted the
+        /// key on a wired host would read as "nothing is unwired" and silently
+        /// restore the bug this route was narrowed to fix.
         #[tokio::test]
         async fn tool_slugs_answers_a_slug_array_on_both_scope_forms() {
             let home_dir = home();
@@ -3858,7 +3941,112 @@ mod tests {
                     body["slugs"].is_array(),
                     "tool-slugs answers a `slugs` array on {uri}, got: {body}"
                 );
+                assert!(
+                    body["unwired"].is_array(),
+                    "tool-slugs answers an `unwired` array on {uri}, got: {body}"
+                );
             }
+        }
+
+        /// Issue #874, the staging repro through the route itself: a company that
+        /// explicitly grants `search`, on a deployment with no managed search
+        /// backend, must NOT be handed `web_search` to ground a proposal on.
+        ///
+        /// This is the regression that shipped. The route answered the
+        /// **grant-only** set, so `web_search` was advertised, the copilot
+        /// authored a `tool_call` on it, and the run died at the first node with
+        /// `tool_call 'web_search' is not available in company workflows`. What
+        /// pins the fix is the pair of assertions: the slug is gone from `slugs`
+        /// **and** present in `unwired` with a reason — dropping it silently would
+        /// leave an operator unable to tell "not allowed" from "not configured".
+        ///
+        /// A granted-and-wired tool (`shell`) stays offered in the same answer, so
+        /// this cannot pass by narrowing the list to nothing.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn tool_slugs_omits_a_granted_but_unwired_tool_and_says_why() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let id = CompanyId::new("acme");
+            let mut manifest = empty_manifest();
+            manifest.tools.allow = vec!["search".to_string(), "shell".to_string()];
+
+            let store = FsCompanyStore::new(home.clone());
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+
+            let mut runtime = RuntimeBuilder::new(home.clone(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            // `workflow_wiring_deps` pins `search: None` — the deployment half of
+            // the repro. Everything else is allowed, so `shell` stays wired.
+            runtime.set_workflow_harness_deps(crate::harness::workflow_wiring_deps(
+                &runtime,
+                None,
+                crate::harness::toolbelt::CapabilityFilter::AllowAll,
+                None,
+            ));
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id, std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/tool-slugs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+
+            let slugs: Vec<&str> = body["slugs"]
+                .as_array()
+                .expect("slugs")
+                .iter()
+                .map(|v| v.as_str().expect("slug"))
+                .collect();
+            assert!(
+                !slugs.contains(&"web_search"),
+                "a granted-but-unwired tool is not offered for grounding: {body}"
+            );
+            assert!(
+                slugs.contains(&"shell"),
+                "a granted AND wired tool is still offered: {body}"
+            );
+
+            let unwired = body["unwired"].as_array().expect("unwired");
+            let entry = unwired
+                .iter()
+                .find(|e| e["slug"] == "web_search")
+                .unwrap_or_else(|| panic!("web_search is reported as unwired: {body}"));
+            assert_eq!(
+                entry["reason"], "searchBackendNotConfigured",
+                "the reason distinguishes an unconfigured provider from a filtered \
+                 capability tier: {body}"
+            );
+            assert!(
+                entry["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("search backend")),
+                "the prose reason is servable as-is: {body}"
+            );
         }
 
         /// A create body whose trigger carries a cron.

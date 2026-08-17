@@ -175,6 +175,10 @@ describe("composeCopilotMessage", () => {
    * Honest absence, the same split `runsKnown` makes: a host that does not serve
    * the tool list must not be told "no tools" — that would suppress a legitimate
    * `tool_call`. It is told the tools could not be listed instead.
+   *
+   * The empty arm says "no tools can run" rather than "none are granted" since
+   * issue #874: the list is now the *effective* set, so a company can hold a
+   * grant and still see an empty list, and the stronger claim would be false.
    */
   it("distinguishes an unlisted tool set from a genuinely empty one", () => {
     const unlisted = composeCopilotMessage(
@@ -187,7 +191,57 @@ describe("composeCopilotMessage", () => {
       { ...context, toolSlugs: [], toolSlugsKnown: true },
       "call a tool",
     );
-    expect(empty).toMatch(/no tools are granted/i);
+    expect(empty).toMatch(/no tools can run/i);
+  });
+
+  /**
+   * Issue #874. A granted-but-unwired tool is named as off-limits rather than
+   * dropped: without the advisory the model cannot tell a tool this company was
+   * never granted from one that simply has no provider on this deployment, so it
+   * either proposes a node that dies at the first run (the bug) or denies the
+   * tool exists. Naming it, with the reason, lets it say why instead.
+   */
+  it("names granted-but-unwired tools as off-limits, with the reason", () => {
+    const message = composeCopilotMessage(
+      {
+        ...context,
+        toolSlugs: ["send_email"],
+        toolSlugsKnown: true,
+        unwiredTools: [
+          {
+            slug: "web_search",
+            reason: "searchBackendNotConfigured",
+            detail: "granted, but no managed search backend is configured",
+          },
+        ],
+      },
+      "add a research step",
+    );
+    expect(message).toMatch(/granted but NOT wired/i);
+    expect(message).toContain("web_search");
+    expect(message).toContain("no managed search backend is configured");
+    expect(message).toMatch(/do NOT author/i);
+  });
+
+  /**
+   * The advisory is absent when there is nothing to advise — an older host
+   * (`undefined`) and a fully wired one (`[]`) both add no section, so the
+   * message never carries an empty "do not author" heading the model has to
+   * reason past.
+   */
+  it("adds no unwired section when there is nothing unwired", () => {
+    for (const unwiredTools of [undefined, []]) {
+      const message = composeCopilotMessage(
+        {
+          ...context,
+          toolSlugs: ["send_email"],
+          toolSlugsKnown: true,
+          unwiredTools,
+        },
+        "add a step",
+      );
+      expect(message).not.toMatch(/granted but NOT wired/i);
+    }
   });
 
   /**
