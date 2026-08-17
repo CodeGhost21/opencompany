@@ -27,8 +27,10 @@ import {
   BookText,
   CheckCircle2,
   FileText,
+  Columns3,
   Loader2,
   Lock,
+  Rows3,
   Plus,
   RefreshCw,
   Search,
@@ -37,6 +39,7 @@ import {
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
+import { patchTask } from "@/api/tasks";
 import {
   byline,
   composableFields,
@@ -87,6 +90,17 @@ interface Props {
   sub?: string | null;
   /** Navigates to `#/ledgers/<slug>`, so a ledger survives a refresh. */
   onOpenLedger?: (slug: string | null) => void;
+  /**
+   * Opens a task card's detail screen (`#/tasks/<id>`).
+   *
+   * The board is the `tasks` ledger and renders here, but a *card* carries far
+   * more than a ledger row — a timeline, a plan brief, a discussion, attempts, a
+   * workflow proposal, steer controls. Reproducing any of that here would be a
+   * worse second copy, so the board's cards link out to the screen that already
+   * does it. Absent when this view is rendered with nowhere to link to, in which
+   * case a card opens the ordinary amend form.
+   */
+  onOpenCard?: (id: string) => void;
 }
 
 /** A row is either being opened fresh or amended; the form differs only in id. */
@@ -99,7 +113,13 @@ interface Composing {
   closing: boolean;
 }
 
-export function LedgersView({ client, company, sub, onOpenLedger }: Props) {
+export function LedgersView({
+  client,
+  company,
+  sub,
+  onOpenLedger,
+  onOpenCard,
+}: Props) {
   const [ledgers, setLedgers] = useState<LedgerSummary[]>([]);
   const [faults, setFaults] = useState<string[]>([]);
   const [remaining, setRemaining] = useState(0);
@@ -115,6 +135,15 @@ export function LedgersView({ client, company, sub, onOpenLedger }: Props) {
   const [confirmDelete, setConfirmDelete] = useState<LedgerEntry | null>(null);
   const [declaring, setDeclaring] = useState(false);
   const [rendered, setRendered] = useState<string | null>(null);
+  /**
+   * Columns or rows.
+   *
+   * Board by default for anything with a status, because that is what a
+   * ledger's statuses *are* — a lifecycle, read left to right. The list is for
+   * reading a row's whole contents, which is what a ledger with long prose
+   * fields is actually for; the board truncates by construction.
+   */
+  const [mode, setMode] = useState<"board" | "list">("board");
 
   const ledger = useMemo(
     () => ledgers.find((held) => held.slug === selected) ?? null,
@@ -210,6 +239,47 @@ export function LedgersView({ client, company, sub, onOpenLedger }: Props) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  /**
+   * Moves a row into `status` — the drop half of the board.
+   *
+   * Two writes, one gesture, and the split is the whole reason the board can
+   * live here at all. A native ledger's rows are the task board's, and entering
+   * a column *fires work*: the dispatch edge, the planning pass, the settle. So
+   * that write goes through `patchTask`, exactly as dragging on the old board
+   * did. Every other ledger takes the ordinary `record_entry` merge.
+   *
+   * A status that demands a reason does not write at all — it opens the compose
+   * form pre-filled instead, because the host refuses a silent close and asking
+   * first is the same rule met before it bites.
+   */
+  const move = async (entry: LedgerEntry, status: string) => {
+    if (!company || !ledger || entry.status === status) return;
+    if (statusNeedsReason(ledger, status) && !entry.fields.reason?.trim()) {
+      setComposing({
+        id: entry.id,
+        fields: { ...entry.fields },
+        status,
+        closing: true,
+      });
+      return;
+    }
+    try {
+      if (ledger.source === "native") {
+        await patchTask(client, company, entry.id, { column: status });
+      } else {
+        await recordEntry(client, company, ledger.slug, {
+          id: entry.id,
+          status,
+        });
+      }
+      await Promise.all([refreshRead(), refreshList()]);
+    } catch (e) {
+      // Shown verbatim: the host's refusal is the only place the reason for a
+      // rejected move exists — this screen validates nothing itself.
+      toast.error(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -403,6 +473,23 @@ export function LedgersView({ client, company, sub, onOpenLedger }: Props) {
                     ))}
                   </SelectContent>
                 </Select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setMode(mode === "board" ? "list" : "board")}
+                  title={
+                    mode === "board"
+                      ? "Show every field on each row"
+                      : "Group rows by status"
+                  }
+                >
+                  {mode === "board" ? (
+                    <Rows3 className="mr-2 size-4" />
+                  ) : (
+                    <Columns3 className="mr-2 size-4" />
+                  )}
+                  {mode === "board" ? "List" : "Board"}
+                </Button>
                 <Button variant="outline" size="sm" onClick={() => void showRendered()}>
                   <FileText className="mr-2 size-4" />
                   Rendered file
