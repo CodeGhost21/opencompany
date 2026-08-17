@@ -170,7 +170,7 @@ test("deciding inline detaches, and the continuation lands in the same channel",
 
   // The card settles rather than vanishing, so the decision visibly lands.
   await expect(card(page, IN_ENGINEERING.id)).toContainText(
-    /Approved — the agent is completing the action/,
+    /Approved — recorded/,
     { timeout: 30_000 },
   );
   // And the work resumes here, exactly once.
@@ -224,7 +224,7 @@ test("a decision made on the Approvals page settles the inline card, with no rel
   await openChannel(page, ENGINEERING.id);
 
   await expect(card(page, IN_ENGINEERING.id)).toContainText(
-    /Approved — the agent is completing the action/,
+    /Approved — recorded/,
     { timeout: 30_000 },
   );
   await expect(card(page, IN_ENGINEERING.id).getByRole("button", { name: "Approve" })).toHaveCount(

@@ -33,9 +33,11 @@ const PARKED = [
     task: { link: "unlinked" },
     // Present, and load-bearing since #395: `agent` is what makes this a
     // blocked *harness tool call* rather than a native effect the runtime
-    // performs itself, and the console now words the confirmation differently
-    // for the two — "the agent is completing the action" only when there is an
-    // agent, "carrying it out now" when there is not.
+    // performs itself, and the console words the confirmation differently for
+    // the two — `approvedLine` names the agent, `approvedByRuntimeLine` does
+    // not, because there is no agent to re-dispatch. They diverge only once the
+    // host reports `stillAwaiting`; without it both answer "recorded", which is
+    // the arm this fixture exercises.
     //
     // The fixture omitted it and so exercised the no-agent arm while the
     // assertion below still named the agent one, which is why this spec went
@@ -118,7 +120,11 @@ test("the line recording a decision is visible in a real channel", async ({ page
   // Back in the channel the operator was last in — the console keeps that
   // across the trip to Approvals, which is the whole of the fix.
   await navigate(page, "Chat", /#\/chat/);
-  await expect(console_(page).getByText(/Approved — the agent is completing the action/)).toBeVisible({
+  // The stub above answers without `stillAwaiting`, which is the pre-#561 host.
+  // Nothing is claimed about what happens next in that case — "recorded" is the
+  // whole promise, and the optimistic sentence this used to assert is exactly
+  // what #561 removed.
+  await expect(console_(page).getByText(/Approved — recorded/)).toBeVisible({
     timeout: 30_000,
   });
 });

@@ -1149,6 +1149,14 @@ struct ChatResponse {
     /// that would need it.
     #[serde(skip_serializing_if = "Option::is_none")]
     message_id: Option<String>,
+    /// The same count [`ResolveReceiptDto::still_awaiting`] carries, for the
+    /// non-detached resolve the Approvals page makes (issue #561).
+    ///
+    /// Only ever set by a resolve. Omitted everywhere else — a chat turn is not
+    /// blocked on anybody's sign-off — so no other caller has to learn it
+    /// exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    still_awaiting: Option<usize>,
 }
 
 /// Runs one operator-chat cycle, returning the report and, when a complaint
@@ -1407,6 +1415,8 @@ async fn chat_and_emit(
         // sequence is the first the cycle journaled (issue #364).
         message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
         responses: report.responses,
+        // A chat turn is nobody's sign-off, so this stays absent here.
+        still_awaiting: None,
     }))
 }
 
@@ -2106,6 +2116,15 @@ struct ResolveReceiptDto {
     /// resolve a no-op that mints no second grant, and saying so lets the console
     /// render it as the success it is.
     already_resolved: bool,
+    /// How many OTHER decisions the turn behind this approval is still blocked
+    /// on (issue #561).
+    ///
+    /// Since #469 a turn continues once, when the last decision it parked
+    /// lands. So on a turn that parked four calls, three of the operator's four
+    /// clicks release nothing — and the console said "the agent is completing
+    /// the action" for all four. This is what lets it say the true thing
+    /// instead. `0` means this decision released the turn.
+    still_awaiting: usize,
 }
 
 async fn run_resolve(
@@ -2142,6 +2161,11 @@ async fn run_resolve(
         }
     };
 
+    // Read once, here: the verdict is durable and the follow-up cycle — which is
+    // what decrements the turn's counter — has not run yet, so this still counts
+    // the approval just decided and `decisions_still_awaited` subtracts it.
+    let still_awaiting = runtime.decisions_still_awaited(&id);
+
     if body.detach {
         // Nothing here waits on the turn. The webhook fan-out still owes the
         // report, so it moves onto its own task rather than being dropped —
@@ -2162,6 +2186,7 @@ async fn run_resolve(
         return Ok(Json(ResolveReceiptDto {
             recorded: true,
             already_resolved: receipt.already_resolved(),
+            still_awaiting,
         })
         .into_response());
     }
@@ -2171,6 +2196,7 @@ async fn run_resolve(
     Ok(Json(ChatResponse {
         message_id: None,
         responses: report.responses,
+        still_awaiting: Some(still_awaiting),
     })
     .into_response())
 }
@@ -4359,6 +4385,91 @@ mod test {
     /// Issue #618: membership gets you the approval, role gets you its
     /// contents.
     ///
+    /// Issue #561: the receipt says whether this decision actually released the
+    /// turn.
+    ///
+    /// A turn that parked two calls is blocked on two decisions (issue #469
+    /// continues it once, on the last one). The console used to tell the
+    /// operator "the agent is completing the action" on the first click, which
+    /// is false — nothing runs until the second. This is the count it now words
+    /// that sentence from: one still owed after the first decision, none after
+    /// the second.
+    #[tokio::test]
+    async fn a_receipt_says_how_many_decisions_the_turn_is_still_blocked_on() {
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        let effect = |memo: &str| crate::ports::types::Effect {
+            kind: "payment.send".into(),
+            group: crate::ports::types::EffectGroup::Spend,
+            amount_usd: Some(10.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "to": "board@example.test", "memo": memo }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+
+        // One turn, two parked calls — the shape an operator meets whenever an
+        // agent gates more than once in a turn.
+        for (id, memo) in [("appr-561-a", "first"), ("appr-561-b", "second")] {
+            runtime
+                .journal
+                .record_parked(
+                    &crate::ports::types::ApprovalId::new(id),
+                    &effect(memo),
+                    1_000,
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    Some("cycle-561".to_string()),
+                )
+                .await
+                .unwrap();
+            runtime.continuations.arm("cycle-561");
+        }
+
+        let app = router(state);
+        let resolve = |app: axum::Router, id: &'static str| async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/company/approvals/{id}"))
+                        .header("content-type", "application/json")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::from(
+                            serde_json::json!({ "verdict": "approve", "detach": true }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let first = resolve(app.clone(), "appr-561-a").await;
+        assert_eq!(
+            first["stillAwaiting"], 1,
+            "the first decision releases nothing — the turn is still blocked on the second: {first}"
+        );
+
+        // The count is read per decision, at the moment the verdict lands. What
+        // happens to the sibling afterwards is issue #848's business — a turn's
+        // gated calls may be consolidated and settle together — and this test
+        // deliberately asserts only the half the operator's confirmation is
+        // worded from: this click did not release the turn.
+        //
+        // The other half — the last decision reporting nothing outstanding —
+        // is pinned on the queue itself in
+        // `runtime::continuation::test::outstanding_counts_the_decision_being_made`,
+        // where it is deterministic rather than racing a spawned follow-up.
+    }
+
     /// **The two-account part is the point.** The harness signs every request
     /// in as an admin, so a redaction verified only as an admin passes
     /// identically against no redaction at all — the test would prove nothing
@@ -4787,7 +4898,7 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
         );
 
         // The answer really did precede the work: the turn is only now under
@@ -4965,7 +5076,7 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": true })
+            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0 })
         );
         assert_eq!(
             c.runtime.grants.live_count(),
@@ -4998,7 +5109,7 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
         );
         assert!(await_continuation(&c.runtime).await);
         assert_eq!(c.runtime.grants.live_count(), 1);

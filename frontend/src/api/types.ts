@@ -273,6 +273,15 @@ export interface ChatReactionDto {
 export interface ChatResponse {
   responses: OutboundMessage[];
   /**
+   * On a resolve: how many OTHER decisions the turn behind that approval is
+   * still blocked on (issue #561). `0` means this decision released it.
+   *
+   * Absent on every other answer, and on a host that predates the field — which
+   * the console reads as "cannot tell", and words its confirmation without a
+   * claim about what happens next rather than guessing the optimistic one.
+   */
+  stillAwaiting?: number;
+  /**
    * The durable id the operator's own message was journaled under (issue #364)
    * — the id `chat/history` will return for it. Absent on a host that predates
    * the field, which the console reads as "this message cannot be threaded or
@@ -397,6 +406,12 @@ export interface ResolveReceipt {
   recorded: boolean;
   /** There was nothing left to resolve — a double-click, not a failure. */
   alreadyResolved: boolean;
+  /**
+   * How many OTHER decisions the turn behind this approval is still blocked on
+   * (issue #561). `0` means this decision released it; absent on a host that
+   * predates the field.
+   */
+  stillAwaiting?: number;
 }
 
 export type Verdict = "approve" | "deny";
