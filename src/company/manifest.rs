@@ -517,6 +517,30 @@ impl CompanyManifest {
             }
         }
 
+        // `[globals].disable`: every entry must name a global that exists. An
+        // opt-out that matches nothing is the one failure mode this list must
+        // not have — the operator wrote it, believed it, and would still get the
+        // global.
+        for entry in &self.globals.disable {
+            if crate::globals::has(entry) {
+                continue;
+            }
+            match entry.split_once(':') {
+                Some((kind, _)) if !crate::globals::DISABLE_KINDS.contains(&kind) => {
+                    problems.push(format!(
+                        "`[globals].disable` entry `{entry}` has an unknown kind `{kind}` — use one of {}.",
+                        join_backticked(crate::globals::DISABLE_KINDS)
+                    ));
+                }
+                Some(_) => problems.push(format!(
+                    "`[globals].disable` entry `{entry}` names no global — there is nothing to disable."
+                )),
+                None => problems.push(format!(
+                    "`[globals].disable` entry `{entry}` is missing its kind — write `<kind>:<id>`, e.g. `agent:{entry}`."
+                )),
+            }
+        }
+
         problems
     }
 
