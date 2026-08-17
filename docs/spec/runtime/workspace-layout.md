@@ -277,9 +277,17 @@ by the operator can therefore accumulate there with no size bound — there are 
 ignore rules and `[workspace]` quotas do not apply to Git objects. Treat the
 feature as suitable for workspaces whose contents are not secrets, or purge
 history deliberately on the same schedule such data would otherwise be rotated.
-The supported purge path is ordinary Git maintenance run against the out-of-band
-repository from the host — `git --git-dir=<workspace>.git reflog expire --expire=now --all` followed by `git --git-dir=<workspace>.git gc --prune=now` drops unreferenced checkpoint blobs and shrinks the repository; deleting the whole `<workspace>.git/` directory resets a workspace to its next checkpoint baseline. No retention is automatic: the checkpointer
-never rewrites history and leaves the repository alone between checkpoints.
+The supported purge path is to drop the checkpoint history from the host,
+because every checkpoint is committed to the `checkpoints` branch and remains
+reachable from it even after data leaves the working tree — reflog expiry and
+`gc` alone do **not** remove it. The clean purge is to delete the whole
+`<workspace>.git/` directory, after which the next tool call re-initializes the
+checkpointer from a fresh baseline. To keep a workspace but drop its prior
+history without fully resetting, delete the branch ref first so its commits
+become unreachable, then garbage-collect them: `git --git-dir=<workspace>.git update-ref -d refs/heads/checkpoints` followed by `git --git-dir=<workspace>.git gc --prune=now`. Either way, `<workspace>.git` must be removed or the `checkpoints` ref must be deleted before `gc --prune=now` will actually free the blobs. Deleting
+`<workspace>.git/` resets a workspace to its next checkpoint baseline. No
+retention is automatic: the checkpointer never rewrites history and leaves the
+repository alone between checkpoints.
 
 **The first two quotas are soft/advisory in the binary.** At boot `serve`
 measures the workspace (and `tmp/`) and emits an operator-visible
