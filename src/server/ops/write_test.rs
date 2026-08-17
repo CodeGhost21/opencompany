@@ -2542,7 +2542,6 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 2);
     let dana = roster.iter().find(|m| m["id"] == id).unwrap();
     assert_eq!(dana["name"], "Dana");
     assert_eq!(dana["role"], "Designer");

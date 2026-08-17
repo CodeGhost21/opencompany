@@ -6695,7 +6695,11 @@ members = ["legal_counsel"]
         let out = result.output_for_llm(true);
         assert!(out.contains("No durable facts recorded"), "{out}");
         assert!(out.contains("No recent activity"), "{out}");
-        assert!(out.contains("No saved workflows"), "{out}");
+        // Not "no saved workflows" any more: the global baseline ships graphs
+        // every company has, wired store or not.
+        for workflow in crate::globals::workflows() {
+            assert!(out.contains(&workflow.id), "{out}");
+        }
     }
 
     /// Regression: a saved workflow (on disk) and an operator-added overlay

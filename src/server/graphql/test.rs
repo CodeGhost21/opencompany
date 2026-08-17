@@ -919,7 +919,9 @@ async fn empty_surfaces_resolve_to_empty_lists() {
     assert_eq!(folder["createdBy"]["agentId"], "maya");
     assert_eq!(company["inboxes"].as_array().unwrap().len(), 0);
     assert_eq!(company["skills"].as_array().unwrap().len(), 0);
-    assert_eq!(company["workflows"].as_array().unwrap().len(), 0);
+    // The global baseline is listed in every company, so "empty" here means the
+    // company has no graphs of its own.
+    assert_eq!(own_workflows(&company["workflows"]).len(), 0);
 }
 
 #[tokio::test]
@@ -1318,7 +1320,7 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
     )
     .await;
     let company = &value["data"]["company"];
-    let summaries = company["workflows"].as_array().expect("summaries");
+    let summaries = own_workflows(&company["workflows"]);
     assert_eq!(summaries.len(), 1, "value: {value}");
     assert_eq!(summaries[0]["id"], "hosted");
     // The real name from the overlay body, not the id fallback.
@@ -1402,9 +1404,7 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
         r#"{"query":"{ company(id:\"acme\"){ workflows { id name enabled } } }"}"#,
     )
     .await;
-    let summaries = value["data"]["company"]["workflows"]
-        .as_array()
-        .expect("summaries");
+    let summaries = own_workflows(&value["data"]["company"]["workflows"]);
     assert_eq!(summaries.len(), 1, "value: {value}");
     assert_eq!(summaries[0]["id"], "orphan");
     assert_eq!(summaries[0]["name"], "Orphan Flow");
