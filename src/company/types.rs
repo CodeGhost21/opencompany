@@ -1526,6 +1526,64 @@ mod test {
         assert_eq!(back.context, None);
     }
 
+    /// A bare `context` string is `Read`; `{ path, access = "write" }` is the
+    /// only way to grant `Write`. `write_scope` collects exactly the write
+    /// entries, and `None` — either an omitted `context` key or a `context`
+    /// with no write entry — is unconfined, not "confined to nothing".
+    #[test]
+    fn write_scope_is_none_unless_a_context_entry_declares_write() {
+        let mut agent = base_agent();
+
+        agent.context = None;
+        assert_eq!(agent.write_scope(), None, "an omitted context key is unconfined");
+
+        agent.context = Some(vec!["Brand/Voice.md".into()]);
+        assert_eq!(
+            agent.write_scope(),
+            None,
+            "a read-only context list is unconfined, not confined to nothing"
+        );
+
+        let write_entry: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = ["Brand/Voice.md", { path = "Agents/critic/notes.md", access = "write" }]
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            write_entry.write_scope(),
+            Some(vec!["Agents/critic/notes.md".to_string()]),
+            "only the declared write entry is in scope, not the read one"
+        );
+    }
+
+    /// An omitted `ledgers` key is unrestricted `Record` access to every slug
+    /// — the tool surface every agent had before this field existed. A
+    /// declared list answers only for the slugs it names.
+    #[test]
+    fn ledger_access_defaults_to_unrestricted_record() {
+        let mut agent = base_agent();
+        agent.ledgers = None;
+        assert_eq!(agent.ledger_access("tasks"), Some(LedgerAccess::Record));
+        assert_eq!(agent.ledger_access("anything"), Some(LedgerAccess::Record));
+
+        agent.ledgers = Some(vec![
+            LedgerGrant {
+                name: "tasks".into(),
+                access: LedgerAccess::Record,
+            },
+            LedgerGrant {
+                name: "decisions".into(),
+                access: LedgerAccess::Read,
+            },
+        ]);
+        assert_eq!(agent.ledger_access("tasks"), Some(LedgerAccess::Record));
+        assert_eq!(agent.ledger_access("DECISIONS"), Some(LedgerAccess::Read));
+        assert_eq!(agent.ledger_access("goals"), None, "an undeclared slug is unreachable");
+    }
+
     /// The `[plan]` section (issue #108) survives a TOML → struct → JSON → struct
     /// round-trip, and an absent section deserializes to the not-set default.
     #[test]
