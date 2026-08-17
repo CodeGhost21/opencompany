@@ -1,2 +1,11 @@
 role = "Strategist"
 description = "Synthesize findings into strategy recommendations."
+
+# Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
+# manages its own work on the board and sees, but does not redefine, company
+# direction. The orchestrator keeps unrestricted access.
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+]
