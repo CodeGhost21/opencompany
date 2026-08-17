@@ -89,6 +89,31 @@ fn require<'a>(body: &'a Value, key: &str) -> Result<&'a Value> {
     })
 }
 
+/// Pulls a required *array* out of a Chargebee response, or fails.
+///
+/// A successful empty `list` means "no rows" — that is the real answer and
+/// stays real. A missing or non-array `list` means the reply's shape moved,
+/// and projecting that as an empty result would be a confident false negative
+/// about a billing system (an agent answering "no invoices" to a site that may
+/// hold any number of them). `paypal::api::list_transactions` makes the same
+/// call for the same reason.
+fn require_array<'a>(body: &'a Value, key: &str) -> Result<&'a Vec<Value>> {
+    body.get(key).and_then(Value::as_array).ok_or_else(|| {
+        tracing::warn!(
+            expected = key,
+            body = %body.to_string().chars().take(200).collect::<String>(),
+            "[chargebee] reply carried no `{key}` array"
+        );
+        OpenCompanyError::Chargebee {
+            status: 0,
+            code: "unexpected_response".to_string(),
+            message: format!(
+                "Chargebee's reply carried no `{key}` array. The reply is in the host log."
+            ),
+        }
+    })
+}
+
 /// Projects Chargebee's invoice object onto [`InvoiceSummary`].
 fn summarize_invoice(invoice: &Value, payment_url: Option<String>) -> InvoiceSummary {
     let num = |key: &str| invoice.get(key).and_then(Value::as_i64).unwrap_or(0);
