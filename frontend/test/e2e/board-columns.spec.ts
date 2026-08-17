@@ -5,18 +5,18 @@ import { LIVE_BRAIN } from "./capabilities";
 /**
  * Issue #301 — the board's shape, asserted against a live host.
  *
- * This spec is the drift guard for the console half of a two-language mirror.
- * `BOARD_COLUMNS` (`src/ports/tasks.rs`) is the source of truth and the REST
- * write boundary rejects a card against it; `TASK_COLUMNS`
- * (`src/lib/tasks-sample.ts`) is what actually renders. A Rust test cannot see
- * the TS list, and there is no frontend unit runner here (the console's scripts
- * are typecheck / build / e2e only) — so the two lists are only ever joined by
- * a test that drives the rendered board against a real host. A column present
- * on one side alone shows up here as either one that never renders or one whose
- * writes always 400.
+ * **The two-language mirror this used to guard is gone.** `TASK_COLUMNS` was a
+ * hand-maintained copy of the host's list in `src/lib/tasks-sample.ts`, and
+ * this spec existed because *"a Rust test cannot see the TS list"* — so only a
+ * rendered board driven against a real host could join them. The console now
+ * reads its columns and their labels off the `tasks` ledger, built from the
+ * host's single table (`src/ledger/board.rs`), and the labels below are pinned
+ * there by `the_labels_are_the_ones_every_surface_renders`.
  *
- * Generating one list from the other is the durable fix and stays deferred: it
- * needs a build step across a separate npm build that this crate does not have.
+ * What this still guards is the end-to-end path, which no unit test on either
+ * side reaches: that the declared columns actually arrive over the wire, in
+ * order, and render. A column the host declares but the console never shows —
+ * a broken ledger read, a dropped label — fails here and nowhere else.
  */
 
 const API = "/api/v1/company";

@@ -170,6 +170,30 @@ mod test {
         );
     }
 
+    /// The labels, pinned.
+    ///
+    /// This assertion used to be impossible to make here. The console kept its
+    /// own copy of these strings, so the only thing that could join the two
+    /// lists was an end-to-end test driving a rendered board against a live
+    /// host — `test/e2e/board-columns.spec.ts`, whose comment said as much:
+    /// *"a Rust test cannot see the TS list."* Now the console reads these off
+    /// the `tasks` ledger, so there is one list and this is it.
+    #[test]
+    fn the_labels_are_the_ones_every_surface_renders() {
+        let labels: Vec<&str> = COLUMNS.iter().map(|column| column.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "To-do",
+                "Planning",
+                "In progress",
+                "Paused",
+                "In review",
+                "Done"
+            ]
+        );
+    }
+
     #[test]
     fn every_column_has_a_label_that_is_not_its_wire_word() {
         for column in &COLUMNS {
