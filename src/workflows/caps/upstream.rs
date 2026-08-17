@@ -427,16 +427,22 @@ impl UpstreamReport {
     /// not see everything, and the operator has to be able to know that without
     /// reading the host's logs.
     pub(super) fn notice(&self) -> Option<String> {
-        // An omitted source is also `truncated()` (it kept nothing), so the two
-        // counts are separated here rather than double-reported: `cut` is the
-        // sources that are in the turn as fragments, `omitted` the ones that are
-        // not in it at all.
-        let cut = self
-            .sources
+        // `cut` is the sources that are in the turn as fragments, `omitted` the
+        // ones that are not in it at all — separated rather than double-reported.
+        //
+        // Counted over the rendered prefix directly rather than by subtracting
+        // `omitted` from every `truncated()` row, because that subtraction
+        // assumed every omitted row is also truncated. One that produced nothing
+        // has `kept == produced`, so it is not truncated, and subtracting it
+        // anyway under-counted `cut` — to zero in the two-source case, which took
+        // the omission-only branch and never told the operator a rendered source
+        // had been cut at all. `bound_sections` always appends the omitted rows
+        // last, so the rendered ones are exactly the leading `sources - omitted`.
+        let rendered = self.sources.len().saturating_sub(self.omitted);
+        let cut = self.sources[..rendered]
             .iter()
             .filter(|source| source.truncated())
-            .count()
-            .saturating_sub(self.omitted);
+            .count();
         if cut == 0 && self.omitted == 0 {
             return None;
         }
@@ -666,6 +672,44 @@ mod tests {
         assert!(notice.contains("1 of them was truncated"), "{notice}");
         assert!(notice.contains("32000 characters"), "{notice}");
         assert!(notice.contains("summarise each one"), "{notice}");
+    }
+
+    /// An empty source in the omitted tail must not erase the truncation half of
+    /// the notice.
+    ///
+    /// CodeRabbit on PR #851: `cut` was derived by subtracting `omitted` from the
+    /// count of every `truncated()` row, which assumes every omitted row is also
+    /// truncated. One that produced nothing has `kept == produced`, so it is
+    /// *not* truncated, and subtracting it anyway under-counted `cut` — here to
+    /// zero, which took the omission-only branch and left the operator never told
+    /// that a rendered source had been cut.
+    #[test]
+    fn an_empty_omitted_source_does_not_hide_a_truncated_one() {
+        let report = UpstreamReport {
+            sources: vec![
+                // Rendered, and cut.
+                SourceBudget {
+                    produced: 40_000,
+                    kept: 31_900,
+                },
+                // Omitted, and produced nothing — so `truncated()` is false.
+                SourceBudget {
+                    produced: 0,
+                    kept: 0,
+                },
+            ],
+            budget: 32_000,
+            omitted: 1,
+        };
+        let notice = report.notice().expect("a cut fold speaks");
+        assert!(
+            notice.contains("1 of them were truncated"),
+            "the truncated rendered source is still reported: {notice}"
+        );
+        assert!(
+            notice.contains("a further 1 could not be shown"),
+            "the omission is still reported alongside it: {notice}"
+        );
     }
 
     // ── The bound must hold for the reporting of the bound, too ──
