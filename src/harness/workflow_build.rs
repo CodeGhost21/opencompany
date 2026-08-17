@@ -65,8 +65,7 @@ use tinyagents::harness::model::{ModelRequest, ModelResponse};
 use crate::company::runtime::CompanyRuntime;
 use crate::company::{
     WORKFLOW_DESTINATION_KINDS, WorkflowGraphSpec, courtesy_validate_draft,
-    list_workflows_with_globals,
-    raw_workflow_from_spec,
+    list_workflows_with_globals, raw_workflow_from_spec,
 };
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;

@@ -123,7 +123,11 @@ fn embed_globals(root: &Path) {
     let manifest = std::fs::read_to_string(globals.join("globals.toml")).unwrap_or_default();
 
     let mut agents = Vec::new();
-    collect(&globals.join("agents"), &globals.join("agents"), &mut agents);
+    collect(
+        &globals.join("agents"),
+        &globals.join("agents"),
+        &mut agents,
+    );
     agents.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut workflows = Vec::new();

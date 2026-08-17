@@ -178,7 +178,9 @@ impl WorkflowAdmin {
     /// Read from the same record load, because the two are read together: a
     /// union that saw the overlays but not the opt-out would answer with a
     /// global graph this company disabled.
-    async fn overlays_and_globals(&self) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ToolResult> {
+    async fn overlays_and_globals(
+        &self,
+    ) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ToolResult> {
         match self.store.load(&self.company).await {
             Ok(record) => Ok(record
                 .map(|r| (r.overlay_workflows, r.manifest.globals.disable))

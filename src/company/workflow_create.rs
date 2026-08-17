@@ -1489,10 +1489,10 @@ pub(crate) async fn set_company_workflow_enabled(
         &record.manifest.globals.disable,
         wid,
     )
-        .ok()
-        .flatten()
-        .map(|file| file.name)
-        .unwrap_or_else(|| wid.to_string());
+    .ok()
+    .flatten()
+    .map(|file| file.name)
+    .unwrap_or_else(|| wid.to_string());
 
     if !record.set_workflow_enabled(wid, enabled) {
         return Ok(false);

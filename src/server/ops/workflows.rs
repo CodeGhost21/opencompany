@@ -85,9 +85,8 @@ use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
     WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, delete_company_workflow,
-    list_workflows_with_globals, load_workflow_with_globals,
-    rollback_company_workflow, seed_file_exists,
-    set_company_workflow_enabled, update_company_workflow, workflow_version,
+    list_workflows_with_globals, load_workflow_with_globals, rollback_company_workflow,
+    seed_file_exists, set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -1313,12 +1312,16 @@ async fn run_workflow(
     let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
         .await
         .map_err(IntoResponse::into_response)?;
-    let file =
-        load_workflow_with_globals(company.runtime.source_dir(), &overlays, &globals_disable, &wid)
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
-        })?;
+    let file = load_workflow_with_globals(
+        company.runtime.source_dir(),
+        &overlays,
+        &globals_disable,
+        &wid,
+    )
+    .map_err(|e| ApiError(e).into_response())?
+    .ok_or_else(|| {
+        ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+    })?;
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let detach = body.detach;
@@ -1924,12 +1927,16 @@ async fn fix_from_run(
         )))
         .into_response());
     }
-    let file =
-        load_workflow_with_globals(company.runtime.source_dir(), &overlays, &globals_disable, &wid)
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
-        })?;
+    let file = load_workflow_with_globals(
+        company.runtime.source_dir(),
+        &overlays,
+        &globals_disable,
+        &wid,
+    )
+    .map_err(|e| ApiError(e).into_response())?
+    .ok_or_else(|| {
+        ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+    })?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry` field on
     // `WorkflowNodeSpec` (the builder never authors them — see its own doc
     // comment), so a node that had either set loses it silently once the
@@ -2467,6 +2474,9 @@ fn relabel_blocked(nodes: &mut [WorkflowRunNode], blocked: &[crate::ports::Workf
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The globals-unaware readers: these tests assert the company's own two
+    // sources, so they call the form that resolves no baseline.
+    use crate::company::{list_workflows_union, load_workflow_union};
 
     const DEMO: &str = r#"
         id = "demo"

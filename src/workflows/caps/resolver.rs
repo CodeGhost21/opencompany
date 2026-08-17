@@ -232,9 +232,12 @@ impl StoreWorkflowResolver {
             }
             // An unresolvable / invalid child is not itself a cycle — it will
             // fail loudly when the engine resolves it. Skip it in the scan.
-            let Ok(Some(file)) =
-                load_workflow_with_globals(source_dir.as_deref(), &overlays, &globals_disable, &current)
-            else {
+            let Ok(Some(file)) = load_workflow_with_globals(
+                source_dir.as_deref(),
+                &overlays,
+                &globals_disable,
+                &current,
+            ) else {
                 continue;
             };
             for referenced in Self::static_refs(&file) {
@@ -286,12 +289,12 @@ impl WorkflowResolver for StoreWorkflowResolver {
             &globals_disable,
             workflow_id,
         )
-            .map_err(|err| EngineError::Capability(format!("sub_workflow '{workflow_id}': {err}")))?
-            .ok_or_else(|| {
-                EngineError::Capability(format!(
-                    "sub_workflow '{workflow_id}' is not a saved workflow on this company"
-                ))
-            })?;
+        .map_err(|err| EngineError::Capability(format!("sub_workflow '{workflow_id}': {err}")))?
+        .ok_or_else(|| {
+            EngineError::Capability(format!(
+                "sub_workflow '{workflow_id}' is not a saved workflow on this company"
+            ))
+        })?;
 
         // (d) Static cycle guard over the same union, before the child is handed
         // back to the engine to compile + run.

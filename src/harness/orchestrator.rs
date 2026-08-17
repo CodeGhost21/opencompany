@@ -1456,9 +1456,9 @@ impl Tool for QueryCompanyTool {
             &overlay_workflows,
             &globals_disable,
         )
-                .into_iter()
-                .map(|f| (f.id, f.name))
-                .collect();
+        .into_iter()
+        .map(|f| (f.id, f.name))
+        .collect();
         let mut seen: std::collections::HashSet<String> =
             workflows.iter().map(|(id, _)| id.clone()).collect();
         if let Some(record) = &record {
