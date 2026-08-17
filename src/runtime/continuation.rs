@@ -331,4 +331,43 @@ mod test {
             "the single continuation carries every decision"
         );
     }
+
+    /// Issue #561: the number the console words its confirmation from.
+    ///
+    /// `outstanding` counts the decisions a turn is still blocked on INCLUDING
+    /// the one being resolved, because the resolve reads it before the
+    /// follow-up cycle decrements it. `CompanyRuntime::decisions_still_awaited`
+    /// subtracts that one; this pins the arithmetic it subtracts from, since a
+    /// count that is off by one here is a sentence that is wrong on screen.
+    #[test]
+    fn outstanding_counts_the_decision_being_made() {
+        let q = ContinuationQueue::default();
+        for _ in 0..3 {
+            q.arm("cycle-1");
+        }
+
+        // Before any decision: three parked, so approving one leaves two.
+        assert_eq!(q.outstanding("cycle-1"), 3);
+
+        assert!(q.decide("cycle-1", Some(resolved("a1"))).is_none());
+        assert_eq!(q.outstanding("cycle-1"), 2, "one decided, two still owed");
+
+        assert!(q.decide("cycle-1", Some(resolved("a2"))).is_none());
+        assert_eq!(q.outstanding("cycle-1"), 1);
+
+        // The last decision releases the turn and drops its state, so nothing
+        // is outstanding — which is what the console renders as "picking it up".
+        assert!(q.decide("cycle-1", Some(resolved("a3"))).is_some());
+        assert_eq!(q.outstanding("cycle-1"), 0);
+    }
+
+    /// A turn this queue never armed reports nothing outstanding, and continues
+    /// on its own. The console must read that as "picking it up", not as a wait
+    /// with no end.
+    #[test]
+    fn an_ungated_turn_is_awaiting_nothing() {
+        let q = ContinuationQueue::default();
+        assert_eq!(q.outstanding("never-armed"), 0);
+        assert!(q.decide("never-armed", Some(resolved("a1"))).is_some());
+    }
 }

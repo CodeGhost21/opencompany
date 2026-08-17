@@ -304,7 +304,7 @@ const NAMESPACE_LABELS: Record<string, string> = {
 };
 
 // Badge variant subset the media status row uses.
-type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
+export type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
 
 /**
  * The media-generation capability (issue #109) is opt-in per tool grant and
@@ -341,9 +341,8 @@ function mediaStatus(caps: CapabilityStatusDto): { label: string; variant: Badge
 
 /**
  * The Composio capability (issue #110) is opt-in per tool grant and gated on a
- * per-tenant OAuth token, so it gets its own status row like media. Four states:
- * not compiled into this build, not granted, granted-but-awaiting-token, and
- * active. Set the token from Connections.
+ * resolved credential, so it gets its own status row like media. Five states —
+ * see {@link composioStatus}.
  */
 function ComposioStatusRow({ caps }: { caps: CapabilityStatusDto }) {
   const { label, variant } = composioStatus(caps);
@@ -352,8 +351,10 @@ function ComposioStatusRow({ caps }: { caps: CapabilityStatusDto }) {
       <div className="space-y-0.5">
         <span className="font-medium">Composio integrations</span>
         <p className="text-xs text-muted-foreground">
-          Gmail, Slack &amp; GitHub via Composio — opt-in, runs on the company&apos;s own OAuth
-          token, and every send/authorize is approved before it runs. Set the token in Connections.
+          Gmail, Slack &amp; GitHub via Composio — opt-in, and every send/authorize is approved
+          before it runs. Runs on this company&apos;s own Composio token when one is set in
+          Connections; otherwise on the company&apos;s TinyHumans key, or on the platform identity
+          this instance already carries.
         </p>
       </div>
       <Badge variant={variant} className="shrink-0">
@@ -363,11 +364,31 @@ function ComposioStatusRow({ caps }: { caps: CapabilityStatusDto }) {
   );
 }
 
-function composioStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
+/**
+ * The Composio row's five states, in order (issue #886).
+ *
+ * The credential is resolved over three tiers — a BYO Composio token, the
+ * company's TinyHumans key, this instance's platform identity — so "is a token
+ * stored" is the wrong question to render. This reads `composioCredentialSource`,
+ * the tier the host says the toolbelt actually resolves.
+ *
+ * The `undefined` rung is load-bearing and must stay above the `"none"` rung.
+ * `undefined` means the host did not answer — an older build that does not send
+ * the field, or one whose secret store could not be read — and falling through
+ * it into the destructive branch is exactly the bug #886 was filed about: a red
+ * "no credential" badge over a Composio account that is working. Unknown is
+ * shown as unknown, and never in the alarm colour.
+ */
+export function composioStatus(caps: CapabilityStatusDto): {
+  label: string;
+  variant: BadgeVariant;
+} {
   if (caps.composioInBuild === false) return { label: "Not in this build", variant: "outline" };
   if (!caps.composioGranted) return { label: "Not granted", variant: "secondary" };
-  if (!caps.composioTokenConfigured)
-    return { label: "Awaiting token", variant: "destructive" };
+  if (caps.composioCredentialSource === undefined)
+    return { label: "Couldn't check", variant: "outline" };
+  if (caps.composioCredentialSource === "none")
+    return { label: "Awaiting credential", variant: "destructive" };
   return { label: "Active", variant: "default" };
 }
 

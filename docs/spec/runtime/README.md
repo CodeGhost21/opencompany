@@ -44,10 +44,44 @@ Supporting docs:
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge
 - [manifest.md](manifest.md) — `company.toml` schema
+- [agents.md](agents.md) — how a teammate is declared: the inline `[[agent]]`
+  form and the one-file-per-teammate `agents/<id>.toml` bundle form, custom
+  prompts, checked-in briefing documents versus routed workspace documents, and
+  the `classes` routing exclusions
+- [tools.md](tools.md) — the three-level tool grant
+  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an empty grant list means
+  "inherit" rather than "nothing", the four namespaces `*` never confers, the
+  unified tool catalog, and the seed-wins rule for console desk overrides
 - [lifecycle.md](lifecycle.md) — company state machine and durability
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
   call per card, the host-gathered evidence pack, the prerequisite verdict
   taxonomy, and the no-run/no-lock concurrency argument
+- [orchestration/](orchestration/README.md) — how a many-agent company
+  *converges*: per-role context routing, a budgeted shared brief, code-derived
+  ledgers, the demand ledger that replaces the board, the attempt loop, the join
+  primitive, and containerised code tools. Also the three entities this removes
+  — the kanban board as the work model, desks, and two of the three memory
+  backends
+  - [orchestration/memory.md](orchestration/memory.md) — `MemoryProvider`
+    replacing the bespoke `CortexClient` backend, with `MemoryStore`,
+    `ContextStore` and `FactStore` kept as typed facades over the one
+    provider rather than as three independent backends, and why the host
+    decorator is the only safe constructor
+  - [orchestration/context-routing.md](orchestration/context-routing.md) — what
+    each role is told, why the exclusions matter as much as the entries, and
+    why assembly order is a prompt-cache decision
+  - [orchestration/alignment.md](orchestration/alignment.md) — the budgeted
+    brief, and the ledgers that are derived rather than asserted
+  - [orchestration/demand-ledger.md](orchestration/demand-ledger.md) — work
+    stated by whoever is blocked, deduped, and closed by evidence that cites it
+    (normative)
+  - [orchestration/loop.md](orchestration/loop.md) — attempt → evaluate → route,
+    and the parity sweep that holds the Rust ladder and its jq translation
+    together
+  - [orchestration/delegation.md](orchestration/delegation.md) — awaiting
+    delegated work, directing a run in flight, and desks as workflows
+  - [orchestration/sandbox.md](orchestration/sandbox.md) — the container
+    posture, write-path placement a shell cannot bypass, and the code library
 - [workflow-build.md](workflow-build.md) — the plan → workflow bridge: a
   `workflow`-deliverable card builds a proposed graph that lands In Review for
   approval before it exists, then apply/reject; host-authority conversion and
@@ -80,6 +114,8 @@ Supporting docs:
   sessions, invites, and chat attribution
 - [auth-modes.md](auth-modes.md) — the configured sign-in mode: `email`,
   `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
+- [hub-console.md](hub-console.md) — one console deployment operating many hosts
+  on other origins: the carried session, CORS, and what it costs
 
 ## Responsibilities
 

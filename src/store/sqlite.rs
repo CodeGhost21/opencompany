@@ -506,6 +506,7 @@ impl CompanyStore for SqliteStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_policy: overlay.policy,
+            overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
@@ -3641,6 +3642,15 @@ mod test {
         conformance::assert_workspace_folder_claims(store()).await;
     }
 
+    /// Issue #887's no-torn-read contract. This backend passed it before the
+    /// `fs` fix and passes it after — which is the point of stating it on the
+    /// port: the guarantee is owed by every backend a tenant can run, not by
+    /// whichever one happened to have it for free.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_never_tears() {
+        conformance::assert_workspace_read_never_tears(store()).await;
+    }
+
     /// Issue #700's emptiness predicate, against the backend that can actually
     /// hold the shape it has to survive.
     ///
@@ -3761,6 +3771,7 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             })

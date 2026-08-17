@@ -8,7 +8,11 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { WorkflowGraph, WorkflowRunNode, WorkflowRunResult } from "@/api/workflows";
+import type {
+  WorkflowGraph,
+  WorkflowRunNode,
+  WorkflowRunResult,
+} from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -40,7 +44,9 @@ export function RunResultPanel({
     [result.output, graph],
   );
   const deliveries = result.deliveries ?? [];
-  const pendingDeliveryCount = deliveries.filter((d) => d.status === "pending").length;
+  const pendingDeliveryCount = deliveries.filter(
+    (d) => d.status === "pending",
+  ).length;
   const undeliveredCount = deliveries.filter(
     (d) => d.status !== "sent" && d.status !== "pending",
   ).length;
@@ -48,6 +54,10 @@ export function RunResultPanel({
   // (already `skipped`) read as "would have gone to …" rather than as failures.
   const isDry = result.dryRun === true;
   const nodeTimeline = result.nodes ?? [];
+  // Issues #881 / #880. Read once so the badge, the sentence and the step chips
+  // cannot disagree about whether this run stopped for a person.
+  const blockedNodes = result.blockedNodes ?? [];
+  const parkedCount = result.approvals?.length ?? 0;
 
   return (
     <div className="border-t bg-card/60" data-testid="workflow-run-result">
@@ -68,20 +78,45 @@ export function RunResultPanel({
             </Badge>
           )}
           {pendingDeliveryCount > 0 && (
-            <Badge variant="outline" className="border-status-blocked/40 bg-status-blocked-soft">
-              {pendingDeliveryCount} report{pendingDeliveryCount === 1 ? "" : "s"} awaiting approval
+            <Badge
+              variant="outline"
+              className="border-status-blocked/40 bg-status-blocked-soft"
+            >
+              {pendingDeliveryCount} report
+              {pendingDeliveryCount === 1 ? "" : "s"} awaiting approval
             </Badge>
           )}
           {undeliveredCount > 0 && (
-            <Badge variant="outline" className="border-status-failed/40 bg-status-failed-soft">
-              {undeliveredCount} report{undeliveredCount === 1 ? "" : "s"} not delivered
+            <Badge
+              variant="outline"
+              className="border-status-failed/40 bg-status-failed-soft"
+            >
+              {undeliveredCount} report{undeliveredCount === 1 ? "" : "s"} not
+              delivered
             </Badge>
           )}
-          {result.pendingApprovals.length > 0 && (
-            <Badge variant="outline" className="border-status-blocked/40 bg-status-blocked-soft">
-              {result.pendingApprovals.length} pending approval
-              {result.pendingApprovals.length === 1 ? "" : "s"}
+          {/* Issue #880: what this run PARKED, in those words. Nothing here is
+              refreshed when the operator approves a card, so a "pending" count
+              is stale the moment they do; a receipt of what the run opened
+              stays true. The live answer lives on the Approvals page. */}
+          {parkedCount > 0 ? (
+            <Badge
+              variant="outline"
+              className="border-status-blocked/40 bg-status-blocked-soft"
+              data-testid="workflow-run-result-parked"
+            >
+              parked {parkedCount} approval{parkedCount === 1 ? "" : "s"}
             </Badge>
+          ) : (
+            result.pendingApprovals.length > 0 && (
+              <Badge
+                variant="outline"
+                className="border-status-blocked/40 bg-status-blocked-soft"
+              >
+                {result.pendingApprovals.length} pending approval
+                {result.pendingApprovals.length === 1 ? "" : "s"}
+              </Badge>
+            )
           )}
         </div>
         <Button variant="ghost" size="sm" onClick={onClose}>
@@ -91,10 +126,30 @@ export function RunResultPanel({
       <div className="max-h-72 overflow-auto px-4 pb-3">
         {request && (
           <p className="mb-2 text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">Requested:</span> {request}
+            <span className="font-medium text-foreground">Requested:</span>{" "}
+            {request}
           </p>
         )}
-        {result.pendingApprovals.length > 0 && (
+        {/* Issue #881: the sentence the drawer never had. A blocked run comes
+            back with no error, nothing delivered and — before this — eight
+            green node cards, so the operator's only reading was "it worked".
+            It says plainly that approving does not continue THIS run: an agent
+            step is not resumable, so they must run the workflow again. */}
+        {blockedNodes.length > 0 && (
+          <p
+            className="mb-2 text-xs text-[var(--status-blocked-text)]"
+            data-testid="workflow-run-result-blocked"
+          >
+            Not finished — {blockedNodes.map((b) => `“${b.nodeId}”`).join(", ")}{" "}
+            {blockedNodes.length === 1 ? "needs" : "need"} your approval, so{" "}
+            {blockedNodes.length === 1 ? "it" : "they"} produced nothing and the
+            steps after {blockedNodes.length === 1 ? "it" : "them"} did not run.{" "}
+            {parkedCount > 0
+              ? `This run parked ${parkedCount} approval${parkedCount === 1 ? "" : "s"}; decide ${parkedCount === 1 ? "it" : "them"} in Approvals, then run the workflow again — approving does not continue this run.`
+              : "Nothing here can be approved; change the policy and run the workflow again."}
+          </p>
+        )}
+        {blockedNodes.length === 0 && result.pendingApprovals.length > 0 && (
           <p className="mb-2 text-xs text-muted-foreground">
             Waiting on: {result.pendingApprovals.join(", ")}
           </p>
@@ -111,7 +166,10 @@ export function RunResultPanel({
         )}
 
         {nodeResults && nodeResults.length > 0 ? (
-          <div className="mb-2 space-y-2" data-testid="workflow-run-node-results">
+          <div
+            className="mb-2 space-y-2"
+            data-testid="workflow-run-node-results"
+          >
             {nodeResults.map((n) => (
               <NodeResultCard key={n.id} node={n} />
             ))}
@@ -159,7 +217,9 @@ function NodeResultCard({ node }: { node: NodeResult }) {
           )}
           {m.text ? (
             <div className="prose prose-sm max-w-none dark:prose-invert">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {m.text}
+              </ReactMarkdown>
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">—</p>
@@ -192,22 +252,31 @@ function NodeTimeline({
     >
       <span className="text-xs font-medium">Steps</span>
       {nodes.map((n, i) => (
-        <div key={`${n.nodeId}-${i}`} className="flex flex-wrap items-baseline gap-1.5">
+        <div
+          key={`${n.nodeId}-${i}`}
+          className="flex flex-wrap items-baseline gap-1.5"
+        >
           <Badge
             variant="outline"
+            /* Issue #881: three tones. The default arm was "anything that is
+               not an error is green", which painted a blocked step — one that
+               produced nothing — exactly like a step that delivered. */
             className={`h-4 px-1.5 text-3xs font-normal ${
               n.status === "error"
                 ? "border-status-failed/40 bg-status-failed-soft"
-                : "border-status-done/40 bg-status-done-soft"
+                : n.status === "blocked"
+                  ? "border-status-blocked/50 bg-status-blocked-soft"
+                  : "border-status-done/40 bg-status-done-soft"
             }`}
           >
             {n.status}
           </Badge>
           <span className="text-2xs">{nameById.get(n.nodeId) ?? n.nodeId}</span>
-          <span className="text-2xs text-muted-foreground">{n.elapsedMs} ms</span>
+          <span className="text-2xs text-muted-foreground">
+            {n.elapsedMs} ms
+          </span>
         </div>
       ))}
     </div>
   );
 }
-

@@ -31,8 +31,10 @@ import {
   type WorkflowEdge,
   type WorkflowGraph,
   type WorkflowNode,
+  type WorkflowReadiness,
   type WorkflowRevision,
   type WorkflowSummary,
+  type PrefilledDraft,
 } from "@/api/workflows";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import {
@@ -367,6 +369,7 @@ export function WorkflowCreateDialog({
   workflow = null,
   onSaved,
   onConflict,
+  prefilledDraft = null,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -389,6 +392,14 @@ export function WorkflowCreateDialog({
    * hands it to the view, whose persistent banner carries the way out (Reload).
    */
   onConflict?: (message: string) => void;
+  /**
+   * A copilot-corrected graph to hydrate the form with directly (issue #840,
+   * PR-3), skipping the description→draft round trip. Combined with `workflow`
+   * (the saved graph the correction targets) this opens the dialog in edit mode
+   * showing the corrected nodes/edges, so Save writes a new *version* under the
+   * same id. The summary/notes/readiness banners render read-only.
+   */
+  prefilledDraft?: PrefilledDraft | null;
 }) {
   const editing = workflow !== null;
   const [id, setId] = useState("");
@@ -441,6 +452,9 @@ export function WorkflowCreateDialog({
   // name/role→id rewrite — shown under the summary so the author sees WHY the
   // hydrated graph differs from a literal reading of their request.
   const [draftNotes, setDraftNotes] = useState<string[]>([]);
+  // Issue #840 (PR-3): the static readiness advisories over a copilot-corrected
+  // graph handed in via `prefilledDraft`. Read-only — it never blocks Save.
+  const [readiness, setReadiness] = useState<WorkflowReadiness | null>(null);
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
   const formId = useId();
 
@@ -479,6 +493,31 @@ export function WorkflowCreateDialog({
     setDraftSummary(null);
     setDraftReason(null);
     setDraftNotes([]);
+    // Issue #840 (PR-3): a copilot-corrected graph handed in hydrates the form
+    // directly — nodes/edges/name from the correction, not the description round
+    // trip — while `workflow` above still supplies the id + version token the
+    // conditional Save writes under. Its banners (summary/notes/readiness) render
+    // read-only below. Absent → a normal open, and the readiness banner clears.
+    //
+    // `g.id` comes from `workflow.id`, host-pinned server-side (the fix route
+    // never lets the copilot's own id vote — see `FixTarget`), so it is not
+    // attacker-influenceable in the current call path. `workflow?.id` is
+    // preferred anyway: it is the id the conditional Save on this dialog
+    // actually writes under, so hydrating from anything else would only ever
+    // be a latent bug if that invariant ever drifted.
+    if (prefilledDraft) {
+      const g = prefilledDraft.workflow;
+      setId(workflow?.id ?? g.id);
+      setName(g.name.trim());
+      setDescription(g.description ?? "");
+      setNodes(draftNodes(g));
+      setEdges(draftEdges(g));
+      setDraftSummary(prefilledDraft.summary ?? null);
+      setDraftNotes((prefilledDraft.notes ?? []).filter((n) => n.trim()));
+      setReadiness(prefilledDraft.readiness ?? null);
+    } else {
+      setReadiness(null);
+    }
     let live = true;
     (async () => {
       try {
@@ -515,7 +554,7 @@ export function WorkflowCreateDialog({
     return () => {
       live = false;
     };
-  }, [open, client, company, workflow]);
+  }, [open, client, company, workflow, prefilledDraft]);
 
   // Issue #753: check the company's cognition path when the copilot is on screen
   // (create mode). On the offline `echo` brain there is nothing to draft with, so
@@ -980,6 +1019,57 @@ export function WorkflowCreateDialog({
               : "Describe it and let the copilot draft it, or define the graph by hand — nodes, then how they connect."}
           </DialogDescription>
         </DialogHeader>
+
+        {/* Issue #840 (PR-3): the fix-from-run banners. A copilot-corrected graph
+            hydrated via `prefilledDraft` shows its summary, any host corrections,
+            and the static readiness advisories — read-only, so the operator sees
+            what changed and what still needs a look before Saving the new version.
+            Rendered regardless of mode (a fix opens the dialog in edit mode), and
+            only when a correction was handed in. */}
+        {prefilledDraft && (
+          <div className="space-y-2" data-testid="workflow-fix-banners">
+            {draftSummary && (
+              <Alert>
+                <AlertDescription>{draftSummary}</AlertDescription>
+              </Alert>
+            )}
+            {draftNotes.length > 0 && (
+              <Alert data-testid="workflow-fix-notes">
+                <AlertDescription>
+                  <ul className="list-disc space-y-1 pl-4">
+                    {draftNotes.map((note, i) => (
+                      <li key={i}>{note}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
+            {readiness && (
+              <Alert
+                variant={readiness.ok ? undefined : "destructive"}
+                data-testid="workflow-fix-readiness"
+              >
+                <AlertDescription>
+                  {readiness.ok ? (
+                    "The corrected workflow passes the static authoring checks."
+                  ) : (
+                    <>
+                      <p>
+                        The copilot corrected the workflow, but a few authoring
+                        checks still flag it — review before saving:
+                      </p>
+                      <ul className="mt-1 list-disc space-y-1 pl-4">
+                        {(readiness.advisories ?? []).map((advisory, i) => (
+                          <li key={i}>{advisory}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
 
         {/* Issue #753: the create-time copilot. Create mode only — an edit
             already has a graph. It drafts a graph from a sentence and hydrates

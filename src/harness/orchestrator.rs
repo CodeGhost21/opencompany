@@ -136,7 +136,9 @@ pub const QUERY_COMPANY_TOOL: &str = "query_company";
 // path share one definition and cannot drift.
 use crate::runtime::builder::agent_effective_grants;
 use crate::runtime::delegation_tools;
-pub use crate::runtime::delegation_tools::{DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL};
+pub use crate::runtime::delegation_tools::{
+    DELEGATE_TO_DESK_TOOL, DELEGATE_TO_TEAMMATE_TOOL, SPAWN_TASK_TOOL,
+};
 /// The `run_workflow` tool name (issue #67).
 pub const RUN_WORKFLOW_TOOL: &str = "run_workflow";
 /// The `read_run_output` tool name (issue #418 — the `run_workflow` companion
@@ -176,6 +178,11 @@ pub fn orchestrator_id(agents: &[ManifestAgent]) -> Option<String> {
 pub fn is_delegation_tool(tool: &str) -> bool {
     tool == SPAWN_TASK_TOOL
         || tool == DELEGATE_TO_DESK_TOOL
+        // Issue #884: not optional. This predicate is what keeps a hand-off
+        // classified as internal work rather than an external effect to park —
+        // and, downstream, what keeps the new edge inside the loop checks
+        // everything else on this seam already passes through.
+        || tool == DELEGATE_TO_TEAMMATE_TOOL
         || tool == ADD_AGENT_TOOL
         || tool == CREATE_WORKFLOW_TOOL
         || tool == ASSIGN_TASK_TOOL
@@ -245,9 +252,10 @@ before answering rather than guessing, then answer directly and concisely. A boa
 exception and needs a reason. \
 When there IS work, two decisions come up and they are INDEPENDENT — do not collapse them into \
 one. (1) WHO SHOULD DO THIS: when a request belongs to a specialist desk, hand it to that desk \
-with `delegate_to_desk`, naming the desk by an id `query_company` lists under Desks (a desk is not \
-a person: handing work to a teammate's name is not a delegation); when it is yours to answer, \
-answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you must not pick a \
+with `delegate_to_desk`, naming the desk by an id `query_company` lists under Desks; when it names \
+one PERSON, hand it to them with `delegate_to_teammate`, naming them by a roster id `query_company` \
+lists under Team — a desk id is not a person and a person is not a desk, so pick the tool that \
+matches the target; when it is yours to answer, answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you must not pick a \
 tool in order to influence it. Anything substantial handed to a desk is opened as a board card \
 automatically, and so is anything substantial an operator asks a desk or teammate directly — the \
 hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for the same work, \
@@ -290,6 +298,22 @@ pub enum Delegation {
         /// The instruction handed to the desk's lead member.
         instruction: String,
     },
+    /// Hand a turn to a **named teammate** rather than to whoever leads their
+    /// desk (issue #884).
+    ///
+    /// Everything else about it is [`DelegateToDesk`](Self::DelegateToDesk): it
+    /// runs one synchronous turn, opens the same hand-off card, folds the same
+    /// [`DeskReply`](crate::runtime::delegation::DeskReply) back for the relay,
+    /// and passes the same depth cap. Only the resolution differs — a roster id
+    /// straight to that agent, instead of a desk key through
+    /// [`desk_lead`](crate::runtime::delegation_tools::desk_lead) — which is the
+    /// whole of what D1 was missing.
+    DelegateToTeammate {
+        /// The teammate's roster id, already validated at the tool boundary.
+        teammate: String,
+        /// The instruction handed to that teammate.
+        instruction: String,
+    },
     /// Set (or change) who owns an existing board card (issue #186 part b).
     AssignTask {
         /// The card's id.
@@ -324,8 +348,15 @@ impl Delegation {
     /// say, so they have no answering role and stay refused on a question turn.
     ///
     /// This is what [`DrainClaim::Answering`] filters on.
+    ///
+    /// [`DelegateToTeammate`](Self::DelegateToTeammate) is (issue #884), for
+    /// exactly the reason `DelegateToDesk` is: "what did the SEO specialist find?"
+    /// is unanswerable without running their turn.
     pub fn answers(&self) -> bool {
-        matches!(self, Self::DelegateToDesk { .. })
+        matches!(
+            self,
+            Self::DelegateToDesk { .. } | Self::DelegateToTeammate { .. }
+        )
     }
 
     /// Whether this delegation is one a **workflow run** may perform
@@ -342,10 +373,14 @@ impl Delegation {
     /// hand-off's only value is a synchronous reply that a run has nowhere to
     /// land.
     ///
+    /// [`DelegateToTeammate`](Self::DelegateToTeammate) is not either, on the
+    /// same ground as `DelegateToDesk`: a run has nowhere to put a synchronous
+    /// reply (issue #884).
+    ///
     /// This is [`answers`](Self::answers) inverted, and deliberately not
     /// written as `!self.answers()`: the two partitions agree today only by
-    /// coincidence of there being four variants, and a fifth would have to be
-    /// classified for each question on its own terms.
+    /// coincidence, and a further variant would have to be classified for each
+    /// question on its own terms.
     pub fn writes_board_only(&self) -> bool {
         matches!(self, Self::SpawnTask { .. } | Self::AssignTask { .. })
     }
@@ -759,7 +794,9 @@ impl DelegationQueue {
             // something false about what it may do next.
             DrainClaim::Board if !delegation.writes_board_only() => {
                 return Staged::NoDrain(match delegation {
-                    Delegation::DelegateToDesk { .. } => NoDrainReason::WorkflowHandOff,
+                    Delegation::DelegateToDesk { .. } | Delegation::DelegateToTeammate { .. } => {
+                        NoDrainReason::WorkflowHandOff
+                    }
                     _ => NoDrainReason::WorkflowLifecycle,
                 });
             }
@@ -768,8 +805,17 @@ impl DelegationQueue {
         // Issue #176: checked after the claim (a context that drains nothing is
         // still the only fact worth reporting) and before the queue lock, so the
         // two locks are never held at once.
-        if matches!(delegation, Delegation::DelegateToDesk { .. })
-            && self.scope_depth() >= max_depth
+        //
+        // Issue #884: the teammate hand-off is gated here too, and that is the
+        // load-bearing half of its loop safety. Its cycle guard refuses handing
+        // work back to somebody already on the chain, but a *ring* of three or
+        // more agents closes no immediate cycle — the depth cap is what bounds
+        // that, exactly as it does for desks. Leaving the new edge out of this
+        // condition would have given it no bound at all.
+        if matches!(
+            delegation,
+            Delegation::DelegateToDesk { .. } | Delegation::DelegateToTeammate { .. }
+        ) && self.scope_depth() >= max_depth
         {
             return Staged::NoDrain(NoDrainReason::Depth);
         }
@@ -2068,6 +2114,201 @@ impl Tool for DelegateToDeskTool {
 }
 
 // ---------------------------------------------------------------------------
+// delegate_to_teammate (issue #884 — D1: a lead can reach a peer on its desk)
+// ---------------------------------------------------------------------------
+
+/// A delegation tool that hands a turn to a **named teammate**. Enqueues a
+/// [`Delegation::DelegateToTeammate`]; the harness brain runs that teammate's
+/// turn on drain and folds their reply back exactly as a desk hand-off's is.
+///
+/// The sibling of [`DelegateToDeskTool`] and deliberately its twin — same
+/// grounding-then-`push_within_cap` shape, same [`PermissionLevel::Write`], same
+/// per-turn cap and same depth bound. Only the target namespace differs.
+///
+/// # Why it has to exist
+///
+/// `delegate_to_desk` resolves to
+/// [`desk_lead`](crate::runtime::delegation_tools::desk_lead) and nothing else,
+/// so a desk's own lead could reach every desk in the company **except the
+/// people sitting on its own**: handing work back to its desk is self-delegation
+/// and refused. A three-person desk asked for one member by name therefore got a
+/// polite decline from the lead, which was the only move it had.
+///
+/// # The target comes from the tool call, never from the message
+///
+/// `teammate` is validated against a closed set derived from the company record
+/// (see [`reject_teammate_target`](crate::runtime::delegation_tools::reject_teammate_target)).
+/// Reading a `Name:` prefix out of the operator's prose was the rejected
+/// alternative: it is ambiguous ("ask the SEO Specialist to…" is not an
+/// address), spoofable — a pasted email opening "SEO Specialist:" would pick
+/// whose grants and whose budget run — undefined for a message naming two
+/// people, and wrong in every language the personas are not written in. Routing
+/// stays deterministic; reading the prose stays with the model.
+pub struct DelegateToTeammateTool {
+    queue: DelegationQueue,
+    company: CompanyId,
+    /// Read at call time so the roster is the **current** one — an operator can
+    /// add a teammate mid-session, and a snapshot would refuse somebody who
+    /// exists. Same reasoning as [`DelegateToDeskTool::store`].
+    store: Arc<dyn CompanyStore>,
+    /// Set when this copy belongs to a desk member rather than the orchestrator.
+    /// `None` is the orchestrator: the whole roster, no allowlist, no self-check.
+    member: Option<MemberScope>,
+}
+
+impl DelegateToTeammateTool {
+    /// Builds the orchestrator's unrestricted copy.
+    pub fn new(queue: DelegationQueue, company: CompanyId, store: Arc<dyn CompanyStore>) -> Self {
+        Self {
+            queue,
+            company,
+            store,
+            member: None,
+        }
+    }
+
+    /// Builds a **desk member's** copy: narrowed to the teammates it shares a
+    /// desk with, plus anybody on a desk its `delegates_to` allowlist permits.
+    pub fn for_member(
+        queue: DelegationQueue,
+        company: CompanyId,
+        store: Arc<dyn CompanyStore>,
+        scope: MemberScope,
+    ) -> Self {
+        Self {
+            queue,
+            company,
+            store,
+            member: Some(scope),
+        }
+    }
+
+    /// Grounds `teammate` against the live record: the refusal for it, if any,
+    /// plus the depth bound this company runs under.
+    ///
+    /// Same fail-open-for-the-orchestrator / fail-closed-for-a-member split
+    /// [`DelegateToDeskTool::ungrounded`] documents, and the same ordering
+    /// rationale: grounding first ("there is no such teammate" outranks "you may
+    /// not reach them", or a model told the latter about somebody it invented
+    /// goes on inventing), then the cycle guard, which is not retryable.
+    async fn ground(&self, teammate: &str) -> Grounding {
+        let record = match self.store.load(&self.company).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return self.ungrounded(teammate, "this company's record is not there"),
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.company,
+                    error = %err,
+                    member = self.member.as_ref().map(|s| s.member.as_str()).unwrap_or("-"),
+                    "[delegate_to_teammate] could not read the company record to ground the target"
+                );
+                return self.ungrounded(teammate, "this company's record could not be read");
+            }
+        };
+        let max_depth = usize::from(
+            record
+                .manifest
+                .tools
+                .max_delegation_depth
+                .unwrap_or(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
+        );
+        let scope = self.member.as_ref();
+        let allowed: &[String] = scope.map(|s| s.delegates_to.as_slice()).unwrap_or(&[]);
+        let refusal = delegation_tools::reject_teammate_target(
+            &record,
+            scope.map(|s| s.member.as_str()),
+            allowed,
+            teammate,
+        )
+        .or_else(|| {
+            delegation_tools::reject_teammate_cycle_target(
+                &record,
+                &self.queue.scope_chain(),
+                teammate,
+            )
+        });
+        Grounding { refusal, max_depth }
+    }
+
+    /// The member/orchestrator split for an unreadable record — see
+    /// [`DelegateToDeskTool::ungrounded`], which this mirrors exactly.
+    fn ungrounded(&self, teammate: &str, why: &str) -> Grounding {
+        let Some(scope) = self.member.as_ref() else {
+            return Grounding::open();
+        };
+        Grounding {
+            refusal: Some(format!(
+                "Could not hand this to `{teammate}`: {why}, so the teammates {member} is allowed \
+                 to reach could not be checked. Nothing was queued — try again, or carry the work \
+                 out yourself.",
+                member = scope.member
+            )),
+            max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for DelegateToTeammateTool {
+    fn name(&self) -> &str {
+        DELEGATE_TO_TEAMMATE_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Hand a turn to one named teammate so the person who actually owns that specialism answers — including somebody on your own desk. Provide the `teammate` (their roster id, as `query_company` lists them under Team) and the `instruction` to carry out. Use this instead of `delegate_to_desk` whenever a specific person is wanted rather than whoever leads a desk. A substantial hand-off is opened as a tracked board card automatically, assigned to them — you do not need to call `spawn_task` as well."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        crate::runtime::delegation_tools::delegate_to_teammate_schema()
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let teammate = required_str(&args, "teammate")?;
+        let instruction = required_str(&args, "instruction")?;
+
+        let grounding = self.ground(&teammate).await;
+        if let Some(refusal) = grounding.refusal {
+            tracing::info!(
+                company = %self.company,
+                "[delegate_to_teammate] refused an ungrounded hand-off target"
+            );
+            // Recorded as well as returned, the same independence #272 gave the
+            // desk refusals: the model is free to describe its own turn however
+            // it likes, so the board must carry the attempt regardless.
+            self.queue.push_refusal(teammate);
+            return Ok(ToolResult::error(refusal));
+        }
+
+        let effect = format!("nothing was handed to {teammate}");
+        match self.queue.push_within_cap(
+            Delegation::DelegateToTeammate {
+                teammate: teammate.clone(),
+                instruction,
+            },
+            MAX_DELEGATIONS_PER_TURN,
+            grounding.max_depth,
+        ) {
+            Staged::Queued => {}
+            Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(
+                    DELEGATE_TO_TEAMMATE_TOOL,
+                    &effect,
+                    why,
+                )));
+            }
+        }
+        Ok(ToolResult::success(format!(
+            "Handed to {teammate}. They will answer this turn."
+        )))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // assign_task / review_task (issue #186 part b — orchestrator lifecycle authority)
 // ---------------------------------------------------------------------------
 
@@ -2383,15 +2624,24 @@ pub fn delegation_tools(
 ) -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(SpawnTaskTool::new(queue.clone())),
-        Box::new(DelegateToDeskTool::new(queue.clone(), company, store)),
+        Box::new(DelegateToDeskTool::new(
+            queue.clone(),
+            company.clone(),
+            store.clone(),
+        )),
+        // Issue #884: the orchestrator can now reach a named teammate directly
+        // rather than only whoever leads their desk.
+        Box::new(DelegateToTeammateTool::new(queue.clone(), company, store)),
         Box::new(AssignTaskTool::new(queue.clone())),
         Box::new(ReviewTaskTool::new(queue.clone())),
     ]
 }
 
-/// The **two** delegation tools a desk member gets when its manifest entry
-/// names a `delegates_to` allowlist (issue #176): `spawn_task` and a
-/// `delegate_to_desk` narrowed to that allowlist.
+/// The delegation tools a desk member gets when its manifest entry names a
+/// `delegates_to` allowlist (issue #176): `spawn_task`, a `delegate_to_desk`
+/// narrowed to that allowlist, and — since #884 — a `delegate_to_teammate`
+/// narrowed to its own desk-mates plus the members of the desks that allowlist
+/// permits.
 ///
 /// Deliberately a subset of [`delegation_tools`] rather than the same list.
 /// `assign_task`, `review_task`, `query_company`, `run_workflow`,
@@ -2401,7 +2651,7 @@ pub fn delegation_tools(
 /// becoming a second CEO. A member gets exactly what it needs to pass a slice
 /// on and to leave the rest tracked.
 ///
-/// Both names are already covered by
+/// All three names are already covered by
 /// [`is_delegation_tool`], so
 /// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) classifies them as
 /// internal here exactly as it does on the orchestrator — no policy change comes
@@ -2415,6 +2665,15 @@ pub fn member_delegation_tools(
     vec![
         Box::new(SpawnTaskTool::new(queue.clone())),
         Box::new(DelegateToDeskTool::for_member(
+            queue.clone(),
+            company.clone(),
+            store.clone(),
+            scope.clone(),
+        )),
+        // Issue #884, D1: without this a desk lead can reach every desk its
+        // allowlist names and nobody at all on its own — the one hand-off it is
+        // best placed to make.
+        Box::new(DelegateToTeammateTool::for_member(
             queue.clone(),
             company,
             store,
@@ -2446,13 +2705,16 @@ pub fn member_delegation_brief(desks: &[String]) -> String {
     };
     format!(
         "\n\n## Handing work on\n\nYou can pass a slice of your work to another desk with \
-`delegate_to_desk`, and open a tracked card for anything that should be followed up later with \
-`spawn_task`. The desks you may hand work to: {reach}.\n\nHand on only the part somebody else is \
-genuinely better placed to do, and do the rest yourself — every hand-off costs another turn. The \
-chain is bounded: if you are told the work has already been handed on as far as this company \
-allows, that is final, so do what you can and say plainly what is left rather than calling the \
-tool again. You cannot hand work back to a desk it already came from, or to a desk you lead \
-yourself.\n"
+`delegate_to_desk`, to one named person with `delegate_to_teammate` — including somebody on your \
+own desk — and open a tracked card for anything that should be followed up later with \
+`spawn_task`. The desks you may hand work to: {reach}. When a request names a specific teammate, \
+hand it to THAT PERSON with `delegate_to_teammate` rather than declining it as not \
+yours.\n\nHand on only the part somebody else is genuinely better placed to do, and do the rest \
+yourself — every hand-off costs another turn. The chain is bounded: if you are told the work has \
+already been handed on as far as this company allows, that is final, so do what you can and say \
+plainly what is left rather than calling the tool again. You cannot hand work back to a desk it \
+already came from, to a desk you lead yourself, or to somebody the work already passed \
+through.\n"
     )
 }
 
@@ -3353,6 +3615,25 @@ impl Tool for RunWorkflowTool {
                         "workflow": file.id,
                         "run_id": ctx.run_id,
                         "pending_approvals": run.pending_approvals.len(),
+                        // Issue #881: structural counts beside the prose, so a
+                        // model reading only the JSON still learns the run
+                        // delivered nothing.
+                        "blocked_nodes": run.blocked_nodes.len(),
+                        // Issue #900: `outcome == Parked` only, unlike
+                        // `WorkflowRun::approvals`'s own receipt semantics
+                        // (which deliberately count `ParkFailed` / `Discarded`
+                        // too — see that field's doc comment). This key has no
+                        // sibling field to carry the failure count the way the
+                        // console's prose does with "N calls could not be
+                        // queued", so a bare `approvals_parked` here has to
+                        // mean what its name says: cards actually sitting on
+                        // the Approvals page, not every receipt this run
+                        // filed.
+                        "approvals_parked": run
+                            .approvals
+                            .iter()
+                            .filter(|a| a.outcome == crate::ports::WorkflowApprovalOutcome::Parked)
+                            .count(),
                     }),
                     md,
                 ))
@@ -3454,13 +3735,48 @@ fn summarize_run(
         _ => md.push_str("_No per-node output was produced._\n"),
     }
 
-    if run.pending_approvals.is_empty() {
-        md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
-    } else {
+    // Issue #881: a blocked node and a paused gate are BOTH in
+    // `pending_approvals`, and they need different sentences. Approving a
+    // paused gate continues the run; approving a blocked node's card does not —
+    // an agent node is not re-enterable, so the only way forward is to run the
+    // workflow again. Telling the model "resolve these for the run to continue"
+    // about a blocked node would have it wait for a continuation that is never
+    // coming.
+    let blocked: Vec<&str> = run
+        .blocked_nodes
+        .iter()
+        .map(|b| b.node_id.as_str())
+        .collect();
+    let paused: Vec<&str> = run
+        .pending_approvals
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !blocked.contains(id))
+        .collect();
+    if !blocked.is_empty() {
+        md.push_str(&format!(
+            "\n**Blocked, waiting on a person** at: {}. {} produced no output and nothing after \
+             {} ran, because a tool call in the step needed approval. This run parked {} \
+             approval(s) and will NOT continue on its own — the approval has to be decided and \
+             the workflow run again.\n",
+            blocked.join(", "),
+            if blocked.len() == 1 {
+                "That step"
+            } else {
+                "Those steps"
+            },
+            if blocked.len() == 1 { "it" } else { "them" },
+            run.approvals.len()
+        ));
+    }
+    if !paused.is_empty() {
         md.push_str(&format!(
             "\n**Paused for approval** at: {}. Resolve these for the run to continue.\n",
-            run.pending_approvals.join(", ")
+            paused.join(", ")
         ));
+    }
+    if blocked.is_empty() && paused.is_empty() {
+        md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
     }
 
     // Footer: the previews above are the *last* item of each node, clipped, so
@@ -4267,7 +4583,12 @@ mod tests {
             tier: tier.map(str::to_string),
             tools: Vec::new(),
             delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         }
     }
 
@@ -4394,6 +4715,8 @@ mod tests {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         });
 
         assert!(!summary.contains(RECIPIENT), "{summary}");
@@ -4422,6 +4745,8 @@ mod tests {
             cancelled: true,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         });
 
         assert!(summary.contains("stopped"), "{summary}");
@@ -5034,6 +5359,15 @@ mod tests {
         assert!(is_delegation_tool(REVIEW_TASK_TOOL));
     }
 
+    /// Issue #884: the teammate hand-off is internal work too. Left out, the
+    /// approval policy would read it as an external effect and park every
+    /// hand-off behind an operator approval — and the new edge would sit outside
+    /// the loop checks every other delegation passes through.
+    #[test]
+    fn the_teammate_hand_off_is_an_internal_delegation_tool() {
+        assert!(is_delegation_tool(DELEGATE_TO_TEAMMATE_TOOL));
+    }
+
     /// The orchestrator is actually handed the new tools.
     #[test]
     fn delegation_tools_include_the_lifecycle_tools() {
@@ -5049,6 +5383,16 @@ mod tests {
         assert!(names.contains(&SPAWN_TASK_TOOL.to_string()), "{names:?}");
         assert!(
             names.contains(&DELEGATE_TO_DESK_TOOL.to_string()),
+            "{names:?}"
+        );
+        // Issue #884: and the teammate hand-off, exactly once — a duplicate name
+        // on one belt is what the `else if` in `build` exists to prevent.
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| *n == DELEGATE_TO_TEAMMATE_TOOL)
+                .count(),
+            1,
             "{names:?}"
         );
     }
@@ -5539,8 +5883,8 @@ members = ["ceo"]
         assert_eq!(queue.queued(), 0);
     }
 
-    /// The member's belt is exactly `spawn_task` + `delegate_to_desk` — never
-    /// the orchestrator's authority tools.
+    /// The member's belt is exactly `spawn_task` + the two hand-off tools —
+    /// never the orchestrator's authority tools.
     #[test]
     fn a_members_delegation_belt_is_the_two_hand_off_tools() {
         let company = CompanyId::new("acme");
@@ -5558,7 +5902,270 @@ members = ["ceo"]
         );
         let mut names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         names.sort();
-        assert_eq!(names, [DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL]);
+        assert_eq!(
+            names,
+            [
+                DELEGATE_TO_DESK_TOOL,
+                DELEGATE_TO_TEAMMATE_TOOL,
+                SPAWN_TASK_TOOL
+            ]
+        );
+    }
+
+    // ── delegate_to_teammate at the tool boundary (issue #884) ──────────────
+
+    /// A company whose `strategy` desk has THREE members, so its lead has peers
+    /// to reach — the shape D1 was observed on — plus an `analyst` on a desk the
+    /// lead's `delegates_to` permits and a `legal_counsel` on one it does not.
+    fn peers_record(id: &CompanyId) -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+delegates_to = ["research"]
+
+[[agent]]
+id = "editor"
+role = "Editor"
+
+[[agent]]
+id = "analyst"
+role = "Analyst"
+
+[[agent]]
+id = "legal_counsel"
+role = "Counsel"
+
+[[group_chat]]
+id = "strategy"
+name = "Strategy desk"
+members = ["writer", "editor"]
+
+[[group_chat]]
+id = "research"
+name = "Research desk"
+members = ["analyst"]
+
+[[group_chat]]
+id = "legal"
+name = "Legal desk"
+members = ["legal_counsel"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..seeded_record(id)
+        }
+    }
+
+    /// `writer`'s copy of the teammate tool: a desk lead with one peer on its
+    /// own desk and a `research` allowlist.
+    fn member_teammate_tool(
+        record: CompanyRecord,
+        queue: &DelegationQueue,
+    ) -> DelegateToTeammateTool {
+        let company = record.id.clone();
+        DelegateToTeammateTool::for_member(
+            queue.clone(),
+            company,
+            Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>,
+            MemberScope {
+                member: "writer".to_string(),
+                delegates_to: vec!["research".to_string()],
+            },
+        )
+    }
+
+    /// D1 at the boundary: the lead's hand-off to the peer beside it is
+    /// **accepted**, and queues the delegation the drain runs that teammate's
+    /// turn from.
+    #[tokio::test]
+    async fn a_lead_may_hand_work_to_a_peer_on_its_own_desk() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_teammate_tool(peers_record(&company), &queue);
+        let result = tool
+            .execute(json!({ "teammate": "editor", "instruction": "tighten the copy" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.output_for_llm(true));
+        assert_eq!(
+            queue.drain(MAX_DELEGATIONS_PER_TURN),
+            vec![Delegation::DelegateToTeammate {
+                teammate: "editor".to_string(),
+                instruction: "tighten the copy".to_string(),
+            }]
+        );
+    }
+
+    /// A key that is nobody is refused before anything is queued, and the
+    /// attempt is recorded for the drain to report on the card — the same
+    /// independence #272 gave the desk refusals.
+    #[tokio::test]
+    async fn a_teammate_that_is_not_on_the_roster_is_refused_and_recorded() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_teammate_tool(peers_record(&company), &queue);
+        let result = tool
+            .execute(json!({ "teammate": "ghost", "instruction": "do it" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{}", result.output_for_llm(true));
+        assert!(
+            result.output_for_llm(true).contains("editor"),
+            "the refusal must name who CAN be reached: {}",
+            result.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+        assert_eq!(
+            queue.drain_refusals(MAX_DELEGATIONS_PER_TURN),
+            vec!["ghost".to_string()]
+        );
+    }
+
+    /// A real teammate on neither the caller's desk nor an allowlisted one is
+    /// refused; one on an allowlisted desk is not. The allowlist is #176's, read
+    /// at teammate granularity rather than duplicated.
+    #[tokio::test]
+    async fn the_allowlist_bounds_which_teammates_a_member_may_reach() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_teammate_tool(peers_record(&company), &queue);
+
+        let refused = tool
+            .execute(json!({ "teammate": "legal_counsel", "instruction": "review it" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "{}", refused.output_for_llm(true));
+        assert_eq!(queue.queued(), 0);
+
+        // `analyst` sits on `research`, which `writer`'s `delegates_to` names.
+        let allowed = tool
+            .execute(json!({ "teammate": "analyst", "instruction": "pull the numbers" }))
+            .await
+            .expect("execute");
+        assert!(!allowed.is_error, "{}", allowed.output_for_llm(true));
+        assert_eq!(queue.queued(), 1);
+    }
+
+    /// A hand-off back to somebody already on the chain is refused as a cycle —
+    /// the A→B→A guard, at the boundary, in the model's own turn.
+    #[tokio::test]
+    async fn a_hand_off_back_up_the_teammate_chain_is_refused() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let record = peers_record(&company);
+        let tool = DelegateToTeammateTool::for_member(
+            queue.clone(),
+            company,
+            Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>,
+            MemberScope {
+                member: "editor".to_string(),
+                delegates_to: Vec::new(),
+            },
+        );
+        // `editor` is running inside a hand-off `writer` made.
+        let _scope = queue.enter_scope(crate::runtime::delegation_tools::teammate_scope_key(
+            "writer",
+        ));
+        let result = tool
+            .execute(json!({ "teammate": "writer", "instruction": "you take it back" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{}", result.output_for_llm(true));
+        assert!(
+            result.output_for_llm(true).contains("loop"),
+            "{}",
+            result.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// The depth bound applies to the teammate hand-off exactly as it does to
+    /// the desk one — the guard a ring of three the cycle check cannot see still
+    /// runs into.
+    #[tokio::test]
+    async fn the_depth_bound_stops_a_teammate_hand_off_too() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let mut record = peers_record(&company);
+        record.manifest.tools.max_delegation_depth = Some(1);
+        let tool = member_teammate_tool(record, &queue);
+        let _scope = queue.enter_scope("strategy".to_string());
+        let result = tool
+            .execute(json!({ "teammate": "editor", "instruction": "tighten the copy" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "depth 1 must stop a further hand-off");
+        assert!(
+            result
+                .output_for_llm(true)
+                .contains("as far as this company allows"),
+            "{}",
+            result.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// The orchestrator's copy is unrestricted: it reaches a teammate that is
+    /// not a desk lead, with no allowlist in the way. Grounding still applies.
+    #[tokio::test]
+    async fn the_orchestrators_teammate_tool_is_unrestricted_but_grounded() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let record = peers_record(&company);
+        let store = Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>;
+        let tool = DelegateToTeammateTool::new(queue.clone(), company, store);
+
+        let ok = tool
+            .execute(json!({ "teammate": "editor", "instruction": "tighten the copy" }))
+            .await
+            .expect("execute");
+        assert!(!ok.is_error, "{}", ok.output_for_llm(true));
+
+        let refused = tool
+            .execute(json!({ "teammate": "ghost", "instruction": "do it" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "{}", refused.output_for_llm(true));
+    }
+
+    /// Both arguments are required, and neither may be blank — a hand-off with
+    /// no instruction is a turn run on nothing.
+    #[tokio::test]
+    async fn the_teammate_tool_requires_both_arguments() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_teammate_tool(peers_record(&company), &queue);
+        assert!(tool.execute(json!({ "teammate": "editor" })).await.is_err());
+        assert!(
+            tool.execute(json!({ "instruction": "do it" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            tool.execute(json!({ "teammate": "  ", "instruction": "do it" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(queue.queued(), 0);
     }
 
     /// Issue #272: the observed failure — the orchestrator handed work to
@@ -6209,6 +6816,7 @@ name = "Morning"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -6624,6 +7232,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             })
         }
     }
@@ -6675,7 +7285,7 @@ name = "Morning"
     }
 
     #[test]
-    fn orchestrator_tools_includes_all_twelve() {
+    fn orchestrator_tools_includes_all_thirteen() {
         use crate::harness::workflow_admin::{
             DELETE_WORKFLOW_TOOL, READ_WORKFLOW_TOOL, UPDATE_WORKFLOW_TOOL,
         };
@@ -6699,8 +7309,9 @@ name = "Morning"
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's
         // `read_run_output` makes nine; #661's read/update/delete_workflow
-        // trio makes twelve.
-        assert_eq!(names.len(), 12, "got {names:?}");
+        // trio makes twelve; #884's `delegate_to_teammate` makes thirteen.
+        assert_eq!(names.len(), 13, "got {names:?}");
+        assert!(names.contains(&DELEGATE_TO_TEAMMATE_TOOL), "got {names:?}");
         assert!(names.contains(&RUN_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&READ_RUN_OUTPUT_TOOL), "got {names:?}");
         assert!(names.contains(&CREATE_WORKFLOW_TOOL), "got {names:?}");
@@ -6749,6 +7360,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         });
         let calls = runner_impl.calls.clone();
         let runner: Arc<dyn WorkflowRunner> = Arc::new(runner_impl);
@@ -6794,6 +7407,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -6894,6 +7509,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -6930,6 +7547,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -6952,6 +7571,109 @@ name = "Morning"
         let out = result.output_for_llm(true);
         assert!(out.contains("Paused for approval"), "{out}");
         assert!(out.contains("worker"), "{out}");
+    }
+
+    /// Issue #900 (tinysweeper `missing-test`): `summarize_run`'s blocked branch
+    /// had no coverage at all, and the doc comment on `blocked` / `paused`
+    /// (issue #881) — that a blocked node and a paused gate need separate
+    /// sentences even though both ride `pending_approvals` — was untested along
+    /// with it. One node blocks, a second is an ordinary paused gate: the
+    /// summary must name the blocked node under "Blocked, waiting on a person"
+    /// (never under "Paused for approval", which would tell the agent the run
+    /// resumes on its own) and the paused node under "Paused for approval"
+    /// only. The structural JSON counts (issue #881) must agree.
+    #[tokio::test]
+    async fn run_workflow_tool_separates_blocked_nodes_from_paused_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": [] } } }),
+            // Issue #881: the union — the blocked node's id rides here too, and
+            // `summarize_run` is what has to keep it out of the "Paused for
+            // approval" line.
+            pending_approvals: vec!["worker".to_string(), "gate".to_string()],
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "worker".to_string(),
+                tools: vec!["publish_artifact".to_string()],
+                approval_ids: vec!["appr-1".to_string()],
+                unparkable: 0,
+            }],
+            approvals: vec![
+                crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("worker".to_string()),
+                    tool: Some("publish_artifact".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                    approval_id: Some("appr-1".to_string()),
+                },
+                // Issue #900: a receipt for a call that did NOT land a card.
+                // `run.approvals.len()` would count this as a second "parked"
+                // approval; the JSON's `approvals_parked` must not.
+                crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("worker".to_string()),
+                    tool: Some("publish_artifact".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                    approval_id: None,
+                },
+            ],
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let refs = WorkflowRefQueue::default();
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            refs,
+            RunOutputCache::default(),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        let out = result.output_for_llm(true);
+        assert!(
+            out.contains("Blocked, waiting on a person") && out.contains("worker"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Paused for approval") && out.contains("gate"),
+            "{out}"
+        );
+        // The blocked node must not also read as an ordinary paused gate — that
+        // sentence promises the run continues once it is decided, which is
+        // false for a block (issue #881).
+        let paused_line = out
+            .lines()
+            .find(|l| l.contains("Paused for approval"))
+            .expect("a Paused for approval line");
+        assert!(!paused_line.contains("worker"), "{out}");
+
+        let payload = match &result.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data.clone(),
+            other => panic!("expected JSON payload, got {other:?}"),
+        };
+        assert_eq!(
+            payload.get("blocked_nodes").and_then(Value::as_u64),
+            Some(1)
+        );
+        // Issue #900: two receipts on this run (one parked, one that failed to
+        // park), and the JSON count must name only the decidable one.
+        assert_eq!(
+            payload.get("approvals_parked").and_then(Value::as_u64),
+            Some(1),
+            "approvals_parked must exclude the ParkFailed receipt: {payload}"
+        );
     }
 
     #[tokio::test]
@@ -7069,6 +7791,7 @@ name = "Morning"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -7133,6 +7856,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7200,6 +7925,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7277,6 +8004,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7377,6 +8106,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7994,6 +8725,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         let md = summarize_run(&file, &run, "run-xyz", RunOutputStored::Stored);
         assert!(md.contains("last of 3 items — third"), "{md}");
@@ -8009,6 +8742,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         let md = summarize_run(&file, &run_one, "run-1", RunOutputStored::Stored);
         assert!(md.contains("1 item(s) — only"), "{md}");
@@ -8046,6 +8781,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),
@@ -8075,6 +8812,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cancel_cache.clone(),
@@ -8111,6 +8850,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),
@@ -8173,6 +8914,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),

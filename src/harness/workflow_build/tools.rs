@@ -59,6 +59,20 @@ pub(super) struct CopilotContext {
     pub(super) description: String,
     pub(super) effective_slugs: Vec<String>,
     pub(super) unwired_slugs: Vec<String>,
+    /// When set, the copilot is CORRECTING an existing workflow (issue #840,
+    /// PR-3) rather than drafting a new one. The host then pins the corrected
+    /// spec's id/name to this saved identity — instead of minting a fresh, deduped
+    /// id — so the operator's Save is a NEW VERSION of that workflow, not an
+    /// orphan graph with a `-2` id. `None` for the create-from-description path.
+    pub(super) fixing: Option<FixTarget>,
+}
+
+/// The saved identity a fix-from-run correction must preserve (issue #840, PR-3):
+/// the exact `wid` the edit route writes under, and the display name the operator
+/// recognises. The model corrects the GRAPH; the host keeps the identity.
+pub(super) struct FixTarget {
+    pub(super) id: String,
+    pub(super) name: String,
 }
 
 /// A graph the propose tool accepted under full host authority — the value the
@@ -266,11 +280,28 @@ impl Tool for CheckWorkflowTool {
         // would have overridden, misleading the agent into reworking a fine graph.
         // Deliberately does NOT touch the name: an omitted name is honest feedback
         // the courtesy pass should surface.
-        spec.id = safe_workflow_id(
-            &spec.name,
-            &self.ctx.description,
-            &self.ctx.company.existing_ids,
-        );
+        //
+        // On the fix path (issue #840, PR-3) the host preserves the failing
+        // workflow's saved id, so `check_workflow` validates the graph the host
+        // WOULD build — a check that minted a fresh deduped id could flag a
+        // duplicate the propose pass will not hit, misleading the agent.
+        match self.ctx.fixing.as_ref() {
+            // Mirror the propose path's fixing branch exactly: the host pins BOTH
+            // id and name to the failing workflow's, so check must validate against
+            // the same name the host will keep — otherwise it validates a
+            // model-supplied name the propose pass overwrites, a false positive.
+            Some(fix) => {
+                spec.id = fix.id.clone();
+                spec.name = fix.name.clone();
+            }
+            None => {
+                spec.id = safe_workflow_id(
+                    &spec.name,
+                    &self.ctx.description,
+                    &self.ctx.company.existing_ids,
+                );
+            }
+        }
 
         let mut problems: Vec<String> = Vec::new();
 
@@ -400,12 +431,24 @@ impl Tool for ProposeWorkflowTool {
 
         // Host authority, byte-for-byte the old inline path: the host owns the id,
         // the name dedup, and approval gating — the model gets no vote.
-        spec.id = safe_workflow_id(
-            &spec.name,
-            &self.ctx.description,
-            &self.ctx.company.existing_ids,
-        );
-        spec.name = safe_workflow_name(&spec.name, &self.ctx.company.existing_names);
+        match self.ctx.fixing.as_ref() {
+            // The fix path (issue #840, PR-3) preserves the failing workflow's
+            // saved identity: the id must equal the `wid` the edit route writes a
+            // NEW VERSION under, and the name stays the one the operator knows. A
+            // freshly deduped id/name here would orphan the correction.
+            Some(fix) => {
+                spec.id = fix.id.clone();
+                spec.name = fix.name.clone();
+            }
+            None => {
+                spec.id = safe_workflow_id(
+                    &spec.name,
+                    &self.ctx.description,
+                    &self.ctx.company.existing_ids,
+                );
+                spec.name = safe_workflow_name(&spec.name, &self.ctx.company.existing_names);
+            }
+        }
         for node in &mut spec.nodes {
             node.requires_approval = None;
         }

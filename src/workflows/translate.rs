@@ -172,6 +172,14 @@ fn translate_node(def: &WorkflowNodeDef) -> Node {
             if let Some(agent) = def.agent.as_deref().filter(|a| !a.is_empty()) {
                 config.insert("agent_ref".to_string(), json!(agent));
             }
+            // Issue #881: which node this is. The vendored `AgentRunner` trait
+            // hands the capability only the resolved config and the trusted
+            // `agent_ref` — the node's own id is lost at that boundary — so a
+            // node that blocks on an approval could not say *which* node
+            // blocked. Written in the first-class layer beside `agent_ref`, and
+            // for the same reason: config must not be able to rebind a node's
+            // identity to another node's name.
+            config.insert("node_id".to_string(), json!(def.id));
         }
         // A `tool_call` needs a `slug` (the config overlay above carries it). The
         // masking node-id default was removed (issue #661): author-time
@@ -443,7 +451,10 @@ mod tests {
                 "agent_ref": "brand_strategist",
                 "prompt": "Turns the brief into an angle + outline.",
                 // Issue #782: the upstream-output binding every agent node carries.
-                "input": "=items"
+                "input": "=items",
+                // Issue #881: the node's own id, so the agent capability can say
+                // WHICH node blocked when its turn parks an approval.
+                "node_id": "strategist"
             })
         );
         // The gate carries its boolean discriminant (issue #661): a condition
@@ -463,7 +474,9 @@ mod tests {
                 "agent_ref": "copywriter",
                 "prompt": "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off.",
                 // Issue #782: the upstream-output binding every agent node carries.
-                "input": "=items"
+                "input": "=items",
+                // Issue #881: as above.
+                "node_id": "publish"
             })
         );
         assert_eq!(config("done"), json!({}));

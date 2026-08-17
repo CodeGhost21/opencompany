@@ -88,6 +88,8 @@ struct Settled {
     cancelled: bool,
     notices: Vec<String>,
     board: Vec<WorkflowRunBoardRow>,
+    blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
+    approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
 }
 
 impl From<Result<&WorkflowRun, &str>> for Settled {
@@ -117,6 +119,8 @@ impl From<Result<&WorkflowRun, &str>> for Settled {
                 cancelled: run.cancelled,
                 notices: run.notices.clone(),
                 board: run.board.clone(),
+                blocked_nodes: run.blocked_nodes.clone(),
+                approvals: run.approvals.clone(),
             },
             Err(err) => Self {
                 deliveries: Vec::new(),
@@ -125,6 +129,16 @@ impl From<Result<&WorkflowRun, &str>> for Settled {
                 cancelled: false,
                 notices: Vec::new(),
                 board: Vec::new(),
+                // Issues #881 / #880: the `Ok` arm only, same trade as `board`
+                // above and worth naming for the same reason. A run whose node
+                // blocked settles `Ok` by design — a blocked node is not a
+                // failed one — so this arm is genuinely a failure, and a
+                // failure returns no `WorkflowRun` to read rows off. Any
+                // approval such a run parked is still on the operator's
+                // Approvals page; what is lost is this event's *listing* of
+                // it, not the card.
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
         }
     }
@@ -154,6 +168,8 @@ pub async fn record_run_finished(
         cancelled: settled.cancelled,
         notices: settled.notices,
         board: settled.board,
+        blocked_nodes: settled.blocked_nodes,
+        approvals: settled.approvals,
     };
 
     if let Err(err) = events.append(company, event).await {
@@ -411,6 +427,8 @@ mod test {
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }
     }
 
@@ -777,6 +795,8 @@ mod test {
                     cancelled: false,
                     notices: Vec::new(),
                     board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
                 },
             )
             .await

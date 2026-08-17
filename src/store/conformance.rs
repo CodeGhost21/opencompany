@@ -163,6 +163,12 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
         overlay_policy: Some(sample_policy_override()),
+        // Non-empty so a backend that drops the field is caught: an empty map
+        // survives every possible bug, including not persisting it at all.
+        overlay_desk_tools: std::collections::BTreeMap::from([(
+            "studio".to_string(),
+            vec!["docs.*".to_string(), "web".to_string()],
+        )]),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
     }
@@ -302,6 +308,15 @@ pub async fn assert_isolation_by_company(
     assert!(
         !loaded.workflow_enabled("digest"),
         "the paused workflow id did not survive save/load"
+    );
+    // The per-desk tool ceilings survive too. A backend that dropped this would
+    // silently widen every console-narrowed department back to the company's
+    // full grant on the next restart — a capability regression whose only
+    // symptom is an agent succeeding at something it had been denied.
+    assert_eq!(
+        loaded.effective_desk_tools("studio"),
+        vec!["docs.*".to_string(), "web".to_string()],
+        "overlay_desk_tools did not survive save/load"
     );
     assert_eq!(
         events
@@ -3421,6 +3436,146 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
         .expect("the contested path must still resolve");
     assert!(!after.was_created());
     assert_eq!(&after.node().id, &ids[0]);
+}
+
+/// Asserts that a reader concurrent with a writer on the SAME node never errors
+/// and never observes a partial body (issue #887).
+///
+/// This is a statement about
+/// [`WorkspaceStore::read`](crate::ports::workspace::WorkspaceStore::read), so
+/// it is stated here rather than as an `fs` test: every backend a hosted tenant
+/// can run has to answer for it. sqlite and mongodb already do — a row update
+/// and a document replace are atomic — which is exactly why the guarantee
+/// belongs to the port and not to whichever backend happened to have it.
+///
+/// The `fs` backend did not. It wrote node content with a bare
+/// `tokio::fs::write`, whose `O_TRUNC` leaves the file short for the whole of
+/// the write, while `read` takes no lock. A reader landing in that window sees a
+/// prefix, and the two ways that surfaces are not equally visible:
+///
+/// * the cut lands **mid-codepoint** → `read_to_string` fails with
+///   `InvalidData`, which at least produces a red step; and
+/// * the cut lands **on** a codepoint boundary → the read **succeeds** with half
+///   a document, the agent grounds an answer in it, and nothing anywhere says
+///   so.
+///
+/// A retry only ever addresses the first. So the body is deliberately built from
+/// multi-byte characters and checked for **equality with a whole revision**
+/// rather than for decodability: length and content, not just "no error".
+pub async fn assert_workspace_read_never_tears(ws: Arc<dyn WorkspaceStore>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// How many times the note is rewritten end to end.
+    const ROUNDS: usize = 60;
+    /// Concurrent readers. More than one, because a single reader spends much of
+    /// its time not inside the window.
+    const READERS: usize = 4;
+    /// Repeats of the 8-byte unit below, giving a ~512 KiB body — large enough
+    /// that the write is not one instantaneous syscall.
+    const UNITS: usize = 64 * 1024;
+
+    let company = CompanyId::new("alpha");
+    // Every character is multi-byte, so a cut at an odd offset splits one. That
+    // is the visible half of the failure; the silent half is a cut that does
+    // not, which the equality check below is what catches.
+    let whole_a: String = "αβγδ".repeat(UNITS);
+    let whole_b: String = "εζηθ".repeat(UNITS);
+    assert_eq!(
+        whole_a.len(),
+        whole_b.len(),
+        "the two revisions must be the same size, so a short read cannot be \
+         mistaken for the other revision"
+    );
+
+    let node = WorkspaceNode {
+        id: "torn-note".to_string(),
+        name: "Torn.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    ws.create(&company, &node, Some(&whole_a))
+        .await
+        .expect("seed the note");
+
+    let done = Arc::new(AtomicBool::new(false));
+
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let ws = Arc::clone(&ws);
+            let company = company.clone();
+            let done = Arc::clone(&done);
+            let (a, b) = (whole_a.clone(), whole_b.clone());
+            tokio::spawn(async move {
+                let mut observed = 0usize;
+                while !done.load(Ordering::Relaxed) {
+                    let body = match ws.read(&company, "torn-note").await {
+                        Ok(Some((_, body))) => body,
+                        Ok(None) => {
+                            return Err(
+                                "the note vanished; nothing in this test deletes it".to_string()
+                            );
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "a read concurrent with a write FAILED ({e}). \
+                                 `read` has no failure mode of its own here — the note exists \
+                                 and is unchanged in size; this is the writer's truncation \
+                                 window observed from the outside."
+                            ));
+                        }
+                    };
+                    if body != a && body != b {
+                        return Err(format!(
+                            "a read concurrent with a write observed a PARTIAL body: \
+                             {seen} bytes, where either whole revision is {whole}. \
+                             It decoded cleanly, so nothing failed and nothing was logged — \
+                             an agent would have grounded its answer in this.",
+                            seen = body.len(),
+                            whole = a.len(),
+                        ));
+                    }
+                    observed += 1;
+                    // Yield so a current-thread runtime interleaves the writer.
+                    tokio::task::yield_now().await;
+                }
+                Ok(observed)
+            })
+        })
+        .collect();
+
+    for round in 0..ROUNDS {
+        let body = if round % 2 == 0 { &whole_b } else { &whole_a };
+        ws.write(&company, "torn-note", body, WorkspaceOrigin::Operator)
+            .await
+            .expect("the writer itself must not fail");
+    }
+    done.store(true, Ordering::Relaxed);
+
+    let mut total = 0usize;
+    for reader in readers {
+        match reader.await.expect("a reader task panicked") {
+            Ok(observed) => total += observed,
+            Err(why) => panic!("{why}"),
+        }
+    }
+    assert!(
+        total > 0,
+        "no read ran while the note was being rewritten, so this case proved nothing"
+    );
+
+    // And the note is one of the two whole revisions once everything settles.
+    let (_, final_body) = ws
+        .read(&company, "torn-note")
+        .await
+        .expect("the settled read")
+        .expect("the note is still there");
+    assert!(final_body == whole_a || final_body == whole_b);
 }
 
 /// A folder node for the binary suite.

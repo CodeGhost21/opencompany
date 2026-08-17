@@ -562,6 +562,7 @@ impl CompanyStore for MongoStore {
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
             overlay_policy: overlay.policy,
+            overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
@@ -4155,6 +4156,7 @@ mod test {
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
                 overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             };
@@ -4381,6 +4383,16 @@ mod test {
     async fn conformance_workspace_folder_claims() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_folder_claims(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// Issue #887's no-torn-read contract, on the other backend hosted tenants
+    /// run. A document replace is atomic, so this passed before the `fs` fix
+    /// and passes after — the contract is the port's, not one backend's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_never_tears() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_read_never_tears(s.clone()).await;
         drop_db(&s).await;
     }
 

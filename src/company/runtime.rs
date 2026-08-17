@@ -1167,6 +1167,33 @@ impl CompanyRuntime {
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
     }
 
+    /// How many **other** decisions the turn behind `id` is still blocked on
+    /// (issue #561).
+    ///
+    /// The console asks so it can say what is actually about to happen. Since
+    /// issue #469 a turn continues once, when the last decision it parked
+    /// lands — so approving one of four tells the operator's agent nothing yet,
+    /// and a confirmation reading "the agent is completing the action" is false
+    /// for three of those four clicks. It was measured false for minutes at a
+    /// time on staging, which is worse than silence: the operator waits for work
+    /// that no decision has released.
+    ///
+    /// `0` means this decision releases the turn (or the turn was never gated,
+    /// which continues on its own the same way).
+    ///
+    /// A **snapshot**, deliberately: the count is read after the verdict is
+    /// durable and before the follow-up cycle decrements it, so this approval is
+    /// still included and is subtracted here. A concurrent resolve on the same
+    /// turn can land between the read and the render, which makes the number
+    /// advisory — it is confirmation copy, not a control, and the continuation
+    /// itself is decided under the queue's own lock where no such race exists.
+    pub fn decisions_still_awaited(&self, id: &ApprovalId) -> usize {
+        let Some(turn) = self.journal.approval_cycle(id).flatten() else {
+            return 0;
+        };
+        self.continuations.outstanding(&turn).saturating_sub(1)
+    }
+
     /// Resolves a parked approval to an operator-amended effect
     /// (approve-with-edit): the operator's `amended_payload` is overlaid onto
     /// the parked effect, which is then executed. Runs a follow-up cycle so the
@@ -1228,7 +1255,7 @@ impl CompanyRuntime {
                 ResolveReceipt::AlreadyResolved => {
                     return Ok(CycleRunner::new(&rt).already_resolved_report());
                 }
-                ResolveReceipt::Settled(event) => event,
+                ResolveReceipt::Settled(event) => *event,
             };
             rt.continue_turn(event).await
         })
@@ -1823,6 +1850,9 @@ impl CompanyRuntime {
             .pending()
             .into_iter()
             .map(|p| ApprovalSummary {
+                // Read before the field moves below (issue #880): the answer
+                // needs the task link *and* the effect together.
+                workflow_run_id: workflow_run_of(&p),
                 id: p.id,
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
@@ -2102,6 +2132,28 @@ impl CompanyRuntime {
     }
 }
 
+/// The **workflow** run waiting on a parked approval, if any (issue #880).
+///
+/// `Effect::run_id` holds two different id spaces — issue #242's task-attempt id
+/// and, on the workflow path, a workflow run id — and `generate_id` is only
+/// process-locally unique, so the value alone cannot say which it is. The park
+/// *site* can, and it is recorded: a task attempt parks inside its dispatch
+/// cycle and is linked to that card, while every workflow park goes through
+/// `park_and_journal` and is recorded explicitly `Unlinked` (#333). A chat turn
+/// is unlinked too but stamps no run id at all, so requiring both is exact.
+///
+/// Deliberately conservative in the ambiguous direction: an approval with no
+/// recorded link (`None`, i.e. a pre-#333 journal line) reports nothing rather
+/// than guessing, which is the same fallback rule #333 set for the task link.
+fn workflow_run_of(parked: &crate::runtime::journal::PendingApproval) -> Option<String> {
+    matches!(
+        parked.task,
+        Some(crate::runtime::journal::TaskLink::Unlinked)
+    )
+    .then(|| parked.effect.run_id.clone())
+    .flatten()
+}
+
 impl std::fmt::Debug for CompanyRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompanyRuntime")
@@ -2115,6 +2167,65 @@ impl std::fmt::Debug for CompanyRuntime {
 #[cfg(test)]
 mod tests {
     use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
+
+    /// Issue #880: which parked approvals name a workflow run, and which must
+    /// not.
+    ///
+    /// The discrimination is the whole content of the change, because
+    /// `Effect::run_id` carries two id spaces — issue #242's task attempt and
+    /// the workflow run — and `generate_id` is only process-locally unique, so
+    /// the value cannot be inspected to tell them apart. Getting this wrong in
+    /// the permissive direction would print a task-attempt id on an approvals
+    /// card as though it were a workflow run.
+    #[test]
+    fn only_an_unlinked_park_with_a_run_id_names_a_workflow_run() {
+        use crate::ports::types::{ApprovalId, Effect, EffectGroup};
+        use crate::runtime::journal::{PendingApproval, TaskLink};
+
+        let parked = |task: Option<TaskLink>, run_id: Option<&str>| PendingApproval {
+            id: ApprovalId::new("appr-1"),
+            effect: Effect {
+                kind: "publish_artifact".to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({}),
+                agent: Some("ceo".to_string()),
+                run_id: run_id.map(str::to_string),
+            },
+            at_millis: 1,
+            task,
+            thread: None,
+            batch: None,
+        };
+
+        // A workflow park: `park_and_journal` records it explicitly unlinked
+        // (#333) and the run stamps its id.
+        assert_eq!(
+            super::workflow_run_of(&parked(Some(TaskLink::Unlinked), Some("run-1"))),
+            Some("run-1".to_string())
+        );
+        // A board task's attempt: same field, different id space. Must NOT be
+        // reported as a workflow run.
+        assert_eq!(
+            super::workflow_run_of(&parked(
+                Some(TaskLink::Task {
+                    id: "card-1".to_string()
+                }),
+                Some("attempt-1")
+            )),
+            None
+        );
+        // A chat turn: unlinked, but nothing stamped a run onto it.
+        assert_eq!(
+            super::workflow_run_of(&parked(Some(TaskLink::Unlinked), None)),
+            None
+        );
+        // A pre-#333 line records no link at all, so the park site is unknown.
+        // Conservative rather than guessing — the same fallback rule #333 set.
+        assert_eq!(super::workflow_run_of(&parked(None, Some("run-1"))), None);
+    }
 
     #[cfg(feature = "openhuman")]
     use std::sync::{Arc, Mutex};

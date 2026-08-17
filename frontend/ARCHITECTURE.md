@@ -22,8 +22,25 @@ a scoped REST surface:
 - Multi-company: `/api/v1/companies/{id}/…`
 - Single-company alias: `/api/v1/company/…`
 
-The typed client (`src/api/client.ts`) resolves that scope, adds the operator
-`Bearer` token, and is the only place HTTP happens.
+The typed client (`src/api/client.ts`) resolves that scope, attaches whatever
+credential its connection holds, and is the only place HTTP happens.
+
+The console holds **N hosts at once** (`src/connections/`), one client per
+connection. Three deployment shapes fall out of that:
+
+- **Same-origin** — served by the host it operates. The session is an `HttpOnly`
+  cookie that nothing in the page can read. The ordinary case, unchanged.
+- **Hub** — one deployment at its own origin operating hosts on other origins,
+  built with `VITE_OC_HUB=1`. No cookie crosses an origin, so it carries a
+  session token itself in `x-opencompany-session`, and its event stream runs
+  over `fetch` because `EventSource` cannot set a header. See
+  [hub-console.md](../docs/spec/runtime/hub-console.md).
+- **Desktop** — routes through its own Rust core, where neither CORS nor the
+  cookie rules apply. See [desktop.md](../docs/spec/runtime/desktop.md).
+
+Which applies is **derived, not configured**: `needsCarriedSession` compares the
+host's origin with the document's, so a console cannot be told to hold a token
+where a cookie would have worked.
 
 Every surface is built to one pattern so the backend can land incrementally:
 

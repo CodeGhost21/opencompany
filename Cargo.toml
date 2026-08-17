@@ -76,7 +76,7 @@ fs2 = "0.4"
 # and `axum`, so this is a direct-use declaration, not new compilation.
 tower = { version = "0.5", features = ["util"] }
 
-tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite", "repl"] }
+tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite"] }
 
 # WS4: openhuman embedded as a library (the harness). Only links under the
 # `openhuman` feature; the default build pulls none of this enormous native
