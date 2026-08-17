@@ -17,10 +17,8 @@ are data-only definitions under `companies/` (a `company.toml` manifest plus a
 `frontend/`. Design notes and module specifications live in `docs/`, with
 `docs/spec/README.md` as the top-level architecture reference and
 `docs/modules/` holding per-surface design docs.
-Vendored runtime sources live under `vendor/` as Git submodules:
-
-- `vendor/openhuman/`
-- `vendor/tinyagents/`
+The vendored runtime source is the `vendor/openhuman/` Git submodule. TinyAgents
+is inherited from OpenHuman at `vendor/openhuman/vendor/tinyagents/`.
 
 Prefer small modules with focused responsibilities. Keep core type definitions
 in a dedicated `types.rs` file and package-local tests in the module file or a

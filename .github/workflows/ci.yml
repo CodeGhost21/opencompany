@@ -163,9 +163,8 @@ jobs:
       # `Report vendored openhuman drift` step's `git -C vendor/openhuman
       # rev-parse|fetch|merge-base|rev-list` — a different command that belongs
       # inline — nor `deploy-staging.yml`'s root-level `git submodule update
-      # --init --recursive`, which is a different shape fetching a different set
-      # (it also takes `vendor/tinyagents`, and runs against a `submodules:
-      # false` checkout).
+      # --init`, which is a different shape fetching the top-level OpenHuman
+      # checkout before the shared helper fills its nested vendor tree.
       - name: Vendored submodule init is not inlined
         run: |
           set -euo pipefail
@@ -675,9 +674,9 @@ jobs:
       # `--no-deps` is LOAD-BEARING — do not "simplify" it away. Cargo treats the
       # vendored `[patch]` crates as local packages, so an unscoped `-D warnings`
       # hard-fails on lints this repo neither owns nor can fix here (today:
-      # `large_enum_variant` in `vendor/tinyagents`), and the gate would never
-      # reach first-party code. Scoping to the primary package is what makes it
-      # meaningful.
+      # `large_enum_variant` in OpenHuman's nested `vendor/tinyagents`), and the
+      # gate would never reach first-party code. Scoping to the primary package
+      # is what makes it meaningful.
       - name: Clippy (openhuman, tinycortex)
         run: cargo clippy --locked --no-deps --features openhuman,tinycortex --all-targets -- -D warnings
 

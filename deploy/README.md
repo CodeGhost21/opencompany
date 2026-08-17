@@ -39,7 +39,7 @@ doctl apps update <APP_ID> --spec .do/app.yaml   # after editing OPENCOMPANY_COM
 ```
 
 Point `github.repo`/`branch` at your fork first. Submodules are cloned by the
-builder, so the `vendor/tinyagents` patch resolves.
+builder, so the nested `vendor/openhuman/vendor/tinyagents` patch resolves.
 
 ### DigitalOcean — plain Droplet
 

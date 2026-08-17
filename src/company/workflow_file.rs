@@ -1358,8 +1358,9 @@ pub(crate) fn required_config_problems(
         }
         // `field` OR `expression` both satisfy a switch — the tinyflows engine
         // reads `config.expression` first and falls back to `config.field`
-        // (`vendor/tinyagents` `switch.rs`), so either is honoured downstream and
-        // requiring only that ONE is present matches the runtime.
+        // (`vendor/openhuman/vendor/tinyflows/.../switch.rs`), so either is
+        // honoured downstream and requiring only that ONE is present matches the
+        // runtime.
         WorkflowNodeKind::Switch if !non_empty("field") && !non_empty("expression") => {
             problems.push(format!(
                 "{label} is a switch node but names no discriminant — set `config.field` or \
