@@ -382,6 +382,28 @@ pub struct CompanyManifest {
     /// Cron-driven prompts. Renamed from the `[[schedule]]` array-of-tables.
     #[serde(default, rename = "schedule")]
     pub schedules: Vec<Schedule>,
+    /// How this company relates to the global baseline ([`crate::globals`]).
+    #[serde(default)]
+    pub globals: Globals,
+}
+
+/// `[globals]` — this company's relationship to the global baseline.
+///
+/// The baseline is a floor every company gets whichever vertical it started
+/// from, so the only thing left to configure is what this company does *not*
+/// want. Replacing a global needs no entry here: a company definition of the
+/// same id supersedes the global one on its own.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Globals {
+    /// Globals this company drops outright, as `<kind>:<id>` keys — e.g.
+    /// `agent:researcher`, `workflow:weekly_review`, `skill:meeting-brief`.
+    ///
+    /// Validated against what the baseline actually carries: an entry naming
+    /// nothing is a manifest error, because the alternative is an opt-out the
+    /// operator wrote, believed, and silently never got. The kinds are
+    /// [`crate::globals::DISABLE_KINDS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disable: Vec<String>,
 }
 
 /// `[company]` — the seed of the Charter.
