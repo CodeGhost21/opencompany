@@ -111,8 +111,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { effectDone } from "@/lib/language";
-import { PRIORITY_STYLES } from "@/lib/tasks-sample";
-import { labelFor, type TaskColumn } from "@/lib/board-columns";
+
+import { labelFor, PRIORITY_STYLES, type TaskColumn } from "@/lib/board-columns";
 import { useBoardColumns } from "@/hooks/use-board-columns";
 import { toast } from "sonner";
 import { ArtifactsTab } from "./ArtifactsTab";

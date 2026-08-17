@@ -90,3 +90,40 @@ export async function fetchBoardColumns(
   const board = list.ledgers.find((held) => held.slug === BOARD_LEDGER);
   return board ? columnsOf(board) : [];
 }
+
+// ---------------------------------------------------------------------------
+// The rest of the board's presentation vocabulary
+// ---------------------------------------------------------------------------
+//
+// These two arrived here when `tasks-sample.ts` was deleted with the board
+// screen. That file was named for illustrative data the console outgrew years
+// ago — its header still claimed "the console has no live task API yet" — and
+// what actually survived in it were these: one board concern each. They live
+// beside the columns because that is what they are about.
+
+export type TaskPriority = "low" | "medium" | "high";
+
+/**
+ * The one column that offers the "+" add-task button (issue #206).
+ *
+ * New work enters the board in exactly one place. Offering `+` on every column
+ * — as the board used to — let an operator create a card straight into
+ * `in_progress`, `in_review`, or `done`, which either skips the dispatch edge
+ * or fabricates a terminal state for work that never ran.
+ */
+export const ADD_TASK_COLUMN = "todo";
+
+/**
+ * Priority badges.
+ *
+ * These deliberately *do* use the status hues, unlike the category and kind
+ * palettes elsewhere. Priority and status share one axis — how much this
+ * wants your attention — so red-for-high and amber-for-medium reinforce the
+ * vocabulary rather than competing with it, and `low` stays neutral for the
+ * same reason `idle` does: nothing is being asked of anyone.
+ */
+export const PRIORITY_STYLES: Record<TaskPriority, string> = {
+  high: "border-status-failed/30 bg-status-failed-soft text-status-failed-text",
+  medium: "border-status-blocked/30 bg-status-blocked-soft text-status-blocked-text",
+  low: "border-border bg-muted text-muted-foreground",
+};

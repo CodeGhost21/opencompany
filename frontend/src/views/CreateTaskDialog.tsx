@@ -42,8 +42,8 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useBoardColumns } from "@/hooks/use-board-columns";
-import { labelFor } from "@/lib/board-columns";
-import { ADD_TASK_COLUMN } from "@/lib/tasks-sample";
+import { ADD_TASK_COLUMN, labelFor } from "@/lib/board-columns";
+
 
 /** How long a derived title may run before the full prompt moves to the note. */
 const TITLE_CAP = 80;

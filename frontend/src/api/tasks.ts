@@ -1,6 +1,6 @@
 // The live task-board API: the console's Kanban reads and writes real cards
 // through the host's `…/tasks` routes (REST, camelCase over the wire). Replaces
-// the client-side `tasks-sample` illustrative data.
+// the client-side illustrative data the console shipped before it had one.
 
 import type { OpenCompanyClient } from "./client";
 import type { ArtifactKind } from "./artifacts";
