@@ -22,7 +22,7 @@ fn the_baseline_is_not_empty() {
     assert!(!agents().is_empty(), "no global agents embedded");
     assert!(!workflows().is_empty(), "no global workflows embedded");
     assert!(!skills().is_empty(), "no global skills embedded");
-    assert!(!tool_baseline().is_empty(), "no global tool baseline");
+    assert!(!default_tool_allow().is_empty(), "no default tool belt");
 }
 
 #[test]
@@ -59,15 +59,22 @@ fn every_global_workflow_names_a_global_agent() {
 }
 
 #[test]
-fn the_tool_baseline_grants_nothing_that_spends_or_leaves() {
-    // The floor is a floor: no company can drop below it, so it must never
-    // carry a namespace that spends money or reaches outside the company.
-    for namespace in tool_baseline() {
-        assert!(
-            !["media", "composio", "search", "web", "*"].contains(&namespace.as_str()),
-            "`{namespace}` cannot be in the global tool floor — a company must be able to withhold it"
-        );
-    }
+fn the_default_tool_belt_is_the_wildcard_belt_without_search() {
+    // The belt a company starts from, authored rather than hardcoded. `search`
+    // stays out of it: it bills per call, and a company that never asked for
+    // web search must never spend on it by default.
+    assert_eq!(
+        default_tool_allow(),
+        vec!["*".to_string(), "media".to_string(), "composio".to_string()]
+    );
+}
+
+#[test]
+fn an_absent_default_tool_belt_falls_back_rather_than_grants_nothing() {
+    // The fallback matters more than it looks: a company whose manifest has no
+    // `[tools]` section takes this value, so an empty answer would ship a
+    // company whose every agent has an empty tool belt.
+    assert!(!default_tool_allow().is_empty());
 }
 
 #[test]

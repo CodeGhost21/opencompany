@@ -3,7 +3,7 @@
 //!
 //! A `companies/<name>/` bundle describes one vertical. This module is the part
 //! that is the same in all of them — a small roster, two workflow graphs, a few
-//! installed skills, and the tool namespaces below which no company may drop.
+//! installed skills, and the tool belt a company starts from.
 //! The authored sources live in `globals/` beside `companies/`, and the
 //! contract is `docs/spec/runtime/globals.md`.
 //!
@@ -29,8 +29,8 @@
 //!   overlay, then the global graph;
 //! * skills — a company-bundle or console-authored skill of the same slug
 //!   supersedes the installed global one;
-//! * tools — `[tools].baseline` is unioned into `[tools].allow`, which is a
-//!   floor and cannot narrow what a company granted.
+//! * tools — `[tools].default_allow` is the belt a company with no `[tools]`
+//!   section gets; one that declares grants keeps exactly what it declared.
 //!
 //! A company drops a global outright with `[globals].disable`, whose entries are
 //! `<kind>:<id>` keys validated against what this module actually carries.

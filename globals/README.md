@@ -9,7 +9,7 @@ part that is the same in all of them.
 | Agents | `agents/*.toml` | Research, writing, and keeping the record straight are not a vertical. |
 | Workflows | `workflows/*.toml` | A weekly review and a research request run the same in a law firm and a game studio. |
 | Skills | `[skills].always` in `globals.toml` | A few shared-library skills are installed rather than offered. |
-| Tools | `[tools].baseline` in `globals.toml` | A teammate with no sandbox, no documents, and no workspace cannot work at all. |
+| Tools | `[tools].default_allow` in `globals.toml` | Every vertical starts from the same belt; where that belt is *authored* is global, and a company can still narrow it. |
 
 The contents are embedded into the binary at build time, so they are present in
 a platform-provisioned container that has no repository checkout beside it —

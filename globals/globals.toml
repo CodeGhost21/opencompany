@@ -3,8 +3,9 @@
 #
 # The agents and workflows beside this file are the rest of the baseline; they
 # need no entry here, because a definition that exists is a definition that
-# ships. This file carries only what cannot be a file: the tool floor, and the
-# subset of the shared skill library that is installed rather than offered.
+# ships. This file carries only what cannot be a file: the default tool belt,
+# and the subset of the shared skill library that is installed rather than
+# offered.
 
 [tools]
 # The tool belt a company gets when its manifest declares no `[tools]` section
