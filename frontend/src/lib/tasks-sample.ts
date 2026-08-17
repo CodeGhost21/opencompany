@@ -13,38 +13,17 @@ export interface TaskCard {
   assignee: { name: string; tone: string };
 }
 
-export interface TaskColumn {
-  id: string;
-  label: string;
-}
-
 /**
- * The board's columns, left to right. Must stay in step with the backend's
- * `BOARD_COLUMNS` (`src/ports/tasks.rs`), which is the source of truth — and
- * which the REST write boundary rejects a card against, so a column that
- * exists only here is one the host will refuse.
+ * The board's columns no longer live here.
+ *
+ * They are the host's, declared once in `src/ledger/board.rs`, published as the
+ * `tasks` ledger's statuses — each with the label a person reads — and fetched
+ * by `lib/board-columns.ts`. The copy that used to sit here was a
+ * hand-maintained mirror whose own comment admitted the drift it could not
+ * prevent: a column added on one side and not the other kept every test green,
+ * and its cards then either vanished from the board or were refused by the
+ * host's write boundary. Nothing in this file should grow a replacement.
  */
-export const TASK_COLUMNS: TaskColumn[] = [
-  // Everything not started (issue #301): work nobody has picked up yet, and
-  // work the lifecycle returned needing another pass (a failed dispatch, a
-  // cancellation, an orchestrator `revise` verdict) — the reason rides along on
-  // the card's note. This replaces the old Backlog/To-do split (issue #206);
-  // the host rewrites a stored `backlog` card to this column on read.
-  //
-  // It is also the board's manual-entry column: `ADD_TASK_COLUMN` below
-  // restricts the "Add task" box to it, and it is what `POST …/tasks` defaults
-  // to.
-  { id: "todo", label: "To-do" },
-  // Between intake and dispatch: the card is being turned into a plan. Inert
-  // today — epic #183 §4's auto-advance is what will move cards through it, and
-  // dragging one here fires nothing (only `in_progress` dispatches).
-  { id: "planning", label: "Planning" },
-  { id: "in_progress", label: "In progress" },
-  // Where a steered-to-pause run parks (issue #111); a card here offers Resume.
-  { id: "paused", label: "Paused" },
-  { id: "in_review", label: "In review" },
-  { id: "done", label: "Done" },
-];
 
 /**
  * The one column that offers the "+" add-task button (issue #206).
