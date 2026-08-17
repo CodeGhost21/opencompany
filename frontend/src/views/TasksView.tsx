@@ -94,23 +94,6 @@ function readTaskDetailId(): string | null {
  */
 const POLL_MS = 4000;
 
-/**
- * The MIME type a dragged card stamps its id onto (issue #334).
- *
- * The drop used to read the dragged id out of React state alone. That is a
- * silent single point of failure: a drag that began on anything other than a
- * card leaves the state null, and the drop handler then returned without a
- * word. Putting the id on the drag itself makes a drop self-describing.
- *
- * Filling the data store at all matters for a second reason: a drag whose store
- * is empty is aborted outright by Firefox and Safari, so the board's one
- * documented gesture never even started there.
- *
- * Every read and write of it is optional-chained. A real drag always carries a
- * `dataTransfer`; a synthesized `DragEvent` — which is how the e2e suite drives
- * these handlers — does not, and the `dragId` fallback covers that case.
- */
-const CARD_MIME = "application/x-opencompany-task";
 
 function priorityStyle(priority: string): string {
   return PRIORITY_STYLES[priority as keyof typeof PRIORITY_STYLES] ?? PRIORITY_STYLES.low;
