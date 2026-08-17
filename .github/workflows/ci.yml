@@ -1123,6 +1123,72 @@ jobs:
       # No lint step: the package declares no lint script. Adding one is a
       # separate decision, not something to smuggle in here.
 
+  # Issue #858. The console suite on whatever Node is current, ADVISORY.
+  #
+  # Every lane above pins the version in `frontend/.nvmrc`, so a break that only
+  # exists on a newer Node is invisible to all of CI while being the first thing
+  # a contributor hits — they get whatever they have installed. That is not
+  # hypothetical: #852 filed 57 failing tests as a `jsdom` caret-range bug and
+  # proposed pinning the dependency. jsdom was innocent on both axes. Node 25
+  # exposes WebStorage as an unflagged global, vitest's `populateGlobal` then
+  # skips `localStorage`, and `window.localStorage` resolves to an empty object
+  # (#857). The proposed pin would have closed the issue with the bug live.
+  #
+  # A version mismatch surfaces deep inside a dependency's surface area, nowhere
+  # near the thing that is wrong, so the honest fix is to make CI able to SEE
+  # the newer runtime rather than to keep guessing from the failure's shape.
+  #
+  # `continue-on-error: true` — deliberately advisory, and the trade is stated
+  # rather than assumed. Required, this lane would let a Node release redden
+  # pull requests that have nothing to do with it: the version it installs
+  # changes without anybody in this repo touching anything, which breaks the
+  # property that a red run is attributable to the diff. Advisory, it is
+  # ignorable — that is the cost. It is the right side of that trade only
+  # because the pinned lane above is what gates merges; this one exists to name
+  # a Node-skew break as one, early, in the place where it is cheap to read.
+  #
+  # A SEPARATE JOB rather than a matrix leg on `Console`: a matrix renames the
+  # check to `Console (22)` / `Console (current)`, and branch protection pins
+  # the name `Console`. Adding a version axis must not silently unpin the
+  # required check.
+  #
+  # Deliberately NOT the whole `Console` job's step list: no `build`, no policy
+  # greps. Those cannot fail for Node-version reasons — the typechecks and the
+  # unit suite are the steps where a runtime difference actually shows up, and
+  # they are the fast ones.
+  console-current-node:
+    name: Console (current Node, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `current` is setup-node's alias for the latest release line — the whole
+      # point of this lane is that it is NOT pinned, so `.nvmrc` is exactly what
+      # it must not read.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: current
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `--ignore-engines` has no npm equivalent, and none is wanted: `engines`
+      # declares `>=22`, so a newer Node satisfies it and `npm ci` is quiet.
+      # If this step ever fails on the engine check, the declaration is what is
+      # wrong, not the runner.
+      - run: npm ci
+        working-directory: frontend
+
+      - run: npm run typecheck
+        working-directory: frontend
+      - run: npm run typecheck:unit
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+
   # Issue #428. The Playwright suite was type-checked by the `Console` job above
   # and executed by NOTHING, which is a worse blind spot than having no suite at
   # all: seventy passing specs that nobody runs look exactly like coverage.
