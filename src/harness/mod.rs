@@ -53,6 +53,10 @@ pub mod build;
 pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
+/// Hosting (TinyHosts): the per-company connection and the agent tools over it.
+/// The credential half is always compiled — the console's Hosting settings write
+/// it in every build — while the tools themselves need `openhuman`.
+pub mod hosting;
 mod checkpoint;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
@@ -464,6 +468,14 @@ pub struct HarnessDeps {
     /// and re-resolved each turn, like `chargebee`.
     #[cfg(feature = "paypal")]
     pub paypal: Option<paypal::TenantPaypal>,
+
+    /// The per-company hosting connection. `None` (the default at every
+    /// construction site) fails closed — no hosting tools are wired. Resolved
+    /// from that company's own secret store and re-resolved each turn, like
+    /// `chargebee`: two companies on one host deploy to two different hosting
+    /// accounts, and a deployment publishes files to the internet under the
+    /// account's own name.
+    pub hosting: Option<hosting::TenantHosting>,
     /// The MANAGED web-search backend (issue #238). `None` (the default at every
     /// construction site but the production runtime builder) **fails closed** —
     /// no `web_search` tool is wired and agents behave exactly as before.
@@ -1157,18 +1169,20 @@ impl HarnessPool {
         let chargebee_config = self.resolve_chargebee(company, deps).await;
         #[cfg(feature = "paypal")]
         let paypal_config = self.resolve_paypal(company, deps).await;
+        // The hosting credential is set from the same settings surface and goes
+        // stale the same way, so it rides the same axis.
+        let hosting_config = self.resolve_hosting(company, deps).await;
         // A build without either feature has no billing axis to go stale on, so
         // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
             use std::hash::Hasher;
-            // `mut` is only exercised when a billing feature is compiled in; a
-            // build with neither writes nothing and the hasher stays untouched.
-            #[cfg_attr(not(any(feature = "chargebee", feature = "paypal")), allow(unused_mut))]
+            // Always written to: the hosting axis below is ungated.
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             #[cfg(feature = "chargebee")]
             hasher.write_u64(chargebee::TenantChargebee::fingerprint(&chargebee_config));
             #[cfg(feature = "paypal")]
             hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
+            hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
             hasher.finish()
         };
 
@@ -1257,6 +1271,7 @@ impl HarnessPool {
         {
             fresh_deps.paypal = paypal_config;
         }
+        fresh_deps.hosting = hosting_config;
         // And the freshly-read bindings (issue #245), so a repository bound or
         // revoked in the console is what the rebuilt agents' tools resolve
         // against — including the descriptions that name what is bound.
@@ -1460,6 +1475,42 @@ impl HarnessPool {
                      connection: {err}"
                 );
                 deps.chargebee.clone()
+            }
+        }
+    }
+
+    /// The hosting equivalent, for the same reasons.
+    ///
+    /// Only companies that **explicitly** grant `hosting` read at all: a
+    /// deployment publishes a company's files to the public internet and can
+    /// provision a database it is billed for, so the catch-all `*` does not
+    /// confer it.
+    ///
+    /// A transient read error keeps the last known connection with a warning,
+    /// like `chargebee` and for the same reason: a stale hosting key is refused
+    /// by the provider, which the agent surfaces as a tool error it can report,
+    /// whereas a tool that has vanished is invisible to the agent — it simply
+    /// stops being able to deploy and says nothing.
+    async fn resolve_hosting(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<hosting::TenantHosting> {
+        if !crate::company::grants_hosting_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.hosting.clone();
+        };
+        match hosting::TenantHosting::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[hosting] could not read the hosting credential; keeping the last known \
+                     connection: {err}"
+                );
+                deps.hosting.clone()
             }
         }
     }
