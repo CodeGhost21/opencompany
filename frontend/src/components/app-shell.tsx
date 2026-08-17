@@ -430,6 +430,14 @@ export function AppShell({
    */
   const [failedApprovals, setFailedApprovals] = useState<Record<string, string>>({});
 
+  // The sidebar badge, and the rising edge behind the "needs a sign-off" push.
+  //
+  // Read off the feed rather than fetched here, and reconciled to the queue in
+  // `useCompany` (issue #932): this number sits a click away from the Approvals
+  // page's own header, and the two are only guaranteed to agree while they come
+  // from one response. Counting `feed.approvals` here directly would work today
+  // and would put the rule in the surface that happens to show it, instead of
+  // in the feed both surfaces read.
   const pending = feed.status.pending_approvals;
 
   // OAuth connect bounce-back: the host's callback redirects the browser to
