@@ -8,6 +8,7 @@ import {
   Settings2,
   ShieldCheck,
   BookText,
+  SquareKanban,
   Workflow,
 } from "lucide-react";
 
@@ -80,7 +81,7 @@ import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView } from "@/views/LedgersView";
-import { TaskDetailView } from "@/views/TaskDetailView";
+import { TasksView } from "@/views/TasksView";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
@@ -155,11 +156,15 @@ const NAV: NavItem[] = [
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
-  // The company's record, board included. Ledgers replaced the standalone
-  // Tasks entry: the board is the `tasks` ledger, rendered as columns from the
-  // statuses the host declares, so one screen covers work, goals, decisions and
-  // whatever axis this workspace added. `#/tasks/<id>` still opens a card's
-  // detail — see `HIDDEN_VIEWS`.
+  // The board, restored and now driven by the `tasks` ledger: its columns,
+  // their order and their labels are the host's declaration, and the cards are
+  // the task records. It keeps its own entry because it is the surface an
+  // operator lives in, and because a card carries far more than a ledger row.
+  { view: "tasks", label: "Tasks", icon: SquareKanban },
+  // Everything else the company records — goals, decisions, and whatever axis
+  // this workspace declared. The board appears here too, as the `tasks`
+  // ledger, so this screen is the whole record rather than most of it; the
+  // two render through the same component.
   { view: "ledgers", label: "Ledgers", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
@@ -181,13 +186,6 @@ const NAV: NavItem[] = [
  * last of what they still do better (a desk's persisted transcript).
  */
 const HIDDEN_VIEWS: View[] = [
-  // The board, unmounted from the sidebar and not retired. Ledgers renders it
-  // as columns and links each card here, so this stays the card **detail**
-  // screen — the timeline, the plan brief, the discussion, the workflow
-  // proposal, the steer controls — which is everything Ledgers deliberately
-  // does not try to reproduce. `#/tasks` still answers, and re-listing it in
-  // `NAV` above brings the standalone board back.
-  "tasks",
   "feedback",
   "inbox",
   "memory",
@@ -1282,40 +1280,23 @@ export function AppShell({
             />
           )}
           {view === "inbox" && <InboxView client={client} company={company} />}
-          {/* `#/tasks/<id>` — one card, opened. The board screen that used to
-              host this is gone: the board is the `tasks` ledger and renders in
-              Ledgers, but a *card* carries a timeline, a plan brief, a
-              discussion, its attempts, a workflow proposal and the steer
-              controls, none of which a ledger row has anywhere to put. So the
-              detail screen kept its route and lost its host.
-
-              `#/tasks` with no id has nothing left to show, so it forwards to
-              the board's new address rather than rendering an empty frame. */}
-          {view === "tasks" &&
-            (sub ? (
-              <TaskDetailView
-                client={client}
-                company={company}
-                taskId={sub}
-                focus={taskFocus}
-                onBack={() => navigate("ledgers", "tasks")}
-                onNavigate={(id) => navigate("tasks", id)}
-                // Issue #246: the card → chat half of the round trip. A card
-                // opened from a conversation remembers which one, so its detail
-                // screen can put the operator back in that thread.
-                onOpenThread={(threadId) => {
-                  setActiveThreadId(threadId);
-                  setView("conversation");
-                }}
-                // The board re-reads itself when it is next shown, so a save or
-                // a delete here needs no reconciliation callback of its own —
-                // the list this used to update no longer exists.
-                onSaved={() => {}}
-                onDeleted={() => navigate("ledgers", "tasks")}
-              />
-            ) : (
-              <BoardMoved onGo={() => navigate("ledgers", "tasks")} />
-            ))}
+          {view === "tasks" && (
+            <TasksView
+              client={client}
+              company={company}
+              // Issue #464: the board learns that work appeared. The same
+              // counter the chat's in-flight strip reads, so a card opened from
+              // chat lands on the board without a reload.
+              taskEventTick={taskEventTick}
+              // Issue #246: the card → chat half of the round trip. A card
+              // opened from a conversation remembers which one, so its detail
+              // screen can put the operator back in that thread.
+              onOpenThread={(threadId) => {
+                setActiveThreadId(threadId);
+                setView("conversation");
+              }}
+            />
+          )}
           {view === "ledgers" && (
             <LedgersView
               client={client}
