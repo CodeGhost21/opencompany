@@ -1100,6 +1100,65 @@ mod tests {
         }
     }
 
+    /// An `access = "record"` grant to a built-in ledger whose `writers`
+    /// excludes this agent must not silently disagree — it is a manifest
+    /// error, not a refusal the agent discovers at call time.
+    #[test]
+    fn a_record_grant_disagreeing_with_a_builtins_writers_is_rejected() {
+        let agents = vec![toml::from_str::<crate::company::Agent>(
+            "id = \"intern\"\nrole = \"Intern\"\nledgers = [{ name = \"risks\", access = \"record\" }]\n",
+        )
+        .unwrap()];
+        let risks = crate::ledger::parse(
+            &serde_json::json!({
+                "slug": "risks",
+                "title": "Risks",
+                "fields": [
+                    { "name": "id", "role": "id" },
+                    { "name": "risk", "role": "title" },
+                    { "name": "status", "role": "status" }
+                ],
+                "statuses": [{ "name": "open" }, { "name": "closed", "closed": true }],
+                "writers": ["cfo"]
+            }),
+            true,
+        )
+        .unwrap();
+
+        let problems = ledger_grant_problems(&agents, &[risks]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("agent `intern`"), "{}", problems[0]);
+        assert!(problems[0].contains("`risks`"), "{}", problems[0]);
+        assert!(problems[0].contains("writers"), "{}", problems[0]);
+    }
+
+    /// A `read` grant never conflicts with `writers` — only `record` implies
+    /// write access, so only `record` is checked.
+    #[test]
+    fn a_read_grant_never_conflicts_with_writers() {
+        let agents = vec![toml::from_str::<crate::company::Agent>(
+            "id = \"intern\"\nrole = \"Intern\"\nledgers = [{ name = \"risks\", access = \"read\" }]\n",
+        )
+        .unwrap()];
+        let risks = crate::ledger::parse(
+            &serde_json::json!({
+                "slug": "risks",
+                "title": "Risks",
+                "fields": [
+                    { "name": "id", "role": "id" },
+                    { "name": "risk", "role": "title" },
+                    { "name": "status", "role": "status" }
+                ],
+                "statuses": [{ "name": "open" }, { "name": "closed", "closed": true }],
+                "writers": ["cfo"]
+            }),
+            true,
+        )
+        .unwrap();
+
+        assert!(ledger_grant_problems(&agents, &[risks]).is_empty());
+    }
+
     /// A `delegates_to` entry must name a real desk (issue #176).
     ///
     /// The failure this catches is silent at runtime rather than loud: a member
