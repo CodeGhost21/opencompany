@@ -20,8 +20,8 @@ The command-line entrypoint lives in `src/bin/opencompany.rs`. Business types
 are data-only definitions under `companies/` (a `company.toml` manifest plus a
 `README.md` — not Cargo crates), loaded at runtime via `opencompany serve
 --company companies/<name>`. What every company has regardless of which of
-those it started from is authored beside them in `globals/`. The operator console is a Vite/React app under
-`frontend/`. Design notes and module specifications live in `docs/`, with
+those it started from is authored beside them in `globals/`. The operator
+console is a Vite/React app under `frontend/`. Design notes and module specifications live in `docs/`, with
 `docs/spec/README.md` as the top-level architecture reference and
 `docs/modules/` holding per-surface design docs.
 The vendored runtime source is the `vendor/openhuman/` Git submodule. TinyAgents
