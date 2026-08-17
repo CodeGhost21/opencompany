@@ -378,6 +378,9 @@ impl Tool for ReadLedger {
             Ok(spec) => spec,
             Err(message) => return Ok(ToolResult::error(message)),
         };
+        if let Err(message) = require_access(&self.ledger_grants, &spec.slug, LedgerAccess::Read) {
+            return Ok(ToolResult::error(message));
+        }
         let query = Query {
             entry: optional(&arguments, "entry"),
             status: optional(&arguments, "status"),
