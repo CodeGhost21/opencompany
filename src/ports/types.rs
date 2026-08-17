@@ -2279,7 +2279,20 @@ pub enum TurnStepFailure {
     /// The host lacks an operating-system permission the call needed.
     MissingPermission,
     /// A program or application the call needed is not available.
+    ///
+    /// Only ever claimed for a call that could actually invoke an external
+    /// program. A path-reading tool that runs in this process has no app to
+    /// install, so its "not there" is [`NotFound`](Self::NotFound) — see
+    /// [`crate::harness::steps`] (issue #924).
     MissingApp,
+    /// The file, folder, or bundled resource the call named does not exist.
+    ///
+    /// Distinct from [`MissingApp`](Self::MissingApp) because the remedy is
+    /// different in kind: a missing path is fixed by naming a different path,
+    /// not by installing software. Both arrive as one `ENOENT` from the
+    /// operating system, and telling a server operator to "install or open the
+    /// app" when a note is simply absent is unactionable (issue #924).
+    NotFound,
     /// The call ran past its deadline and was stopped.
     Timeout,
     /// A service the call depends on — an upstream API, or the model provider —
