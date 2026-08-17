@@ -115,6 +115,19 @@ pub struct Field {
 pub struct StatusSpec {
     /// The wire word an event writes.
     pub name: String,
+    /// What a person reads, when it differs from the wire word.
+    ///
+    /// Empty for the ledgers a company declares, whose statuses are already
+    /// written to be read (`open`, `at_risk`, `kept`); the console humanises
+    /// those. It exists for the ones that are not: the board's columns are
+    /// `in_progress` and `in_review`, and a console deriving "In progress" from
+    /// the id gets `todo` → "Todo" wrong on the very first column.
+    ///
+    /// Carrying it on the wire is what let the console delete its own copy of
+    /// the label table — the copy whose comment admitted a Rust test could not
+    /// see it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
     /// Whether this status ends the entry's life.
     ///
     /// A closed entry is kept and rendered, never deleted. A known dead end is
@@ -457,6 +470,7 @@ impl LedgerSpec {
         }
         for status in &mut self.statuses {
             status.name = status.name.trim().to_ascii_lowercase();
+            status.label = status.label.trim().to_string();
             if status.name.is_empty() {
                 return Err(invalid("every status needs a `name`"));
             }
