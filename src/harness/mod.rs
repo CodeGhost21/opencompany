@@ -53,6 +53,7 @@ pub mod build;
 pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
+mod checkpoint;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
 /// agent, and why every cut it makes describes itself. Pure and un-gated (the
@@ -210,6 +211,10 @@ pub struct HarnessDeps {
     /// Root under which per-agent workspace directories are created
     /// (`{root}/{company}/{agent}/workspace`).
     pub workspace_root: PathBuf,
+    /// Whether each private agent workspace is initialized as a Git repository
+    /// and checkpointed after tool calls. Host-level `[workspace]` config owns
+    /// this switch; false preserves the pre-checkpoint behavior exactly.
+    pub workspace_git_enabled: bool,
     /// The **instance data root** the shell audit sink hangs off, resolved
     /// through [`DataLayout::agent_audit_dir`](crate::store::DataLayout::agent_audit_dir)
     /// to `companies/<slug>/audit/<agent>/` (issue #775).
@@ -3191,6 +3196,7 @@ description = "Builds the product."
                 store: store.clone(),
                 meter: Some(meter.clone()),
                 workspace_root: dir.path().to_path_buf(),
+                workspace_git_enabled: false,
                 audit_root: dir.path().to_path_buf(),
                 model_override: None,
                 tasks: None,
@@ -3402,6 +3408,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4095,6 +4102,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4279,6 +4287,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4948,6 +4957,7 @@ description = "Builds the product."
             store: live_store.clone(),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -5126,6 +5136,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -5285,6 +5296,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter,
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,

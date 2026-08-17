@@ -2318,6 +2318,7 @@ mod tests {
             store: runtime.store.clone(),
             meter,
             workspace_root: std::env::temp_dir(),
+            workspace_git_enabled: false,
             audit_root: std::env::temp_dir(),
             model_override: None,
             tasks: None,

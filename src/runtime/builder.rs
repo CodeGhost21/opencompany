@@ -396,6 +396,9 @@ pub struct RuntimeBuilder {
     /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
     /// naming a quota is still not a way to write an unbounded file.
     workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Whether private per-agent filesystem workspaces keep automatic Git
+    /// checkpoints after tool calls.
+    workspace_git_enabled: bool,
     /// Issue #752: which storage backend is serving this host's secrets. Only
     /// the repository-credential gates read it, and the default is the refusing
     /// side (`fs`) — a runtime built without naming a backend is assumed to keep
@@ -511,6 +514,7 @@ impl RuntimeBuilder {
             ledgers: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            workspace_git_enabled: false,
             storage_kind: crate::store::StorageKind::default(),
             facts: None,
             artifacts: None,
@@ -725,6 +729,13 @@ impl RuntimeBuilder {
     /// tree). See [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace).
     pub fn with_workspace_quota(mut self, quota: crate::runtime::WorkspaceQuota) -> Self {
         self.workspace_quota = quota;
+        self
+    }
+
+    /// Enables or disables automatic Git checkpoints in private agent
+    /// workspaces. Disabled by default.
+    pub fn with_workspace_git_enabled(mut self, enabled: bool) -> Self {
+        self.workspace_git_enabled = enabled;
         self
     }
 
@@ -2234,6 +2245,7 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                workspace_git_enabled: self.workspace_git_enabled,
                                 // Issue #775: the shell audit sink is HOST-owned
                                 // and hangs off the data root, resolving to
                                 // `companies/<slug>/audit/<agent>/` — a sibling
@@ -3096,6 +3108,31 @@ mod test {
             .prefix(prefix)
             .tempdir()
             .expect("tempdir")
+    }
+
+    /// Automatic Git checkpoints are opt-in and stay off unless the operator
+    /// flips the switch. The default is asserted here so a silent change to the
+    /// host default — which would start shelling out to `git` in every agent
+    /// workspace — cannot slip past.
+    #[test]
+    fn workspace_git_checkpoints_default_off_and_switchable() {
+        let home = tmp_home("opencompany-workspace-git-");
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+                .expect("manifest");
+        let builder = RuntimeBuilder::new(home.path().to_path_buf(), manifest);
+        assert!(
+            !builder.workspace_git_enabled,
+            "workspace Git checkpoints must default to off"
+        );
+        let enabled = builder.with_workspace_git_enabled(true);
+        assert!(enabled.workspace_git_enabled);
+        assert!(
+            !enabled
+                .with_workspace_git_enabled(false)
+                .workspace_git_enabled,
+            "the switch must also be able to turn checkpoints back off"
+        );
     }
 
     mod scoped_grants {

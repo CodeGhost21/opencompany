@@ -1420,6 +1420,7 @@ description = "Runs Acme."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
