@@ -1323,7 +1323,7 @@ async fn a_host_wide_auth_override_reaches_a_company_provisioned_after_it_is_set
     state.set_auth_mode_override(Some(AuthMode::Email));
     let app = router(state.clone());
 
-    let manifest = "[company]\nname = \"Acme\"\n[users]\nmode = \"password\"\n";
+    let manifest = "[company]\nname = \"Acme\"\n[users]\nmode = \"wallet\"\n";
     let response = app
         .oneshot(provision_req(Some(PLATFORM_SECRET), manifest))
         .await
