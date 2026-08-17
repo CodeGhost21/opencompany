@@ -123,6 +123,48 @@ OpenCompany is the open host that points your companies at it.
 > Grab your key and request Medulla access at
 > **[tinyhumans.ai](https://tinyhumans.ai)**.
 
+## New to this?
+
+You do not need a software background to run a company. Three things, and
+about fifteen minutes.
+
+1. **[Docker Desktop](https://www.docker.com/products/docker-desktop/)**, a
+   free app that runs OpenCompany in a self-contained box so it cannot make a
+   mess of your machine.
+2. **A TinyHumans API key** from [tinyhumans.ai](https://tinyhumans.ai). This
+   is what lets the agents think and act. Skip it at first if you like: without
+   a key you can still launch a company and look around, the agents just will
+   not do real work.
+3. **A terminal.** On a Mac that is the app called Terminal, on Linux you
+   already know, and on Windows install
+   [WSL](https://learn.microsoft.com/windows/wsl/install) or Git Bash first,
+   because these commands expect a Unix-style shell.
+
+Then three lines. Copy one, press enter, wait for it to finish, and move to the
+next:
+
+```sh
+git clone --recurse-submodules https://github.com/tinyhumansai/opencompany.git
+cd opencompany
+./scripts/launch-demo.sh marketing up
+```
+
+The first run takes a few minutes while it downloads and builds. When it
+settles, open **http://localhost:5173**: that is the console, where you watch
+your agents work and answer anything waiting on you. Run
+`./scripts/list-demos.sh` to see the other businesses you can launch in place
+of `marketing`, and `./scripts/launch-demo.sh marketing down` when you are
+finished.
+
+Making it yours means editing `companies/<name>/company.toml`, a plain text
+file naming the roles, what each one owns, and where you want to be asked
+before anything happens. It is written to be read by people, and changing a
+role is editing a few lines rather than programming.
+[Your first company](gitbooks/get-started/your-first-company.md) walks through
+it.
+
+The rest of this section is the from-source path, for changing the host itself.
+
 ## Start your company
 
 ```sh
