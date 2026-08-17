@@ -53,11 +53,6 @@ pub mod build;
 pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
-/// Hosting (TinyHosts): the per-company connection and the agent tools over it.
-/// The keys it reads live in `company::hosting`, which is compiled in every
-/// build — the console's Hosting settings write them whether or not this
-/// harness exists to use them.
-pub mod hosting;
 mod checkpoint;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
@@ -81,6 +76,11 @@ pub mod cost;
 /// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
 #[cfg(feature = "tinycortex")]
 pub mod embeddings;
+/// Hosting (TinyHosts): the per-company connection and the agent tools over it.
+/// The keys it reads live in `company::hosting`, which is compiled in every
+/// build — the console's Hosting settings write them whether or not this
+/// harness exists to use them.
+pub mod hosting;
 pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;

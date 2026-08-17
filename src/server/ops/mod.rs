@@ -17,7 +17,6 @@
 
 pub mod artifacts;
 pub mod billing;
-pub mod hosting;
 pub mod capabilities;
 pub mod channels;
 pub mod company_key;
@@ -26,6 +25,7 @@ pub mod composio_toolkits;
 pub mod connections_read;
 pub mod domain;
 pub mod finances;
+pub mod hosting;
 pub mod imap;
 pub mod inbox;
 pub mod inference;

@@ -33,9 +33,9 @@ pub mod copilot;
 // platform token vs a static key). Always compiled: the answer decides whether a
 // company can think at all, in every build.
 pub mod billing;
-pub mod hosting;
 pub mod credentials;
 pub mod dns;
+pub mod hosting;
 pub mod inference;
 /// Dynamic ledgers: the one place a ledger is read, written, declared or
 /// retired. Every surface routes through it, because the rules that matter —
