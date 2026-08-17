@@ -33,8 +33,9 @@ dedicated `test.rs` file when they grow.
 - `cargo test`: run the full test suite.
 - `cargo run --bin opencompany`: run the CLI.
 - `cargo run --bin opencompany -- serve`: run the Axum HTTP server on `127.0.0.1:8080`.
-- `git submodule update --init --recursive`: initialize OpenHuman and TinyAgents.
-- `cargo check --features tiny`: compile against vendored TinyAgents.
+- `git submodule update --init vendor/openhuman`: initialize OpenHuman.
+- `scripts/ci/init-vendored-submodules.sh`: initialize its vendored crates.
+- `cargo check --features tiny`: compile against OpenHuman's TinyAgents pin.
 
 Run commands from the repository root unless a future workspace layout changes
 the module location.
