@@ -33,7 +33,7 @@ export interface WorkflowNodeData extends Record<string, unknown> {
  * console lights the node up because it was told to, not because it inferred it.
  * `ok` and `error` come from the finish frame, exact as before.
  */
-export type NodeRunState = "running" | "ok" | "error";
+export type NodeRunState = "running" | "ok" | "error" | "blocked";
 
 /**
  * Ring + glow per run state, layered over the node's own kind accent.
@@ -43,13 +43,23 @@ export type NodeRunState = "running" | "ok" | "error";
  * comes from the identity palette — the two never reach for the same hue.
  */
 export const RUN_STATE_CLASSES: Record<NodeRunState, string> = {
-  running: "ring-2 ring-status-running/70 shadow-status-running/20 animate-pulse",
+  running:
+    "ring-2 ring-status-running/70 shadow-status-running/20 animate-pulse",
   ok: "ring-2 ring-status-done/60",
   error: "ring-2 ring-status-failed/80",
+  // Issue #881. Deliberately the blocked token rather than the failed one: the
+  // node did not break, it is parked until a person decides. Red would send an
+  // operator looking for a bug when the fix is a click in Approvals — and it
+  // would put a run that is merely waiting into the same visual bucket as one
+  // that fell over.
+  blocked: "ring-2 ring-status-blocked/80",
 };
 
 /** Per-kind emoji + accent, mirroring OpenHuman's node-kind metadata. */
-export const NODE_KIND_META: Record<string, { emoji: string; color: NodeColor }> = {
+export const NODE_KIND_META: Record<
+  string,
+  { emoji: string; color: NodeColor }
+> = {
   trigger: { emoji: "⚡", color: "sage" },
   agent: { emoji: "🤖", color: "primary" },
   tool_call: { emoji: "🔧", color: "amber" },
@@ -77,7 +87,10 @@ export const NODE_KIND_META: Record<string, { emoji: string; color: NodeColor }>
  * The key names are the accents the sample data already refers to; they name a
  * slot, not a colour.
  */
-export const COLOR_CLASSES: Record<NodeColor, { border: string; chip: string }> = {
+export const COLOR_CLASSES: Record<
+  NodeColor,
+  { border: string; chip: string }
+> = {
   primary: { border: "border-primary/40", chip: "bg-primary/10" },
   sage: { border: "border-tone-3/40", chip: "bg-tone-3/10" },
   amber: { border: "border-tone-5/40", chip: "bg-tone-5/10" },
@@ -86,6 +99,9 @@ export const COLOR_CLASSES: Record<NodeColor, { border: string; chip: string }> 
 };
 
 /** Emoji + accent for a node kind, falling back for an unknown kind. */
-export function nodeKindMeta(kind: string): { emoji: string; color: NodeColor } {
+export function nodeKindMeta(kind: string): {
+  emoji: string;
+  color: NodeColor;
+} {
   return NODE_KIND_META[kind] ?? { emoji: "•", color: "neutral" };
 }

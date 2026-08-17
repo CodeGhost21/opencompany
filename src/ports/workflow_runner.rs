@@ -26,8 +26,24 @@ pub struct WorkflowRun {
     /// The final run state after the terminal node(s) completed. Its shape is
     /// the engine's `{ "run": …, "nodes": { "<id>": { "items": [ … ] } } }` map.
     pub output: Value,
-    /// Node ids that paused the run awaiting human approval. Empty for a run
-    /// that reached its terminal node(s) without gating.
+    /// Node ids the run is waiting on a human for. Empty for a run that
+    /// reached its terminal node(s) without stopping for anybody.
+    ///
+    /// **Two producers, deliberately unioned** (issue #881). The original is
+    /// the tinyflows engine's own gate-node list: a `tool_call` node marked
+    /// `requires_approval` pauses the engine, lands here, and resumes through
+    /// [`workflow_resume`](crate::runtime::workflow_resume). The second is a
+    /// node the *host* blocked — an agent node whose turn had a tool call
+    /// parked for approval (see [`blocked_nodes`](Self::blocked_nodes)), which
+    /// the engine never learns about because the refusal happens inside the
+    /// model's tool loop.
+    ///
+    /// They are unioned because the question this field answers — "which nodes
+    /// is this run waiting on me for?" — has the same answer for both, and the
+    /// console renders every entry as a node name. What differs is what
+    /// approving does: a paused gate resumes the run, a blocked node does not
+    /// (see [`blocked_nodes`](Self::blocked_nodes)), which is why the two stay
+    /// separable through that field rather than only through this one.
     pub pending_approvals: Vec<String>,
     /// One row per attempt to route a reached `output` node's report to its
     /// configured destination (issue #170), in graph order.
@@ -115,6 +131,164 @@ pub struct WorkflowRun {
     /// deserialized from a payload written before this field existed.
     #[serde(default)]
     pub board: Vec<WorkflowRunBoardRow>,
+    /// One row per node this run **blocked** on a human (issue #881), in the
+    /// order the nodes reported.
+    ///
+    /// A node blocks when a tool call inside its agent turn was parked for
+    /// operator approval. Before this, that node returned the model's apology
+    /// as its output, reported `ok`, and the graph carried the apology into the
+    /// next node's input — so a run that delivered nothing finished green.
+    ///
+    /// **Not a failure, and not a pause either.** The branch stops (see
+    /// [`WorkflowNodeStatus::Blocked`](crate::ports::types::WorkflowNodeStatus))
+    /// but the run is not parked for auto-resume: an agent node is not
+    /// re-enterable, so resuming would run a fresh turn that parks a *new*
+    /// approval, forever. Approving lets the operator re-run; it does not
+    /// continue this one.
+    ///
+    /// `#[serde(default)]` so a `WorkflowRun` deserialized from a payload
+    /// written before this field existed still loads, as empty — which is every
+    /// run that blocked on nobody.
+    #[serde(default)]
+    pub blocked_nodes: Vec<WorkflowBlockedNode>,
+    /// One row per approval this run **parked** (issue #880), in the order the
+    /// parks were attempted.
+    ///
+    /// Three real feature-pipeline runs each reported every node `ok` with an
+    /// empty [`pending_approvals`](Self::pending_approvals) and an empty
+    /// [`deliveries`](Self::deliveries) while the company's approval queue held
+    /// fifteen `publish_artifact` cards those very runs had opened. Both of
+    /// those fields were *truthful* — they mean the engine's gate nodes and
+    /// `output`-node routing respectively — and neither answers what the run
+    /// view is asked. This field does.
+    ///
+    /// # It is a receipt, which is why it is named for what the run parked
+    ///
+    /// Not `pending_approvals_opened`, not "still outstanding". A settle-time
+    /// snapshot of what is *still* waiting rots into a fresh lie the moment the
+    /// operator approves one; a record that this run parked two cards is true
+    /// forever. The console's wording follows from the name — "parked N
+    /// approvals", never "waiting on N".
+    ///
+    /// **The failure rows are the ones that matter most.** Before this, a park
+    /// that could not be performed — no approvals queue wired, or a store that
+    /// refused the write — was recorded only by a `tracing::error!`, which is
+    /// the sole trace that a call the operator will never be asked about was
+    /// dropped. A failure row is a receipt, never a node failure; the same
+    /// stance [`WorkflowRunBoardRow`] takes for a board write that did not land.
+    ///
+    /// `#[serde(default)]` so a payload written before this field existed still
+    /// loads, and `skip_serializing_if` so a run that parked nothing — nearly
+    /// all of them — serializes byte-for-byte as it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<WorkflowRunApprovalRow>,
+}
+
+/// One node a workflow run blocked on a human (issue #881).
+///
+/// **Structural only**, the same discipline [`WorkflowRunBoardRow`] keeps: the
+/// node, the tools whose calls were gated, and the ids of the cards that were
+/// opened. No model prose, no policy error text — so a blocked node cannot
+/// become a channel for a turn's apology into the journal, the run response, or
+/// a host log. The console writes its own sentence from these ids.
+///
+/// One shape rides all three surfaces — the `WorkflowRunFinished` journal
+/// event, `GET …/workflows/runs`, and the synchronous run response — hence the
+/// camelCase serde here rather than at each HTTP DTO. The [`DeliveryReport`]
+/// precedent, for the same reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowBlockedNode {
+    /// The node that blocked.
+    pub node_id: String,
+    /// The tools whose calls the node's turn had gated, deduplicated and in
+    /// first-seen order. A tool *name*, never its arguments.
+    pub tools: Vec<String>,
+    /// The approvals this node's gated calls actually opened.
+    ///
+    /// Empty when every park failed — which is strictly worse than a parked
+    /// one, because then nobody can unblock the node at all. The per-call
+    /// receipts on [`WorkflowRun::approvals`] say which of the two happened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_ids: Vec<String>,
+    /// How many of this node's gated calls could **not** be parked.
+    ///
+    /// Non-zero is the loud case: the call was refused, the operator will never
+    /// be asked about it, and re-running is the only way forward. Skipped when
+    /// zero, which is the ordinary case.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unparkable: usize,
+}
+
+/// `skip_serializing_if` predicate for a count that is almost always zero.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// What became of one gated tool call a workflow run tried to park (issue
+/// #880), as a closed set.
+///
+/// Three arms because there are exactly three real outcomes at the drain, and
+/// an operator reading a run wants to tell them apart: the card is on the
+/// Approvals page, the card could not be written, or the call was dropped
+/// before parking was even attempted. Carries no payload by construction, so
+/// nothing a model or a store wrote can ride an outcome into a log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowApprovalOutcome {
+    /// A decidable card is on the Approvals page. The row's `approvalId` names
+    /// it.
+    Parked,
+    /// The park was attempted and did not land — the store refused the write,
+    /// or this runtime has no approvals queue wired at all. **Nobody will ever
+    /// be asked about this call.**
+    ParkFailed,
+    /// The call was dropped before parking: the turn gated more calls than
+    /// [`MAX_APPROVAL_REQUESTS_PER_TURN`](crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN)
+    /// allows and this one was in the excess. The drain caps and drops in one
+    /// step, so which tool it was is not recoverable — hence a row with no
+    /// `tool`.
+    Discarded,
+}
+
+impl WorkflowApprovalOutcome {
+    /// Whether this row records a call the operator will **never** be asked
+    /// about.
+    pub fn unparkable(&self) -> bool {
+        matches!(self, Self::ParkFailed | Self::Discarded)
+    }
+}
+
+/// One gated tool call a workflow run's agent node tried to park (issue #880).
+///
+/// **Structural only** — the node, the tool's name, the outcome, and the
+/// approval id when one was minted. No arguments, no policy reason, no store
+/// error text: the same rule [`WorkflowRunBoardRow`] follows, so a row cannot
+/// become a channel for a turn's payload into the journal or a host log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunApprovalRow {
+    /// The agent node whose turn made the call.
+    ///
+    /// Absent only where node identity is unavailable — the vendored
+    /// `AgentRunner` trait boundary carries no node id of its own, so a graph
+    /// authored without one leaves this unset rather than inventing a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// The tool whose call was gated.
+    ///
+    /// Absent on [`Discarded`](WorkflowApprovalOutcome::Discarded): the drain
+    /// caps and drops the excess in one step, so by the time the count is known
+    /// the entries are gone. A row with no tool is the honest shape — "one more
+    /// call was dropped" — rather than a name guessed from the survivors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// What became of the park attempt.
+    pub outcome: WorkflowApprovalOutcome,
+    /// The card the operator can decide, on the
+    /// [`Parked`](WorkflowApprovalOutcome::Parked) arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
 }
 
 /// One node's structural outcome inside a run (issue #542).

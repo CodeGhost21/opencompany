@@ -1144,6 +1144,19 @@ struct RunWorkflowResponse {
     /// run that touched no card.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     board: Vec<crate::ports::WorkflowRunBoardRow>,
+    /// The nodes this run blocked on a human (issue #881).
+    ///
+    /// The same rows `GET …/workflows/runs` returns and the same rows the
+    /// `WorkflowRunFinished` event carries — one shape across all three, so a
+    /// console reads a blocked run identically whether it awaited it or found
+    /// it in the history. Omitted when empty, so a run that blocked on nobody
+    /// is byte-unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
+    /// The approvals this run parked (issue #880) — what it opened, not what
+    /// is still outstanding.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
 }
 
 /// The `detach: true` response (issue #383): the run's id, handed back before
@@ -1170,7 +1183,11 @@ struct DetachedRunResponse {
 /// always returned, `202 Accepted` for a run that has been accepted and started
 /// but has not finished — which is precisely what `202` means.
 enum RunWorkflowOk {
-    Settled(RunWorkflowResponse),
+    /// Boxed: the settled body is far wider than the detached one (it carries
+    /// the run's output, node trail, deliveries, board rows and — since #881 /
+    /// #880 — its blocked nodes and parked-approval receipts), and holding it
+    /// inline made the 202 path pay that width too.
+    Settled(Box<RunWorkflowResponse>),
     Detached(DetachedRunResponse),
 }
 
@@ -1326,7 +1343,7 @@ async fn run_workflow(
     // aborted — the run's outcome was never journaled, so there is nothing
     // truthful to hand back and this is a genuine 500 rather than a run result.
     match handle.await {
-        Ok(Ok(run)) => Ok(RunWorkflowOk::Settled(RunWorkflowResponse {
+        Ok(Ok(run)) => Ok(RunWorkflowOk::Settled(Box::new(RunWorkflowResponse {
             output: run.output,
             pending_approvals: run.pending_approvals,
             deliveries: run.deliveries,
@@ -1342,7 +1359,13 @@ async fn run_workflow(
             // that pressed Run learns what the run did to the board without a
             // second read of the history.
             board: run.board,
-        })),
+            // Issues #881 / #880: likewise. An operator who pressed Run and
+            // watched eight green nodes come back is exactly the reader these
+            // two exist for — the run drawer is where they first learn the
+            // pipeline delivered nothing and why.
+            blocked_nodes: run.blocked_nodes,
+            approvals: run.approvals,
+        }))),
         Ok(Err(err)) => Err(ApiError(err).into_response()),
         Err(join) => {
             tracing::error!(
@@ -1852,6 +1875,27 @@ struct WorkflowRunOutcome {
     /// Omitted when empty, like `notices` — which is nearly every run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     board: Vec<crate::ports::WorkflowRunBoardRow>,
+    /// The nodes this run blocked on a human (issue #881) — one row per node
+    /// whose agent turn had a tool call parked, so it produced no deliverable
+    /// and nothing after it ran.
+    ///
+    /// Projected **verbatim** from the port row, like `board` and `deliveries`
+    /// above: it is already camelCase and already structural, and a second
+    /// transcription is only a place for the two shapes to drift.
+    ///
+    /// This is what stops a blocked run reading as a clean one. Its nodes'
+    /// rows arrive relabelled too — see the settle arm in [`list_runs`], which
+    /// flips each blocked node's journaled `error` status to `blocked`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
+    /// The approvals this run parked (issue #880) — a receipt of what it
+    /// opened, the failed parks included.
+    ///
+    /// Named for what the run *parked*, never for what is still outstanding: a
+    /// receipt cannot go stale, whereas a settle-time "still waiting on N"
+    /// count becomes a fresh lie the moment somebody approves one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
 }
 
 /// One node's outcome inside a run (issue #371).
@@ -1975,6 +2019,11 @@ async fn list_runs(
                     // even one whose nodes have already opened cards. The rows
                     // arrive with the settle below.
                     board: Vec::new(),
+                    // Issues #881 / #880: same — only a finish carries these.
+                    // A run in flight has blocked on nobody *yet*, and any
+                    // approval it has already parked is listed once it settles.
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
                 });
             }
             CompanyEvent::WorkflowNodeFinished {
@@ -2008,6 +2057,8 @@ async fn list_runs(
                 cancelled,
                 notices,
                 board,
+                blocked_nodes,
+                approvals,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -2027,6 +2078,18 @@ async fn list_runs(
                     entry.cancelled = cancelled;
                     entry.notices = notices;
                     entry.board = board;
+                    // Issue #881: the node rows for this run were folded from
+                    // `WorkflowNodeFinished` events the engine wrote, and the
+                    // engine reported a blocked node as `error` — honestly, in
+                    // its own terms: the capability really did return an error,
+                    // which is what halted the branch. The finish is the first
+                    // point that knows *why*, so the relabelling happens here,
+                    // on the read, rather than by rewriting the durable node
+                    // rows. Same host-side reclassification the run record
+                    // itself performs; see `workflows::runner`.
+                    relabel_blocked(&mut entry.nodes, &blocked_nodes);
+                    entry.blocked_nodes = blocked_nodes;
+                    entry.approvals = approvals;
                     continue;
                 }
                 // …else stand alone. Two ways to get here, both legitimate: a
@@ -2049,6 +2112,12 @@ async fn list_runs(
                     cancelled,
                     notices,
                     board,
+                    // No start row means no node rows either, so there is
+                    // nothing here to relabel — the blocked list is still
+                    // carried, because it is the only thing that tells this
+                    // orphaned row apart from a clean finish.
+                    blocked_nodes,
+                    approvals,
                 });
             }
             _ => {}
@@ -2061,6 +2130,26 @@ async fn list_runs(
     runs.reverse();
     runs.truncate(limit);
     Ok(Json(runs))
+}
+
+/// Relabels a run's node rows for the nodes it blocked on a human (issue #881).
+///
+/// The read-side half of the host reclassification. `WorkflowNodeFinished` is
+/// written live, node by node, long before anything knows the run stopped for an
+/// approval rather than a fault — so the durable row says `error` and stays that
+/// way. Fixing it up here, against the finish's own blocked list, is what keeps
+/// the history panel's node chips agreeing with the run's terminal reading; the
+/// alternative is a run that says "blocked" beside a node chip that says
+/// "failed".
+fn relabel_blocked(nodes: &mut [WorkflowRunNode], blocked: &[crate::ports::WorkflowBlockedNode]) {
+    if blocked.is_empty() {
+        return;
+    }
+    for node in nodes.iter_mut() {
+        if blocked.iter().any(|b| b.node_id == node.node_id) {
+            node.status = WorkflowNodeStatus::Blocked;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2598,6 +2687,8 @@ mod tests {
                 title: None,
                 assignee: Some("ceo".into()),
             }],
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .expect("serialize");
         assert_eq!(json["board"][0]["action"], "assigned");
@@ -2617,11 +2708,121 @@ mod tests {
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .expect("serialize");
         assert!(
             json.get("board").is_none(),
             "a run that touched no card sends no board key: {json}"
+        );
+    }
+
+    /// Issues #881 / #880: the synchronous run response carries the blocked
+    /// nodes and the parked-approval receipts, in the same camelCase shape the
+    /// journal event and the history route use.
+    ///
+    /// The operator who pressed Run is the reader these exist for: before this,
+    /// a pipeline whose first step had its `publish_artifact` parked came back
+    /// with every node green and an empty body, and there was nothing anywhere
+    /// in the response that said otherwise.
+    ///
+    /// Omission matters as much, for the same reason it does on `board`: a run
+    /// that blocked on nobody sends neither key, so every existing caller's body
+    /// is byte-unchanged.
+    #[test]
+    fn the_run_response_carries_blocked_nodes_and_parked_approvals() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: Value::Null,
+            pending_approvals: vec!["spec".into()],
+            deliveries: Vec::new(),
+            run_id: "run-1".into(),
+            cancelled: false,
+            nodes: vec![WorkflowRunNode {
+                node_id: "spec".into(),
+                status: WorkflowNodeStatus::Blocked,
+                elapsed_ms: 42,
+            }],
+            dry_run: false,
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "spec".into(),
+                tools: vec!["publish_artifact".into()],
+                approval_ids: vec!["appr-1".into()],
+                unparkable: 0,
+            }],
+            approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                node_id: Some("spec".into()),
+                tool: Some("publish_artifact".into()),
+                outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                approval_id: Some("appr-1".into()),
+            }],
+        })
+        .expect("serialize");
+        assert_eq!(json["nodes"][0]["status"], "blocked");
+        assert_eq!(json["blockedNodes"][0]["nodeId"], "spec");
+        assert_eq!(json["blockedNodes"][0]["tools"][0], "publish_artifact");
+        assert_eq!(json["blockedNodes"][0]["approvalIds"][0], "appr-1");
+        assert!(
+            json["blockedNodes"][0].get("unparkable").is_none(),
+            "the ordinary case — every call was parked — stays off the wire: {json}"
+        );
+        assert_eq!(json["approvals"][0]["outcome"], "parked");
+        assert_eq!(json["approvals"][0]["approvalId"], "appr-1");
+
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-2".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        })
+        .expect("serialize");
+        assert!(json.get("blockedNodes").is_none(), "{json}");
+        assert!(json.get("approvals").is_none(), "{json}");
+    }
+
+    /// A park that could NOT happen is on the wire as loudly as one that did
+    /// (issue #880).
+    ///
+    /// This is the arm whose only previous record was a `tracing::error!` — the
+    /// operator will never be asked about the call, so a run that hides it is
+    /// telling them the least when it matters most.
+    #[test]
+    fn a_failed_park_is_reported_rather_than_only_logged() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: Value::Null,
+            pending_approvals: vec!["spec".into()],
+            deliveries: Vec::new(),
+            run_id: "run-3".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "spec".into(),
+                tools: vec!["publish_artifact".into()],
+                approval_ids: Vec::new(),
+                unparkable: 2,
+            }],
+            approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                node_id: Some("spec".into()),
+                tool: Some("publish_artifact".into()),
+                outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                approval_id: None,
+            }],
+        })
+        .expect("serialize");
+        assert_eq!(json["blockedNodes"][0]["unparkable"], 2);
+        assert_eq!(json["approvals"][0]["outcome"], "parkFailed");
+        assert!(
+            json["approvals"][0].get("approvalId").is_none(),
+            "there is no card, so naming one would point at nothing: {json}"
         );
     }
 
@@ -2648,6 +2849,8 @@ mod tests {
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["node"], "done");
@@ -2681,6 +2884,8 @@ mod tests {
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["status"], "pending");
@@ -2699,6 +2904,8 @@ mod tests {
             nodes: Vec::new(),
             dry_run: false,
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"], serde_json::json!([]));
@@ -3299,6 +3506,8 @@ mod tests {
                         cancelled: false,
                         notices: Vec::new(),
                         board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
                     },
                 )
                 .await
@@ -3534,6 +3743,8 @@ mod tests {
                         cancelled: false,
                         notices: Vec::new(),
                         board: Vec::new(),
+                        blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
                     },
                 )
                 .await
@@ -3592,6 +3803,86 @@ mod tests {
             assert_eq!(nodes[0]["elapsedMs"], 42);
             assert_eq!(nodes[1]["nodeId"], "send");
             assert_eq!(nodes[1]["status"], "error");
+        }
+
+        /// Issues #881 / #880 at the HTTP boundary: a blocked run reads as
+        /// blocked in the history, and **its node chip is relabelled too**.
+        ///
+        /// The node row is journaled live, node by node, long before anything
+        /// knows the run stopped for an approval rather than a fault — so the
+        /// durable `WorkflowNodeFinished` says `error`, honestly, in the
+        /// engine's own terms. Without the read-side relabel the panel would
+        /// show a run that says "blocked" beside a node chip that says
+        /// "failed", and an operator would go hunting for a bug that is not
+        /// there.
+        #[tokio::test]
+        async fn run_history_reports_a_blocked_node_and_the_approvals_it_parked() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-b", false).await;
+            // The engine's own account: the capability returned an error, so
+            // the observer reported `error`.
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-b",
+                "spec",
+                WorkflowNodeStatus::Error,
+            )
+            .await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "digest".to_string(),
+                        scheduled: false,
+                        run_id: Some("run-b".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["spec".to_string()],
+                        // The whole point: a blocked run carries NO error.
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                            node_id: "spec".to_string(),
+                            tools: vec!["publish_artifact".to_string()],
+                            approval_ids: vec!["appr-1".to_string()],
+                            unparkable: 0,
+                        }],
+                        approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                            node_id: Some("spec".to_string()),
+                            tool: Some("publish_artifact".to_string()),
+                            outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                            approval_id: Some("appr-1".to_string()),
+                        }],
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1, "{body}");
+            assert!(
+                rows[0].get("error").is_none(),
+                "a run waiting on a person did not fail: {body}"
+            );
+            assert_eq!(rows[0]["blockedNodes"][0]["nodeId"], "spec");
+            assert_eq!(rows[0]["approvals"][0]["outcome"], "parked");
+            assert_eq!(
+                rows[0]["nodes"][0]["status"], "blocked",
+                "the node chip must agree with the run's terminal reading: {body}"
+            );
         }
 
         /// A run whose host died leaves a start with no finish, and it folds as
@@ -4672,6 +4963,8 @@ mod tests {
                             nodes: Vec::new(),
                             notices: Vec::new(),
                             board: Vec::new(),
+                            blocked_nodes: Vec::new(),
+                            approvals: Vec::new(),
                         });
                     }
                 }
@@ -4684,6 +4977,8 @@ mod tests {
                     nodes: Vec::new(),
                     notices: Vec::new(),
                     board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
                 })
             }
         }
@@ -5314,6 +5609,8 @@ label = "ok"
                     }],
                     notices: Vec::new(),
                     board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
                 })
             }
         }

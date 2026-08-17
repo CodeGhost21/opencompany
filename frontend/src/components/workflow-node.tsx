@@ -13,6 +13,9 @@ const RUN_STATE_LABEL: Record<NodeRunState, string> = {
   running: "running",
   ok: "done",
   error: "failed",
+  // Issue #881: the word an operator can act on. Not "failed" — nothing broke —
+  // and not "done", which is precisely the claim this state exists to stop.
+  blocked: "needs approval",
 };
 
 /** Badge tint per run state — read alongside the ring, never instead of it, so
@@ -21,6 +24,7 @@ const RUN_STATE_BADGE: Record<NodeRunState, string> = {
   running: "bg-status-running-soft text-status-running-text",
   ok: "bg-status-done-soft text-status-done-text",
   error: "bg-status-failed-soft text-status-failed-text",
+  blocked: "bg-status-blocked-soft text-[var(--status-blocked-text)]",
 };
 
 /** A custom xyflow node: emoji + colored header, name, and a one-line summary.
@@ -42,12 +46,23 @@ export function WorkflowNode({ data, selected }: NodeProps) {
       )}
       data-run-state={runState}
     >
-      <Handle type="target" position={Position.Left} className="!size-2 !border-2 !bg-background" />
-      <div className={cn("flex items-center gap-2 rounded-t-[10px] px-3 py-2", colors.chip)}>
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="!size-2 !border-2 !bg-background"
+      />
+      <div
+        className={cn(
+          "flex items-center gap-2 rounded-t-[10px] px-3 py-2",
+          colors.chip,
+        )}
+      >
         <span className="text-base leading-none" aria-hidden>
           {d.emoji}
         </span>
-        <div className="min-w-0 flex-1 truncate text-sm font-semibold">{d.name}</div>
+        <div className="min-w-0 flex-1 truncate text-sm font-semibold">
+          {d.name}
+        </div>
         {runState && (
           <span
             className={cn(
@@ -71,10 +86,16 @@ export function WorkflowNode({ data, selected }: NodeProps) {
       <div className="px-3 py-2 text-2xs leading-snug text-muted-foreground">
         {d.summary}
         {typeof d.elapsedMs === "number" && (
-          <span className="ml-1 font-mono opacity-70">· {formatElapsed(d.elapsedMs)}</span>
+          <span className="ml-1 font-mono opacity-70">
+            · {formatElapsed(d.elapsedMs)}
+          </span>
         )}
       </div>
-      <Handle type="source" position={Position.Right} className="!size-2 !border-2 !bg-background" />
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="!size-2 !border-2 !bg-background"
+      />
     </div>
   );
 }

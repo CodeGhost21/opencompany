@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::company::{CompanyManifest, POLICY_MODES, Policy};
 use crate::ports::ids::{agent_slug, generate_id, now_millis};
-use crate::ports::workflow_runner::{DeliveryReport, WorkflowRunBoardRow};
+use crate::ports::workflow_runner::{
+    DeliveryReport, WorkflowBlockedNode, WorkflowRunApprovalRow, WorkflowRunBoardRow,
+};
 
 // ---------------------------------------------------------------------------
 // Identifiers
@@ -1065,6 +1067,34 @@ pub enum CompanyEvent {
         /// them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         board: Vec<WorkflowRunBoardRow>,
+        /// One row per node this run blocked on a human (issue #881) — the
+        /// same rows the synchronous run response hands back.
+        ///
+        /// What makes a **scheduled** run's blockage readable at all: nobody
+        /// was watching the response, so without this the only evidence a 3am
+        /// run stopped short is an approval card nothing ties back to a run.
+        ///
+        /// `#[serde(default)]` + `skip_serializing_if` so a line written
+        /// before this field existed replays — the event is folded at boot, so
+        /// a field without a default would make every pre-existing journal
+        /// line fail to parse, which is silent history loss rather than a
+        /// compile error — and a run that blocked on nobody serializes
+        /// byte-for-byte as it did before.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocked_nodes: Vec<WorkflowBlockedNode>,
+        /// One row per approval this run parked (issue #880) — a receipt of
+        /// what it opened, not a snapshot of what is still outstanding.
+        ///
+        /// The field the three `feature_pipeline` runs needed: they parked
+        /// fifteen `publish_artifact` cards between them and their run records
+        /// said nothing, because `pendingApprovals` means the engine's gate
+        /// nodes and `deliveries` means `output`-node routing. Both were
+        /// honest; neither was an answer.
+        ///
+        /// Same `#[serde(default)]` + `skip_serializing_if` contract as
+        /// `blocked_nodes` above, and for the same replay reason.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        approvals: Vec<WorkflowRunApprovalRow>,
     },
     /// A workflow run began (issue #371) — the opening bracket of a run's
     /// per-node progress trail.
@@ -1433,12 +1463,15 @@ impl CompanyEvent {
     }
 }
 
-/// How one workflow node's execution came out (issue #371).
+/// How one workflow node's execution came out (issue #371, third arm #881).
 ///
-/// A closed two-value set on purpose: it is the entire payload of
+/// A closed set of **unit** variants on purpose: it is the entire payload of
 /// [`CompanyEvent::WorkflowNodeFinished`] beyond the structural ids, and having
 /// no `String` arm is what guarantees, by construction, that a node's own error
-/// text cannot reach the journal or the wire through this event.
+/// text cannot reach the journal or the wire through this event. Issue #881
+/// added a third reading and kept that invariant — [`Blocked`](Self::Blocked)
+/// carries nothing, and what it is blocked *on* travels structurally on
+/// [`WorkflowRun::blocked_nodes`](crate::ports::WorkflowRun) instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkflowNodeStatus {
@@ -1446,6 +1479,21 @@ pub enum WorkflowNodeStatus {
     Ok,
     /// The node's executor errored (after any retries were exhausted).
     Error,
+    /// The node stopped because it needs a human, not because anything went
+    /// wrong (issue #881): a tool call inside its turn was parked for operator
+    /// approval, so the node produced no deliverable and its branch does not
+    /// continue.
+    ///
+    /// **Never reported by the engine.** tinyflows knows only success and
+    /// failure, and an agent node whose turn parked a gated call returns a
+    /// capability error so the branch halts — mechanically the right channel,
+    /// since `on_error` defaults to `"stop"` and `retry.max_attempts` to `1`.
+    /// The *host* then reclassifies that node's row, exactly as
+    /// [`WorkflowRun::cancelled`](crate::ports::WorkflowRun) reclassifies a
+    /// stopped run: a blocked node is not a failed one, and rolling it into the
+    /// failure count would hide real failures among approvals nobody has
+    /// answered yet.
+    Blocked,
 }
 
 /// A `CompanyEvent` durably appended to the log with its sequence and time.
@@ -5113,6 +5161,8 @@ mod test {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -5131,6 +5181,8 @@ mod test {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -5161,6 +5213,8 @@ mod test {
                 cancelled: false,
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             }
         );
         // …and serializing it back emits nothing extra.
@@ -5202,6 +5256,8 @@ mod test {
                 title: Some("Reply to the auditor".to_string()),
                 assignee: None,
             }],
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
         let out = serde_json::to_string(&event).expect("serialize");
@@ -5221,6 +5277,8 @@ mod test {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         let out = serde_json::to_string(&untouched).expect("serialize");
         assert!(!out.contains("board"), "{out}");
@@ -5259,6 +5317,8 @@ mod test {
             cancelled: true,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
 
@@ -5310,7 +5370,14 @@ mod test {
     /// slow run from a wedged one.
     #[test]
     fn workflow_node_finished_round_trips_both_statuses() {
-        for status in [WorkflowNodeStatus::Ok, WorkflowNodeStatus::Error] {
+        for status in [
+            WorkflowNodeStatus::Ok,
+            WorkflowNodeStatus::Error,
+            // Issue #881's third arm. Pinned in the same loop rather than a
+            // test of its own so a fourth reading cannot be added without
+            // someone editing this list.
+            WorkflowNodeStatus::Blocked,
+        ] {
             let event = CompanyEvent::WorkflowNodeFinished {
                 workflow_id: "digest".to_string(),
                 run_id: "run-1".to_string(),
@@ -5320,6 +5387,63 @@ mod test {
             };
             assert_eq!(round_trip(&event), event);
         }
+    }
+
+    /// A `WorkflowRunFinished` line written before #881 / #880 still replays.
+    ///
+    /// **This is not a nicety.** The event is folded at boot, so a new field
+    /// without `#[serde(default)]` would make every pre-existing journal line
+    /// fail to parse — and the failure mode is a company silently losing its
+    /// whole run history, not a compile error. Pinned against a hand-written
+    /// legacy payload rather than a round-trip, because a round-trip can only
+    /// ever prove the new shape agrees with itself.
+    #[test]
+    fn a_pre_881_run_finished_line_still_replays() {
+        let legacy = serde_json::json!({
+            "kind": "WorkflowRunFinished",
+            "workflow_id": "digest",
+            "scheduled": true,
+            "run_id": "run-1",
+            "pending_approvals": ["review"],
+            "cancelled": false
+        });
+        let event: CompanyEvent =
+            serde_json::from_value(legacy).expect("a pre-#881 journal line must still parse");
+        let CompanyEvent::WorkflowRunFinished {
+            blocked_nodes,
+            approvals,
+            pending_approvals,
+            ..
+        } = &event
+        else {
+            panic!("expected a WorkflowRunFinished, got {event:?}");
+        };
+        assert!(blocked_nodes.is_empty());
+        assert!(approvals.is_empty());
+        assert_eq!(pending_approvals, &vec!["review".to_string()]);
+    }
+
+    /// A run that blocked on nobody serializes byte-for-byte as it did before
+    /// #881 / #880 — which is nearly every run, so this is what keeps the
+    /// journal from growing two empty arrays per line.
+    #[test]
+    fn a_run_that_blocked_on_nobody_adds_no_keys() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: false,
+            run_id: Some("run-1".to_string()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+        let json = serde_json::to_value(&event).expect("serialize");
+        assert!(json.get("blocked_nodes").is_none(), "{json}");
+        assert!(json.get("approvals").is_none(), "{json}");
     }
 
     /// Every field on both #371 variants is required, and that is the point:
@@ -5373,6 +5497,8 @@ mod test {
                 cancelled: false,
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             }
         );
     }

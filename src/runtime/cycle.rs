@@ -153,7 +153,12 @@ pub enum ResolveReceipt {
     /// The verdict is journaled and any approved effect settled — the grant is
     /// minted, or the native effect executed. The carried `ApprovalResolved` is
     /// the event the follow-up cycle must run so the brain learns the verdict.
-    Settled(CompanyEvent),
+    ///
+    /// Boxed: `CompanyEvent` is a wide enum (its largest variant is the
+    /// workflow-run outcome), and holding it inline made every
+    /// `AlreadyResolved` — the common answer — pay that width. Indirection here
+    /// costs one allocation on the settled path only.
+    Settled(Box<CompanyEvent>),
 }
 
 impl ResolveReceipt {
@@ -786,11 +791,13 @@ approval.]"
         // The follow-up event, so the brain learns the verdict. Returning it
         // (rather than appending it here) keeps the event logged exactly once:
         // the cycle that runs it is the thing that appends it.
-        Ok(ResolveReceipt::Settled(CompanyEvent::ApprovalResolved {
-            approval_id: id.clone(),
-            verdict,
-            by,
-        }))
+        Ok(ResolveReceipt::Settled(Box::new(
+            CompanyEvent::ApprovalResolved {
+                approval_id: id.clone(),
+                verdict,
+                by,
+            },
+        )))
     }
 
     /// Applies an approved effect: **mint a grant** when it came from a harness
@@ -1154,11 +1161,13 @@ approval.]"
         // The follow-up event, so the brain learns the approval resolved (with
         // an edit). `CompanyEvent` is closed, so the verdict rides as `Approve`;
         // the edit itself lives in the journal audit trail.
-        Ok(ResolveReceipt::Settled(CompanyEvent::ApprovalResolved {
-            approval_id: id.clone(),
-            verdict: Verdict::Approve,
-            by,
-        }))
+        Ok(ResolveReceipt::Settled(Box::new(
+            CompanyEvent::ApprovalResolved {
+                approval_id: id.clone(),
+                verdict: Verdict::Approve,
+                by,
+            },
+        )))
     }
 
     /// Replays the journal to rebuild the executed-key set, the approval queue,

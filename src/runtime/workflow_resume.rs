@@ -1498,6 +1498,8 @@ mod decide_tests {
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             })
         }
     }
