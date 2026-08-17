@@ -156,7 +156,10 @@ function bodyOf(req: TransportRequest): Record<string, unknown> {
 
 describe("client.chat deliverable", () => {
   function clientOn(t: Transport) {
-    return new OpenCompanyClient({ baseUrl: "", company: null, operatorToken: null }, t);
+    return new OpenCompanyClient(
+      { baseUrl: "", company: null, operatorToken: null, sessionHeader: null },
+      t,
+    );
   }
 
   it("omits deliverable for an ordinary (once) message, keeping the pre-#580 shape", async () => {

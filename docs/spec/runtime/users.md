@@ -281,9 +281,42 @@ all, and a cross-site `fetch` that sets a custom one is preflighted, which CORS
 answers for allow-listed origins only. The header is the stricter carrier — it
 is never attached ambiently the way a cookie is.
 
-**Nothing issues one to a browser.** A session token reaches a browser only as
-`Set-Cookie`, where `HttpOnly` keeps it away from JavaScript. Device pairing is
-the intended issuer for clients that need the header form.
+**A browser gets the cookie unless it asks otherwise, and it only asks when the
+cookie cannot work.** The default is unchanged and is what every same-origin
+console still gets: the token reaches the browser only as `Set-Cookie`, where
+`HttpOnly` keeps it away from JavaScript. Device pairing remains the issuer for
+native clients.
+
+The exception is the [hub console](hub-console.md), which is cross-origin with
+every host it operates and therefore receives no cookie at all.
+
+### Asking for the header carrier
+
+A client that cannot receive a cookie sends `x-opencompany-session-carrier:
+header` on a sign-in request. The response then carries the ready-made header
+value as `session` in its JSON body and sets **no** cookie:
+
+```http
+POST /api/v1/companies/acme/auth/verify
+x-opencompany-session-carrier: header
+
+200 OK
+{ "id": "…", "email": "ada@example.com", …, "session": "acme.<token>" }
+```
+
+One session, one carrier — deliberately. Issuing both would leave the cookie
+half as a third-party cookie that some browsers keep and others discard, so
+whether logging out actually ended the session would vary by browser.
+
+Every browser login path routes through one `mint_session`, so all four —
+magic link, password, hub sign-in and wallet — support this identically.
+
+Opting in this way is safe for the same reason the header carrier itself is: a
+cross-site HTML form cannot set a request header, and a cross-site `fetch` that
+sets one is preflighted, which CORS answers for allow-listed origins only. A
+hostile page therefore cannot make someone's browser request the readable
+carrier on its behalf. Anything other than `header` — absent, empty, or a value
+nobody defined — degrades to the cookie rather than to no session.
 
 ## Device pairing
 

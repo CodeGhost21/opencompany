@@ -108,6 +108,7 @@ async fn state_with(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -3177,6 +3178,7 @@ async fn state_with_manifest_and_defaults(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -3218,6 +3220,7 @@ async fn state_with_manifest_and_overlays(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -3694,6 +3697,7 @@ async fn state_with_source_dir(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -4015,6 +4019,7 @@ async fn state_with_telegram_at(
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         })
@@ -8775,6 +8780,8 @@ async fn the_run_history_carries_a_runs_board_rows() {
                 title: Some("Reply to the auditor".into()),
                 assignee: None,
             }],
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         },
         // A second run that touched no card, so the omission is asserted on a
         // real row rather than on an absence that could be the fold failing.
@@ -8788,6 +8795,8 @@ async fn the_run_history_carries_a_runs_board_rows() {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         },
     ] {
         runtime.events().append(&company, event).await.unwrap();

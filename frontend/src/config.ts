@@ -2,10 +2,15 @@
 //
 // The console works against ANY OpenCompany host and ANY company. Resolution
 // order (first match wins), so the same build drops in anywhere:
-//   1. URL query params: ?api=<url>&company=<id>&token=<t>
+//   1. URL query params: ?api=<url>&company=<id>&token=<t>&hub
 //   2. window.OPENCOMPANY_CONFIG (injected in index.html for static hosting)
-//   3. Vite build-time env: VITE_OC_API / VITE_OC_COMPANY / VITE_OC_TOKEN
-//   4. Defaults: same-origin API, single-company mode (no id)
+//   3. Vite build-time env: VITE_OC_API / VITE_OC_COMPANY / VITE_OC_TOKEN /
+//      VITE_OC_HUB
+//   4. Defaults: same-origin API, single-company mode (no id), not a hub
+//
+// What this resolves is the console's **bootstrap** connection, not the set of
+// hosts it can hold — that has been a list since connections landed, and a hub
+// build (see `hub`) resolves no bootstrap connection at all.
 
 export interface ConsoleConfig {
   /** Base URL of the OpenCompany host. Empty string means same-origin. */
@@ -23,6 +28,32 @@ export interface ConsoleConfig {
    * no longer exists — there is no shared-secret path into a company.
    */
   operatorToken: string | null;
+  /**
+   * A ready-made `x-opencompany-session` value, when this client carries its
+   * own session instead of relying on a cookie.
+   *
+   * Never resolved from the environment or the URL — only supplied per
+   * connection by `connectionConfig`, after a sign-in that asked the host for
+   * the header carrier. It lives here because it describes *how a client
+   * authenticates*, which is what this type is for; anywhere else and the
+   * client would be taking its credential from two places.
+   */
+  sessionHeader: string | null;
+  /**
+   * Whether this deployment is a **hub**: one console serving many hosts that
+   * live on other origins, rather than a console served by the host it
+   * operates.
+   *
+   * The difference is entirely in the bootstrap. An ordinary console assumes
+   * its own origin is a host and opens a connection to it; a hub's origin
+   * serves static assets and nothing else, so that assumption yields a
+   * connection which can only ever fail — the browser's exact equivalent of the
+   * dead same-origin row the desktop used to carry (issue #613).
+   *
+   * A hub holds no directory of its own. The hosts it knows are the ones
+   * somebody added, remembered in `localStorage` by `profileStore`.
+   */
+  hub: boolean;
 }
 
 declare global {
@@ -46,6 +77,11 @@ function fromQuery(): Partial<ConsoleConfig> {
   // makes — see `signInWithHubToken`, which hands it to the host once and lets
   // it go. `key=auth` is the hub's own marker for that redirect.
   if (token !== null && q.get("key") !== "auth") out.operatorToken = token;
+  // `?hub` and `?hub=1` both mean yes; `?hub=0` and `?hub=false` mean no, so a
+  // hub build can be turned *off* for a debugging session without editing the
+  // deployment. Absent leaves it to the layers below rather than forcing false.
+  const hub = q.get("hub");
+  if (hub !== null) out.hub = isTruthy(hub);
   return out;
 }
 
@@ -55,7 +91,22 @@ function fromEnv(): Partial<ConsoleConfig> {
   if (env.VITE_OC_API) out.baseUrl = env.VITE_OC_API;
   if (env.VITE_OC_COMPANY) out.company = env.VITE_OC_COMPANY;
   if (env.VITE_OC_TOKEN) out.operatorToken = env.VITE_OC_TOKEN;
+  if (env.VITE_OC_HUB) out.hub = isTruthy(env.VITE_OC_HUB);
   return out;
+}
+
+/**
+ * Reads a flag written the way a person writes one.
+ *
+ * Vite env values are always strings, so `VITE_OC_HUB=false` is truthy in
+ * JavaScript — a build that meant to turn the hub off would silently turn it
+ * on, and the symptom (a bootstrap connection that cannot be reached) looks
+ * nothing like the cause.
+ */
+function isTruthy(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  // An empty value is the bare `?hub` form, which is an assertion, not a blank.
+  return normalized !== "0" && normalized !== "false" && normalized !== "no";
 }
 
 /** Resolves the effective console configuration once, at startup. */
@@ -71,5 +122,9 @@ export function resolveConfig(): ConsoleConfig {
     baseUrl,
     company: merged.company ?? null,
     operatorToken: merged.operatorToken ?? null,
+    // Never configured at this level: a session belongs to one connection, and
+    // this resolves at most one connection's *address*. See `ConsoleConfig`.
+    sessionHeader: null,
+    hub: merged.hub ?? false,
   };
 }

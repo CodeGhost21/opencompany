@@ -246,6 +246,43 @@ pub fn grants_workspace_write_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "workspace" || grant == "workspace.write")
 }
 
+/// Epistemic classes a roster teammate may declare, gating which routed
+/// documents it may be told (`docs/spec/runtime/orchestration/context-routing.md`).
+///
+/// The routing spec's three exclusions quantify over "roles that weigh
+/// evidence", "roles that judge" and "roles acting on a directive", and it is
+/// explicit that the classification MUST be an explicit declaration and **never**
+/// a match on `role`: `role` is prose an operator writes for humans, so matching
+/// on it would make a company that renames "Critic" to "Reviewer" silently lose
+/// an exclusion, and a control a rename can switch off is not a control.
+///
+/// * `evidence` — weighs evidence, so it is never routed the assertion board.
+/// * `judge` — scores a deliverable, so it is never routed the scratch.
+/// * `directive` — acts on an operator instruction, so it is never routed the
+///   claim ledger.
+///
+/// Declaring none (the default) is *unclassified*, which imposes no exclusion —
+/// the correct default, because an ordinary teammate is not judging anything.
+pub const PROMPT_CLASSES: [&str; 3] = ["evidence", "judge", "directive"];
+
+/// Ceiling, in Unicode codepoints, on the prompt text one agent's
+/// `prompt_files` (and, separately, its routed `context` documents) may
+/// contribute to the system prompt.
+///
+/// Sized as the brief budget in
+/// `docs/spec/runtime/orchestration/alignment.md` — 10,000 provider-billed
+/// tokens — measured in codepoints as a cheap, tokenizer-free upper bound. One
+/// token typically spans several codepoints for the encodings in use, so a
+/// codepoint count is never smaller than the true token count: the clamp may cut
+/// earlier than the budget strictly requires, never later.
+///
+/// Applied **where the prompt is spent** (assembly), never by refusing to load
+/// the file. Refusing the read costs the company the whole document; clamping at
+/// assembly costs only its tail.
+///
+/// [brief]: https://docs/spec/runtime/orchestration/alignment.md
+pub const PROMPT_FILE_BUDGET_CHARS: usize = 10_000;
+
 /// Built-in capability tier names selectable in `[plan].name` (issue #108). The
 /// name → budget-map table lives in
 /// [`plan_named`](crate::harness::capability_budget::plan_named); this list is
@@ -357,16 +394,21 @@ pub struct Agent {
     ///
     /// Empty (the default) means **no delegation tools at all** — the behaviour
     /// every manifest had before this field existed, and the reason adding it is
-    /// a no-op for an existing company. A non-empty list wires exactly
-    /// `spawn_task` + `delegate_to_desk` onto this agent (never the
-    /// orchestrator's roster/workflow/lifecycle authority) and narrows
-    /// `delegate_to_desk` to the desks named here. `"*"` is a wildcard for
-    /// "every desk the company has".
+    /// a no-op for an existing company. A non-empty list wires
+    /// `spawn_task` + `delegate_to_desk` + `delegate_to_teammate` (issue #884)
+    /// onto this agent (never the orchestrator's roster/workflow/lifecycle
+    /// authority), narrows `delegate_to_desk` to the desks named here, and lets
+    /// `delegate_to_teammate` reach any member of any desk this agent sits on
+    /// (deliberately unconditional — the enable switch is opting in at all, not
+    /// which desk is named) plus every member of the desks named here. `"*"` is
+    /// a wildcard for "every desk the company has" on both tools.
     ///
     /// Entries are **desk** ids or names, not teammate ids: desks are
     /// OpenCompany's delegation address space, and `delegate_to_desk` already
-    /// resolves its target that way. Deliberately a field of its own rather than
-    /// more [`tools`](Self::tools) grant globs — that vocabulary feeds the
+    /// resolves its target that way — `delegate_to_teammate` reads the same
+    /// list and expands each desk to its members rather than taking teammate
+    /// ids directly. Deliberately a field of its own rather than more
+    /// [`tools`](Self::tools) grant globs — that vocabulary feeds the
     /// capability-namespace math, and a desk id is not a namespace.
     ///
     /// This is simultaneously the per-member enable switch and the capability
@@ -374,9 +416,96 @@ pub struct Agent {
     /// than inferred from who happens to lead which desk.
     #[serde(default)]
     pub delegates_to: Vec<String>,
+    /// Workspace documents routed into this agent's system prompt.
+    ///
+    /// The manifest half of *context routing*
+    /// (`docs/spec/runtime/orchestration/alignment.md`): which working
+    /// documents this role is told to reason from. Context is authority, so it
+    /// is stated per role rather than given to everyone — and the exclusions
+    /// carry as much weight as the entries, because a role that weighs evidence
+    /// must not be handed unevidenced text beside it.
+    ///
+    /// Paths are relative to the company workspace root. A named document that
+    /// does not exist is skipped; one that is oversized or not valid UTF-8 is an
+    /// error, because silently dropping it yields a role whose prompt was
+    /// written around a document it never received.
+    ///
+    /// `None` (an omitted `context` key) means this agent takes the
+    /// per-tier default once the routing layer lands. `Some(vec![])` (an
+    /// explicit `context = []`) means the role gets the universal document
+    /// and nothing else, distinct from taking the default — see
+    /// `docs/spec/runtime/orchestration/alignment.md`. `Option<Vec<String>>`
+    /// rather than a defaulted `Vec<String>` is what makes that distinction
+    /// representable at all: a plain `Vec` with `#[serde(default)]` cannot
+    /// tell an omitted key from an explicit empty list apart, since both
+    /// deserialize to the same empty vec.
+    ///
+    /// The **dynamic** half of the prompt-context pair: these are live
+    /// operator-owned documents, re-read on every roster rebuild and placed last
+    /// in the system prompt, after the static
+    /// [`prompt_files`](Self::prompt_files). Documents are resolved by
+    /// `harness::context_routing` before the (synchronous) agent build, and a
+    /// change to one moves the roster fingerprint so it reaches the next turn
+    /// rather than the next restart.
+    #[serde(default)]
+    pub context: Option<Vec<String>>,
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,
+    /// A custom system-prompt body for this role, appended to the generated
+    /// persona sentence rather than replacing it.
+    ///
+    /// Appended, not substituted, because the generated line is what binds the
+    /// agent to *this* company and *this* role — an agent that replaced it would
+    /// lose the identity framing that makes it answer as the Copywriter at Acme
+    /// instead of falling back to the runtime's own assistant persona. What an
+    /// operator wants here is the working instruction ("write in the brand's
+    /// voice, never the agency's"), which is additive to that framing.
+    ///
+    /// Available on a `[[agent]]` entry as well as an `agents/<id>.toml` file:
+    /// one field, one consumer, so adopting a prompt does not require adopting
+    /// the bundle layout first.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Checked-in documents folded into this agent's system prompt, as paths
+    /// relative to the company bundle's `agents/` directory.
+    ///
+    /// The **static** half of the prompt-context pair. These are version
+    /// controlled beside the agent definition and never change between two
+    /// turns of a run, which is why they are read once at manifest load and
+    /// placed early in the prompt where the cache prefix stays stable. The
+    /// dynamic half is [`context`](Self::context): live workspace documents,
+    /// re-read per roster rebuild and placed last.
+    ///
+    /// A path that escapes `agents/`, or names a file that does not exist, is a
+    /// **validation error** rather than a skipped entry. This is deliberately
+    /// stricter than `context`'s missing-document rule, and for a reason the two
+    /// do not share: a workspace document is operator-owned live state that may
+    /// legitimately not exist yet, while a `prompt_files` entry names a file in
+    /// the same commit as the agent that references it. A typo there yields a
+    /// role whose prompt was written around a briefing it silently never
+    /// received.
+    #[serde(default)]
+    pub prompt_files: Vec<String>,
+    /// The `(path, body)` pairs [`prompt_files`](Self::prompt_files) resolved
+    /// to, filled by the bundle loader at manifest-load time.
+    ///
+    /// Carried on the manifest rather than read at prompt-assembly time because
+    /// `harness::build::build_agent` is synchronous and runs on every roster
+    /// rebuild; doing the file I/O there would put a disk read behind a lock on
+    /// a hot path, to load bytes that cannot have changed since the manifest was
+    /// parsed. `#[serde(skip)]` keeps it out of the on-disk record — it is
+    /// derived state, and a persisted copy would go stale against the bundle.
+    #[serde(skip)]
+    pub prompt_files_resolved: Vec<(String, String)>,
+    /// This role's epistemic classes, gating which routed documents it may be
+    /// told. See [`PROMPT_CLASSES`] for the closed set and what each excludes.
+    ///
+    /// Empty (the default) is *unclassified*: no exclusion, the correct default
+    /// for an ordinary teammate. A company that wants an exclusion states it
+    /// here rather than having it guessed from the free-text `role`.
+    #[serde(default)]
+    pub classes: Vec<String>,
 }
 
 /// The `[[agent]].tier` value that marks a roster's orchestrator.
@@ -418,6 +547,26 @@ pub struct GroupChat {
     /// Agent ids in this chat; each must exist in the roster.
     #[serde(default)]
     pub members: Vec<String>,
+    /// This desk's tool ceiling: the middle level of the three-level narrowing
+    /// `[tools].allow ∩ desk.tools ∩ [[agent]].tools`.
+    ///
+    /// A desk is how a company expresses a department — a finance desk, a
+    /// creative desk — so it is the natural place to say "nobody on this desk
+    /// reaches the web", once, instead of repeating the restriction on every
+    /// member and hoping the next member added inherits it.
+    ///
+    /// Empty (the default) narrows **nothing**, which makes this field a no-op
+    /// for every manifest written before it existed.
+    ///
+    /// A teammate sitting on several desks takes the **union** of their
+    /// ceilings before the intersection with the company grant. Union rather
+    /// than intersection because desks are additive memberships: joining the
+    /// growth desk is how a marketer gains the ad tools, and an intersection
+    /// would make each extra desk silently *remove* capability — so adding
+    /// someone to a desk could break the job they already did. See
+    /// [`agent_scoped_grants`](crate::runtime::builder::agent_scoped_grants).
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 /// A `[[connection]]` entry — an integration to prioritize wiring. This is
@@ -1137,6 +1286,61 @@ mod test {
         let value = serde_json::to_value(&manifest).unwrap();
         assert!(value.get("agent").is_some());
         assert!(value.get("schedule").is_some());
+    }
+
+    /// `Agent.context` is `Option<Vec<String>>`, not a defaulted `Vec`,
+    /// specifically so an omitted `context` key and an explicit `context = []`
+    /// stay distinguishable (docs/spec/runtime/orchestration/alignment.md's
+    /// per-tier-default rule depends on this). Pin the manifest round-trip for
+    /// both spellings so a regression to a defaulted `Vec` — which would
+    /// collapse them back to the same value — fails a test instead of shipping
+    /// silently.
+    #[test]
+    fn agent_context_distinguishes_omitted_from_explicit_empty() {
+        let omitted: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            omitted.context, None,
+            "an omitted `context` key MUST deserialize to None, not an empty vec"
+        );
+
+        let explicit_empty: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = []
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            explicit_empty.context,
+            Some(vec![]),
+            "an explicit `context = []` MUST deserialize to Some(vec![]), distinct from None"
+        );
+
+        let populated: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = ["GOAL.md", "CLAIMS.md"]
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            populated.context,
+            Some(vec!["GOAL.md".to_string(), "CLAIMS.md".to_string()])
+        );
+
+        // The distinction survives a JSON round-trip too, since the routing
+        // layer this field feeds may cross that boundary (e.g. the console).
+        let json = serde_json::to_string(&omitted).expect("serialize");
+        let back: Agent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.context, None);
     }
 
     /// The `[plan]` section (issue #108) survives a TOML → struct → JSON → struct

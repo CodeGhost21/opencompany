@@ -1787,6 +1787,12 @@ mod tests {
                 "composio_execute",
                 serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" }),
             ),
+            // Issue #903: handing the finished work to the operator. It writes
+            // into the company's own workspace and artifact chain — no
+            // counterparty, no address — and the chain versions it, so the
+            // company can undo it alone. Parking it made every deliverable wait
+            // on a human; one 9-node pipeline run produced 15 such waits.
+            ("publish_artifact", serde_json::json!({})),
         ] {
             assert_eq!(
                 p.check(&request(tool, args)).await,
@@ -1795,6 +1801,28 @@ mod tests {
                  the agent's own work"
             );
         }
+
+        // Issue #903, the two ways an operator keeps a human on every hand-over.
+        // Both must survive the change above, or `auto` has quietly become the
+        // only tier and the choice is gone.
+        assert!(
+            matches!(
+                policy("supervised", &[], None)
+                    .check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a supervised desk must still see a publish before it lands"
+        );
+        assert!(
+            matches!(
+                policy("auto", &["publish_artifact"], None)
+                    .check(&request("publish_artifact", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "always_approve names it, and always_approve wins over every tier"
+        );
 
         // Still parks: arbitrary code, arbitrary addresses, a configured remote,
         // operator-authored guidance, third-party effects, real money on submit,
@@ -1809,7 +1837,6 @@ mod tests {
             ("workspace_create", serde_json::json!({})),
             ("workspace_delete", serde_json::json!({})),
             ("workspace_rename", serde_json::json!({})),
-            ("publish_artifact", serde_json::json!({})),
             ("media_generate_image", serde_json::json!({})),
             ("media_generate_video", serde_json::json!({})),
             ("mcp_call_tool", serde_json::json!({})),

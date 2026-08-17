@@ -60,6 +60,7 @@ import {
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { mergeReadFloors, unreadCount } from "@/lib/unread";
+import { approvedLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
@@ -1002,14 +1003,14 @@ export function AppShell({
     // live one, or the operator cannot tell which attempt it belongs to.
     clearFailure(approval.id);
     try {
-      await client.resolveApproval(approval.id, verdict, undefined, company, {
+      const answer = await client.resolveApproval(approval.id, verdict, undefined, company, {
         detach: true,
         scope,
       });
       setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
       toast.success(
         verdict === "approve"
-          ? "Approved — the agent is completing the action."
+          ? approvedLine(answer.stillAwaiting)
           : "Declined — recorded.",
       );
       // A decline ends the thread's story, and silence would read as a stall.

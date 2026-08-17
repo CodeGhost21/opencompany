@@ -90,15 +90,24 @@ fn every_company_skill_and_workspace_parses() {
     }
 }
 
-/// Templates whose shipped skills (`web-research`, `seo-audit`,
-/// `competitor-scan`) instruct agents to search the web and cite sources, so
-/// each must carry an explicit `search` grant (issue #312).
-const SEARCH_GRANTED_COMPANIES: [&str; 6] = [
+/// Templates that must carry an explicit `search` grant (issues #312, #878).
+///
+/// The reason is the work the roster is described as doing, not anything on
+/// disk under the company: the search-dependent skills (`web-research`,
+/// `seo-audit`, `competitor-scan`) live in the *repo-level* `skills/` registry,
+/// which is global and unscoped, so an operator can install any of them into
+/// any company at runtime. No company ships a copy in its own `skills/` dir.
+/// Whether a template belongs here is therefore a judgement about its charter —
+/// research, editorial, marketing, legal, product engineering — recorded here
+/// because it cannot be derived from content.
+const SEARCH_GRANTED_COMPANIES: [&str; 8] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_research_lab",
+    "agentic_software_company",
     "signals_opportunity_studio",
 ];
 
@@ -107,15 +116,47 @@ const SEARCH_GRANTED_COMPANIES: [&str; 6] = [
 /// flaky), and `openhuman_demo` is a walkthrough nobody opted into spend for.
 const SEARCH_DENIED_COMPANIES: [&str; 2] = ["e2e_harness", "openhuman_demo"];
 
+/// Templates that simply do not grant `search` today. Unlike
+/// [`SEARCH_DENIED_COMPANIES`] there is no rule keeping them off the priced
+/// path — nobody has decided their roster needs the web. Moving one into
+/// [`SEARCH_GRANTED_COMPANIES`] is an ordinary product call, not a violation.
+///
+/// This list exists so the posture is a *partition* rather than an allow-list.
+/// An allow-list asserts a decision someone remembered, so it cannot notice a
+/// company nobody remembered: `agentic_software_company` shipped with nine
+/// agents and no search grant, and the suite stayed green for it (issue #878).
+/// [`every_company_declares_a_search_posture`] asserts this list plus the other
+/// two covers `companies/` exactly, so a new template fails CI until whoever
+/// adds it writes the decision down here.
+const SEARCH_UNGRANTED_COMPANIES: [&str; 12] = [
+    "agentic_accounting_firm",
+    "agentic_customer_support",
+    "agentic_enterprise_sales",
+    "agentic_game_business",
+    "agentic_game_studio",
+    "agentic_influencer_business",
+    "agentic_pharma_startup",
+    "agentic_realestate_company",
+    "agentic_recruiting_company",
+    "agentic_venture_capital",
+    "agentic_venture_studio",
+    "startup_accelerator",
+];
+
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
-/// excluded: it overrides the default down to a research-only belt on purpose.
-const FULL_BELT_PLUS_SEARCH: [&str; 5] = [
+/// excluded: it overrides the default down to a research-only belt on purpose,
+/// and `agentic_research_lab` is excluded for the same reason — its belt is
+/// `["*", "search"]`, dropping `media` and `composio`, because a research lab
+/// has no use for image generation or third-party OAuth side effects and both
+/// are opt-in spend.
+const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_software_company",
 ];
 
 fn load_company(name: &str) -> CompanyManifest {
@@ -180,6 +221,115 @@ fn fixture_templates_never_grant_search() {
             !grants_search_explicit(&grants),
             "{name}: must not grant `search` — a priced network call here \
              makes the fixture non-hermetic (found {grants:?})"
+        );
+    }
+}
+
+/// Every shipped company must appear in exactly one of the three search-posture
+/// lists, and the three together must cover `companies/` exactly (issue #878).
+///
+/// The guard #312 left behind was allow-list shaped: it checked that the six
+/// companies someone listed do grant `search`, and said nothing about the
+/// fifteen it did not list. `agentic_software_company` therefore shipped nine
+/// agents whose `web_search` was never wired, with a green suite. An allow-list
+/// can only ever assert a decision somebody remembered.
+///
+/// A partition inverts that. Adding a template to `companies/` fails this test
+/// as unclassified until its author states the posture; deleting one fails it as
+/// stale. And the classification cannot be made true by editing the list alone:
+/// every `SEARCH_UNGRANTED_COMPANIES` entry is re-derived from its manifest
+/// through the real `effective_grants` narrowing, so a company that actually
+/// grants search cannot hide in the ungranted bucket.
+#[test]
+fn every_company_declares_a_search_posture() {
+    use std::collections::BTreeSet;
+
+    let buckets: [(&str, &[&str]); 3] = [
+        ("SEARCH_GRANTED_COMPANIES", &SEARCH_GRANTED_COMPANIES),
+        ("SEARCH_DENIED_COMPANIES", &SEARCH_DENIED_COMPANIES),
+        ("SEARCH_UNGRANTED_COMPANIES", &SEARCH_UNGRANTED_COMPANIES),
+    ];
+
+    // (a) Each list is duplicate-free, and no company sits in two of them —
+    // otherwise "exactly one posture" degrades to "at least one".
+    for (name, list) in buckets {
+        let unique: BTreeSet<&str> = list.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            list.len(),
+            "{name} lists a company twice: {list:?}"
+        );
+    }
+    for (index, (left_name, left)) in buckets.iter().enumerate() {
+        for (right_name, right) in &buckets[index + 1..] {
+            let left_set: BTreeSet<&str> = left.iter().copied().collect();
+            let overlap: Vec<&str> = right
+                .iter()
+                .copied()
+                .filter(|name| left_set.contains(name))
+                .collect();
+            assert!(
+                overlap.is_empty(),
+                "{left_name} and {right_name} both claim {overlap:?} — a \
+                 company has exactly one search posture"
+            );
+        }
+    }
+
+    // (b) The union is exactly what is on disk.
+    let declared: BTreeSet<&str> = buckets
+        .iter()
+        .flat_map(|(_, list)| list.iter().copied())
+        .collect();
+    let on_disk: BTreeSet<String> = subdirs(&repo_root().join("companies"))
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_else(|| panic!("non-UTF-8 company dir {}", path.display()))
+                .to_string()
+        })
+        .collect();
+    assert!(!on_disk.is_empty(), "no companies found under companies/");
+
+    let unclassified: Vec<&str> = on_disk
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !declared.contains(name))
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "companies/{unclassified:?} declare no search posture. Every template \
+         must be listed in exactly one of SEARCH_GRANTED_COMPANIES (its roster \
+         needs the web), SEARCH_DENIED_COMPANIES (it must never reach the \
+         priced backend) or SEARCH_UNGRANTED_COMPANIES (no decision to grant \
+         it yet). Grants are not inherited from `*` — a company left out of the \
+         granted list has `web_search` wired for none of its agents (#878)."
+    );
+
+    let stale: Vec<&str> = declared
+        .iter()
+        .copied()
+        .filter(|name| !on_disk.contains(*name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "{stale:?} are listed in a search-posture const but no longer exist \
+         under companies/ — delete the entries"
+    );
+
+    // (c) The ungranted bucket is verified against the manifests, not taken on
+    // trust: a company that does grant search cannot be parked here.
+    for name in SEARCH_UNGRANTED_COMPANIES {
+        let manifest = load_company(name);
+        let grants = effective_grants(&manifest);
+        assert!(
+            !grants_search_explicit(&grants),
+            "{name}: sits in SEARCH_UNGRANTED_COMPANIES but its effective \
+             grants ({grants:?}) do include `search`. If the grant is \
+             intentional, move it to SEARCH_GRANTED_COMPANIES so \
+             `research_templates_grant_search_at_both_layers` checks every \
+             agent actually receives it."
         );
     }
 }

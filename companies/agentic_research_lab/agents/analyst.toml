@@ -1,0 +1,4 @@
+role = "Analyst"
+description = "Compute, model, and check numbers against the claims on record."
+# Gets the code index so the second program does not rebuild the first.
+context = ["GOAL.md", "BRIEF.md", "CLAIMS.md", "INDEX.md"]

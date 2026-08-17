@@ -35,6 +35,13 @@ tier = "reasoning"                 # cognition tier hint (see glossary)
 tools = ["docs.*", "email.send"]   # tool grant globs
 delegates_to = ["research"]        # desks this agent may hand work to ("*" = all)
 budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
+prompt = "Write for the reader."   # appended to the generated persona
+prompt_files = ["prompts/tone.md"] # checked-in briefing docs, under `agents/`
+context = ["BRIEF.md"]             # live workspace docs routed into the prompt
+classes = ["evidence"]             # routing exclusions: evidence | judge | directive
+# A roster may instead live one file per teammate under `agents/<id>.toml`, with
+# these same keys and the filename as the id. The two forms are exclusive —
+# declaring both is a validation error. See runtime/agents.md.
 
 # ── new tables (all optional) ──────────────────────────────────────────
 [users]
@@ -72,9 +79,17 @@ enabled = true                     # built-in chat; default true
 [channels.email]
 provider = "openhuman"             # delegate to an OpenHuman channel
 
+[[group_chat]]
+id = "creative"                    # a desk: who the human talks to
+name = "Creative studio"
+members = ["copywriter"]           # ids from the roster
+tools = ["docs.*"]                 # NEW: this desk's tool ceiling. Optional;
+                                   # empty narrows nothing. See runtime/tools.md
+
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
-allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
+allow = ["web.*", "docs.*", "search"]  # company-wide ceiling. Desks and agents
+                                   # narrow it: allow ∩ desk.tools ∩ agent.tools
                                    # `search` must be named — `*` never grants it
 search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 max_delegation_depth = 2           # how deep one message's hand-off chain may run
@@ -114,10 +129,22 @@ prompt = "Weekly review and operator digest"
 
 - **`[company]`** becomes the seed of the [Charter](../company-brain/charter.md).
   `handle` is only used when `[place].discoverable = true`.
-- **`[[agent]]`** entries define the Roster. `tier` is a hint the brain may
-  use when delegating; it never selects a model (the backend maps tiers to
-  SKUs). `tools` and `budget_usd_daily` intersect with the company-wide
-  `[tools].allow` and `[budget]` — the most restrictive wins.
+- **`[[agent]]`** entries define the Roster — or, equivalently, one
+  `agents/<id>.toml` file per teammate under the company bundle, carrying the
+  same keys with the filename as the id. The two forms are **exclusive**:
+  declaring both is a validation error rather than a precedence rule, because
+  either precedence would silently discard teammates somebody wrote down. Full
+  schema, including `prompt` / `prompt_files` / `context` / `classes`, in
+  [runtime/agents.md](agents.md).
+
+  `tier` is a hint the brain may use when delegating; it never selects a model
+  (the backend maps tiers to SKUs). `tools` and `budget_usd_daily` intersect
+  with the company-wide `[tools].allow` and `[budget]` — the most restrictive
+  wins. Tool grants resolve through **three** levels,
+  `[tools].allow ∩ [[group_chat]].tools ∩ [[agent]].tools`, every one of them
+  narrow-only and an empty one a pass-through; see
+  [runtime/tools.md](tools.md), which also covers why an empty grant list means
+  "inherit" rather than "nothing".
 
   **`delegates_to`** (issue #176) is the one per-agent key that is *not* a
   narrowing of a company-wide list: it is an **opt-in**. Empty — the default,

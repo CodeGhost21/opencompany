@@ -346,6 +346,10 @@ const DECLARED: &[Declared] = &[
     d("query_company", EffectGroup::Other, Reach::Nothing),
     d("spawn_task", EffectGroup::Other, Reach::Nothing),
     d("delegate_to_desk", EffectGroup::Other, Reach::Nothing),
+    // Issue #884: `delegate_to_teammate` is `delegate_to_desk` resolved to a
+    // person instead of a desk. Same class exactly — it runs a turn inside this
+    // company and nothing leaves it.
+    d("delegate_to_teammate", EffectGroup::Other, Reach::Nothing),
     d("add_agent", EffectGroup::Other, Reach::Nothing),
     d("create_workflow", EffectGroup::Other, Reach::Nothing),
     d("assign_task", EffectGroup::Other, Reach::Nothing),
@@ -528,7 +532,19 @@ const DECLARED: &[Declared] = &[
     d("workspace_rename", EffectGroup::Other, Reach::Consequence),
     // ---- Publishing --------------------------------------------------------
     // Externally visible and not reversible by the company alone.
-    d("publish_artifact", EffectGroup::Publish, Reach::Consequence),
+    // `Reach::Consequence` because a publish does change state, and a
+    // `supervised` desk should still see one before it lands. But `Grantable`,
+    // not `PerCall` (issue #903): handing a finished file to the operator does
+    // not leave the company. `harness::publish` writes into the company's own
+    // workspace and artifact chain — no counterparty, no address, nothing sent
+    // — and the write is versioned (`…/artifacts/{id}/versions`, `…/diff`), so
+    // it is reversible by the company alone, unlike the tools this section's
+    // neighbours classify. `auto` already promises that the agent's own
+    // sandbox writes run unattended; this is that promise applied to the step
+    // that makes the work visible. An operator who wants a human on every
+    // hand-over keeps one by choosing `supervised`, or by naming
+    // `publish_artifact` in `always_approve`, which wins over every tier.
+    d_grantable("publish_artifact", EffectGroup::Publish, Reach::Consequence),
     // ---- Priced backend calls ----------------------------------------------
     // `web_search` is billed per request but changes nothing (issue #238).
     // Media generation moves real money on submit (issue #109); listing the
@@ -1605,6 +1621,14 @@ mod tests {
             "edit",
             "file_write",
             "memory_store",
+            // Issue #903, and the one entry that is not the agent's private
+            // sandbox: it writes into the company's shared workspace. Declared
+            // deliberately. A publish still reaches no counterparty and no
+            // address, and the artifact chain versions it, so the company can
+            // undo it alone — the two properties every other name here has.
+            // What it buys is that a finished deliverable reaches the operator
+            // without a per-file decision, which is the whole point of `auto`.
+            "publish_artifact",
         ];
 
         let crossers = |args: &serde_json::Value| {
@@ -1655,7 +1679,6 @@ mod tests {
             "workspace_write",
             "workspace_delete",
             "workspace_rename",
-            "publish_artifact",
             "media_generate_image",
             "media_generate_video",
             "mcp_call_tool",
@@ -1686,6 +1709,27 @@ mod tests {
         // cap is what holds spend.
         assert!(!c("web_search").parks_under_auto());
         assert!(c("web_search").reach.costs_money());
+
+        // The other boundary `auto` deliberately does not draw (issue #903):
+        // handing a finished file to the operator. `publish_artifact` changes
+        // state, so it keeps `Reach::Consequence` and still parks under
+        // `supervised` — but it reaches no counterparty and no address, writes
+        // only into the company's own workspace and artifact chain, and is
+        // versioned, so it is reversible by the company alone. Parking it under
+        // `auto` made every deliverable wait on a human: one 9-node pipeline
+        // run generated 15 of these.
+        assert!(
+            !c("publish_artifact").parks_under_auto(),
+            "handing a file to the operator does not leave the company"
+        );
+        assert!(
+            c("publish_artifact").reach.parks_under_supervision(),
+            "a supervised desk must still see a publish before it lands"
+        );
+        assert!(
+            !c("publish_artifact").reach.costs_money(),
+            "a publish is not a spend, so the daily cap must not bill for it"
+        );
     }
 
     /// The argument-classified half of the same line: a Composio read runs
@@ -2337,6 +2381,7 @@ mod tests {
             orchestrator::QUERY_COMPANY_TOOL,
             orchestrator::SPAWN_TASK_TOOL,
             orchestrator::DELEGATE_TO_DESK_TOOL,
+            orchestrator::DELEGATE_TO_TEAMMATE_TOOL,
             orchestrator::ADD_AGENT_TOOL,
             orchestrator::CREATE_WORKFLOW_TOOL,
             orchestrator::ASSIGN_TASK_TOOL,

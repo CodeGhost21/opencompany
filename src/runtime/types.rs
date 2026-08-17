@@ -170,6 +170,40 @@ pub struct ApprovalSummary {
     /// page and in no thread, exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
+    /// The **workflow run** waiting on this approval (issue #880), when one is.
+    ///
+    /// The other direction of #880's fix: [`WorkflowRun::approvals`](crate::ports::WorkflowRun)
+    /// lets a run say what it parked; this lets a card say which run parked it.
+    /// Without it the Approvals page shows fifteen `publish_artifact` cards
+    /// with nothing tying any of them to the three runs that opened them.
+    ///
+    /// # Why this is not simply `effect.run_id`
+    ///
+    /// [`Effect::run_id`](crate::ports::types::Effect::run_id) is **overloaded**.
+    /// It is documented as issue #242's *task-attempt* id — a
+    /// [`RunRecord`](crate::ports::runs::RunRecord), stamped at the dispatch
+    /// boundary — and the workflow path also writes a *workflow* run id into it
+    /// (`workflows::caps::park_gated_calls` and
+    /// `runtime::workflow_resume::gate_effect`, the latter saying so in its own
+    /// comment). Two different id spaces in one field, and
+    /// [`generate_id`](crate::ports::ids::generate_id) is only process-locally
+    /// unique, so the ids cannot be told apart by inspection.
+    ///
+    /// The discriminator is the *park site*, which is recorded: a task attempt
+    /// parks inside its dispatch cycle and is linked
+    /// [`TaskLink::Task`](crate::runtime::journal::TaskLink), while every
+    /// workflow park goes through
+    /// [`DeliveryParking::park_and_journal`](crate::workflows::DeliveryParking)
+    /// and is recorded explicitly [`Unlinked`](TaskLink::Unlinked) (#333). So
+    /// "a run id on an approval that belongs to no card" is a workflow run, by
+    /// construction rather than by guess — and a chat turn, which is also
+    /// unlinked, stamps no run id at all.
+    ///
+    /// Omitted when absent, the additive pattern the two fields above follow: an
+    /// old console ignores the key and a new one reads its absence as "no run
+    /// behind this card", which is the truth for every chat and scheduler park.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
     /// Whether the operator may grant this tool **broadly** — one standing
     /// permission covering any arguments until a deadline (issue #374).
     ///

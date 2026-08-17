@@ -1,8 +1,16 @@
 // The user-authentication surface: magic link, password, session.
 //
-// The session itself is an HttpOnly cookie, so none of this returns or stores a
-// token — the browser holds it and `credentials: "include"` in the client sends
-// it. There is nothing here for an XSS to read.
+// For a console served by the host it talks to — every same-origin deployment,
+// which is the normal one — the session is an HttpOnly cookie: none of this
+// returns or stores a token, the browser holds it, and `credentials: "include"`
+// in the client sends it. There is nothing here for an XSS to read.
+//
+// A console on a *different* origin from its host gets no cookie at all: the
+// host sets it `SameSite=Lax` and the browser withholds it from every
+// cross-site request. Those sign-ins ask for a token instead and return it as
+// `SignIn.session`, which the caller stores on the connection. See
+// `Credential` in `connections/types.ts` for what that costs and why it is
+// still the right trade where the alternative is no console at all.
 
 import type { OpenCompanyClient } from "./client";
 
@@ -64,6 +72,19 @@ export interface Me {
 }
 
 /**
+ * What a successful sign-in returns.
+ *
+ * `session` is present only when the client asked the host to mint a session it
+ * would carry itself — a console on a different origin from its host, where no
+ * cookie can work. See `Credential` in `connections/types.ts`.
+ *
+ * A caller that receives one **must store it** (`adoptSession`), or the sign-in
+ * appears to succeed and the very next request is anonymous: the token comes
+ * back exactly once and only its hash is kept server-side.
+ */
+export type SignIn = Me & { session?: string };
+
+/**
  * The answer to "send me a link".
  *
  * `sent` is always true, for everyone, including addresses with no account —
@@ -94,8 +115,8 @@ export async function verifyCode(
   client: OpenCompanyClient,
   company: string | null,
   code: string,
-): Promise<Me> {
-  return client.post<Me>(`${client.scopeFor(company)}/auth/verify`, { code });
+): Promise<SignIn> {
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/verify`, { code });
 }
 
 /** One ecosystem sign-in button, as the host describes it. */
@@ -135,9 +156,9 @@ export async function fetchHubProviders(
  * The token arrives in the URL as `?token=…&key=auth` after the hub completes
  * OAuth and redirects back here. It is not an identity this console can read or
  * check — it is handed straight to the host, which asks the hub whose it is and
- * then applies this company's own roster. So this returns the same `Me` a magic
- * link would, and the browser keeps nothing either way: the session comes back
- * as an HttpOnly cookie and the token is stripped from the URL.
+ * then applies this company's own roster. So this returns the same result a
+ * magic link would, and the hub's token is spent here and stripped from the URL
+ * rather than kept — whichever carrier the session itself comes back in.
  *
  * The distinguishable failures are `hub_rejected` (expired or forged — sign in
  * again), `not_a_member` (a real ecosystem account with no access here), and
@@ -148,8 +169,8 @@ export async function signInWithHubToken(
   client: OpenCompanyClient,
   company: string | null,
   token: string,
-): Promise<Me> {
-  return client.post<Me>(`${client.scopeFor(company)}/auth/hub`, { token });
+): Promise<SignIn> {
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/hub`, { token });
 }
 
 /** Exchanges an email and password for a session. */
@@ -158,8 +179,8 @@ export async function loginWithPassword(
   company: string | null,
   email: string,
   password: string,
-): Promise<Me> {
-  return client.post<Me>(`${client.scopeFor(company)}/auth/login`, { email, password });
+): Promise<SignIn> {
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/login`, { email, password });
 }
 
 /** Who the current session belongs to; throws 401 when signed out. */
@@ -220,7 +241,10 @@ export async function verifyWalletSignature(
   nonce: string,
   signature: string,
 ): Promise<Me> {
-  return client.post<Me>(`${client.scopeFor(company)}/auth/wallet/verify`, { nonce, signature });
+  return client.postSignIn<SignIn>(`${client.scopeFor(company)}/auth/wallet/verify`, {
+    nonce,
+    signature,
+  });
 }
 
 /** Revokes this session, server-side and in the browser. */
