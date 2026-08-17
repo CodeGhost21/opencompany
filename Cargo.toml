@@ -85,7 +85,7 @@ fs2 = "0.4"
 # and `axum`, so this is a direct-use declaration, not new compilation.
 tower = { version = "0.5", features = ["util"] }
 
-tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite"] }
+tinyagents = { path = "vendor/openhuman/vendor/tinyagents", optional = true, features = ["sqlite"] }
 
 # WS4: openhuman embedded as a library (the harness). Only links under the
 # `openhuman` feature; the default build pulls none of this enormous native
@@ -103,10 +103,8 @@ tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite"
 # OpenHuman's own skill *read* tools (`list_workflows` / `describe_workflow` /
 # `read_workflow_resource`), which live in the gated `openhuman::skills`
 # domain. The feature carries no extra deps (`skills = []` upstream) — it only
-# recompiles the skills domain modules. Keep `vendor/tinyagents` on the
-# same commit openhuman's own `vendor/tinyagents` pins: the two are a
-# lockstep pair, and a skew fails to compile (only under this feature, which
-# CI does not build).
+# recompiles the skills domain modules. TinyAgents is consumed from OpenHuman's
+# own pin so both crates always share one trait identity and cannot drift.
 openhuman_core = { package = "openhuman", path = "vendor/openhuman", optional = true, default-features = false, features = ["skills", "mcp"] }
 # The openhuman `Provider`/`Memory` traits return `anyhow::Result` and log via
 # the `log` facade; both only link under the `openhuman` feature.
@@ -140,7 +138,7 @@ url = "2"
 # replaces the crate's SOURCE, not the version requirement it has to satisfy, so
 # a stale `0.5` fails resolution outright rather than quietly building the old
 # copy. Its `tinyagents` requirement resolves to the already-vendored
-# `vendor/tinyagents`, so this adds no new lockstep.
+# `vendor/openhuman/vendor/tinyagents`, so this adds no second copy.
 # We deliberately do NOT enable openhuman's own `flows` feature: that drags in
 # rhai + the builder tools, defeating the point of running tinyflows directly.
 tinyflows = { version = "0.8", optional = true }
@@ -417,10 +415,9 @@ chargebee = ["dep:reqwest"]
 paypal = ["dep:reqwest"]
 
 [patch.crates-io]
-# opencompany's own vendored tinyagents (2.1.0). Satisfies openhuman's `^2.1`.
-# Kept on the exact commit openhuman's own `vendor/tinyagents` pins — see the
-# lockstep note on `openhuman_core` above.
-tinyagents = { path = "vendor/tinyagents" }
+# Reuse OpenHuman's own TinyAgents pin (2.1.0). This satisfies OpenHuman's
+# `^2.1` requirement while keeping a single checkout and crate identity.
+tinyagents = { path = "vendor/openhuman/vendor/tinyagents" }
 # WS4: openhuman's own Cargo.toml `[patch.crates-io]` is ignored when it is a
 # path dependency, so its vendored-submodule patches must be replicated here
 # (paths rebased onto `vendor/openhuman/vendor/...`). These entries are inert in

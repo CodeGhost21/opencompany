@@ -17,10 +17,8 @@ are data-only definitions under `companies/` (a `company.toml` manifest plus a
 `frontend/`. Design notes and module specifications live in `docs/`, with
 `docs/spec/README.md` as the top-level architecture reference and
 `docs/modules/` holding per-surface design docs.
-Vendored runtime sources live under `vendor/` as Git submodules:
-
-- `vendor/openhuman/`
-- `vendor/tinyagents/`
+The vendored runtime source is the `vendor/openhuman/` Git submodule. TinyAgents
+is inherited from OpenHuman at `vendor/openhuman/vendor/tinyagents/`.
 
 Prefer small modules with focused responsibilities. Keep core type definitions
 in a dedicated `types.rs` file and package-local tests in the module file or a
@@ -35,8 +33,9 @@ dedicated `test.rs` file when they grow.
 - `cargo test`: run the full test suite.
 - `cargo run --bin opencompany`: run the CLI.
 - `cargo run --bin opencompany -- serve`: run the Axum HTTP server on `127.0.0.1:8080`.
-- `git submodule update --init --recursive`: initialize OpenHuman and TinyAgents.
-- `cargo check --features tiny`: compile against vendored TinyAgents.
+- `git submodule update --init vendor/openhuman`: initialize OpenHuman.
+- `scripts/ci/init-vendored-submodules.sh`: initialize its vendored crates.
+- `cargo check --features tiny`: compile against OpenHuman's TinyAgents pin.
 
 Run commands from the repository root unless a future workspace layout changes
 the module location.
