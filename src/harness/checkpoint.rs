@@ -52,6 +52,10 @@ impl WorkspaceCheckpointer {
     /// path, and a planted pointer is overwritten with the real one so commands
     /// the agent itself runs still discover the genuine repository.
     pub(crate) fn initialize(workspace: &Path) -> anyhow::Result<Self> {
+        Self::initialize_with_lock_wait(workspace, true)
+    }
+
+    fn initialize_with_lock_wait(workspace: &Path, wait_for_lock: bool) -> anyhow::Result<Self> {
         std::fs::create_dir_all(workspace)?;
         let out_of_band = workspace.with_extension("git");
 
@@ -98,7 +102,7 @@ impl WorkspaceCheckpointer {
             workspace: workspace.to_path_buf(),
             git_dir: out_of_band,
         };
-        checkpointer.initialize_baseline()?;
+        checkpointer.initialize_baseline(wait_for_lock)?;
         Ok(checkpointer)
     }
 
@@ -117,7 +121,12 @@ impl WorkspaceCheckpointer {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(|| Self::initialize(workspace))
             }
-            _ => Self::initialize(workspace),
+            // A current-thread runtime cannot synchronously wait for a Tokio
+            // mutex: the future holding it needs this same worker to release
+            // its guard. Fail safely on contention and let build_agent's
+            // existing warning/fallback path proceed without checkpointing.
+            Ok(_) => Self::initialize_with_lock_wait(workspace, false),
+            Err(_) => Self::initialize(workspace),
         }
     }
 
@@ -125,22 +134,26 @@ impl WorkspaceCheckpointer {
     /// per-call checkpoint path holds, so an in-flight tool checkpoint cannot
     /// contend with this one on the Git index.
     ///
-    /// [`build_agent`](crate::harness::build::build_agent) is synchronous, so
-    /// there is no `.await` and the lock can only be probed with `try_lock`. A
-    /// contended lock — a tool checkpoint in flight while the roster is
-    /// rebuilt — is waited on by spinning with `yield_now` until the guard is
-    /// acquired. That is deliberate: calling `Handle::block_on` here inside a
-    /// Tokio task panics, and proceeding without the guard would race the
-    /// in-flight checkpoint on the Git index. A checkpoint holds the lock only
-    /// for a short `git add`/`commit`, so the spin is bounded; it is a
-    /// defensive backstop, not the hot path.
-    fn initialize_baseline(&self) -> anyhow::Result<()> {
+    /// On a multi-threaded runtime (or outside Tokio), a contended initializer
+    /// may wait because another worker can poll the checkpoint future that
+    /// releases the guard. On a current-thread runtime it must fail instead:
+    /// synchronously spinning would prevent that sole worker from polling the
+    /// guard owner and deadlock roster construction.
+    fn initialize_baseline(&self, wait_for_lock: bool) -> anyhow::Result<()> {
         let lock = path_lock(&self.git_dir);
-        let _guard = loop {
-            match lock.try_lock() {
-                Ok(guard) => break Some(guard),
-                Err(_) => std::thread::yield_now(),
+        let _guard = if wait_for_lock {
+            loop {
+                match lock.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(_) => std::thread::yield_now(),
+                }
             }
+        } else {
+            lock.try_lock().map_err(|_| {
+                anyhow::anyhow!(
+                    "workspace checkpoint initialization is contending with an active checkpoint"
+                )
+            })?
         };
         self.checkpoint_unlocked("initialize workspace", true)
     }
@@ -608,5 +621,31 @@ mod test {
             "re-initialize must succeed once the checkpoint lock is released"
         );
         thread.join().expect("lock thread");
+    }
+
+    #[test]
+    fn current_thread_initialization_fails_instead_of_deadlocking_on_contention() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().join("workspace");
+        WorkspaceCheckpointer::initialize(&workspace).unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let lock = path_lock(&dir.path().join("workspace.git"));
+            let _guard = lock.lock().await;
+            let started = std::time::Instant::now();
+
+            let error = WorkspaceCheckpointer::initialize_off_worker(&workspace)
+                .expect_err("current-thread initialization must not wait on a Tokio mutex");
+
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "contended initialization blocked the current-thread runtime"
+            );
+            assert!(error.to_string().contains("contending"), "{error}");
+        });
     }
 }
