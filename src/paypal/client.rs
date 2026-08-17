@@ -107,6 +107,43 @@ fn unparsed_body_message(status: u16, body: &str) -> String {
     )
 }
 
+/// Checks that `path` is a plain absolute path before anything pastes it onto
+/// the base URL.
+///
+/// [`PaypalClient::get`] builds its URL by concatenation, and concatenation is
+/// not host-safe: `"https://api.paypal.com"` followed by `"@evil.com/v1"` parses
+/// as userinfo `api.paypal.com` against host `evil.com`, so the bearer token
+/// goes to whoever owns that name. No caller passes a dynamic path today — both
+/// call sites in [`crate::paypal::api`] are literals — but `get` is `pub`, this
+/// is a payments client, and the obvious next operation takes an id from a tool
+/// argument. Making the URL unforgeable here costs a comparison per call and
+/// means that caller cannot introduce the hole by accident.
+///
+/// `?` and `#` are refused for a different reason: the query is a separate
+/// argument that reqwest appends, so a path carrying its own would silently
+/// merge with it or truncate it. `//` is not exploitable against a base URL that
+/// already carries a scheme and host, but no PayPal endpoint has such a path,
+/// and allowing it would mean a reader has to re-derive the URL grammar to
+/// convince themselves of that.
+fn check_path(path: &str) -> Result<()> {
+    let rejected = !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains('@')
+        || path.contains('?')
+        || path.contains('#')
+        || path.chars().any(|c| c.is_whitespace() || c.is_control());
+    if rejected {
+        return Err(err(
+            0,
+            "invalid_path",
+            // The path itself is not echoed: it is the untrusted half of this
+            // check, and this message reaches the model's context.
+            "refusing to build a PayPal request from a path that is not a plain absolute path",
+        ));
+    }
+    Ok(())
+}
+
 impl PaypalClient {
     /// Builds a client against the environment named in `config`.
     pub fn new(config: PaypalConfig) -> Result<Self> {
@@ -213,7 +250,12 @@ impl PaypalClient {
     }
 
     /// `GET path` with query parameters, returning the decoded JSON.
+    ///
+    /// `path` must be a plain absolute path — see [`check_path`]. It is checked
+    /// before the token is fetched, so a rejected path costs no round trip and,
+    /// more to the point, never puts a credential on the wire.
     pub async fn get(&self, path: &str, query: &[(String, String)]) -> Result<Value> {
+        check_path(path)?;
         let token = self.token().await?;
         let response = self
             .http
@@ -392,6 +434,81 @@ mod tests {
             message.contains("Client Authentication failed"),
             "{message}"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_path_that_could_move_the_host_is_refused_before_any_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // A live stub, so "was refused" is proved by the request never arriving
+        // rather than by an error that a connection failure would also produce.
+        // The count also covers the TOKEN call: a rejected path must not spend a
+        // credential fetch either.
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let app = axum::Router::new().fallback(axum::routing::any(move || {
+            let seen = seen.clone();
+            async move {
+                seen.fetch_add(1, Ordering::SeqCst);
+                (
+                    axum::http::StatusCode::OK,
+                    [("content-type", "application/json")],
+                    r#"{"access_token":"tok","expires_in":32400,"balances":[]}"#,
+                )
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let client =
+            PaypalClient::with_base_url(config(), format!("http://{addr}")).expect("builds");
+
+        for path in [
+            // The one that matters: concatenated onto the base this reads as
+            // userinfo `api.paypal.com` at host `evil.com`, and the bearer token
+            // goes to whoever owns that name.
+            "@evil.com/v1/reporting/balances",
+            "/v1/reporting/balances@evil.com",
+            // Not absolute — pastes straight onto the host name.
+            "v1/reporting/balances",
+            "evil.com/v1",
+            // Protocol-relative.
+            "//evil.com/v1",
+            // The query is a separate argument; a path carrying its own would
+            // silently merge with or truncate it.
+            "/v1/reporting/balances?start_date=x",
+            "/v1/reporting/balances#frag",
+            // Header/URL splitting.
+            "/v1/reporting/ balances",
+            "/v1/reporting/\nbalances",
+        ] {
+            let error = client
+                .get(path, &[])
+                .await
+                .expect_err(&format!("{path:?} must be refused"));
+            assert!(
+                matches!(&error, OpenCompanyError::Paypal { code, .. } if code == "invalid_path"),
+                "{path:?} was refused, but for the wrong reason: {error}",
+            );
+            // And the path itself is not echoed back into the transcript.
+            assert!(!error.to_string().contains("evil.com"), "{error}");
+        }
+
+        // Nothing reached the network at all — not the request, and not the
+        // token fetch that would have preceded it.
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        // The guard rejects; it does not reject everything. A real path still
+        // goes through, or the check would be indistinguishable from a break.
+        client
+            .get("/v1/reporting/balances", &[])
+            .await
+            .expect("a plain absolute path is still allowed");
+        assert!(hits.load(Ordering::SeqCst) > 0);
         server.abort();
     }
 
