@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use tinymemory::registry::{
     COGNEE_DRIVER_ID, ConfigLabels, DriverClass, DriverEntry, DriverRegistry, MEM0_DRIVER_ID,
-    NULL_DRIVER_ID, SUPERMEMORY_DRIVER_ID, TINYCORTEX_DRIVER_ID, TRUSTED,
+    NULL_DRIVER_ID, SUPERMEMORY_DRIVER_ID, TRUSTED,
 };
 use tinymemory_api::null::NullMemoryProvider;
 use tinymemory_api::provider::MemoryProvider;
@@ -152,13 +152,13 @@ pub fn open_driver(
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| {
-                    MemoryDriverError(
+                    MemoryDriverError(format!(
                         "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_DRIVER (or \
-                         [memory].provider) naming the hosted engine — one of `supermemory`, \
-                         `mem0`, `cognee`. There is no default: binding the wrong hosted engine \
-                         writes a company's memory somewhere it cannot be read back from."
-                            .to_string(),
-                    )
+                         [memory].provider) naming the hosted engine — one of {}. There is no \
+                         default: binding the wrong hosted engine writes a company's memory \
+                         somewhere it cannot be read back from.",
+                        SUPPORTED_REMOTE_DRIVERS.join(", ")
+                    ))
                 })?;
             let url = require(
                 config.url.as_deref(),
@@ -275,13 +275,10 @@ fn open_failed(error: anyhow::Error) -> OpenCompanyError {
 pub const SUPPORTED_REMOTE_DRIVERS: [&str; 3] =
     [SUPERMEMORY_DRIVER_ID, MEM0_DRIVER_ID, COGNEE_DRIVER_ID];
 
-/// The embedded engine's reserved id, re-exported so `select` can name it
-/// without depending on the registry directly.
-pub const EMBEDDED_DRIVER_ID: &str = TINYCORTEX_DRIVER_ID;
-
 #[cfg(test)]
 mod test {
     use super::*;
+    use tinymemory::registry::TINYCORTEX_DRIVER_ID;
 
     fn config(mode: MemoryMode) -> MemoryDriverConfig {
         MemoryDriverConfig {
@@ -358,7 +355,7 @@ mod test {
         // Class is host-side: naming the embedded engine under the remote mode
         // would run it under the wrong checks.
         let mut cfg = config(MemoryMode::Remote);
-        cfg.driver_id = Some(EMBEDDED_DRIVER_ID.into());
+        cfg.driver_id = Some(TINYCORTEX_DRIVER_ID.into());
         cfg.url = Some("https://memory.example".into());
         cfg.api_key = Some("k".into());
         let error = open_driver(&cfg).err().unwrap().to_string();

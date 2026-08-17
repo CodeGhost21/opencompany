@@ -499,6 +499,16 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         return Ok(None);
     };
     let bound = BoundMemory::bind(provider, class)?;
+    // Announce the bind: which engine, and — the part an operator cannot infer —
+    // the class the *host* assigned it, since that is what decides whether the
+    // egress and external-trust checks apply. Names the engine and its
+    // capabilities, never the endpoint or the credential.
+    tracing::info!(
+        driver_id = bound.driver_id(),
+        class = bound.class().as_str(),
+        capabilities = ?bound.capability_names(),
+        "memory engine bound"
+    );
     if settings.memory_backend == MemoryBackend::Null {
         // Loud, once, at open: `null` is a legitimate choice but a surprising
         // one to inherit from a stale environment, and every read returning
@@ -901,8 +911,7 @@ mod test {
             ..StorageSettings::default()
         };
         let error = open_memory_overlay(&settings)
-            .err()
-            .expect("remote without an endpoint must refuse")
+            .expect_err("remote without an endpoint must refuse")
             .to_string();
         assert!(error.contains("OPENCOMPANY_MEMORY_URL"), "{error}");
     }

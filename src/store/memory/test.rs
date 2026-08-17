@@ -572,3 +572,69 @@ async fn debug_names_the_driver_and_its_class() {
     assert!(rendered.contains("fake-engine"), "{rendered}");
     assert!(rendered.contains("embedded"), "{rendered}");
 }
+
+// ---------------------------------------------------------------------------
+// Port conformance
+// ---------------------------------------------------------------------------
+//
+// Issue #914 requires the same conformance suite to hold for every port that
+// binds a provider, so a provider-backed store is held to the identical
+// assertions the fs, sqlite and mongodb backends are. This matters more here
+// than for an in-tree backend: these facades encode records into an opaque
+// `content` string and re-derive everything on the way out, so "it round-trips"
+// is a property to prove against the shared suite rather than to assume.
+//
+// `assert_fact_store` is new coverage rather than a mirror of the cortex
+// backends' three: the embedded engine implements memory + context only, so
+// there has never been a cortex `FactStore` to run it against.
+
+use crate::ports::events::EventLog;
+use crate::ports::store::CompanyStore;
+use crate::store::conformance;
+use crate::store::{FsCompanyStore, FsEventLog};
+
+/// The four trait objects the suite drives: fs company and event stores, paired
+/// with provider-backed memory and context. The two fs slots are the ports a
+/// memory engine does not implement — same arrangement the cortex backends use.
+type ConformanceStores = (
+    Arc<dyn CompanyStore>,
+    Arc<dyn EventLog>,
+    Arc<dyn crate::ports::MemoryStore>,
+    Arc<dyn crate::ports::ContextStore>,
+);
+
+fn conformance_stores(dir: &std::path::Path) -> ConformanceStores {
+    let memory = engine();
+    (
+        Arc::new(FsCompanyStore::new(dir.to_path_buf())),
+        Arc::new(FsEventLog::new(dir.to_path_buf())),
+        memory.memory(),
+        memory.context(),
+    )
+}
+
+#[tokio::test]
+async fn conformance_isolation_by_company() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, events, memory, context) = conformance_stores(dir.path());
+    conformance::assert_isolation_by_company(store, events, memory, context).await;
+}
+
+#[tokio::test]
+async fn conformance_export_totality() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, events, memory, context) = conformance_stores(dir.path());
+    conformance::assert_export_totality(store, events, memory, context).await;
+}
+
+#[tokio::test]
+async fn conformance_context_chunk_stamps() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_store, _events, _memory, context) = conformance_stores(dir.path());
+    conformance::assert_context_chunk_stamps(context).await;
+}
+
+#[tokio::test]
+async fn conformance_fact_store() {
+    conformance::assert_fact_store(engine().facts()).await;
+}
