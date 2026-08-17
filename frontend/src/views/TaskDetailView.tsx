@@ -291,6 +291,9 @@ export function TaskDetailView({
   /** Tell the board a card was deleted. */
   onDeleted: (id: string) => void;
 }) {
+  // The board's columns, so this screen and the board label a status the same
+  // way without either keeping a list. See `lib/board-columns`.
+  const columns = useBoardColumns(client, company);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [inflight, setInflight] = useState<InflightRun | null>(null);
   const [loading, setLoading] = useState(true);
