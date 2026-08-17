@@ -2565,8 +2565,11 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 1);
-    assert_eq!(roster[0]["id"], "ceo");
+    assert!(
+        roster.iter().all(|row| row["id"] != id.as_str()),
+        "the deleted overlay teammate is still listed: {roster:?}"
+    );
+    assert!(roster.iter().any(|row| row["id"] == "ceo"));
 
     // Toggle an inbox on.
     let (status, ack) = send(

@@ -1450,7 +1450,11 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
         .iter()
         .map(|row| row["id"].as_str().unwrap())
         .collect();
-    let gql_ids: Vec<&str> = summaries
+    // Both sides unfiltered here: the point of this assertion is that the two
+    // surfaces answer with the same id set, baseline graphs included.
+    let gql_ids: Vec<&str> = value["data"]["company"]["workflows"]
+        .as_array()
+        .expect("summaries")
         .iter()
         .map(|row| row["id"].as_str().unwrap())
         .collect();
