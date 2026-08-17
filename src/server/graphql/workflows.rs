@@ -253,8 +253,8 @@ pub(crate) async fn resolve_one(
     runtime: &Arc<CompanyRuntime>,
     id: &str,
 ) -> async_graphql::Result<Option<WorkflowGql>> {
-    let overlays = overlays(runtime).await?;
-    Ok(load_one(runtime, &overlays, id).map(WorkflowGql::from))
+    let (overlays, globals_disable) = overlays_and_globals(runtime).await?;
+    Ok(load_one(runtime, &overlays, &globals_disable, id).map(WorkflowGql::from))
 }
 
 #[cfg(test)]
