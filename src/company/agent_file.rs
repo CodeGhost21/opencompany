@@ -241,6 +241,8 @@ fn parse_agent_file(
         prompt_files: file.prompt_files,
         prompt_files_resolved,
         classes: file.classes,
+        ledgers: file.ledgers,
+        can_declare_ledgers: file.can_declare_ledgers.unwrap_or(true),
     })
 }
 
