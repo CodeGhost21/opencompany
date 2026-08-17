@@ -3087,7 +3087,9 @@ mod test {
         let enabled = builder.with_workspace_git_enabled(true);
         assert!(enabled.workspace_git_enabled);
         assert!(
-            !enabled.with_workspace_git_enabled(false).workspace_git_enabled,
+            !enabled
+                .with_workspace_git_enabled(false)
+                .workspace_git_enabled,
             "the switch must also be able to turn checkpoints back off"
         );
     }
