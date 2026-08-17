@@ -3283,6 +3283,7 @@ mod tests {
     // HTTP-level: a hosted tenant has no source directory to scan, so these
     // exercise the manifest-enabled union path end to end via the router.
     mod hosted_mode {
+        use super::own_rows;
         use axum::body::{Body, to_bytes};
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
