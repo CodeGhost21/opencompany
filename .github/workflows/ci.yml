@@ -1029,13 +1029,18 @@ jobs:
           # No `submodules` — unlike the Rust jobs this one resolves no vendored
           # manifests, and `vendor/openhuman` is a large checkout to skip.
 
-      # Node 22 tracks `frontend/Dockerfile`, which builds the shipped console
+      # Issue #858. `node-version-file`, NOT a literal — `frontend/.nvmrc` is
+      # the single place the console's Node version is written, and this is one
+      # of four jobs that used to hold their own copy of `22`. A literal here
+      # is a copy that can silently disagree with the one a contributor runs.
+      #
+      # It still tracks `frontend/Dockerfile`, which builds the shipped console
       # `FROM node:22-slim`. CI must compile on the version that produces the
-      # artifact; bump both together or this job stops being evidence for the
-      # thing that deploys.
+      # artifact; that file cannot read `.nvmrc`, so those two are the only pair
+      # left to bump together — and the Dockerfile carries a comment saying so.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -1157,9 +1162,11 @@ jobs:
           # `rust` job and nothing here resolves a cargo manifest, so the large
           # `vendor/openhuman` checkout would be pure cost.
 
+      # Node version from `frontend/.nvmrc`, like every other lane here —
+      # see the `Console` job's note (issue #858).
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -1251,9 +1258,11 @@ jobs:
           # No `submodules`, for the same reason as the lane above: the binary
           # arrives prebuilt and nothing here resolves a cargo manifest.
 
+      # Node version from `frontend/.nvmrc`, like every other lane here —
+      # see the `Console` job's note (issue #858).
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -1346,9 +1355,11 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev libsoup-3.0-dev
 
+      # Node version from `frontend/.nvmrc`, like every other lane here —
+      # see the `Console` job's note (issue #858).
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
