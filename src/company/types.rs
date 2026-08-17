@@ -1565,24 +1565,36 @@ mod test {
     /// declared list answers only for the slugs it names.
     #[test]
     fn ledger_access_defaults_to_unrestricted_record() {
-        let mut agent = base_agent();
-        agent.ledgers = None;
-        assert_eq!(agent.ledger_access("tasks"), Some(LedgerAccess::Record));
-        assert_eq!(agent.ledger_access("anything"), Some(LedgerAccess::Record));
+        let unrestricted: Agent = toml::from_str("id = \"critic\"\nrole = \"Critic\"\n").unwrap();
+        assert_eq!(unrestricted.ledger_access("tasks"), Some(LedgerAccess::Record));
+        assert_eq!(unrestricted.ledger_access("anything"), Some(LedgerAccess::Record));
 
-        agent.ledgers = Some(vec![
-            LedgerGrant {
-                name: "tasks".into(),
-                access: LedgerAccess::Record,
-            },
-            LedgerGrant {
-                name: "decisions".into(),
-                access: LedgerAccess::Read,
-            },
-        ]);
-        assert_eq!(agent.ledger_access("tasks"), Some(LedgerAccess::Record));
-        assert_eq!(agent.ledger_access("DECISIONS"), Some(LedgerAccess::Read));
-        assert_eq!(agent.ledger_access("goals"), None, "an undeclared slug is unreachable");
+        let scoped: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            ledgers = [
+                { name = "tasks", access = "record" },
+                { name = "decisions", access = "read" },
+            ]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(scoped.ledger_access("tasks"), Some(LedgerAccess::Record));
+        assert_eq!(scoped.ledger_access("DECISIONS"), Some(LedgerAccess::Read));
+        assert_eq!(scoped.ledger_access("goals"), None, "an undeclared slug is unreachable");
+    }
+
+    /// A bare `{ name = "tasks" }` grant, with no `access` key, defaults to
+    /// `Read` — the safer of the two, so declaring a `ledgers` list without
+    /// stating an access level does not silently hand out write access.
+    #[test]
+    fn a_ledger_grant_with_no_access_key_defaults_to_read() {
+        let agent: Agent = toml::from_str(
+            "id = \"critic\"\nrole = \"Critic\"\nledgers = [{ name = \"tasks\" }]\n",
+        )
+        .unwrap();
+        assert_eq!(agent.ledger_access("tasks"), Some(LedgerAccess::Read));
     }
 
     /// The `[plan]` section (issue #108) survives a TOML → struct → JSON → struct
