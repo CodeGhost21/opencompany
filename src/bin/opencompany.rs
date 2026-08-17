@@ -572,8 +572,18 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
     use opencompany::app::config::ProcessEnv;
     use opencompany::harness::HarnessPool;
     use opencompany::harness::provider::{
-        harness_inference_from_env, media_backend_from_env, search_backend_from_env,
+        PlatformCredentialStatus, harness_inference_from_env, media_backend_from_env,
+        search_backend_from_env,
     };
+
+    // Issue #879: every managed surface below fails closed and says nothing at
+    // boot, so a tenant provisioned without its platform token comes up looking
+    // healthy and only reveals the gap when an agent is built or a workflow node
+    // 500s. Say it once, here, where an operator reading the pod's first lines
+    // will see it.
+    if let Some(warning) = PlatformCredentialStatus::resolve(&ProcessEnv).boot_warning() {
+        tracing::warn!("[boot] {warning}");
+    }
 
     let builder = builder.with_harness(Arc::new(HarnessPool::new()));
     // Issue #109: the MANAGED media-generation backend, resolved from the

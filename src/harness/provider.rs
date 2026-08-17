@@ -226,6 +226,116 @@ pub fn search_backend_from_env(env: &dyn EnvSource) -> Option<super::search::Sea
     ))
 }
 
+/// Which managed-platform surfaces resolved a credential at boot (issue #879).
+///
+/// Every surface below fails **closed** and independently: a tenant with no
+/// platform credential still boots, still serves, and still builds agents — it
+/// simply never wires `web_search`, never wires the media tools, and falls back
+/// to whatever brain its manifest names. That is the right runtime behaviour and
+/// the wrong operator experience: the only trace today is one `tracing::warn`
+/// per agent at roster build, which nobody reads until a workflow 500s.
+///
+/// This is the boot-time summary of the same resolvers the rest of the module
+/// exposes, so there is one place that answers "did this deployment come up with
+/// a platform identity" and it cannot drift from what actually got wired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformCredentialStatus {
+    /// A platform identity resolved at all — [`TinyhumansTokenSource::from_env`]
+    /// found a projected file or a static key.
+    pub platform_identity: bool,
+    /// That identity is the **projected-file** tier rather than a static key.
+    pub projected_tier: bool,
+    /// Managed chat inference and embeddings resolved
+    /// ([`hosted_endpoint_from_env`]).
+    pub inference: bool,
+    /// Managed web search resolved ([`search_backend_from_env`]).
+    pub search: bool,
+    /// Managed media generation resolved ([`media_backend_from_env`]).
+    pub media: bool,
+}
+
+impl PlatformCredentialStatus {
+    /// Resolves every managed surface against one environment read.
+    pub fn resolve(env: &dyn EnvSource) -> Self {
+        let source = TinyhumansTokenSource::from_env(env);
+        let projected_tier = source
+            .as_ref()
+            .is_some_and(|s| s.tier() == crate::company::credentials::TokenTier::ProjectedFile);
+        Self {
+            platform_identity: source.is_some(),
+            projected_tier,
+            inference: hosted_endpoint_from_env(env).is_some(),
+            search: search_backend_from_env(env).is_some(),
+            media: media_backend_from_env(env).is_some(),
+        }
+    }
+
+    /// Every managed surface has a credential.
+    pub fn all_wired(&self) -> bool {
+        self.inference && self.search && self.media
+    }
+
+    /// The one line an operator needs at boot, or `None` when nothing is
+    /// missing.
+    ///
+    /// Two shapes, because they call for two different actions:
+    ///
+    /// * **No platform identity at all** — the hosted tenant was provisioned
+    ///   without its projected token volume. Names both tiers, since the fix
+    ///   differs between a cluster tenant and `docker compose`.
+    /// * **A projected identity that media cannot use** — the deployment *does*
+    ///   have a platform token and search/inference are live, but
+    ///   [`media_backend_from_env`] reads only the static tier
+    ///   ([`API_KEY_ENV`](crate::company::credentials::API_KEY_ENV)), never the
+    ///   projected file. Without this arm an operator who has just fixed a
+    ///   missing-token incident sees media still reporting "Awaiting credential"
+    ///   with nothing anywhere saying why. The underlying asymmetry is not
+    ///   fixable here — the upstream media client takes a `String` bearer for
+    ///   the life of the process, so flattening a 600-second projected token
+    ///   into it would trade "never works" for "works for ten minutes" — so the
+    ///   deployment is told, precisely, what to set instead.
+    pub fn boot_warning(&self) -> Option<String> {
+        use crate::company::credentials::{API_KEY_ENV, TOKEN_FILE_ENV};
+
+        if !self.platform_identity && !self.inference && !self.media {
+            return Some(format!(
+                "no platform credential resolved: managed inference, embeddings, web_search and \
+                 media generation are ALL unwired for every company on this deployment \
+                 (fail-closed). A hosted tenant expects the platform-projected token volume named \
+                 by {TOKEN_FILE_ENV}; a local or self-hosted instance expects a static \
+                 {API_KEY_ENV}."
+            ));
+        }
+
+        if self.projected_tier && !self.media {
+            return Some(format!(
+                "the platform identity is a projected token file ({TOKEN_FILE_ENV}), which media \
+                 generation does not read: media tools stay unwired even for a company that grants \
+                 `media`. Set OPENCOMPANY_MEDIA_KEY (or a static {API_KEY_ENV}) to wire them."
+            ));
+        }
+
+        let mut unwired: Vec<&str> = Vec::new();
+        if !self.inference {
+            unwired.push("managed inference/embeddings");
+        }
+        if !self.search {
+            unwired.push("web_search");
+        }
+        if !self.media {
+            unwired.push("media generation");
+        }
+        if unwired.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "platform credential is only partly configured: {} unwired (fail-closed). See \
+             {TOKEN_FILE_ENV} / {API_KEY_ENV}.",
+            unwired.join(", ")
+        ))
+    }
+}
+
 /// Flatten a tinyagents request's messages into the OpenAI-compatible wire
 /// `[{role, content, …}]` array.
 ///
@@ -1184,6 +1294,127 @@ mod tests {
             ("OPENCOMPANY_SEARCH_KEY", "search-specific"),
         ]);
         assert!(search_backend_from_env(&env).is_none());
+    }
+
+    // ---- boot-time platform credential status (issue #879) -----------------
+
+    /// Writes a projected-token file and returns `(dir, path-as-string)`. The
+    /// `TempDir` must stay alive: `TinyhumansTokenSource` selects the projected
+    /// tier only when the path **exists**.
+    fn projected_token_file() -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-cred-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "projected-token").unwrap();
+        let rendered = path.display().to_string();
+        (dir, rendered)
+    }
+
+    /// The #879 tenant: nothing at all is set. One warning must name every
+    /// surface that silently failed closed, and both tiers, because the fix
+    /// differs between a cluster tenant and `docker compose`.
+    #[test]
+    fn no_platform_credential_warns_about_every_managed_surface() {
+        let status = PlatformCredentialStatus::resolve(&MapEnv::default());
+        assert!(!status.platform_identity);
+        assert!(!status.all_wired());
+
+        let warning = status.boot_warning().expect("a warning");
+        assert!(warning.contains("no platform credential"), "{warning}");
+        for expected in [
+            "inference",
+            "web_search",
+            "media",
+            crate::company::credentials::TOKEN_FILE_ENV,
+            crate::company::credentials::API_KEY_ENV,
+        ] {
+            assert!(warning.contains(expected), "{expected} missing: {warning}");
+        }
+    }
+
+    /// The trap this check exists for. A hosted tenant given the projected token
+    /// volume — the documented hosted mechanism, and the fix for #879 — resolves
+    /// inference and search but **not** media, because
+    /// [`media_backend_from_env`] reads only the static tier. Staying silent
+    /// here is what leaves an operator who has just supplied the credential
+    /// staring at a console that still says "Awaiting credential".
+    #[test]
+    fn projected_token_alone_warns_that_media_cannot_use_it() {
+        let (_dir, token_path) = projected_token_file();
+        let env = MapEnv::new([(crate::company::credentials::TOKEN_FILE_ENV, token_path)]);
+
+        let status = PlatformCredentialStatus::resolve(&env);
+        assert!(status.platform_identity);
+        assert!(status.projected_tier);
+        assert!(status.inference, "inference reads the projected tier");
+        assert!(status.search, "search reads the projected tier");
+        assert!(!status.media, "media reads only the static tier");
+        assert!(!status.all_wired());
+
+        let warning = status.boot_warning().expect("a warning");
+        assert!(warning.contains("media"), "{warning}");
+        assert!(
+            warning.contains("OPENCOMPANY_MEDIA_KEY"),
+            "the warning must name the variable that fixes it: {warning}"
+        );
+    }
+
+    /// A projected token plus a media key wires everything, so boot says
+    /// nothing. Guards the check against crying wolf on a healthy deployment.
+    #[test]
+    fn projected_token_with_a_media_key_is_silent() {
+        let (_dir, token_path) = projected_token_file();
+        let env = MapEnv::new([
+            (
+                crate::company::credentials::TOKEN_FILE_ENV.to_string(),
+                token_path,
+            ),
+            (
+                "OPENCOMPANY_MEDIA_KEY".to_string(),
+                "media-specific".to_string(),
+            ),
+        ]);
+
+        let status = PlatformCredentialStatus::resolve(&env);
+        assert!(status.all_wired());
+        assert_eq!(status.boot_warning(), None);
+    }
+
+    /// The `docker compose` / self-host shape: one static key feeds all three
+    /// surfaces, so boot is silent there too.
+    #[test]
+    fn a_static_key_wires_every_surface_and_is_silent() {
+        let env = MapEnv::new([(crate::company::credentials::API_KEY_ENV, "th-static")]);
+        let status = PlatformCredentialStatus::resolve(&env);
+
+        assert!(status.platform_identity);
+        assert!(!status.projected_tier);
+        assert!(status.all_wired());
+        assert_eq!(status.boot_warning(), None);
+    }
+
+    /// A media key on its own is not a platform identity: it wires media and
+    /// leaves inference and search closed, which the partial arm must report by
+    /// name rather than collapsing into "no credential".
+    #[test]
+    fn a_media_key_alone_warns_about_the_surfaces_it_does_not_cover() {
+        let env = MapEnv::new([("OPENCOMPANY_MEDIA_KEY", "media-specific")]);
+        let status = PlatformCredentialStatus::resolve(&env);
+
+        assert!(!status.platform_identity);
+        assert!(status.media);
+        assert!(!status.inference);
+        assert!(!status.search);
+
+        let warning = status.boot_warning().expect("a warning");
+        assert!(warning.contains("partly configured"), "{warning}");
+        assert!(warning.contains("web_search"), "{warning}");
+        assert!(
+            !warning.contains("no platform credential"),
+            "a partial deployment is not a bare one: {warning}"
+        );
     }
 
     #[tokio::test]
