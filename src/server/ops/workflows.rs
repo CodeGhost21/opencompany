@@ -2478,6 +2478,21 @@ mod tests {
     // sources, so they call the form that resolves no baseline.
     use crate::company::{list_workflows_union, load_workflow_union};
 
+    /// The listed rows this company itself has, with the global baseline
+    /// filtered out. Every company lists the baseline graphs; these tests are
+    /// about what this one created, deleted, or declared.
+    fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
+        listed
+            .as_array()
+            .expect("array response")
+            .iter()
+            .filter(|row| {
+                let id = row["id"].as_str().unwrap_or_default();
+                !crate::globals::workflows().iter().any(|w| w.id == id)
+            })
+            .collect()
+    }
+
     const DEMO: &str = r#"
         id = "demo"
         name = "Demo flow"
@@ -3363,7 +3378,7 @@ mod tests {
             // Regression for #70: the REST list used to scan the filesystem
             // only, so a hosted tenant with no source dir always got `[]`
             // here even though its manifest declared an enabled workflow.
-            let items = body.as_array().expect("array response");
+            let items = own_rows(&body);
             assert_eq!(items.len(), 1, "body: {body}");
             assert_eq!(items[0]["id"], "demo");
             // No file to load a real name from, so the id is the fallback
@@ -3498,7 +3513,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let listed = json_body(response).await;
-            let items = listed.as_array().expect("array");
+            let items = own_rows(&listed);
             assert_eq!(items.len(), 1, "body: {listed}");
             assert_eq!(items[0]["id"], "greeter");
             assert_eq!(items[0]["name"], "Greeter");
@@ -4917,7 +4932,7 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
+            assert_eq!(own_rows(&items).len(), 1, "{items}");
         }
 
         // ── Issue #274: revision history + rollback at the HTTP boundary ────
@@ -5186,8 +5201,9 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
-            assert_eq!(items[0]["id"], "greeter");
+            let own = own_rows(&items);
+            assert_eq!(own.len(), 1, "{items}");
+            assert_eq!(own[0]["id"], "greeter");
         }
 
         #[tokio::test]
@@ -5263,7 +5279,7 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 0, "{items}");
+            assert_eq!(own_rows(&items).len(), 0, "{items}");
 
             // …and from the graph read.
             let response = router(state)
