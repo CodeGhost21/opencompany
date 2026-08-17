@@ -302,6 +302,38 @@ impl Bundle {
         self.dir.join("tasks.json")
     }
 
+    /// Path to the company's ledger **declarations** (`ledgers.json`, the whole
+    /// set as a JSON array).
+    ///
+    /// Declarations only. The built-ins ship with the runtime and are never
+    /// stored, so a company's file cannot drift from the code every prompt and
+    /// route is written against.
+    pub fn ledgers_json(&self) -> PathBuf {
+        self.dir.join("ledgers.json")
+    }
+
+    /// Path to one ledger's append-only event log
+    /// (`ledgers/<slug>.jsonl`, one [`LedgerEvent`](crate::ledger::LedgerEvent)
+    /// per line, in append order).
+    ///
+    /// One file per ledger rather than one shared log: the fold reads a single
+    /// ledger at a time, and a shared file would make every read of the goals
+    /// scan every task event ever written. Concurrent writers to *different*
+    /// ledgers then never touch the same file at all, and writers to the same
+    /// one interleave whole lines under `O_APPEND`.
+    ///
+    /// The slug is `[a-z0-9-]` by construction
+    /// ([`normalize_slug`](crate::ledger::normalize_slug)), so it cannot escape
+    /// this directory.
+    pub fn ledger_events_jsonl(&self, slug: &str) -> PathBuf {
+        self.ledgers_dir().join(format!("{slug}.jsonl"))
+    }
+
+    /// Path to the per-ledger event log directory.
+    pub fn ledgers_dir(&self) -> PathBuf {
+        self.dir.join("ledgers")
+    }
+
     /// Path to the durable facts log (`facts.jsonl`, one fact per line;
     /// last-write-wins per id).
     pub fn facts_jsonl(&self) -> PathBuf {
