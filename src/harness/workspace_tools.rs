@@ -32,10 +32,16 @@
 //! session cache, so a note edited in the console between two turns changes
 //! what the agent quotes on the next turn with no agent rebuild.
 //!
-//! # Agents write unconfined — and why that is the right call (issue #551)
+//! # Agents write broadly, except for operator-only secrets
 //!
-//! There is no prefix gate here. An agent may create and overwrite anywhere in
-//! the company's tree, exactly as `workspace_write` always could. Confining
+//! Ordinary shared content has no prefix gate: an agent may create and
+//! overwrite anywhere in the company's tree, exactly as `workspace_write`
+//! always could. The one confidentiality boundary is `secrets/`: that subtree
+//! is omitted from the agent path index and search before names or bodies are
+//! returned, and create refuses the root case-insensitively. Console and
+//! operator APIs continue to use the complete store.
+//!
+//! Confining
 //! *create* to `Agents/<id>/` while leaving *overwrite* free would protect
 //! nothing — overwriting an existing standard is the strictly more destructive
 //! of the two operations — so the confinement would be theatre with a
@@ -184,11 +190,11 @@ use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 // with `workspace_search` so search can never offer a node this module's
 // `PathIndex` would then refuse to resolve.
 use crate::company::workspace_paths::{render_path, split_logical_path};
-use crate::company::workspace_scaffold::AGENTS_ROOT;
+use crate::company::workspace_scaffold::{AGENTS_ROOT, is_agent_hidden_path};
 // The one definition of a workspace match, shared with the REST route and the
 // GraphQL resolver so no two surfaces can answer the same query differently.
 use crate::company::workspace_search::{
-    DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, search_workspace,
+    DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, search_workspace_for_agent,
 };
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactStore};
@@ -377,7 +383,7 @@ impl CompanyWorkspace {
     /// The single company-scoped read every tool funnels through.
     async fn index(&self) -> crate::Result<PathIndex> {
         let nodes = self.store.tree(&self.company).await?;
-        Ok(PathIndex::build(nodes))
+        Ok(PathIndex::build_for_agent(nodes))
     }
 
     /// Whether `segments` spell exactly this agent's own home folder,
@@ -477,7 +483,21 @@ struct PathIndex {
 }
 
 impl PathIndex {
+    #[cfg(test)]
     fn build(nodes: Vec<WorkspaceNode>) -> Self {
+        Self::build_with_visibility(nodes, |_| true)
+    }
+
+    /// Build the index exposed through agent workspace tools.
+    ///
+    /// Hidden nodes remain in `child_count`, so lifecycle safety still sees a
+    /// folder as non-empty when its only child is operator-only, but they are
+    /// absent from both address maps and therefore unreachable by path or id.
+    fn build_for_agent(nodes: Vec<WorkspaceNode>) -> Self {
+        Self::build_with_visibility(nodes, |path| !is_agent_hidden_path(path))
+    }
+
+    fn build_with_visibility(nodes: Vec<WorkspaceNode>, visible: impl Fn(&str) -> bool) -> Self {
         let by_id_raw: HashMap<&str, &WorkspaceNode> =
             nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
@@ -492,7 +512,7 @@ impl PathIndex {
         }
         for node in &nodes {
             match render_path(node, &by_id_raw) {
-                Some(path) => {
+                Some(path) if visible(&path) => {
                     let entry = Entry {
                         path: path.clone(),
                         node: node.clone(),
@@ -500,6 +520,7 @@ impl PathIndex {
                     index.by_id.insert(node.id.clone(), entry.clone());
                     index.by_path.entry(path).or_default().push(entry);
                 }
+                Some(_) => {}
                 None => index.unaddressable += 1,
             }
         }
@@ -1141,7 +1162,7 @@ impl Tool for WorkspaceReadTool {
 ///
 /// This is the one tool that does not build a [`PathIndex`], and the containment
 /// argument is unchanged rather than merely similar:
-/// [`search_workspace`](crate::company::workspace_search::search_workspace) is
+/// [`search_workspace_for_agent`](crate::company::workspace_search::search_workspace_for_agent) is
 /// handed `self.workspace.company` — fixed at agent-build time, never read from
 /// an argument — and derives its entire reachable set from one
 /// `store.tree(company)` call, reading bodies only by ids that came out of that
@@ -1252,7 +1273,7 @@ impl Tool for WorkspaceSearchTool {
         };
         let limit = NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN);
 
-        let outcome = match search_workspace(
+        let outcome = match search_workspace_for_agent(
             self.workspace.store.as_ref(),
             &self.workspace.company,
             query,
@@ -1789,6 +1810,11 @@ impl Tool for WorkspaceCreateTool {
             Err(why) => return Ok(ToolResult::error(format!("Invalid `path`: {why}."))),
         };
         let normalized = segments.join("/");
+        if is_agent_hidden_path(&normalized) {
+            return Ok(ToolResult::error(
+                "Refused: this workspace path is not available to agents.".to_string(),
+            ));
+        }
         let (parent_segments, name) = segments.split_at(segments.len() - 1);
         let name = name[0];
 
@@ -2069,6 +2095,120 @@ mod tests {
         assert_eq!(index.by_id["b"].path, "Standards/Engineering standards.md");
         assert_eq!(index.by_id["c"].path, "README.md");
         assert_eq!(index.unaddressable, 0);
+    }
+
+    #[test]
+    fn the_agent_index_omits_the_secrets_subtree_by_path_and_id() {
+        let nodes = vec![
+            folder("secret-root", "secrets", None),
+            file("secret-note", "token.md", Some("secret-root")),
+            file("public-note", "secrets-old.md", None),
+        ];
+
+        let index = PathIndex::build_for_agent(nodes);
+
+        assert!(!index.by_id.contains_key("secret-root"));
+        assert!(!index.by_id.contains_key("secret-note"));
+        assert_eq!(index.by_id["public-note"].path, "secrets-old.md");
+        assert_eq!(index.unaddressable, 0, "hidden is not malformed");
+    }
+
+    #[tokio::test]
+    async fn secrets_are_operator_visible_but_absent_from_every_agent_workspace_tool() {
+        let (_dir, store) = seeded("acme").await;
+        let company = CompanyId::new("acme");
+        store
+            .create(&company, &folder("secret-root", "secrets", None), None)
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &file("secret-note", "keys.md", Some("secret-root")),
+                Some("launch-codeword-umbra"),
+            )
+            .await
+            .unwrap();
+        let workspace = ws(store.clone(), company.clone());
+
+        let listed = text(
+            &WorkspaceListTool::new(workspace.clone())
+                .execute(json!({}))
+                .await
+                .unwrap(),
+        );
+        assert!(!listed.contains("secrets"), "{listed}");
+        assert!(!listed.contains("secret-note"), "{listed}");
+
+        for args in [
+            json!({"path": "secrets/keys.md"}),
+            json!({"id": "secret-note"}),
+        ] {
+            let result = WorkspaceReadTool::new(workspace.clone())
+                .execute(args)
+                .await
+                .unwrap();
+            assert!(result.is_error, "{}", text(&result));
+            assert!(!text(&result).contains("launch-codeword-umbra"));
+        }
+
+        let searched = text(
+            &WorkspaceSearchTool::new(workspace.clone())
+                .execute(json!({"query": "launch-codeword-umbra"}))
+                .await
+                .unwrap(),
+        );
+        assert!(searched.contains("No workspace notes match"), "{searched}");
+        assert!(!searched.contains("secret-note"), "{searched}");
+
+        let write = WorkspaceWriteTool::new(workspace.clone())
+            .execute(json!({
+                "id": "secret-note",
+                "content": "overwritten",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(write.is_error, "{}", text(&write));
+
+        let rename = WorkspaceRenameTool::new(workspace.clone())
+            .execute(json!({"id": "secret-note", "new_name": "public.md"}))
+            .await
+            .unwrap();
+        assert!(rename.is_error, "{}", text(&rename));
+
+        let delete = WorkspaceDeleteTool::new(workspace.clone())
+            .execute(json!({
+                "id": "secret-note",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(delete.is_error, "{}", text(&delete));
+
+        let create = WorkspaceCreateTool::new(workspace)
+            .execute(json!({
+                "path": "Secrets/new.md",
+                "kind": "file",
+                "content": "agent value",
+            }))
+            .await
+            .unwrap();
+        assert!(create.is_error, "{}", text(&create));
+
+        // Operator-facing helpers deliberately retain the complete tree.
+        let operator = crate::company::workspace_search::search_workspace(
+            store.as_ref(),
+            &company,
+            "launch-codeword-umbra",
+            None,
+            NonZeroUsize::MIN,
+        )
+        .await
+        .unwrap();
+        assert_eq!(operator.hits[0].path, "secrets/keys.md");
+        let (_, body) = store.read(&company, "secret-note").await.unwrap().unwrap();
+        assert_eq!(body, "launch-codeword-umbra");
     }
 
     /// A child excluded from the path maps must still be counted against its
