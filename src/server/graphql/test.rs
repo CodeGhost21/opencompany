@@ -15,6 +15,20 @@ use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
+/// The workflow summaries a company itself has: the global baseline is listed
+/// in every company, and these tests are about the company's own graphs.
+pub(crate) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .as_array()
+        .expect("summaries")
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::workflows().iter().any(|w| w.id == id)
+        })
+        .collect()
+}
+
 pub(crate) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("opencompany-gql-")
