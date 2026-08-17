@@ -32,11 +32,21 @@
 //! session cache, so a note edited in the console between two turns changes
 //! what the agent quotes on the next turn with no agent rebuild.
 //!
-//! # Agents write unconfined by default — and per-path scope is opt-in (issue #551, revisited)
+//! # Agents write broadly by default — `secrets/` is out, per-path scope is opt-in
 //!
-//! There is still no prefix gate by default. An agent may create and overwrite
-//! anywhere in the company's tree, exactly as `workspace_write` always could,
-//! unless its manifest opts into a narrower scope — see below. Confining
+//! Two independent boundaries sit on this surface, and neither is the old
+//! "confine create to `Agents/<id>/`" idea (issue #551, revisited).
+//!
+//! The first is unconditional and is about confidentiality: `secrets/` is
+//! operator-only. That subtree is omitted from the agent path index and from
+//! agent search before names or bodies are returned, and create refuses the
+//! root case-insensitively. Console and operator APIs continue to use the
+//! complete store.
+//!
+//! The second is per-agent and opt-in — see "write scope" below. Outside those
+//! two, ordinary shared content still has no prefix gate: an agent may create
+//! and overwrite anywhere in the company's tree, exactly as `workspace_write`
+//! always could. Confining
 //! *create* to `Agents/<id>/` while leaving *overwrite* free would protect
 //! nothing — overwriting an existing standard is the strictly more destructive
 //! of the two operations — so a confinement that stopped at create alone would
@@ -49,8 +59,8 @@
 //! it and who last wrote it (issue #326), so a mess is legible and reversible
 //! rather than anonymous.
 //!
-//! A manifest may narrow this for one agent by declaring at least one
-//! `context` entry with `access = "write"` (see
+//! **Write scope.** A manifest may narrow this for one agent by declaring at
+//! least one `context` entry with `access = "write"` (see
 //! [`crate::company::Agent::write_scope`]). That agent's `workspace_write` and
 //! `workspace_create` are then confined to exactly the paths it declared, plus
 //! its own `Agents/<id>/` home, which stays writable regardless — a role given
@@ -59,7 +69,9 @@
 //! entry is unaffected, so every company written before this existed keeps the
 //! unconfined behaviour above. A role written to scope real risk — e.g. a
 //! narrow specialist that should touch only its own briefs — can now have that
-//! enforced rather than merely asked for in a description.
+//! enforced rather than merely asked for in a description. It narrows only what
+//! an agent can already see: a declared scope can never reach back into
+//! `secrets/`, which is absent from the agent index whatever the manifest says.
 //!
 //! Issue #671 added the other half of that bargain. An agent that can only
 //! produce leaves every superseded draft in place forever, under whatever name
@@ -197,11 +209,11 @@ use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 // with `workspace_search` so search can never offer a node this module's
 // `PathIndex` would then refuse to resolve.
 use crate::company::workspace_paths::{render_path, split_logical_path};
-use crate::company::workspace_scaffold::AGENTS_ROOT;
+use crate::company::workspace_scaffold::{AGENTS_ROOT, is_agent_hidden_path};
 // The one definition of a workspace match, shared with the REST route and the
 // GraphQL resolver so no two surfaces can answer the same query differently.
 use crate::company::workspace_search::{
-    DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, search_workspace,
+    DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, search_workspace_for_agent,
 };
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactStore};
@@ -434,7 +446,7 @@ impl CompanyWorkspace {
     /// The single company-scoped read every tool funnels through.
     async fn index(&self) -> crate::Result<PathIndex> {
         let nodes = self.store.tree(&self.company).await?;
-        Ok(PathIndex::build(nodes))
+        Ok(PathIndex::build_for_agent(nodes))
     }
 
     /// Whether `segments` spell exactly this agent's own home folder,
@@ -534,7 +546,21 @@ struct PathIndex {
 }
 
 impl PathIndex {
+    #[cfg(test)]
     fn build(nodes: Vec<WorkspaceNode>) -> Self {
+        Self::build_with_visibility(nodes, |_| true)
+    }
+
+    /// Build the index exposed through agent workspace tools.
+    ///
+    /// Hidden nodes remain in `child_count`, so lifecycle safety still sees a
+    /// folder as non-empty when its only child is operator-only, but they are
+    /// absent from both address maps and therefore unreachable by path or id.
+    fn build_for_agent(nodes: Vec<WorkspaceNode>) -> Self {
+        Self::build_with_visibility(nodes, |path| !is_agent_hidden_path(path))
+    }
+
+    fn build_with_visibility(nodes: Vec<WorkspaceNode>, visible: impl Fn(&str) -> bool) -> Self {
         let by_id_raw: HashMap<&str, &WorkspaceNode> =
             nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
@@ -549,7 +575,7 @@ impl PathIndex {
         }
         for node in &nodes {
             match render_path(node, &by_id_raw) {
-                Some(path) => {
+                Some(path) if visible(&path) => {
                     let entry = Entry {
                         path: path.clone(),
                         node: node.clone(),
@@ -557,6 +583,7 @@ impl PathIndex {
                     index.by_id.insert(node.id.clone(), entry.clone());
                     index.by_path.entry(path).or_default().push(entry);
                 }
+                Some(_) => {}
                 None => index.unaddressable += 1,
             }
         }
@@ -1198,7 +1225,7 @@ impl Tool for WorkspaceReadTool {
 ///
 /// This is the one tool that does not build a [`PathIndex`], and the containment
 /// argument is unchanged rather than merely similar:
-/// [`search_workspace`](crate::company::workspace_search::search_workspace) is
+/// [`search_workspace_for_agent`](crate::company::workspace_search::search_workspace_for_agent) is
 /// handed `self.workspace.company` — fixed at agent-build time, never read from
 /// an argument — and derives its entire reachable set from one
 /// `store.tree(company)` call, reading bodies only by ids that came out of that
@@ -1309,7 +1336,7 @@ impl Tool for WorkspaceSearchTool {
         };
         let limit = NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN);
 
-        let outcome = match search_workspace(
+        let outcome = match search_workspace_for_agent(
             self.workspace.store.as_ref(),
             &self.workspace.company,
             query,
@@ -1855,6 +1882,15 @@ impl Tool for WorkspaceCreateTool {
             Err(why) => return Ok(ToolResult::error(format!("Invalid `path`: {why}."))),
         };
         let normalized = segments.join("/");
+        // The operator-only boundary is checked first and unconditionally: a
+        // path inside `secrets/` gets the same neutral refusal whether or not
+        // this agent also has a declared write scope, so the narrower message
+        // below can never confirm that such a path exists.
+        if is_agent_hidden_path(&normalized) {
+            return Ok(ToolResult::error(
+                "Refused: this workspace path is not available to agents.".to_string(),
+            ));
+        }
 
         if !self.workspace.write_allowed(&normalized) {
             return Ok(ToolResult::error(format!(
@@ -2147,6 +2183,120 @@ mod tests {
         assert_eq!(index.by_id["b"].path, "Standards/Engineering standards.md");
         assert_eq!(index.by_id["c"].path, "README.md");
         assert_eq!(index.unaddressable, 0);
+    }
+
+    #[test]
+    fn the_agent_index_omits_the_secrets_subtree_by_path_and_id() {
+        let nodes = vec![
+            folder("secret-root", "secrets", None),
+            file("secret-note", "token.md", Some("secret-root")),
+            file("public-note", "secrets-old.md", None),
+        ];
+
+        let index = PathIndex::build_for_agent(nodes);
+
+        assert!(!index.by_id.contains_key("secret-root"));
+        assert!(!index.by_id.contains_key("secret-note"));
+        assert_eq!(index.by_id["public-note"].path, "secrets-old.md");
+        assert_eq!(index.unaddressable, 0, "hidden is not malformed");
+    }
+
+    #[tokio::test]
+    async fn secrets_are_operator_visible_but_absent_from_every_agent_workspace_tool() {
+        let (_dir, store) = seeded("acme").await;
+        let company = CompanyId::new("acme");
+        store
+            .create(&company, &folder("secret-root", "secrets", None), None)
+            .await
+            .unwrap();
+        store
+            .create(
+                &company,
+                &file("secret-note", "keys.md", Some("secret-root")),
+                Some("launch-codeword-umbra"),
+            )
+            .await
+            .unwrap();
+        let workspace = ws(store.clone(), company.clone());
+
+        let listed = text(
+            &WorkspaceListTool::new(workspace.clone())
+                .execute(json!({}))
+                .await
+                .unwrap(),
+        );
+        assert!(!listed.contains("secrets"), "{listed}");
+        assert!(!listed.contains("secret-note"), "{listed}");
+
+        for args in [
+            json!({"path": "secrets/keys.md"}),
+            json!({"id": "secret-note"}),
+        ] {
+            let result = WorkspaceReadTool::new(workspace.clone())
+                .execute(args)
+                .await
+                .unwrap();
+            assert!(result.is_error, "{}", text(&result));
+            assert!(!text(&result).contains("launch-codeword-umbra"));
+        }
+
+        let searched = text(
+            &WorkspaceSearchTool::new(workspace.clone())
+                .execute(json!({"query": "launch-codeword-umbra"}))
+                .await
+                .unwrap(),
+        );
+        assert!(searched.contains("No workspace notes match"), "{searched}");
+        assert!(!searched.contains("secret-note"), "{searched}");
+
+        let write = WorkspaceWriteTool::new(workspace.clone())
+            .execute(json!({
+                "id": "secret-note",
+                "content": "overwritten",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(write.is_error, "{}", text(&write));
+
+        let rename = WorkspaceRenameTool::new(workspace.clone())
+            .execute(json!({"id": "secret-note", "new_name": "public.md"}))
+            .await
+            .unwrap();
+        assert!(rename.is_error, "{}", text(&rename));
+
+        let delete = WorkspaceDeleteTool::new(workspace.clone())
+            .execute(json!({
+                "id": "secret-note",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(delete.is_error, "{}", text(&delete));
+
+        let create = WorkspaceCreateTool::new(workspace)
+            .execute(json!({
+                "path": "Secrets/new.md",
+                "kind": "file",
+                "content": "agent value",
+            }))
+            .await
+            .unwrap();
+        assert!(create.is_error, "{}", text(&create));
+
+        // Operator-facing helpers deliberately retain the complete tree.
+        let operator = crate::company::workspace_search::search_workspace(
+            store.as_ref(),
+            &company,
+            "launch-codeword-umbra",
+            None,
+            NonZeroUsize::MIN,
+        )
+        .await
+        .unwrap();
+        assert_eq!(operator.hits[0].path, "secrets/keys.md");
+        let (_, body) = store.read(&company, "secret-note").await.unwrap().unwrap();
+        assert_eq!(body, "launch-codeword-umbra");
     }
 
     /// A child excluded from the path maps must still be counted against its
@@ -4953,6 +5103,77 @@ mod tests {
 
         let tree = store.tree(&id).await.unwrap();
         assert!(!tree.iter().any(|n| n.name == "New standard.md"));
+    }
+
+    /// The two boundaries compose, and the operator-only one wins.
+    ///
+    /// A declared write scope narrows what an agent may touch; it can never
+    /// widen it into `secrets/`. Naming that subtree explicitly in a scope is
+    /// still refused, and with the *neutral* refusal rather than the
+    /// scope-shaped one — a scoped agent must not be able to tell an
+    /// operator-only path from an out-of-scope one, which is the whole point of
+    /// checking the hidden root first.
+    #[tokio::test]
+    async fn a_declared_write_scope_cannot_reach_into_the_operator_only_subtree() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let workspace = ws(store.clone(), id.clone())
+            .with_write_scope(Some(vec!["secrets/keys.md".to_string()]));
+        let tool = WorkspaceCreateTool::new(workspace);
+
+        let result = tool
+            .execute(json!({
+                "path": "secrets/keys.md",
+                "kind": "file",
+                "content": "agent value"
+            }))
+            .await
+            .unwrap();
+        let out = text(&result);
+        assert!(result.is_error, "{out}");
+        assert!(out.contains("not available to agents"), "{out}");
+        assert!(
+            !out.contains("write scope"),
+            "the refusal must not differ from an ordinary agent's: {out}"
+        );
+
+        let tree = store.tree(&id).await.unwrap();
+        assert!(!tree.iter().any(|n| n.name == "keys.md"));
+    }
+
+    /// The unconfined default still gets the operator-only refusal, and a
+    /// write-scoped agent still keeps its own home inside the visible tree —
+    /// neither boundary swallows the other.
+    #[tokio::test]
+    async fn the_operator_only_refusal_precedes_the_write_scope_check() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+
+        // Unconfined: `secrets/` is refused on the hidden-root rule alone.
+        let unconfined = WorkspaceCreateTool::new(ws(store.clone(), id.clone()))
+            .execute(json!({"path": "Secrets/new.md", "kind": "file", "content": "x"}))
+            .await
+            .unwrap();
+        assert!(unconfined.is_error, "{}", text(&unconfined));
+        assert!(
+            text(&unconfined).contains("not available to agents"),
+            "{}",
+            text(&unconfined)
+        );
+
+        // Scoped: the always-writable home is unaffected by the hidden root.
+        let scoped = WorkspaceCreateTool::new(
+            ws(store.clone(), id.clone())
+                .with_write_scope(Some(vec!["Somewhere/Else.md".to_string()])),
+        )
+        .execute(json!({
+            "path": format!("{AGENTS_ROOT}/{TEST_AGENT}/Brief.md"),
+            "kind": "file",
+            "content": "# Brief"
+        }))
+        .await
+        .unwrap();
+        assert!(!scoped.is_error, "{}", text(&scoped));
     }
 
     /// The listing marks a payload, so an agent never spends a `workspace_read`

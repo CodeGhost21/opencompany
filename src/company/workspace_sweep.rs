@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(swept_names(&removed), vec!["ceo", "cto"]);
         assert_eq!(
             names(&ws, &company).await,
-            vec!["Agents", "cmo", "task-1"],
+            vec!["Agents", "README.md", "cmo", "secrets", "task-1"],
             "a folder holding anything at all must survive"
         );
     }
@@ -399,7 +399,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(swept_names(&removed), vec!["ceo"]);
-        assert_eq!(names(&ws, &company).await, vec!["Agents", "README.md"]);
+        assert_eq!(
+            names(&ws, &company).await,
+            vec!["Agents", "README.md", "README.md", "secrets"]
+        );
     }
 
     /// Acceptance criterion: running it twice is a no-op the second time. The
@@ -519,9 +522,11 @@ mod tests {
                 "Agents",
                 "Archive",
                 "Desks",
+                "README.md",
                 "ceo",
                 "creative_studio",
-                "drafts"
+                "drafts",
+                "secrets"
             ],
         );
     }
@@ -614,8 +619,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(names(&ws, &acme).await, vec!["Agents"]);
-        assert_eq!(names(&ws, &other).await, vec!["Agents", "ceo"]);
+        assert_eq!(
+            names(&ws, &acme).await,
+            vec!["Agents", "README.md", "secrets"]
+        );
+        assert_eq!(
+            names(&ws, &other).await,
+            vec!["Agents", "README.md", "ceo", "secrets"]
+        );
     }
 
     // -- the predicate, on shapes no backend here would create ---------------
