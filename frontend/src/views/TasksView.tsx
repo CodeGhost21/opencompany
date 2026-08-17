@@ -45,7 +45,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { startVisiblePolling } from "@/lib/visible-poll";
-import { ADD_TASK_COLUMN, PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
+import { ADD_TASK_COLUMN, PRIORITY_STYLES } from "@/lib/tasks-sample";
+import { labelFor, type TaskColumn } from "@/lib/board-columns";
+import { useBoardColumns } from "@/hooks/use-board-columns";
 import {
   extraOutputCount,
   primaryLink,
@@ -125,9 +127,16 @@ function priorityStyle(priority: string): string {
   return PRIORITY_STYLES[priority as keyof typeof PRIORITY_STYLES] ?? PRIORITY_STYLES.low;
 }
 
-/** A column's board label, for messages the operator reads. */
-function columnLabel(id: string): string {
-  return TASK_COLUMNS.find((c) => c.id === id)?.label ?? id;
+/**
+ * A column's board label, for messages the operator reads.
+ *
+ * Takes the columns rather than reading a module-level list: they come from the
+ * `tasks` ledger now, so there is no list to read at module scope. `labelFor`
+ * humanises whatever the host has not named, which is what keeps a toast
+ * readable before the column read lands.
+ */
+function columnLabel(columns: TaskColumn[], id: string): string {
+  return labelFor(columns, id);
 }
 
 /**
@@ -481,7 +490,7 @@ export function TasksView({
         }}
         className="flex min-h-0 flex-1 gap-4 overflow-x-auto py-4 pl-4"
       >
-        {TASK_COLUMNS.map((col) => {
+        {columns.map((col) => {
           const items = tasks.filter((t) => t.column === col.id);
           return (
             <div
@@ -886,8 +895,7 @@ function CreateTaskDialog({
     }
   }
 
-  const columnLabel =
-    TASK_COLUMNS.find((c) => c.id === ADD_TASK_COLUMN)?.label ?? ADD_TASK_COLUMN;
+  const columnLabel = labelFor(columns, ADD_TASK_COLUMN);
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
