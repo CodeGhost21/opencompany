@@ -386,7 +386,10 @@ export function LedgersView({ client, company, sub, onOpenLedger }: Props) {
                     onChange={(e) => setQuery(e.target.value)}
                   />
                 </div>
-                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                <Select
+                  value={statusFilter}
+                  onValueChange={(value) => setStatusFilter(value ?? "all")}
+                >
                   <SelectTrigger className="w-[12rem]">
                     <SelectValue />
                   </SelectTrigger>
@@ -696,7 +699,7 @@ function ComposeDialog({
               <Select
                 value={composing.status}
                 onValueChange={(value) =>
-                  onChange({ ...composing, status: value })
+                  onChange({ ...composing, status: value ?? "" })
                 }
               >
                 <SelectTrigger>
