@@ -405,7 +405,7 @@ impl CompanyWorkspace {
             return true;
         };
         if let Ok(segments) = super::workspace_paths::split_logical_path(path)
-            && self.is_own_home(&segments) || self.is_strictly_inside_own_home(&segments)
+            && (self.is_own_home(&segments) || self.is_strictly_inside_own_home(&segments))
         {
             return true;
         }
