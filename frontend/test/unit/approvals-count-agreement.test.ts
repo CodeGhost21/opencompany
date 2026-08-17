@@ -138,19 +138,27 @@ describe("useCompany — one number for one queue (#932)", () => {
     expect(feed().status.pending_approvals).toBe(14);
   });
 
-  it("shows no badge over a queue it has not read yet", async () => {
-    // A company switch resets the queue to empty while the picker's status —
-    // taken from a list read for a different surface — still carries a count.
-    // Rendering it would be the same disagreement one switch earlier.
-    const client = skewedClient(0, 0);
+  it("leaves the pre-fetch count alone, so the first read is not a rising edge", async () => {
+    // The reconciliation is between a status and a queue that *arrived
+    // together*. Before the first poll there is no queue to reconcile against
+    // — an empty array here means "not read yet", not "nothing is pending".
+    //
+    // Reading it as a count of zero costs more than the flash it fixes:
+    // `useEvents` fires the "needs a sign-off" push on a rise in this number,
+    // with its detector seeded so the first read never toasts. Zeroing the
+    // badge and letting the poll raise it turns every load and every company
+    // switch into an unprompted push. Two E2E specs caught exactly that.
+    const client = skewedClient(7, 7);
     const feed = probe<CompanyFeed>(() =>
       useCompany(client, "acme", { ...STATUS, pending_approvals: 7 }),
     );
 
-    expect(feed().status.pending_approvals).toBe(feed().approvals.length);
+    expect(feed().status.pending_approvals).toBe(7);
 
+    // And once the queue does arrive, the two agree as before.
     await act(async () => {
       await Promise.resolve();
     });
+    expect(feed().status.pending_approvals).toBe(feed().approvals.length);
   });
 });

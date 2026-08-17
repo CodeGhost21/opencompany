@@ -36,6 +36,10 @@ export interface CompanyFeed {
  * This does **not** make `CompanyStatus.pending_approvals` redundant. The
  * company picker renders one count per company without fetching any of their
  * queues, and there the number is the only thing there is.
+ *
+ * Applied only where a status and a queue arrived **together**. Reconciling a
+ * status against a queue this console has not read yet is a different claim
+ * — see the reset effect in [`useCompany`] for what that costs.
  */
 export function withApprovalCount(
   status: CompanyStatus,
@@ -63,12 +67,17 @@ export function useCompany(
   const [now, setNow] = useState(() => Date.now());
   const mounted = useRef(true);
 
-  // Reset to the freshly-picked company's status when switching. The count is
-  // reconciled here too (#932): the queue starts empty because this console has
-  // not read the new company's yet, and a badge carrying the picker's number
-  // over an empty page is the same disagreement one company switch earlier.
+  // Reset to the freshly-picked company's status when switching.
+  //
+  // Deliberately NOT reconciled against the empty queue below (#932). There is
+  // no approvals response to reconcile *against* here — the queue is empty
+  // because this console has not read the new company's yet, which is an
+  // absence, not a count of zero. Forcing the badge to 0 and letting the first
+  // poll raise it makes every load and every company switch a rising edge, and
+  // the rising edge is what fires the "needs a sign-off" push in `useEvents` —
+  // whose detector is seeded precisely so that the first read never toasts.
   useEffect(() => {
-    setStatus(withApprovalCount(initialStatus, []));
+    setStatus(initialStatus);
     setApprovals([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [company]);
