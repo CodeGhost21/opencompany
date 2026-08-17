@@ -231,6 +231,7 @@ mod tests {
 
     fn agent(tier: Option<&str>) -> Agent {
         Agent {
+            global: false,
             id: "a".into(),
             role: "Role".into(),
             description: None,

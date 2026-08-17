@@ -4577,6 +4577,7 @@ mod tests {
 
     fn agent(id: &str, tier: Option<&str>) -> ManifestAgent {
         ManifestAgent {
+            global: false,
             id: id.to_string(),
             role: "Role".to_string(),
             description: None,

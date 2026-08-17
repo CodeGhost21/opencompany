@@ -2597,6 +2597,7 @@ mod tests {
         use crate::company::{WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef};
 
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,
@@ -2787,6 +2788,7 @@ mod tests {
         use crate::company::{WorkflowNodeDef, WorkflowNodeKind};
 
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,

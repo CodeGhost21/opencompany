@@ -2810,6 +2810,7 @@ pub(crate) fn build_roster(
 /// ([`build::persona_prompt`]).
 fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
     ManifestAgent {
+        global: false,
         id: overlay.id.clone(),
         role: overlay.role.clone(),
         description: overlay.description.clone(),
@@ -6152,6 +6153,7 @@ budget_usd_daily = 0.0
             }];
         }
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -6268,6 +6270,7 @@ budget_usd_daily = 0.0
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,

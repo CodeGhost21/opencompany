@@ -162,6 +162,7 @@ mod tests {
 
     fn agent(role: &str) -> Agent {
         Agent {
+            global: false,
             id: "a".into(),
             role: role.into(),
             description: None,

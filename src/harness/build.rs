@@ -1429,6 +1429,7 @@ mod tests {
 
     fn manifest_agent(role: &str, description: Option<&str>) -> ManifestAgent {
         ManifestAgent {
+            global: false,
             id: "ceo".to_string(),
             role: role.to_string(),
             description: description.map(str::to_string),
@@ -1622,6 +1623,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = pin_deps(dir.path().to_path_buf());
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1667,6 +1669,7 @@ mod tests {
             crate::company::DEFAULT_SEARCH_DAILY_CALLS,
         ));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1708,6 +1711,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.workspace = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1747,6 +1751,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.artifacts = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1945,6 +1950,7 @@ mod tests {
             })
             .collect();
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -2580,6 +2586,7 @@ mod tests {
         let deps = enabled_git_deps(dir.path().to_path_buf());
         let company = CompanyId::new("acme");
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
