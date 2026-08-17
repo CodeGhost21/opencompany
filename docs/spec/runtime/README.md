@@ -44,6 +44,9 @@ Supporting docs:
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge
 - [manifest.md](manifest.md) — `company.toml` schema
+- [globals.md](globals.md) — the global baseline: the agents, workflows, skills
+  and starting tool belt every company gets whichever vertical it started from,
+  how a company supersedes or disables one, and why provenance is persisted
 - [agents.md](agents.md) — how a teammate is declared: the inline `[[agent]]`
   form and the one-file-per-teammate `agents/<id>.toml` bundle form, custom
   prompts, checked-in briefing documents versus routed workspace documents, and
