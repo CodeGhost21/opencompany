@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::company::{Agent, ContextEntry};
+use crate::company::Agent;
 use crate::error::{OpenCompanyError, Result};
 
 /// The bundle subdirectory holding one TOML file per roster teammate.
