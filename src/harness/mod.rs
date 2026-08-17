@@ -2575,6 +2575,11 @@ fn globals_skill_disables(disable: &[String]) -> Vec<SkillState> {
         .map(|slug| SkillState {
             slug: slug.to_string(),
             enabled: false,
+            // The shared library is where these skills are authored, so that is
+            // what they are a delta over. The value is inert here in any case:
+            // this delta is synthesized per rebuild, never stored, and only its
+            // `enabled = false` is read.
+            source: crate::ports::SkillSource::Registry,
             custom_doc: None,
         })
         .collect()

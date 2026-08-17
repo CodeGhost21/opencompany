@@ -785,7 +785,14 @@ pub fn build_agent(
     // harness is wired to a skills source; otherwise the agent stays skill-less
     // and the default path is untouched. The catalogue is folded into the
     // persona body because `omit_skills_catalog` is inert upstream.
-    if deps.skills_source_dir.is_some() || !skill_deltas.is_empty() {
+    // The global baseline installs skills in every company, including one with
+    // no source dir and no deltas — a platform-provisioned tenant is exactly
+    // that — so its presence arms this branch too. Without that clause the
+    // baseline would reach every company except the hosted ones.
+    if deps.skills_source_dir.is_some()
+        || !skill_deltas.is_empty()
+        || !crate::globals::skills().is_empty()
+    {
         let skill_ws = deps
             .workspace_root
             .join(company.as_ref())
