@@ -510,6 +510,41 @@ mod test {
         assert!(!dir.path().join("host-executed").exists());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkpoint_commits_never_run_repository_hooks() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path().join("workspace");
+        let checkpointer = WorkspaceCheckpointer::initialize(&workspace).unwrap();
+
+        // Even a hook dropped straight into the out-of-band repository's own
+        // hooks directory must never execute: `isolate_git` pins `core.hooksPath`
+        // so a checkpoint commit cannot run agent-supplied code in the host
+        // process, however the repository was poisoned.
+        let hooks = checkpointer.git_dir.join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("post-commit"), "#!/bin/sh\ntouch hook-ran\n").unwrap();
+
+        let mut tools = CheckpointingTool::wrap_all(
+            vec![Box::new(WriteTool(workspace.join("answer.txt")))],
+            checkpointer,
+        );
+        tools
+            .remove(0)
+            .execute(json!({"body": "42"}))
+            .await
+            .unwrap();
+
+        assert!(
+            !dir.path().join("hook-ran").exists(),
+            "a checkpoint commit must not run repository hooks"
+        );
+        assert!(
+            log(&workspace).contains("checkpoint: after write_fixture"),
+            "the checkpoint still committed"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn initialize_blocks_behind_an_in_flight_checkpoint_lock() {
         let dir = TempDir::new().unwrap();
