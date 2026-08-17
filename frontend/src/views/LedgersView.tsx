@@ -45,6 +45,7 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { patchTask } from "@/api/tasks";
+import { columnsOf } from "@/lib/board-columns";
 import {
   byline,
   composableFields,
@@ -682,6 +683,133 @@ export function LedgersView({
       )}
     </div>
   );
+}
+
+/**
+ * A ledger as columns: one per declared status, in declaration order.
+ *
+ * Declaration order is deliberate and is the host's. A console that sorted
+ * these itself — alphabetically, or by count — would put Done beside To-do the
+ * first time somebody added a column, and the left-to-right reading that makes
+ * a board a board would be gone.
+ *
+ * Every ledger with a status can render this way, not just the board. That
+ * falls out rather than being designed: a status list *is* a lifecycle, and the
+ * only thing that differs between the board and a hiring pipeline is which call
+ * the drop makes — which the parent decides, not this component.
+ */
+function BoardMode({
+  ledger,
+  entries,
+  onMove,
+  onOpen,
+}: {
+  ledger: LedgerSummary;
+  entries: LedgerEntry[];
+  onMove: (entry: LedgerEntry, status: string) => void;
+  onOpen: (entry: LedgerEntry) => void;
+}) {
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const columns = columnsOf(ledger);
+
+  if (columns.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This ledger declares no statuses, so it has no columns. Switch to the
+        list.
+      </p>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto pb-4">
+      {columns.map((column) => {
+        const held = entries.filter((entry) => entry.status === column.id);
+        return (
+          <div
+            key={column.id}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+              setOver(column.id);
+            }}
+            onDragLeave={() =>
+              setOver((current) => (current === column.id ? null : current))
+            }
+            onDrop={(event) => {
+              event.preventDefault();
+              setOver(null);
+              const id = event.dataTransfer?.getData("text/plain") || dragId;
+              setDragId(null);
+              const entry = entries.find((held) => held.id === id);
+              if (entry) onMove(entry, column.id);
+            }}
+            className={cn(
+              "flex w-72 shrink-0 flex-col gap-2 rounded-lg border p-2",
+              over === column.id ? "border-primary bg-accent/50" : "bg-muted/30",
+            )}
+          >
+            <header className="flex items-center justify-between px-1">
+              <span className="text-sm font-medium">{column.label}</span>
+              <Badge variant="secondary">{held.length}</Badge>
+            </header>
+            {held.map((entry) => (
+              <button
+                key={entry.id}
+                type="button"
+                draggable
+                onDragStart={(event) => {
+                  setDragId(entry.id);
+                  event.dataTransfer?.setData("text/plain", entry.id);
+                }}
+                onDragEnd={() => {
+                  setDragId(null);
+                  setOver(null);
+                }}
+                onClick={() => onOpen(entry)}
+                className={cn(
+                  "rounded-md border bg-card p-2 text-left text-sm shadow-sm transition-opacity",
+                  dragId === entry.id && "opacity-50",
+                )}
+              >
+                <span className="line-clamp-2 font-medium">
+                  {entry.title || entry.id}
+                </span>
+                {/* One field beneath the title, not all of them: a board is
+                    scanned, and a card carrying every prose field is a list
+                    with extra steps. The list mode is where a row is read. */}
+                {subtitleOf(entry, ledger) && (
+                  <span className="mt-1 block truncate text-xs text-muted-foreground">
+                    {subtitleOf(entry, ledger)}
+                  </span>
+                )}
+              </button>
+            ))}
+            {held.length === 0 && (
+              <p className="px-1 py-4 text-center text-xs text-muted-foreground">
+                Nothing here
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * The one line a board card carries under its title: its owner if the ledger
+ * declares one, else its id.
+ *
+ * Its **id**, and not the first prose field, when there is no owner. A board
+ * card has to be identifiable at a glance so somebody can say which one they
+ * mean, and a truncated sentence of detail identifies nothing.
+ */
+function subtitleOf(entry: LedgerEntry, ledger: LedgerSummary): string {
+  const owner = ledger.fields.find((field) => field.role === "owner");
+  const value = owner ? entry.fields[owner.name]?.trim() : "";
+  return value || entry.id;
 }
 
 function EntryCard({

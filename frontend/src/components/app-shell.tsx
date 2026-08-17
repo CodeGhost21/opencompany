@@ -1273,6 +1273,10 @@ export function AppShell({
               // guessing.
               sub={sub}
               onOpenLedger={(slug) => navigate("ledgers", slug ?? undefined)}
+              // A board card leaves for its own screen. The board renders
+              // here; the card's timeline, plan, discussion and attempts stay
+              // where they already work.
+              onOpenCard={(id) => navigate("tasks", id)}
             />
           )}
           {view === "team" && (
