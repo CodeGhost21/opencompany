@@ -497,7 +497,7 @@ classes = ["judge", "evidence"]
         );
         assert_eq!(
             agent.context.as_deref(),
-            Some(&["GOAL.md".to_string(), "CLAIMS.md".to_string()][..])
+            Some(&[ContextEntry::from("GOAL.md"), ContextEntry::from("CLAIMS.md")][..])
         );
         assert_eq!(agent.classes, ["judge", "evidence"]);
     }
