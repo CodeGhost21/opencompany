@@ -51,6 +51,10 @@ pub mod cycle;
 /// [`DelegationRunner`]: delegation::DelegationRunner
 /// [`TurnOutcome`]: crate::harness::TurnOutcome
 #[cfg(feature = "openhuman")]
+/// The write guard on the `derived/` folder: a [`WorkspaceStore`] decorator
+/// that refuses a hand-written edit to a file a ledger renders, and names the
+/// tool that actually writes the row.
+pub mod derived_guard;
 pub mod delegation;
 /// Brain-agnostic delegation-tool primitives (issue #176): the tool names,
 /// argument schemas, hosted [`ToolManifestEntry`](crate::brain::medulla::wire::ToolManifestEntry)
