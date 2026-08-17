@@ -267,8 +267,8 @@ no bearing on cache-prefix stability.
 - **An omitted `context` and an explicit `context = []` do not collapse.** Two
   fixtures, because one value cannot prove both: an agent with no `context` key
   receives its per-tier default in full, and an agent with `context = []`
-  receives nothing beyond the universal method policy. This is the entire reason
-  the field is `Option<Vec<String>>` rather than a defaulted `Vec<String>`, so
+  receives nothing beyond the two universal documents. This is the entire reason
+  the field is `Option<Vec<ContextEntry>>` rather than a defaulted `Vec`, so
   a suite that asserts only the empty case would pass against an implementation
   that had silently lost the distinction.
 - **An agent with no `tier` receives the `reasoning` row**, not an empty
