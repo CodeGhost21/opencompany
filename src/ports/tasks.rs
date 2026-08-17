@@ -115,8 +115,7 @@ pub const COLUMN_DONE: &str = "done";
 /// keeps this green."* Now the table is the declaration, this is a `const fn`
 /// projection of it, and the console reads its labels off the `tasks` ledger.
 /// One edit adds a column everywhere.
-pub const BOARD_COLUMNS: [&str; crate::ledger::board::COLUMNS.len()] =
-    crate::ledger::board::ids();
+pub const BOARD_COLUMNS: [&str; crate::ledger::board::COLUMNS.len()] = crate::ledger::board::ids();
 
 /// The column id issue #206 used for the unqueued pool, removed by #301.
 ///

@@ -151,7 +151,11 @@ fn the_boards_archive_is_the_one_capped_section() {
         })
         .expect("the archive section exists");
     assert_eq!(done.cap, 5);
-    for section in tasks.sections.iter().filter(|held| held.heading != done.heading) {
+    for section in tasks
+        .sections
+        .iter()
+        .filter(|held| held.heading != done.heading)
+    {
         assert_eq!(section.cap, crate::ledger::budget::MAX_LISTED);
     }
 }

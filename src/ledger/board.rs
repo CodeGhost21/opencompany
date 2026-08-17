@@ -240,7 +240,12 @@ mod test {
         let headings: Vec<&str> = sections().iter().map(|column| column.section).collect();
         assert_eq!(
             headings,
-            ["Not started", "In flight", "Waiting on a person", "Recently done"]
+            [
+                "Not started",
+                "In flight",
+                "Waiting on a person",
+                "Recently done"
+            ]
         );
     }
 
