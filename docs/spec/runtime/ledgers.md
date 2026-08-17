@@ -123,7 +123,7 @@ because the reader concludes there is nothing more and re-proposes what was cut.
 So every truncation says how many it dropped and names the call that fetches
 them.
 
-## The task board is registered, not re-implemented
+## The task board is the `tasks` ledger
 
 `tasks` is `LedgerSource::Native`: its rows stay in `TaskStore` and its columns
 keep firing dispatch, planning passes and run settles. None of that is
@@ -131,14 +131,52 @@ expressible as a declaration and none of it should be — a declared status cann
 open an attempt, and a company that could redefine `in_progress` into something
 that does not dispatch has broken its own runtime from a JSON file.
 
-It is registered anyway so `list_ledgers` names **every** ledger and
-`read_ledger` reads every ledger. A discovery surface that covers the ledgers a
-company invented but not the one it already had is a surface an agent stops
-trusting, and then stops using.
+It is registered so `list_ledgers` names **every** ledger and `read_ledger`
+reads every ledger. A discovery surface that covers the ledgers a company
+invented but not the one it already had is a surface an agent stops trusting,
+and then stops using.
 
-Its statuses are `BOARD_COLUMNS` verbatim, and `done` is the only closed one: a
-card in review or paused is *stopped*, not finished, and calling either closed
-would make "what is still outstanding" answer wrong.
+### One column table, four consumers
+
+The board's columns lived in three places that could not check each other: a
+`[&str; 6]` on the port, a `match` from id to label beside it, and a
+hand-maintained `TASK_COLUMNS` in the console — whose own comment admitted the
+cost: *"a Rust test cannot see the TS list, so a column added on one side and
+not the other keeps this green."* A column present on one side alone either
+never rendered (its cards silently vanished) or was refused by the write
+boundary.
+
+`ledger::board::COLUMNS` is now the one declaration. Each row carries the id,
+the label a person reads, whether it closes a card, and the section it renders
+under. Everything else derives:
+
+| consumer | what it takes |
+| --- | --- |
+| `ports::tasks::BOARD_COLUMNS` | the ids, via a `const fn` — still a genuine `const` |
+| `ports::tasks::column_label` | the labels |
+| the `tasks` ledger declaration | one status per column, one section per heading |
+| the console | the ledger's `statuses`, labels included, over the wire |
+
+Adding a column is one edit. The labels are pinned in Rust by
+`the_labels_are_the_ones_every_surface_renders` — an assertion that was
+impossible to write while the console kept a copy.
+
+**The ids stay leaf constants.** `COLUMN_IN_PROGRESS` and its siblings remain
+plain `&str` consts on the port, and the table refers to them: entering
+`in_progress` *dispatches the card* and the edge keys off that exact literal, so
+a column's identity has to be something a `match` arm can name. Only its
+presentation and its grouping moved.
+
+**And the table is not itself declarable.** A company may declare any ledger it
+likes, but not this one: a column here is a lifecycle state that spends money.
+`planning` fires a model call, `in_progress` opens an attempt, and `done` is
+reachable only through a human verdict. A seventh column from a JSON file would
+be a state the runtime has no edge for, and a card that entered it would sit
+there forever with nothing to say why.
+
+`done` is the only closed column: a card in review or paused is *stopped*, not
+finished, and calling either closed would make "what is still outstanding"
+answer wrong.
 
 ## What a declaration cannot do
 
@@ -226,3 +264,21 @@ place of a compose box, rather than offering a form whose save the host refuses.
 
 The compose form reads `needsReason` off the declaration and asks for the reason
 *before* the save — the same rule the host enforces, met earlier.
+
+### The board renders here, and the standalone screen is unmounted
+
+Any ledger with statuses renders as columns — one per status, in declaration
+order, labelled by the host. That falls out rather than being designed: a status
+list *is* a lifecycle, and the only thing that differs between the board and a
+hiring pipeline is which call a drop makes. A native ledger's drop goes through
+`patchTask`, because entering a column fires work; every other ledger's is an
+ordinary `record_entry` merge. A drop into a status that demands a reason opens
+the compose form instead of writing, since the host refuses a silent close.
+
+The Tasks nav entry is gone and `#/tasks` is **unmounted, not retired** — the
+convention issue #302 set for Brain, Inbox and Finances. It stays routable
+because a *card* carries far more than a ledger row: a timeline, a plan brief, a
+discussion, attempts, a workflow proposal, steer controls. Reproducing any of
+that in the Ledgers screen would be a worse second copy, so a board card links
+to `#/tasks/<id>` and that screen keeps doing what it already does well.
+Re-listing `tasks` in the console's `NAV` brings the standalone board back.
