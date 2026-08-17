@@ -120,6 +120,12 @@ fn first_run_manifest(preset_id: &str) -> Result<CompanyManifest> {
             "bundled desktop preset `{preset_id}` is invalid: {error}"
         ))
     })?;
+    // The roster lives in `agents/*.toml`, which the embedded `company.toml`
+    // does not carry — see `embedded_roster`.
+    let roster = embedded_roster(preset_id)?;
+    if !roster.is_empty() {
+        manifest.agents = roster;
+    }
     if !manifest
         .users
         .admins
@@ -132,6 +138,50 @@ fn first_run_manifest(preset_id: &str) -> Result<CompanyManifest> {
             .push(DESKTOP_OPERATOR_EMAIL.to_string());
     }
     Ok(manifest)
+}
+
+/// The roster `build.rs` embedded for `preset_id`.
+///
+/// A bundle authors its roster either inline in `company.toml` as `[[agent]]`
+/// entries or as one file per teammate under `agents/`, and the two are
+/// exclusive — `CompanyManifest::from_file_with_agents` refuses a bundle that
+/// has both rather than picking a precedence. The on-disk path moved with the
+/// bundles when every shipped company adopted the per-file form; the embedded
+/// path could not follow, because a preset carries a single `include_str!`'d
+/// `company.toml` and `include_str!` cannot glob a directory. So the desktop
+/// parsed a manifest whose `[[agent]]` section no longer existed and seeded a
+/// company with nobody in it.
+///
+/// Empty means "this bundle has no `agents/` directory", which leaves whatever
+/// `[[agent]]` entries the manifest declared untouched — the same exclusivity
+/// the disk path implements, from the other side.
+fn embedded_roster(preset_id: &str) -> Result<Vec<crate::company::Agent>> {
+    let Some((_, files)) = generated::EMBEDDED_AGENT_BUNDLES
+        .iter()
+        .find(|(id, _)| *id == preset_id)
+    else {
+        return Ok(Vec::new());
+    };
+
+    let names = crate::company::agent_file::embedded_roster_names(files);
+    crate::company::agent_file::load_agents_from(
+        // Only ever used to label a parse failure, and a packaged install has
+        // no path to name — the bundle id is what identifies it to a reader.
+        std::path::Path::new(preset_id),
+        &names,
+        &|rel| {
+            files
+                .iter()
+                .find(|(name, _)| *name == rel)
+                .map(|(_, body)| (*body).to_string())
+                .ok_or(std::io::ErrorKind::NotFound)
+        },
+    )
+}
+
+/// The bundle rosters `build.rs` embedded, one entry per shipped company.
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/embedded_agents.rs"));
 }
 
 /// Registers every company this data root already holds, seeding the first-run
@@ -308,6 +358,82 @@ mod tests {
             "Agentic Marketing Agency"
         );
         assert!(PRESETS.iter().all(|preset| !preset.manifest.is_empty()));
+    }
+
+    /// The embedded roster must equal the one the same bundle yields on disk.
+    ///
+    /// Two code paths now produce a roster — `agents/` read off the filesystem
+    /// by `CompanyManifest::from_located`, and the table `build.rs` embeds — and
+    /// a company must not depend on which one loaded it. They share a parser, so
+    /// field-level drift is unlikely; **order** is the real risk, and it is
+    /// load-bearing: `orchestrator_id` falls back to "the first agent declared"
+    /// when nobody is tagged `tier = "orchestrator"`, so a different sort would
+    /// silently hand the company to a different teammate.
+    ///
+    /// Compares ids in order, plus each agent's resolved prompt documents, which
+    /// is where the embedded path does the most work that disk gets for free.
+    #[test]
+    fn the_embedded_roster_matches_the_bundle_on_disk() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("companies");
+
+        for preset in PRESETS {
+            let bundle = root.join(preset.id);
+            if !bundle.join(crate::company::agent_file::AGENTS_DIR).is_dir() {
+                continue;
+            }
+
+            let from_disk = crate::company::agent_file::load_agents(&bundle)
+                .unwrap_or_else(|e| panic!("bundle `{}` must load from disk: {e}", preset.id));
+            let embedded = embedded_roster(preset.id)
+                .unwrap_or_else(|e| panic!("bundle `{}` must load embedded: {e}", preset.id));
+
+            assert_eq!(
+                embedded.iter().map(|a| &a.id).collect::<Vec<_>>(),
+                from_disk.iter().map(|a| &a.id).collect::<Vec<_>>(),
+                "bundle `{}` yields a different roster order embedded than on \
+                 disk, which changes which teammate orchestrates",
+                preset.id
+            );
+            for (embedded, disk) in embedded.iter().zip(from_disk.iter()) {
+                assert_eq!(
+                    embedded.prompt_files_resolved, disk.prompt_files_resolved,
+                    "agent `{}` in bundle `{}` resolves different prompt \
+                     documents embedded than on disk",
+                    disk.id, preset.id
+                );
+                assert_eq!(embedded.role, disk.role);
+                assert_eq!(embedded.tier, disk.tier);
+                assert_eq!(embedded.tools, disk.tools);
+            }
+        }
+    }
+
+    /// Every bundled template must seed a company that has teammates.
+    ///
+    /// The roster moved out of `company.toml` and into `agents/*.toml`, and the
+    /// disk path followed it — `CompanyManifest::from_located` reads the bundle
+    /// when `agents/` is present. The embedded path did not: a preset carries
+    /// only the `include_str!`'d `company.toml`, so `first_run_manifest` parsed
+    /// a manifest whose `[[agent]]` entries no longer exist and seeded an empty
+    /// roster. That reaches both desktop first-run and the setup flow, since
+    /// `seed_company` builds from this manifest.
+    ///
+    /// Asserted for every preset rather than just the default, because the
+    /// failure is per bundle and silent: a company with no teammates still
+    /// boots and still serves, it simply never answers.
+    #[test]
+    fn every_preset_seeds_a_non_empty_roster() {
+        for preset in PRESETS {
+            let manifest = first_run_manifest(preset.id)
+                .unwrap_or_else(|e| panic!("preset `{}` must parse: {e}", preset.id));
+
+            assert!(
+                !manifest.agents.is_empty(),
+                "preset `{}` seeds a company with no teammates — its roster lives \
+                 in `agents/*.toml`, which the embedded manifest does not carry",
+                preset.id
+            );
+        }
     }
 
     /// No shipped template narrows Composio to a hand-written toolkit list.
