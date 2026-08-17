@@ -85,7 +85,7 @@ use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
     WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, delete_company_workflow,
-    list_workflows_union, list_workflows_with_globals, load_workflow_union, load_workflow_with_globals,
+    list_workflows_with_globals, load_workflow_with_globals,
     rollback_company_workflow, seed_file_exists,
     set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
@@ -417,10 +417,6 @@ fn overlay_toml<'a>(overlays: &'a [OverlayWorkflow], wid: &str) -> Option<&'a st
         .map(|w| w.toml.as_str())
 }
 
-async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflow>, ApiError> {
-    Ok(overlay_workflows_and_globals(company).await?.0)
-}
-
 /// This company's overlay graph bodies and its `[globals].disable`, read
 /// together — the pair every union read needs.
 async fn overlay_workflows_and_globals(
@@ -732,7 +728,7 @@ async fn graph_with_version(
     file: WorkflowFile,
 ) -> Result<WorkflowGraph, ApiError> {
     let source_dir = company.runtime.source_dir();
-    let (overlays, disabled, globals_disable) = workflow_state(company).await?;
+    let (overlays, disabled, _) = workflow_state(company).await?;
     let editable = is_editable(source_dir, &overlays, &file.id);
     let version = editable
         .then(|| overlay_toml(&overlays, &file.id).map(workflow_version))
