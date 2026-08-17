@@ -155,8 +155,8 @@ const COLUMN_LABELS: Record<string, string> = {
  * carries the raw column id, not prose, exactly as `task_card_changed` and
  * `approval_parked` do. The host holds the same sentence for the rehydrated
  * half (`dispatch_marker_text`), and unit tests on both sides pin the identical
- * literals — the same contract `BOARD_COLUMNS`/`TASK_COLUMNS` already live
- * with.
+ * literals. See `COLUMN_LABELS` above for why this copy is the one exception
+ * to the ledger-driven rule.
  *
  * Drift between the two can only *reword* a marker across a reload; it can
  * never double one, because the dedupe is on identity (`h<seq>`) and not on
