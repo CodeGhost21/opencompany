@@ -2797,6 +2797,8 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         prompt_files: Vec::new(),
         prompt_files_resolved: Vec::new(),
         classes: Vec::new(),
+        ledgers: None,
+        can_declare_ledgers: true,
     }
 }
 
@@ -6131,6 +6133,8 @@ budget_usd_daily = 0.0
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -6247,6 +6251,8 @@ budget_usd_daily = 0.0
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let agent = build::build_agent(
             &CompanyId::new("acme"),
