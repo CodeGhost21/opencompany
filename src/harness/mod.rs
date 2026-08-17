@@ -5814,4 +5814,232 @@ budget_usd_daily = 0.0
         }
         assert!(checked > 0, "no executable tool was on the belt to check");
     }
+
+    // --- Per-company billing resolution (issues #788, #789) -----------------
+    //
+    // `resolve_chargebee` / `resolve_paypal` are what actually decide whether a
+    // company's agents get billing tools on a given turn — `HarnessPool::ensure`
+    // re-resolves them every turn, and `RuntimeBuilder::build` runs the same
+    // three-way decision once at boot. All three branches are silent when they
+    // go wrong: a dropped grant check wires tools the manifest never allowed, and
+    // a read error collapsed into "no credential" disconnects a working
+    // integration on one transient store hiccup.
+
+    /// A secret store that reads back what was seeded, or fails every read.
+    #[derive(Default)]
+    struct BillingSecrets {
+        map: StdMutex<std::collections::HashMap<String, String>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl SecretStore for BillingSecrets {
+        async fn get(
+            &self,
+            _c: &CompanyId,
+            key: &str,
+        ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+            if self.fail {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "the secret store is unreachable".into(),
+                ));
+            }
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|v| crate::ports::types::SecretValue(v.clone())))
+        }
+        async fn set(
+            &self,
+            _c: &CompanyId,
+            key: &str,
+            value: crate::ports::types::SecretValue,
+        ) -> crate::Result<()> {
+            self.map.lock().unwrap().insert(key.to_string(), value.0);
+            Ok(())
+        }
+    }
+
+    /// A company whose manifest allows exactly `grants`.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    fn record_granting(grants: &[&str]) -> CompanyRecord {
+        let mut rec = record();
+        rec.manifest.tools.allow = grants.iter().map(|g| g.to_string()).collect();
+        rec
+    }
+
+    /// The inert fixture deps, with a secret store and a "last known" connection.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    fn billing_deps(dir: &std::path::Path, secrets: Arc<dyn SecretStore>) -> HarnessDeps {
+        let mut deps = deps_with_plan(dir, Arc::new(MockContext::default()), None, None);
+        deps.secrets = Some(secrets);
+        deps
+    }
+
+    #[cfg(feature = "chargebee")]
+    #[tokio::test]
+    async fn chargebee_resolves_only_for_a_company_that_grants_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets::default());
+        secrets
+            .set(
+                &CompanyId::new("acme"),
+                crate::chargebee::types::SITE_SECRET,
+                crate::ports::types::SecretValue("acme-test".into()),
+            )
+            .await
+            .expect("seed");
+        secrets
+            .set(
+                &CompanyId::new("acme"),
+                crate::chargebee::types::API_KEY_SECRET,
+                crate::ports::types::SecretValue("cb_key".into()),
+            )
+            .await
+            .expect("seed");
+        let deps = billing_deps(dir.path(), secrets);
+        let pool = HarnessPool::new();
+
+        // Granted and configured: the credential resolves.
+        let granted = pool
+            .resolve_chargebee(&record_granting(&["chargebee"]), &deps)
+            .await
+            .expect("a granted, configured company resolves");
+        assert_eq!(granted.site(), "acme-test");
+
+        // Same credentials, no grant. The store is untouched — the gate is the
+        // manifest, so a company that never opted in gets no tools however well
+        // configured the host happens to be.
+        assert!(
+            pool.resolve_chargebee(&record_granting(&[]), &deps)
+                .await
+                .is_none(),
+            "an ungranted company must resolve nothing"
+        );
+
+        // And a wildcard is not a grant: these tools send invoices to real
+        // people, so they are opted into by name rather than riding in on the
+        // `*` somebody set for file and shell tools.
+        assert!(
+            pool.resolve_chargebee(&record_granting(&["*"]), &deps)
+                .await
+                .is_none(),
+            "a catch-all grant must not confer chargebee"
+        );
+    }
+
+    #[cfg(feature = "chargebee")]
+    #[tokio::test]
+    async fn a_chargebee_store_hiccup_keeps_the_last_known_connection() {
+        // The distinction this pins: absence wires no tools, but a READ FAILURE
+        // keeps whatever was already resolved. Collapsing the two would drop a
+        // working company's billing tools mid-conversation on one bad read, and
+        // silently — the agent would simply stop being able to invoice.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets {
+            fail: true,
+            ..Default::default()
+        });
+        let mut deps = billing_deps(dir.path(), secrets);
+        let last_known = crate::harness::chargebee::TenantChargebee::resolve(
+            &(Arc::new(BillingSecrets {
+                map: StdMutex::new(
+                    [
+                        (
+                            crate::chargebee::types::SITE_SECRET.to_string(),
+                            "acme-test".to_string(),
+                        ),
+                        (
+                            crate::chargebee::types::API_KEY_SECRET.to_string(),
+                            "cb_key".to_string(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                fail: false,
+            }) as Arc<dyn SecretStore>),
+            &CompanyId::new("acme"),
+        )
+        .await
+        .expect("the seeded store reads")
+        .expect("both halves present");
+        deps.chargebee = Some(last_known);
+
+        let kept = pool_resolve_chargebee(&deps).await;
+        assert_eq!(
+            kept.map(|c| c.site().to_string()).as_deref(),
+            Some("acme-test"),
+            "a transient read failure must not disconnect a working integration"
+        );
+    }
+
+    #[cfg(feature = "chargebee")]
+    async fn pool_resolve_chargebee(
+        deps: &HarnessDeps,
+    ) -> Option<crate::harness::chargebee::TenantChargebee> {
+        HarnessPool::new()
+            .resolve_chargebee(&record_granting(&["chargebee"]), deps)
+            .await
+    }
+
+    #[cfg(feature = "paypal")]
+    #[tokio::test]
+    async fn paypal_resolves_only_for_a_company_that_grants_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets::default());
+        for (key, value) in [
+            (crate::company::paypal::CLIENT_ID_SECRET, "AY_id"),
+            (crate::company::paypal::CLIENT_SECRET_SECRET, "EL_secret"),
+        ] {
+            secrets
+                .set(
+                    &CompanyId::new("acme"),
+                    key,
+                    crate::ports::types::SecretValue(value.into()),
+                )
+                .await
+                .expect("seed");
+        }
+        let deps = billing_deps(dir.path(), secrets);
+        let pool = HarnessPool::new();
+
+        assert!(
+            pool.resolve_paypal(&record_granting(&["paypal"]), &deps)
+                .await
+                .is_some(),
+            "a granted, configured company resolves"
+        );
+        assert!(
+            pool.resolve_paypal(&record_granting(&[]), &deps)
+                .await
+                .is_none(),
+            "an ungranted company must resolve nothing"
+        );
+        assert!(
+            pool.resolve_paypal(&record_granting(&["*"]), &deps)
+                .await
+                .is_none(),
+            "a catch-all grant must not confer paypal"
+        );
+    }
+
+    #[cfg(feature = "paypal")]
+    #[tokio::test]
+    async fn a_paypal_grant_with_no_credential_wires_nothing_rather_than_failing() {
+        // Fail closed: a manifest that grants `paypal` on a host where nobody
+        // has saved a credential must wire no tools, not tools that fail on
+        // first use — an agent that HAS a wallet tool tells the operator the
+        // balance is unavailable, rather than that it cannot read wallets.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = billing_deps(dir.path(), Arc::new(BillingSecrets::default()));
+        assert!(
+            HarnessPool::new()
+                .resolve_paypal(&record_granting(&["paypal"]), &deps)
+                .await
+                .is_none()
+        );
+    }
 }
