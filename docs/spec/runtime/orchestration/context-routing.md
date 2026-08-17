@@ -26,7 +26,9 @@ calls it has to think to make.
 > record why each exclusion is an exclusion.
 
 `role_context` MUST decide, per role, which workspace documents enter the system
-prompt. Exactly one document is universal: the company's method policy.
+prompt. Two documents are universal: the company's method policy (`METHOD.md`)
+and its per-workspace working agreement (`AGENTS.md`) — see
+[`UNIVERSAL_DOCUMENTS`](../../../src/company/context_routing.rs).
 
 **This is data, not code.** The sibling runtime encodes its table as a Rust
 `match` on role name, which is right for 22 compiled-in roles and wrong for us:
