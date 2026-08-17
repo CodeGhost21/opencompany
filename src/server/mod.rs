@@ -15,6 +15,7 @@ mod error;
 pub mod feedback;
 pub mod graphql;
 pub mod hooks;
+pub mod hooks_chargebee;
 pub mod hub_identity;
 // Console MCP OAuth callback (issue #90): the unauthenticated browser-redirect
 // landing route. Gated on `mcp` (it needs the OAuth token-exchange path).

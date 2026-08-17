@@ -741,6 +741,27 @@ jobs:
           cargo test --locked --features acp --lib server::acp
           cargo test --locked --features acp --lib harness::acp_run_turn
 
+      # Issue #788: Chargebee billing — the REST layer (`chargebee::`) and the
+      # toolbelt bridge (`harness::chargebee`) in one filter, which selects both.
+      # It runs HERE rather than on the fast default job because the bridge lives
+      # under `src/harness/` and so compiles only with `openhuman`; splitting it
+      # across two lanes would need two rows in feature-lanes.txt for one
+      # feature, which that table rejects. All of it is offline: the wire tests
+      # drive a stub on an ephemeral port and the rest never build a request.
+      - name: Test the Chargebee billing integration
+        run: scripts/ci/run-scoped-suite.sh "chargebee" openhuman,tinycortex,chargebee chargebee
+
+      # Issue #789: PayPal. Here rather than on the fast default job for the same
+      # reason as chargebee above — the toolbelt bridge is under `src/harness/`
+      # and so needs `openhuman`. It USED to ride the default job on `--features
+      # paypal` alone, which reached `company::paypal` and `paypal::` and could
+      # not compile `harness::paypal` at all: those tests existed and no lane ran
+      # them, which is exactly the #770 pathology this table exists to stop. One
+      # lane with the gated feature set selects all three. Offline: the token
+      # cache and error tests drive a stub on an ephemeral port.
+      - name: Test the PayPal integration
+        run: scripts/ci/run-scoped-suite.sh "paypal" openhuman,tinycortex,paypal paypal
+
       - name: Assert every integration target actually runs
         run: scripts/ci/assert-integration-targets-run.sh openhuman,tinycortex
 

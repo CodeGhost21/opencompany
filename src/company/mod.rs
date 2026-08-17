@@ -32,11 +32,13 @@ pub mod copilot;
 // How this instance obtains its TinyHumans credential (projected, rotating
 // platform token vs a static key). Always compiled: the answer decides whether a
 // company can think at all, in every build.
+pub mod billing;
 pub mod credentials;
 pub mod dns;
 pub mod inference;
 mod manifest;
 pub mod mcp;
+pub mod paypal;
 // Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the
 // per-tenant browser sign-in flow. Needs the vendored `oh::mcp::config_servers` discovery
 // primitive + `uuid`/`base64`/`url`, so it links only under the `mcp` feature.
@@ -117,7 +119,8 @@ pub use types::{
     INFERENCE_TIERS, Inference, KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, McpServer,
     ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROMPT_CLASSES,
     PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
-    TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit, grants_repo_explicit,
+    TOOL_PROVIDERS, Tools, grants_chargebee_explicit, grants_composio_explicit,
+    grants_media_explicit, grants_paypal_explicit, grants_repo_explicit,
     grants_repo_write_explicit, grants_search_explicit, grants_workspace_write_explicit,
     orchestrator_id,
 };

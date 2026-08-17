@@ -16,6 +16,7 @@
 //! compiled only under the `oauth` feature and 404 otherwise.
 
 pub mod artifacts;
+pub mod billing;
 pub mod capabilities;
 pub mod channels;
 pub mod company_key;
@@ -165,6 +166,7 @@ pub fn router() -> Router<AppState> {
         .merge(tool_catalog::router())
         .merge(connections_read::router())
         .merge(channels::router())
+        .merge(billing::router())
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())

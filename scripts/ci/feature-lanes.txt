@@ -62,6 +62,8 @@ media          | partial      | openhuman,mcp,telegram,media    | harness::build
 composio       | partial      | openhuman,tinycortex,composio   | harness::composio::isolation_tests harness::composio::ops_helper_tests harness::composio::live::live_tests server::ops::composio::tests::gated_tests
 export         | partial      | export                          | store::export
 imap           | partial      | imap,smtp                       | server::ops::imap
+chargebee      | partial      | openhuman,tinycortex,chargebee  | chargebee
+paypal         | partial      | openhuman,tinycortex,paypal     | paypal
 sidecar        | partial      | sidecar                         | brain::sidecar
 
 # --- Owed a lane: gated tests exist, and they are currently RED -------------
