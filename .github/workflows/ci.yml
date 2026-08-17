@@ -1120,6 +1120,40 @@ jobs:
       # Node-only and cheap; the rule itself is repository-wide.
       - run: ./scripts/ci/assert-md-line-cap.sh
 
+      # Issue #858. `pnpm-lock.yaml`, read by nothing until now.
+      #
+      # `npm ci` above is the fidelity guard for `package-lock.json`. There is a
+      # SECOND lockfile in that directory and it had no guard at all: nothing in
+      # this file mentions pnpm, and the `Desktop` job runs `npm ci` plus
+      # `npm run build` directly rather than `tauri build`, so it never reaches
+      # Tauri's `beforeBuildCommand` either. The file is not vestigial —
+      # `frontend/src-tauri/tauri.conf.json` declares `pnpm dev` / `pnpm build`,
+      # so a developer running `npm run tauri:dev` locally resolves through it.
+      # It went out of sync on `main` and stayed there until #857 regenerated
+      # it; the person who would have found out is whoever next built the
+      # desktop app.
+      #
+      # `--lockfile-only` installs NOTHING — no `node_modules`, ~200ms. It is a
+      # consistency check between two committed files, which is why it can ride
+      # this job without being able to flake on upstream availability the way a
+      # lane that actually resolved ranges would.
+      #
+      # `--trust-lockfile` skips pnpm 11's supply-chain policy pass, which
+      # re-verifies every entry against the registry — 15s and a network
+      # dependency, for an answer this step is not asking for. Without it this
+      # check would redden for reasons outside the diff, which is the exact
+      # property the `npm ci` note above exists to defend.
+      #
+      # Pinned `pnpm@11` via npx rather than a `packageManager` field: that
+      # field would make a corepack-enabled contributor's `npm ci` refuse to
+      # run, and npm is this project's primary resolver. The floor pnpm 9 fails
+      # to clear is declared in `engines.pnpm` instead — `pnpm-workspace.yaml`
+      # uses `allowBuilds`, and pnpm 9 rejects the whole file for having no
+      # `packages` key.
+      - name: Validate pnpm-lock.yaml against package.json
+        run: npx --yes pnpm@11 install --frozen-lockfile --lockfile-only --trust-lockfile
+        working-directory: frontend
+
       # No lint step: the package declares no lint script. Adding one is a
       # separate decision, not something to smuggle in here.
 
