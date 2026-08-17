@@ -16,10 +16,15 @@
 // and framed as the ordinary way to be finished with something, because a
 // closed row keeps its reason and a deleted one keeps nothing.
 //
-// **The task board is read-only here.** It is listed as a ledger so this screen
-// is the whole record and not most of it, but its rows fire dispatch and
-// planning passes, so they are written on the board. The card says so and
-// offers no compose box, rather than offering one whose save the host refuses.
+// **The task board writes differently, not less.** The board IS the `tasks`
+// ledger and renders here as columns, because its statuses are a lifecycle and
+// that is what a lifecycle looks like. But entering a column *fires work* — the
+// dispatch edge, the planning pass, the settle — so a drop there goes through
+// `patchTask` rather than through `record_entry`, and there is no compose box:
+// a card is opened by a person or an agent through the board's own paths, and a
+// form here would produce a save the host refuses. Clicking a card leaves for
+// `#/tasks/<id>`, which carries the timeline, plan, discussion and attempts
+// this screen does not try to reproduce.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -441,7 +446,9 @@ export function LedgersView({
                 <Alert>
                   <Lock className="size-4" />
                   <AlertDescription>
-                    Read-only here. {ledger.writtenBy}
+                    Rows here are opened elsewhere: {ledger.writtenBy}. You can
+                    still move one between columns — that goes through the board,
+                    which is what makes it start work.
                   </AlertDescription>
                 </Alert>
               )}
@@ -680,12 +687,15 @@ export function LedgersView({
 function EntryCard({
   entry,
   ledger,
+  onOpen,
   onAmend,
   onClose,
   onDelete,
 }: {
   entry: LedgerEntry;
   ledger: LedgerSummary;
+  /** Leaves for the row's own screen, when it has one. Only the board does. */
+  onOpen?: () => void;
   onAmend: () => void;
   onClose: () => void;
   onDelete: () => void;
@@ -702,7 +712,17 @@ function EntryCard({
               {entry.status}
             </Badge>
           )}
-          <span className="flex-1 font-medium">{entry.title}</span>
+          {onOpen ? (
+            <button
+              type="button"
+              className="flex-1 text-left font-medium hover:underline"
+              onClick={onOpen}
+            >
+              {entry.title}
+            </button>
+          ) : (
+            <span className="flex-1 font-medium">{entry.title}</span>
+          )}
         </div>
 
         <dl className="grid gap-x-4 gap-y-1 text-sm sm:grid-cols-[10rem_1fr]">
