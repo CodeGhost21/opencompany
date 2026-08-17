@@ -287,23 +287,23 @@ mod tests {
     fn the_per_tier_default_table_matches_the_spec() {
         assert_eq!(
             routed_documents(&agent(Some("orchestrator"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS, THREADS]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS, THREADS]
         );
         assert_eq!(
             routed_documents(&agent(Some("reasoning"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS]
         );
         assert_eq!(
             routed_documents(&agent(Some("frontend"))),
-            [UNIVERSAL_DOCUMENT, BRIEF]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
         );
         assert_eq!(
             routed_documents(&agent(Some("compress"))),
-            [UNIVERSAL_DOCUMENT]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC]
         );
         assert_eq!(
             routed_documents(&agent(Some("subconscious"))),
-            [UNIVERSAL_DOCUMENT]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC]
         );
     }
 
@@ -323,13 +323,13 @@ mod tests {
         explicit.context = Some(Vec::new());
         assert_eq!(
             routed_documents(&explicit),
-            [UNIVERSAL_DOCUMENT],
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC],
             "`context = []` means the universal document and nothing else"
         );
 
         assert_eq!(
             routed_documents(&agent(Some("orchestrator"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS, THREADS],
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS, THREADS],
             "an omitted key takes the tier default"
         );
     }
@@ -338,7 +338,7 @@ mod tests {
     fn an_explicit_context_overrides_the_tier_default() {
         let mut a = agent(Some("orchestrator"));
         a.context = Some(vec!["GOAL.md".into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, "GOAL.md"]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, "GOAL.md"]);
     }
 
     #[test]
@@ -356,7 +356,7 @@ mod tests {
         let mut a = agent(Some("reasoning"));
         a.classes = vec!["judge".into()];
         a.context = Some(vec![SCRATCH.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC]);
     }
 
     #[test]
@@ -377,7 +377,7 @@ mod tests {
         let mut a = agent(None);
         a.classes = vec!["judge".into()];
         a.context = Some(vec![SCRATCH.into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]);
     }
 
     #[test]
@@ -390,7 +390,7 @@ mod tests {
             CLAIMS.into(),
             BRIEF.into(),
         ]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]);
     }
 
     /// The method policy is exempt: it is how the company works, not something
@@ -400,21 +400,21 @@ mod tests {
         let mut a = agent(None);
         a.classes = vec!["judge".into(), "evidence".into(), "directive".into()];
         a.context = Some(Vec::new());
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC]);
     }
 
     #[test]
     fn a_document_listed_twice_is_routed_once() {
         let mut a = agent(None);
         a.context = Some(vec![UNIVERSAL_DOCUMENT.into(), BRIEF.into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]);
     }
 
     #[test]
     fn blank_context_entries_are_ignored() {
         let mut a = agent(None);
         a.context = Some(vec!["".into(), "  ".into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]);
     }
 
     /// An unknown class imposes no exclusion. Manifest validation refuses one
