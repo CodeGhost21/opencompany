@@ -1,6 +1,6 @@
 # Agentic Research Lab — working agreement
 
-> A research lab of agents that investigates a question with primary sources,
+> A research lab of agents that investigates a question with primary sources, computes what it can, argues with its own conclusions, and reports only what it can defend — with a human setting the question and accepting the findings.
 
 This file is routed into every teammate's system prompt alongside `METHOD.md` (`context_routing::UNIVERSAL_DOCUMENTS`), so it is the one place a convention reaches the whole roster without being repeated in every agent's `context`.
 
