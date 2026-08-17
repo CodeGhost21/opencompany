@@ -462,6 +462,7 @@ export function TaskDetailView({
               task={detail.task}
               worked={worked}
               waiting={waiting}
+              columns={columns}
             />
 
             <ControlBar
@@ -481,7 +482,11 @@ export function TaskDetailView({
               onOpenThread={onOpenThread}
             />
 
-            <LineageRail lineage={detail.lineage} onNavigate={onNavigate} />
+            <LineageRail
+              lineage={detail.lineage}
+              onNavigate={onNavigate}
+              columns={columns}
+            />
 
             <AwaitingApprovalRow approvals={detail.approvals} now={now} />
 
@@ -612,10 +617,15 @@ function DetailHeader({
   task,
   worked,
   waiting,
+  columns,
 }: {
   task: Task;
   worked: { millis: number; live: boolean } | null;
   waiting: { millis: number; live: boolean } | null;
+  /** The board's columns, for the status badge's label. Passed rather than
+      read here: they come from the `tasks` ledger, so the one component that
+      can fetch them is the one that already holds the client. */
+  columns: TaskColumn[];
 }) {
   const hasDispatch = worked !== null && (worked.millis > 0 || worked.live);
   // Issue #465: "Not yet dispatched" is only sayable where it can still be true.
@@ -648,7 +658,7 @@ function DetailHeader({
         <span className="inline-flex items-center gap-1.5">
           <span className="font-medium text-foreground">Status</span>
           <Badge variant="secondary" className="font-normal">
-            {columnLabel(task.column)}
+            {columnLabel(columns, task.column)}
           </Badge>
         </span>
         {/* Issue #580: this card builds a reusable workflow rather than doing
@@ -1044,9 +1054,11 @@ function OriginThreadRow({
 function LineageRail({
   lineage,
   onNavigate,
+  columns,
 }: {
   lineage: TaskDetail["lineage"];
   onNavigate: (id: string) => void;
+  columns: TaskColumn[];
 }) {
   if (!lineage.parent && lineage.children.length === 0) return null;
   return (
@@ -1065,7 +1077,7 @@ function LineageRail({
               {lineage.parent.title}
             </span>
             <Badge variant="secondary" className="shrink-0 font-normal">
-              {columnLabel(lineage.parent.column)}
+              {columnLabel(columns, lineage.parent.column)}
             </Badge>
           </button>
         )}
@@ -1081,7 +1093,7 @@ function LineageRail({
             <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate">{child.title}</span>
             <Badge variant="secondary" className="shrink-0 font-normal">
-              {columnLabel(child.column)}
+              {columnLabel(columns, child.column)}
             </Badge>
           </button>
         ))}
