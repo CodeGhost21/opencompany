@@ -300,7 +300,14 @@ impl WorkflowResolver for StoreWorkflowResolver {
         let start_id = workflow_id.to_string();
         let start_file = file.clone();
         tokio::task::spawn_blocking(move || {
-            Self::guard_cycle(source_dir, overlays, root_id, start_id, start_file)
+            Self::guard_cycle(
+                source_dir,
+                overlays,
+                globals_disable,
+                root_id,
+                start_id,
+                start_file,
+            )
         })
         .await
         .map_err(|err| {
