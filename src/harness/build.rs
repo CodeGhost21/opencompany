@@ -718,6 +718,7 @@ pub fn build_agent(
                 company.clone(),
                 manifest_agent.id.clone(),
                 workspace_writes,
+                manifest_agent.write_scope(),
             ))
         }
         _ => None,
