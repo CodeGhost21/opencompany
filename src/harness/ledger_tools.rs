@@ -523,6 +523,7 @@ impl Tool for RecordEntry {
 struct CloseEntry {
     ctx: Ledgers,
     author: LedgerAuthor,
+    ledger_grants: Option<Vec<LedgerGrant>>,
 }
 
 #[async_trait]
