@@ -8,7 +8,6 @@ import {
   Settings2,
   ShieldCheck,
   BookText,
-  SquareKanban,
   Workflow,
 } from "lucide-react";
 
@@ -131,11 +130,11 @@ const NAV: NavItem[] = [
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
-  { view: "tasks", label: "Tasks", icon: SquareKanban },
-  // The company's own record — goals, decisions, and whatever axis this
-  // workspace declared. The board sits beside it rather than inside it: a
-  // card's column fires dispatch and a planning pass, so it keeps its own
-  // screen, and appears in Ledgers as a read-only row anybody can search.
+  // The company's record, board included. Ledgers replaced the standalone
+  // Tasks entry: the board is the `tasks` ledger, rendered as columns from the
+  // statuses the host declares, so one screen covers work, goals, decisions and
+  // whatever axis this workspace added. `#/tasks/<id>` still opens a card's
+  // detail — see `HIDDEN_VIEWS`.
   { view: "ledgers", label: "Ledgers", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
@@ -157,6 +156,13 @@ const NAV: NavItem[] = [
  * last of what they still do better (a desk's persisted transcript).
  */
 const HIDDEN_VIEWS: View[] = [
+  // The board, unmounted from the sidebar and not retired. Ledgers renders it
+  // as columns and links each card here, so this stays the card **detail**
+  // screen — the timeline, the plan brief, the discussion, the workflow
+  // proposal, the steer controls — which is everything Ledgers deliberately
+  // does not try to reproduce. `#/tasks` still answers, and re-listing it in
+  // `NAV` above brings the standalone board back.
+  "tasks",
   "feedback",
   "inbox",
   "memory",
