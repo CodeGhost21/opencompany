@@ -18,6 +18,7 @@
 // against a real host that what comes back here is byte-identical to what a
 // browser's `fetch` would have seen.
 
+import { type TauriCore, tauriCore } from "./bridge";
 import { connectionReady } from "./desktop";
 import type {
   StreamHandlers,
@@ -35,25 +36,20 @@ interface ProxyReply {
   headers: Record<string, string>;
 }
 
-/** The Tauri entry points this transport uses. */
-interface TauriBridge {
-  invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
-  Channel: new <T>() => { onmessage: ((message: T) => void) | null };
-}
-
 /**
- * Reads the Tauri bridge off the window.
+ * The Tauri bridge, or a thrown error.
  *
- * Accessed lazily rather than imported: `frontend/` is one bundle that must
- * also load in a plain browser, where `@tauri-apps/api` is not present. A
- * static import would make the web build depend on it.
+ * This transport is only ever selected under `isDesktopRuntime()`, so an absent
+ * bridge here is not a browser — it is a desktop whose global did not resolve,
+ * and it must say so rather than degrade. `tauriCore()` is the only reader of
+ * that global; `bridge.ts` says why one is the number.
  */
-function bridge(): TauriBridge {
-  const internals = (window as unknown as { __TAURI__?: TauriBridge }).__TAURI__;
-  if (!internals) {
+function bridge(): TauriCore {
+  const core = tauriCore();
+  if (!core) {
     throw new Error("the desktop bridge is unavailable: not running under Tauri");
   }
-  return internals;
+  return core;
 }
 
 export class ProxyTransport implements Transport {
@@ -94,6 +90,15 @@ export class ProxyTransport implements Transport {
     };
   }
 
+  /**
+   * Opens the stream through the core.
+   *
+   * Takes no `headers`, unlike the interface allows: the core resolves this
+   * connection's credential from its own registration and the keychain, and is
+   * the only thing that ever holds a device token. Accepting one here would let
+   * the console hand the core a credential to use, which is exactly the
+   * arrangement the keychain exists to prevent.
+   */
   subscribe(url: string, handlers: StreamHandlers): () => void {
     const { invoke, Channel } = bridge();
     const channel = new Channel<string>();

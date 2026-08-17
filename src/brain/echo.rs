@@ -187,6 +187,7 @@ mod test {
                     text: "hi".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &host,
             )

@@ -27,6 +27,8 @@ id = "gate"
 kind = "condition"
 name = "Resolvable now?"
 summary = "Resolve directly or escalate."
+[node.config]
+field = "=item.resolvable_now"
 
 [[node]]
 id = "escalate"
@@ -40,6 +42,8 @@ id = "gate2"
 kind = "condition"
 name = "Bug or refund?"
 summary = "Route the escalation to the right path."
+[node.config]
+field = "=item.is_bug"
 
 [[node]]
 id = "bug"
@@ -93,12 +97,12 @@ to = "gate2"
 [[edge]]
 from = "gate2"
 to = "bug"
-label = "bug"
+label = "yes"
 
 [[edge]]
 from = "gate2"
 to = "refund"
-label = "refund"
+label = "no"
 
 [[edge]]
 from = "bug"

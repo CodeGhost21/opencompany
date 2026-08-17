@@ -14,7 +14,9 @@
 //! - skills → `skills.json` (operator deltas)
 //! - workspace → real folders + Markdown files under `workspace/`, indexed by
 //!   `.workspace-index.json` (ULID → node metadata; physical paths derive from
-//!   the folder/name tree so a rename physically relocates the subtree)
+//!   the folder/name tree so a rename physically relocates the subtree). The
+//!   filesystem store therefore refuses a write whose resolved path another
+//!   node already holds: two ids may never alias one on-disk path (issue #666).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -27,6 +29,10 @@ use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::now_millis;
+use crate::ports::run_output::{
+    MAX_RUN_OUTPUTS_PER_COMPANY, WorkflowRunOutputRecord, WorkflowRunOutputStore,
+    sort_newest_first as sort_run_outputs_newest_first,
+};
 use crate::ports::runs::{
     NewRun, RunFilter, RunRecord, RunStatus, RunStepRecord, RunStore, sort_newest_first,
 };
@@ -41,7 +47,9 @@ use crate::ports::workflow_revisions::{
     sort_newest_first as sort_revisions_newest_first,
 };
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
-use crate::store::fs::{append_line, io_err, path_lock, read_jsonl, read_optional, write_atomic};
+use crate::store::fs::{
+    append_line, io_err, path_lock, read_jsonl, read_optional, write_atomic, write_atomic_bytes,
+};
 use crate::store::paths::Bundle;
 
 /// One filesystem store implementing every WS3 console port over a company
@@ -210,6 +218,27 @@ impl UserStore for FsOps {
             None => invites.push(invite.clone()),
         }
         write_atomic(&path, &serde_json::to_string(&invites)?).await
+    }
+
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool> {
+        let path = self.bundle(company).user_invites_json();
+        // The same lock `delete_invite` takes, which is what makes the
+        // read-modify-write atomic against a concurrent revocation rather than
+        // merely unlikely to race with one.
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut invites = load_json_vec::<InviteRecord>(&path).await?;
+        let Some(existing) = invites.iter_mut().find(|i| i.id == id) else {
+            return Ok(false);
+        };
+        existing.notified_at_millis = Some(at_millis);
+        write_atomic(&path, &serde_json::to_string(&invites)?).await?;
+        Ok(true)
     }
 
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
@@ -601,6 +630,58 @@ fn prune_workflow_revisions(all: &mut Vec<WorkflowRevisionRecord>, workflow_id: 
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRunOutputStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl WorkflowRunOutputStore for FsOps {
+    async fn put_run_output(
+        &self,
+        company: &CompanyId,
+        record: &WorkflowRunOutputRecord,
+    ) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.run_outputs_jsonl();
+        // The per-path lock makes read-dedup-prune-write atomic against a
+        // concurrent settle — process-local, the documented fs-backend
+        // assumption everywhere in this file.
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut all = read_jsonl::<WorkflowRunOutputRecord>(&path).await?;
+        // Last-write-wins per run_id: drop any prior snapshot for this run before
+        // appending the new one, so a re-run's output overwrites rather than
+        // stacks (and still counts once toward the cap).
+        all.retain(|r| r.run_id != record.run_id);
+        all.push(record.clone());
+        prune_run_outputs(&mut all);
+        rewrite_jsonl(&path, &all).await
+    }
+
+    async fn get_run_output(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Option<WorkflowRunOutputRecord>> {
+        let all = read_jsonl::<WorkflowRunOutputRecord>(&self.bundle(company).run_outputs_jsonl())
+            .await?;
+        // Last-write-wins on read too: if two lines share a run_id (a crash
+        // between append and prune), the later one is the truth.
+        Ok(all.into_iter().rev().find(|r| r.run_id == run_id))
+    }
+}
+
+/// Trims `all` to the newest [`MAX_RUN_OUTPUTS_PER_COMPANY`] run snapshots,
+/// dropping the oldest. Kept as a free function so the cap lives in one place.
+fn prune_run_outputs(all: &mut Vec<WorkflowRunOutputRecord>) {
+    if all.len() <= MAX_RUN_OUTPUTS_PER_COMPANY {
+        return;
+    }
+    sort_run_outputs_newest_first(all);
+    all.truncate(MAX_RUN_OUTPUTS_PER_COMPANY);
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -844,6 +925,53 @@ impl crate::ports::schedule_fires::ScheduleFireStore for FsOps {
         .await
         .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
     }
+
+    async fn delete_schedule_fires(&self, company: &CompanyId, schedule_id: &str) -> Result<usize> {
+        let dir = self
+            .bundle(company)
+            .schedule_fires_dir()
+            .join(hashed_schedule_component(schedule_id));
+        tokio::task::spawn_blocking(move || {
+            let markers = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                // No directory means the schedule never fired — nothing to
+                // purge, the same NotFound-is-empty rule the other verbs use.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(io_err(&dir, e)),
+            };
+            let mut removed = 0usize;
+            for marker in markers {
+                let marker = marker.map_err(|e| io_err(&dir, e))?;
+                // Only our minute markers count as claim rows; a filename that
+                // does not parse is not one of ours, so it is left in place
+                // (and will simply keep the best-effort `remove_dir` below from
+                // succeeding, which is harmless).
+                let Some(_minute) = marker
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u64>().ok())
+                else {
+                    continue;
+                };
+                let path = marker.path();
+                match std::fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    // A racing prune already removed it — not our removal to
+                    // count, but not an error either.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(io_err(&path, e)),
+                }
+            }
+            // Best-effort: drop the now-empty schedule directory so a purged
+            // schedule leaves no directory behind. Ignored if it is not empty
+            // (a stray non-marker file) or already gone — the rows are what the
+            // count and the contract are about, not the directory.
+            let _ = std::fs::remove_dir(&dir);
+            Ok(removed)
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -927,6 +1055,216 @@ impl SkillStateStore for FsOps {
 }
 
 // ---------------------------------------------------------------------------
+// ReadStateStore
+// ---------------------------------------------------------------------------
+
+/// One stored marker. The user is part of the row rather than the file name, so
+/// the whole company's markers stay one readable document.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct StoredRead {
+    user_id: String,
+    channel_id: String,
+    last_read_at: i64,
+}
+
+#[async_trait]
+impl crate::ports::read_state::ReadStateStore for FsOps {
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::read_state::ChannelRead>> {
+        let rows = load_json_vec::<StoredRead>(&self.bundle(company).read_state_json()).await?;
+        let mut out: Vec<_> = rows
+            .into_iter()
+            .filter(|r| r.user_id == user)
+            .map(|r| crate::ports::read_state::ChannelRead {
+                channel_id: r.channel_id,
+                last_read_at: r.last_read_at,
+            })
+            .collect();
+        out.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+        Ok(out)
+    }
+
+    async fn mark(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        channel_id: &str,
+        at: i64,
+    ) -> Result<crate::ports::read_state::ChannelRead> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.read_state_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut rows = load_json_vec::<StoredRead>(&path).await?;
+        // Monotonic, as the port promises — see `ReadStateStore::mark`.
+        let settled = match rows
+            .iter_mut()
+            .find(|r| r.user_id == user && r.channel_id == channel_id)
+        {
+            Some(existing) => {
+                existing.last_read_at = existing.last_read_at.max(at);
+                existing.last_read_at
+            }
+            None => {
+                rows.push(StoredRead {
+                    user_id: user.to_string(),
+                    channel_id: channel_id.to_string(),
+                    last_read_at: at,
+                });
+                at
+            }
+        };
+        write_atomic(&path, &serde_json::to_string(&rows)?).await?;
+        Ok(crate::ports::read_state::ChannelRead {
+            channel_id: channel_id.to_string(),
+            last_read_at: settled,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NotificationStore
+// ---------------------------------------------------------------------------
+
+/// One per-person read marker. Kept in its own document rather than as a field
+/// on the notification, because read state is per person (#749) — a flag on the
+/// shared record would mark it read for everyone the moment one admin opened it.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct StoredNotifRead {
+    user_id: String,
+    notification_id: String,
+    read_at: u64,
+}
+
+#[async_trait]
+impl crate::ports::notifications::NotificationStore for FsOps {
+    async fn append(
+        &self,
+        company: &CompanyId,
+        notification: &crate::ports::notifications::Notification,
+    ) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.notifications_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut rows = load_json_vec::<crate::ports::notifications::Notification>(&path).await?;
+        // Idempotent by id (first write wins): a retried or replayed append must
+        // not duplicate the feed. Matches the sqlite primary key and the mongo
+        // unique index, so all three backends agree.
+        if !rows.iter().any(|n| n.id == notification.id) {
+            rows.push(notification.clone());
+            write_atomic(&path, &serde_json::to_string(&rows)?).await?;
+        }
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::notifications::NotificationView>> {
+        let bundle = self.bundle(company);
+        let records = load_json_vec::<crate::ports::notifications::Notification>(
+            &bundle.notifications_json(),
+        )
+        .await?;
+        let reads = load_json_vec::<StoredNotifRead>(&bundle.notification_reads_json()).await?;
+        // This person's markers, indexed once, so the join is linear rather than
+        // O(records × markers) — mirrors the map the mongo backend builds.
+        let mine: std::collections::HashMap<&str, u64> = reads
+            .iter()
+            .filter(|r| r.user_id == user)
+            .map(|r| (r.notification_id.as_str(), r.read_at))
+            .collect();
+        let mut out: Vec<_> = records
+            .into_iter()
+            .map(|n| {
+                let read_at = mine.get(n.id.as_str()).copied();
+                crate::ports::notifications::NotificationView {
+                    notification: n,
+                    read_at,
+                }
+            })
+            .collect();
+        // Newest first, ties broken by id descending — the order the trait
+        // documents, not each backend's insertion order.
+        out.sort_by(|a, b| {
+            b.notification
+                .created_at
+                .cmp(&a.notification.created_at)
+                .then_with(|| b.notification.id.cmp(&a.notification.id))
+        });
+        Ok(out)
+    }
+
+    async fn mark_read(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        ids: Option<&[String]>,
+    ) -> Result<u64> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let records = load_json_vec::<crate::ports::notifications::Notification>(
+            &bundle.notifications_json(),
+        )
+        .await?;
+        let path = bundle.notification_reads_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut reads = load_json_vec::<StoredNotifRead>(&path).await?;
+        // Which notifications to mark: the named ids that actually exist, or
+        // every notification when `None`.
+        let targets: Vec<&str> = match ids {
+            Some(ids) => records
+                .iter()
+                .filter(|n| ids.iter().any(|i| i == &n.id))
+                .map(|n| n.id.as_str())
+                .collect(),
+            None => records.iter().map(|n| n.id.as_str()).collect(),
+        };
+        let now = crate::ports::now_millis();
+        let mut changed = false;
+        for id in targets {
+            // A latch: only stamp a marker that is not already there, so the
+            // original `read_at` survives a re-mark.
+            let already = reads
+                .iter()
+                .any(|r| r.user_id == user && r.notification_id == id);
+            if !already {
+                reads.push(StoredNotifRead {
+                    user_id: user.to_string(),
+                    notification_id: id.to_string(),
+                    read_at: now,
+                });
+                changed = true;
+            }
+        }
+        // Only rewrite the marker file when a marker was actually added, so a
+        // repeated mark-all is a pure read rather than a rewrite of the whole
+        // file for no change.
+        if changed {
+            write_atomic(&path, &serde_json::to_string(&reads)?).await?;
+        }
+        // Still-unread count for this person: records with no marker of theirs.
+        let unread = records
+            .iter()
+            .filter(|n| {
+                !reads
+                    .iter()
+                    .any(|r| r.user_id == user && r.notification_id == n.id)
+            })
+            .count() as u64;
+        Ok(unread)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
@@ -942,7 +1280,10 @@ impl WorkspaceStore for FsOps {
         let Some(node) = index.get(id).cloned() else {
             return Ok(None);
         };
-        let content = if node.kind == NodeKind::File {
+        // A binary node reads as an empty body, like a folder — see the port's
+        // trait docs. Checked before touching the disk, so a 200 MiB video is
+        // never loaded to be thrown away (and never attempted as UTF-8).
+        let content = if node.kind == NodeKind::File && !node.is_binary() {
             let path = self.physical_path(company, &index, id)?;
             read_optional(&path).await?
         } else {
@@ -970,20 +1311,18 @@ impl WorkspaceStore for FsOps {
                 "cannot write content to a folder".to_string(),
             ));
         }
+        if let Some(mime) = node.mime.clone() {
+            return Err(OpenCompanyError::InvalidRequest(
+                crate::ports::workspace::binary_write_refusal(&node.name, &mime),
+            ));
+        }
         node.updated_at_millis = now_millis();
         // Authorship rides the same stamp as the timestamp: "when the body last
         // changed" and "who changed it" are one fact and must never drift apart.
         node.updated_by = author;
         let node = node.clone();
         let file = self.physical_path(company, &index, id)?;
-        if let Some(parent) = file.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| io_err(parent, e))?;
-        }
-        tokio::fs::write(&file, content)
-            .await
-            .map_err(|e| io_err(&file, e))?;
+        write_atomic(&file, content).await?;
         self.save_index(company, &index).await?;
         Ok(node)
     }
@@ -1022,6 +1361,7 @@ impl WorkspaceStore for FsOps {
                 }
             }
         }
+        reject_path_collision(&index, &node.id, &node.name, node.parent_id.as_deref())?;
         index.insert(node.id.clone(), node.clone());
         let physical = self.physical_path(company, &index, &node.id)?;
         match node.kind {
@@ -1031,17 +1371,187 @@ impl WorkspaceStore for FsOps {
                     .map_err(|e| io_err(&physical, e))?;
             }
             NodeKind::File => {
-                if let Some(parent) = physical.parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|e| io_err(parent, e))?;
-                }
-                tokio::fs::write(&physical, content.unwrap_or(""))
-                    .await
-                    .map_err(|e| io_err(&physical, e))?;
+                write_atomic(&physical, content.unwrap_or("")).await?;
             }
         }
         self.save_index(company, &index).await
+    }
+
+    /// The whole claim — look, then adopt or insert — under the one lock every
+    /// other write to this index already takes (issue #759).
+    ///
+    /// That lock is what makes it atomic here, and it is enough: the `fs`
+    /// backend is single-process per data directory by documented contract (see
+    /// `docs/spec/runtime/storage.md`), so there is no second writer for it to
+    /// miss. The other two backends have to reach for a transaction and an index
+    /// respectively because their deployments have one.
+    ///
+    /// Before this, the same claim was a `tree()` read in the caller followed by
+    /// a plain [`create`](WorkspaceStore::create). The read was honest about the
+    /// instant it happened and the create acted on it later; on this backend
+    /// `reject_path_collision` then refused the loser, so a concurrent publish
+    /// failed spuriously instead of adopting the folder it wanted.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        use crate::ports::workspace::{FolderClaim, existing_folder_claim, new_folder};
+        reject_unsafe_name(name)?;
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        if let Some(parent) = parent {
+            match index.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        if let Some(existing) = existing_folder_claim(index.values(), parent, name)? {
+            return Ok(FolderClaim::Adopted(existing));
+        }
+        let node = new_folder(name, parent, origin);
+        // Still checked, and it is not the sibling check above repeated: this
+        // backend renders a node's *path* from the chain of names above it, so a
+        // legacy tree carrying duplicate-named ancestors can put two different
+        // `(parent, name)` pairs on one directory. Refusing keeps the claim
+        // fail-closed in exactly the case the sibling check cannot see.
+        reject_path_collision(&index, &node.id, &node.name, parent)?;
+        index.insert(node.id.clone(), node.clone());
+        let physical = self.physical_path(company, &index, &node.id)?;
+        tokio::fs::create_dir_all(&physical)
+            .await
+            .map_err(|e| io_err(&physical, e))?;
+        self.save_index(company, &index).await?;
+        Ok(FolderClaim::Created(node))
+    }
+
+    /// Writes the payload to its real path, then indexes it.
+    ///
+    /// **File first, index second — the same order the text path already uses.**
+    /// A crash between the two leaves a file on disk that the index does not
+    /// name: invisible to every reader, costing only disk, and overwritten by
+    /// the next create at that path. The opposite order would leave the index
+    /// naming a node whose bytes are absent — a download that 404s from a tree
+    /// that says the file is there. Only one of those is survivable, so it is
+    /// the one this picks; there is no sweep because there is nothing a sweep
+    /// would protect a reader from.
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<WorkspaceNode> {
+        let node = crate::ports::workspace::stamped_binary(node, bytes)?;
+        reject_unsafe_name(&node.name)?;
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        if index.contains_key(&node.id) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "workspace node {} already exists",
+                node.id
+            )));
+        }
+        if let Some(parent) = &node.parent_id {
+            match index.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        reject_path_collision(&index, &node.id, &node.name, node.parent_id.as_deref())?;
+        index.insert(node.id.clone(), node.clone());
+        // The same sanitized derivation the text path uses, so a binary node
+        // cannot reach a path a note could not.
+        let physical = self.physical_path(company, &index, &node.id)?;
+        write_atomic_bytes(&physical, bytes).await?;
+        self.save_index(company, &index).await?;
+        // The stamped node, so the digest a caller records can only have come
+        // from the store (issue #668).
+        Ok(node)
+    }
+
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: WorkspaceOrigin,
+    ) -> Result<WorkspaceNode> {
+        let path = self.bundle(company).workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        let node = index
+            .get_mut(id)
+            .ok_or_else(|| OpenCompanyError::CompanyNotFound(format!("workspace node {id}")))?;
+        crate::ports::workspace::rebind_binary(node, bytes, mime, author)?;
+        let node = node.clone();
+        let file = self.physical_path(company, &index, id)?;
+        write_atomic_bytes(&file, bytes).await?;
+        self.save_index(company, &index).await?;
+        Ok(node)
+    }
+
+    /// Streams the file straight off disk — the payload is never resident.
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+        let index = self.load_index(company).await?;
+        let Some(node) = index.get(id).cloned() else {
+            return Ok(None);
+        };
+        if !node.is_binary() {
+            return Ok(None);
+        }
+        let path = self.physical_path(company, &index, id)?;
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            // The index names it but the bytes are gone — the benign half of the
+            // write ordering above, seen from the read side. Reported as absent
+            // rather than as an I/O error: there is no payload to serve, which
+            // is exactly what `None` means here.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let stream = tokio_util::io::ReaderStream::new(file);
+        Ok(Some((
+            node,
+            Box::pin(futures::StreamExt::map(stream, |chunk| {
+                chunk.map_err(|e| {
+                    OpenCompanyError::Store(format!("reading a workspace blob failed: {e}"))
+                })
+            })),
+        )))
     }
 
     async fn rename_move(
@@ -1077,6 +1587,10 @@ impl WorkspaceStore for FsOps {
                 ));
             }
         }
+        let current = index.get(id).expect("node present");
+        let target_name = name.unwrap_or(&current.name);
+        let target_parent = parent.unwrap_or(current.parent_id.as_deref());
+        reject_path_collision(&index, id, target_name, target_parent)?;
         let old_physical = self.physical_path(company, &index, id)?;
         {
             let node = index.get_mut(id).expect("node present");
@@ -1104,6 +1618,99 @@ impl WorkspaceStore for FsOps {
         }
         self.save_index(company, &index).await?;
         Ok(node)
+    }
+
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: Option<&str>,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<WorkspaceNode>> {
+        reject_unsafe_name(name)?;
+        let path = self.bundle(company).workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        let Some(replacement) = index.get(replacement_id).cloned() else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {replacement_id}"
+            )));
+        };
+        if replacement.kind != NodeKind::File {
+            return Err(OpenCompanyError::InvalidRequest(
+                "only files can be promoted from a staging path".to_string(),
+            ));
+        }
+
+        // The two readings of `expected_id`, decided under the same index lock
+        // that the install below runs under — so a concurrent publisher cannot
+        // slip between the question and the answer.
+        let expected = expected_id.and_then(|id| index.get(id).cloned());
+        let still_current = match expected_id {
+            Some(_) => expected.as_ref().is_some_and(|node| {
+                node.kind == NodeKind::File
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            }),
+            // Issue #697: `None` asserts the name is unoccupied. Any node
+            // already holding it — of either kind, however it got there — loses
+            // this caller the compare-and-swap. The staged node is excluded
+            // because it is the thing being installed and still carries its
+            // staging name.
+            None => !index.values().any(|node| {
+                node.id != replacement.id
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            }),
+        };
+        if !still_current {
+            // The compare-and-swap lost. The staging node is private to this
+            // operation, so consume it while the same index lock is held.
+            let physical = self.physical_path(company, &index, replacement_id)?;
+            if tokio::fs::try_exists(&physical).await.unwrap_or(false) {
+                tokio::fs::remove_file(&physical)
+                    .await
+                    .map_err(|e| io_err(&physical, e))?;
+            }
+            index.remove(replacement_id);
+            self.save_index(company, &index).await?;
+            return Ok(None);
+        }
+
+        let staged_physical = self.physical_path(company, &index, replacement_id)?;
+        let mut promoted = replacement;
+        promoted.name = name.to_string();
+        promoted.updated_at_millis = now_millis();
+
+        // Where the staged payload lands differs by mode. Replacing, it is the
+        // superseded node's own path — that rename IS the swap boundary, which
+        // is why the destination is computed before the index changes.
+        // Creating, there is no such path yet, so the promoted node is named in
+        // the index first and its final path derived from that.
+        let destination = match expected.as_ref() {
+            Some(node) => self.physical_path(company, &index, &node.id)?,
+            None => {
+                index.insert(promoted.id.clone(), promoted.clone());
+                self.physical_path(company, &index, &promoted.id)?
+            }
+        };
+
+        // `rename` is the filesystem compare-and-swap boundary: on the
+        // supported Unix server platforms it replaces the destination in one
+        // operation, so a payload reader sees either the old bytes or the new
+        // bytes and never an absent final path. If it fails, the index is still
+        // untouched on disk — nothing above here has been saved — and the old
+        // deliverable, where there was one, remains authoritative.
+        tokio::fs::rename(&staged_physical, &destination)
+            .await
+            .map_err(|e| io_err(&destination, e))?;
+        if let Some(node) = expected {
+            index.remove(&node.id);
+        }
+        index.insert(promoted.id.clone(), promoted.clone());
+        self.save_index(company, &index).await?;
+        Ok(Some(promoted))
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
@@ -1213,6 +1820,96 @@ fn descendants(index: &HashMap<String, WorkspaceNode>, id: &str) -> HashSet<Stri
         }
     }
     out
+}
+
+/// The workspace-relative chain of names a node resolves to, or would.
+///
+/// This is [`FsOps::physical_path`]'s derivation with the constant
+/// `workspace/` prefix left off, and it exists separately because the check
+/// below needs the path of a node that is *not in the index yet*. Two nodes
+/// alias exactly when their chains are equal, so comparing chains and
+/// comparing the paths they build is the same question.
+fn name_chain(
+    index: &HashMap<String, WorkspaceNode>,
+    name: &str,
+    parent: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut names = vec![name.to_string()];
+    let mut cursor = parent.map(str::to_string);
+    let mut guard = 0;
+    while let Some(node_id) = cursor {
+        let node = index.get(&node_id).ok_or_else(|| {
+            OpenCompanyError::Store(format!("dangling workspace parent {node_id}"))
+        })?;
+        names.push(node.name.clone());
+        cursor = node.parent_id.clone();
+        guard += 1;
+        if guard > 10_000 {
+            return Err(OpenCompanyError::Store(
+                "workspace cycle detected".to_string(),
+            ));
+        }
+    }
+    names.reverse();
+    Ok(names)
+}
+
+/// Refuses a name/parent that would resolve to a physical path another node
+/// already holds.
+///
+/// Node ids are the workspace's durable identity, but the filesystem backend
+/// intentionally mirrors the operator-visible folder/name tree on disk. That
+/// representation cannot safely carry two nodes on one path: the second create
+/// would overwrite the first node's bytes while leaving both metadata rows
+/// behind, and a later read would serve one payload under the other row's size
+/// and digest (issue #666).
+///
+/// # Why the whole path, and not the sibling name
+///
+/// Matching on `(parent_id, name)` catches the ordinary case and misses the one
+/// that is already in the field. A tree may hold **duplicate-named folders** —
+/// [`crate::company::workspace_scaffold`] finds them, refuses to resolve them
+/// and deliberately leaves them standing, and an index written before this
+/// check existed can carry them. Two nodes under two roots both named `Desks`
+/// are not siblings by `parent_id`, and their paths are nevertheless the same
+/// string. Comparing the resolved chain closes that, and subsumes the sibling
+/// case: equal parents plus equal names is equal chains.
+///
+/// # Why only the moved node's own path is checked
+///
+/// Renaming a folder moves its whole subtree, but a chain is determined by its
+/// prefix: if a descendant's new chain equalled some other node's chain, their
+/// prefixes would be equal too — which is a collision on the renamed node's own
+/// chain, and is refused here. So a descendant cannot collide unless its
+/// ancestor already does.
+///
+/// A node whose own chain cannot be derived (a dangling parent in a damaged
+/// index) is skipped rather than propagated: it resolves to no path, so it can
+/// alias nothing, and one unreachable row must not make every write fail.
+///
+/// The check runs while the workspace-index lock is held by every caller, so
+/// two concurrent creates cannot both observe an available path. `self_id` is
+/// excluded so a no-op rename remains valid.
+fn reject_path_collision(
+    index: &HashMap<String, WorkspaceNode>,
+    self_id: &str,
+    name: &str,
+    parent: Option<&str>,
+) -> Result<()> {
+    let candidate = name_chain(index, name, parent)?;
+    let taken = index
+        .values()
+        .filter(|node| node.id != self_id)
+        .any(|node| {
+            name_chain(index, &node.name, node.parent_id.as_deref())
+                .is_ok_and(|chain| chain == candidate)
+        });
+    if taken {
+        return Err(OpenCompanyError::Conflict(format!(
+            "workspace already contains `{name}` in that folder"
+        )));
+    }
+    Ok(())
 }
 
 /// Rejects a node name that contains a path separator or a parent-dir hop, so a
@@ -1331,6 +2028,174 @@ mod test {
             .expect("tempdir")
     }
 
+    fn workspace_node(id: &str, name: &str, kind: NodeKind, parent: Option<&str>) -> WorkspaceNode {
+        WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            parent_id: parent.map(str::to_string),
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+        }
+    }
+
+    /// A file node carrying the mime a binary write requires; `size` and
+    /// `sha256` are the store's to compute.
+    fn binary_node(id: &str, name: &str, parent: Option<&str>) -> WorkspaceNode {
+        WorkspaceNode {
+            mime: Some("application/pdf".to_string()),
+            ..workspace_node(id, name, NodeKind::File, parent)
+        }
+    }
+
+    async fn collect_stream(stream: crate::ports::workspace::BlobStream) -> Vec<u8> {
+        use futures::StreamExt;
+        let mut stream = stream;
+        let mut out = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            out.extend_from_slice(&chunk.expect("chunk"));
+        }
+        out
+    }
+
+    /// Two root folders under one name, written straight to the index.
+    ///
+    /// `create` refuses to *make* this shape now (issue #666), but it is
+    /// reachable in the field: an index written before that refusal existed
+    /// carries it, and `workspace_scaffold` finds such roots, declines to
+    /// resolve them and deliberately leaves them standing. So the state is
+    /// seeded rather than requested.
+    async fn seed_duplicate_roots(ops: &FsOps, company: &CompanyId) {
+        let mut index = HashMap::new();
+        for id in ["root-a", "root-b"] {
+            index.insert(
+                id.to_string(),
+                workspace_node(id, "Desks", NodeKind::Folder, None),
+            );
+        }
+        ops.bundle(company)
+            .ensure_dirs()
+            .await
+            .expect("bundle dirs");
+        ops.save_index(company, &index).await.expect("seed index");
+    }
+
+    /// Issue #666, one level below the sibling case: nodes under two
+    /// same-named folders are not siblings by `parent_id`, and still resolve to
+    /// one path. A check keyed on `(parent_id, name)` admits the second and
+    /// lets it overwrite the first node's bytes.
+    #[tokio::test]
+    async fn equal_names_under_duplicate_roots_cannot_claim_one_path() {
+        let root_dir = tmp_root();
+        let ops = FsOps::new(root_dir.path());
+        let company = CompanyId::new("acme");
+        seed_duplicate_roots(&ops, &company).await;
+
+        ops.create_binary(
+            &company,
+            &binary_node("first", "report.pdf", Some("root-a")),
+            b"the first payload",
+        )
+        .await
+        .expect("the first child of the first root is fine");
+
+        let err = ops
+            .create_binary(
+                &company,
+                &binary_node("second", "report.pdf", Some("root-b")),
+                b"a different payload entirely",
+            )
+            .await
+            .expect_err("the second root's child resolves to the same path");
+        assert!(
+            matches!(err, OpenCompanyError::Conflict(_)),
+            "a path already in use is a conflict, not a store error: {err:?}"
+        );
+
+        let (node, stream) = ops
+            .read_bytes(&company, "first")
+            .await
+            .expect("read")
+            .expect("the first node still exists");
+        assert_eq!(
+            collect_stream(stream).await,
+            b"the first payload",
+            "the refused create must not have overwritten the first payload"
+        );
+        assert_eq!(
+            node.size,
+            Some("the first payload".len() as u64),
+            "nor left the surviving node describing bytes it no longer holds"
+        );
+        assert!(
+            ops.tree(&company)
+                .await
+                .expect("tree")
+                .iter()
+                .all(|n| n.id != "second"),
+            "a refused create must not leave a metadata row behind"
+        );
+    }
+
+    /// The same path, reached by moving rather than creating.
+    #[tokio::test]
+    async fn a_move_cannot_claim_a_path_held_under_a_duplicate_root() {
+        let root_dir = tmp_root();
+        let ops = FsOps::new(root_dir.path());
+        let company = CompanyId::new("acme");
+        seed_duplicate_roots(&ops, &company).await;
+
+        ops.create_binary(
+            &company,
+            &binary_node("first", "report.pdf", Some("root-a")),
+            b"the first payload",
+        )
+        .await
+        .expect("create under the first root");
+        ops.create_binary(
+            &company,
+            &binary_node("mover", "draft.pdf", Some("root-b")),
+            b"a different payload entirely",
+        )
+        .await
+        .expect("a differently-named child of the second root is fine");
+
+        let err = ops
+            .rename_move(&company, "mover", Some("report.pdf"), None)
+            .await
+            .expect_err("renaming it onto the other root's path is refused");
+        assert!(
+            matches!(err, OpenCompanyError::Conflict(_)),
+            "expected a conflict: {err:?}"
+        );
+
+        let (_, stream) = ops
+            .read_bytes(&company, "first")
+            .await
+            .expect("read")
+            .expect("the node whose path was targeted still exists");
+        assert_eq!(
+            collect_stream(stream).await,
+            b"the first payload",
+            "the refused move must not have overwritten it"
+        );
+        let (moved, stream) = ops
+            .read_bytes(&company, "mover")
+            .await
+            .expect("read")
+            .expect("and the mover still exists");
+        assert_eq!(moved.name, "draft.pdf", "under its original name");
+        assert_eq!(
+            collect_stream(stream).await,
+            b"a different payload entirely",
+            "with its own bytes"
+        );
+    }
+
     #[tokio::test]
     async fn conformance_task_store() {
         let root_dir = tmp_root();
@@ -1379,6 +2244,13 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_workflow_revision_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workflow_run_output_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workflow_run_output_store(Arc::new(FsOps::new(&root))).await;
     }
 
     #[tokio::test]
@@ -1444,10 +2316,51 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_read_state_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_read_state_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_notification_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_notification_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
     async fn conformance_workspace_store() {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_workspace_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_binary_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_binary_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_folder_claims() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_folder_claims(Arc::new(FsOps::new(&root))).await;
+    }
+
+    /// Issue #887, and the backend the case was written against: this is the
+    /// one that failed it. Node content was written with a bare
+    /// `tokio::fs::write`, so a reader inside the `O_TRUNC` window saw a
+    /// prefix — visibly when the cut split a codepoint, silently when it did
+    /// not. Multi-threaded because the race is between two blocking-pool
+    /// threads, which a current-thread runtime makes far rarer.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_never_tears() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_read_never_tears(Arc::new(FsOps::new(&root))).await;
     }
 
     #[tokio::test]
@@ -1470,6 +2383,9 @@ mod test {
                 updated_at_millis: now,
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             None,
         )
@@ -1486,6 +2402,9 @@ mod test {
                 updated_at_millis: now,
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             Some("# Voice"),
         )

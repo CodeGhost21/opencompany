@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Real Estate Company harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -7,32 +7,17 @@ name = "Agentic Real Estate Company"
 output = "Underwritten deals and managed properties"
 human_role = "Purchase approvals"
 
-[[agent]]
-id = "property_scout"
-role = "Property Scout"
-description = "Find and screen candidate properties."
-
-[[agent]]
-id = "neighborhood_analyst"
-role = "Neighborhood Analyst"
-description = "Analyze neighborhoods, comps, and trends."
-
-[[agent]]
-id = "deal_underwriter"
-role = "Deal Underwriter"
-description = "Underwrite deals and model returns."
-
-[[agent]]
-id = "contractor_coordinator"
-role = "Contractor Coordinator"
-description = "Coordinate contractors and renovations."
-
-[[agent]]
-id = "tenant_manager"
-role = "Tenant Manager"
-description = "Manage tenants and property operations."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["acquisition_pipeline"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

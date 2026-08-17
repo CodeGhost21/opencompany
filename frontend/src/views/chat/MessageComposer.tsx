@@ -11,15 +11,31 @@ import {
   Strikethrough,
 } from "lucide-react";
 
+import type { TaskDeliverable } from "@/api/tasks";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 interface Props {
   placeholder: string;
   disabled?: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, deliverable?: TaskDeliverable) => void;
   /** Compact form, for the narrower thread panel. */
   compact?: boolean;
+  /**
+   * Show the once-vs-workflow control (issue #580), opt-in per composer.
+   *
+   * The channel and DM composers ask for it — either can open a board card, so
+   * "do it once" versus "build me the workflow" belongs at both prompt boxes.
+   * The thread and copilot composers never carry it, so their `onSend` stays a
+   * plain `(text)` and their wire shape is unchanged.
+   *
+   * DMs were omitted when #580 landed (issue #845). Nothing downstream was
+   * scoped to channels — the chat route reads `deliverable` off the payload
+   * whatever thread it came from — so a DM asking for a workflow was sent as a
+   * `once` card, dispatched to a desk agent holding no authoring tool, and came
+   * back as a refusal. The control was the only part missing.
+   */
+  deliverableChoice?: boolean;
 }
 
 /** The markdown a toolbar button wraps the selection in. */
@@ -38,15 +54,26 @@ const WRAPS = [
  * with the draft up to a cap before scrolling. Enter sends; Shift+Enter breaks
  * the line, which is the convention every chat client shares.
  */
-export function MessageComposer({ placeholder, disabled, onSend, compact }: Props) {
+export function MessageComposer({
+  placeholder,
+  disabled,
+  onSend,
+  compact,
+  deliverableChoice,
+}: Props) {
   const [draft, setDraft] = useState("");
+  // The once-vs-workflow choice for the NEXT line only. It resets to "once"
+  // after every send so a workflow request never silently carries into the
+  // ordinary message after it — each build is an explicit, per-line decision.
+  const [deliverable, setDeliverable] = useState<TaskDeliverable>("once");
   const input = useRef<HTMLTextAreaElement>(null);
 
   function send() {
     const text = draft.trim();
     if (!text || disabled) return;
     setDraft("");
-    onSend(text);
+    onSend(text, deliverableChoice ? deliverable : undefined);
+    setDeliverable("once");
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -131,6 +158,36 @@ export function MessageComposer({ placeholder, disabled, onSend, compact }: Prop
         />
 
         <div className="flex items-center gap-0.5 px-2 pb-1.5">
+          {deliverableChoice && !compact && (
+            <div
+              className="mr-1 flex items-center gap-0.5 rounded-lg border p-0.5"
+              role="group"
+              aria-label="What this should produce"
+            >
+              {(
+                [
+                  { value: "once", label: "Do it once" },
+                  { value: "workflow", label: "Build me the workflow" },
+                ] as const
+              ).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  aria-pressed={deliverable === option.value}
+                  onClick={() => setDeliverable(option.value)}
+                  data-testid={`composer-deliverable-${option.value}`}
+                  className={cn(
+                    "rounded-md px-2 py-1 text-2xs font-medium transition-colors",
+                    deliverable === option.value
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
           <Button
             variant="ghost"
             size="icon"
@@ -163,7 +220,7 @@ export function MessageComposer({ placeholder, disabled, onSend, compact }: Prop
         </div>
       </div>
       {!compact && (
-        <p className="mt-1.5 px-1 text-[11px] text-muted-foreground">
+        <p className="mt-1.5 px-1 text-2xs text-muted-foreground">
           <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
           <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new line
         </p>

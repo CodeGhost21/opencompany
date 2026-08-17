@@ -34,6 +34,23 @@ type Approval {
 	range that would overflow GraphQL's `Int`.
 	"""
 	atMillis: Float!
+	"""
+	Whether `amountUsd` was withheld from this reader by their role (#618).
+	
+	Carried for the same reason it is on the REST summary: a `null` amount
+	otherwise means "this effect involves no money", and a Member looking at
+	a withheld payment would read it as a free action.
+	"""
+	contentsHidden: Boolean!
+	"""
+	The workflow run waiting on this approval, when one is (issue #880).
+	
+	Structural — a run id, nothing more — and it is what lets a reader join
+	a card on the Approvals page back to the run that opened it. Null for
+	every park with no workflow behind it (a chat turn, a scheduler tick, a
+	board task's attempt), which is the majority.
+	"""
+	workflowRunId: String
 }
 
 """
@@ -98,6 +115,11 @@ type Company {
 	pendingApprovals: Int!
 	"""
 	The approvals currently awaiting the operator for this company.
+	
+	Contents are role-gated exactly as on the REST list (issue #618). This
+	is the surface that made the question worth asking: it maps the same
+	projection, so a redaction applied only to the REST handlers would leave
+	the whole boundary reachable through one GraphQL field.
 	"""
 	approvals: [Approval!]!
 	"""
@@ -132,6 +154,11 @@ type Company {
 	One workspace file by id, with content and backlinks; null when absent.
 	"""
 	workspaceFile(id: ID!): WorkspaceFile
+	"""
+	Which workspace notes mention `query`, matched case-insensitively as a
+	substring of note names and note bodies (issue #607).
+	"""
+	workspaceSearch(query: String!, prefix: String, limit: Int): WorkspaceSearchResults!
 	"""
 	The company-brain memory facts.
 	"""
@@ -360,6 +387,36 @@ type FsNode {
 	Who last wrote the node's content (a rename or move does not change it).
 	"""
 	updatedBy: WorkspaceOrigin!
+	"""
+	The payload's media type — **set only on a binary node** (issue #553),
+	and null on a folder or a prose note.
+	
+	Its presence is the whole test for "this node holds bytes, not text", and
+	without it no GraphQL consumer could discover that binaries exist at all:
+	a payload's text `read` is an empty body by contract, so a 4 MB PNG and a
+	genuinely empty note were the same answer on this surface (issue #669).
+	The REST `FsNode` has carried these three since #553; this is the field
+	set catching up, not a new concept.
+	"""
+	mime: String
+	"""
+	The payload's length in bytes; null unless `mime` is set.
+	
+	`Float`, not `Int`, because the store's `size` is a `u64` and GraphQL's
+	`Int` is 32-bit — the same choice `usage` and `Approval.atMillis` made,
+	for the same reason. Today's 64 MiB per-write cap fits in an `Int`; the
+	cap is configurable and the field should not be the thing that stops it
+	being raised.
+	"""
+	size: Float
+	"""
+	The payload's sha256, the same digest the blob route serves as its
+	`ETag`; null unless `mime` is set.
+	
+	This is what makes "the bytes changed" observable to a consumer that
+	cannot see the bytes — a re-publish keeps the node id and changes this.
+	"""
+	sha256: String
 }
 
 type Inbox {
@@ -1102,6 +1159,49 @@ type WorkspaceOrigin {
 	The agent's roster id — set only when `kind` is `agent`.
 	"""
 	agentId: String
+}
+
+"""
+One workspace search hit (issue #607).
+
+The node is nested rather than flattened: `FsNode` is already the projection
+every other workspace read hands back, and re-declaring its fields here would
+be a second copy to keep in step. What search adds is the two things only a
+search knows — where the node sits, and why it came back.
+"""
+type WorkspaceSearchHit {
+	"""
+	The matching node.
+	"""
+	node: FsNode!
+	"""
+	Its logical path, e.g. `Standards/Engineering.md`.
+	"""
+	path: String!
+	"""
+	`name` or `content`.
+	"""
+	matched: String!
+	"""
+	Text around the first body match; null for a name match, a folder and a
+	binary node.
+	"""
+	excerpt: String
+}
+
+"""
+A page of workspace search hits, plus how many matched in total.
+"""
+type WorkspaceSearchResults {
+	"""
+	The hits: name matches first, then content matches, freshest first
+	within each group.
+	"""
+	hits: [WorkspaceSearchHit!]!
+	"""
+	Matches before the limit was applied.
+	"""
+	total: Int!
 }
 
 """

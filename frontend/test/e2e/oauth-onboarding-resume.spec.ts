@@ -62,8 +62,23 @@ test("a cancelled handshake lands back in the console, not on a dead page", asyn
     .poll(() => new URL(page.url()).searchParams.get("connect_error"))
     .toBeNull();
 
-  // Connecting is still offered: the failure is a retry, not a terminal state.
-  await expect(page.getByRole("button", { name: "Connect" }).first()).toBeEnabled();
+  // The grid is rendered and usable — the failure was a bounce-back, not a
+  // terminal state.
+  //
+  // Issue #582 collapsed the page's two provider lists into one, so this asserts
+  // the surviving grid's heading rather than a category section heading from the
+  // catalogue grid that used to sit below it. The categories did not go away —
+  // they are filter chips on the one grid now.
+  await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible();
+
+  // Issue #599: this used to assert `getByRole("button", { name: "Connect" })`
+  // was enabled. That button was only there because of the bug — this harness
+  // company declares no `[[connection]]`, the binary carries no `composio`
+  // feature and `host.sh` passes no `OPENCOMPANY_OAUTH_*`, so no route could
+  // complete and clicking it 400'd with "provider is not enabled on this host".
+  // A tile with no route now says so instead, which is what makes the retry
+  // offer honest rather than merely present.
+  await expect(page.getByTestId("provider-slack")).toContainText(/not available here/i);
 });
 
 test("an unknown failure code still produces a usable message", async ({ page }) => {

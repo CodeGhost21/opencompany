@@ -41,6 +41,8 @@ pub(crate) async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -186,6 +188,8 @@ async fn state_with_rich_company(home: &std::path::Path) -> AppState {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -246,6 +250,7 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
         name: "Jamie".to_string(),
         role: "Growth".to_string(),
         description: None,
+        tools: Vec::new(),
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -329,12 +334,14 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         name: "Zeroed".to_string(),
         role: "Growth".to_string(),
         description: None,
+        tools: Vec::new(),
     });
     record.overlay_agents.push(OverlayAgent {
         id: "uncapped".to_string(),
         name: "Uncapped".to_string(),
         role: "Ops".to_string(),
         description: None,
+        tools: Vec::new(),
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -476,7 +483,7 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
     let app = router(state);
     let value = query(
         app,
-        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 10) { items { text } } } } }"}"#,
+        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 1) { total items { text } } } } }"}"#,
     )
     .await;
     let texts: Vec<&str> = value["data"]["company"]["chat"]["history"]["items"]
@@ -485,11 +492,55 @@ async fn chat_history_finds_agent_replies_under_general_and_main() {
         .iter()
         .map(|m| m["text"].as_str().unwrap())
         .collect();
-    assert!(texts.contains(&"canonical id"), "missing: {texts:?}");
-    assert!(
-        texts.contains(&"console default-thread id"),
-        "missing: {texts:?}"
+    assert_eq!(
+        texts,
+        vec!["console default-thread id"],
+        "the page must contain only the newest matching message"
     );
+    assert_eq!(
+        value["data"]["company"]["chat"]["history"]["total"], 2,
+        "the GraphQL page keeps its unpaginated total without making the REST reader scan it"
+    );
+}
+
+/// A GraphQL caller controls `first`, but a history page must have the same
+/// hard ceiling as REST so a huge integer cannot become a huge Vec reservation.
+#[tokio::test]
+async fn chat_history_clamps_an_oversized_page_request() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    for i in 0..201 {
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                crate::ports::types::CompanyEvent::AgentReply {
+                    parent: None,
+                    task_id: None,
+                    chat_id: "General".to_string(),
+                    agent_id: "maya".to_string(),
+                    text: format!("message {i}"),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ chat(id:\"general\"){ history(first: 2147483647) { total items { text } } } } }"}"#,
+    )
+    .await;
+    let items = value["data"]["company"]["chat"]["history"]["items"]
+        .as_array()
+        .unwrap();
+    assert_eq!(items.len(), 200, "the requested page is capped");
+    assert_eq!(items[0]["text"], "message 1");
+    assert_eq!(items[199]["text"], "message 200");
+    assert_eq!(value["data"]["company"]["chat"]["history"]["total"], 201);
 }
 
 /// Issue #246 + #65: the card a reply opened is projected on **both** history
@@ -744,6 +795,8 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -810,12 +863,12 @@ async fn memory_page_reflects_upserts() {
 /// An unpopulated surface resolves to `[]`, never to `null` or an error.
 ///
 /// `workspaceTree` is the exception and states why: since issue #551 a company
-/// is never born with an empty tree — boot scaffolds the reserved `Agents/` and
-/// `Desks/` roots — so what it proves here is that the resolver answers with
-/// exactly that and invents nothing else. A member folder is *not* part of that
-/// baseline; this mints one to pin the authorship projection (#326), which is
-/// the only place in the GraphQL surface where `WorkspaceOrigin` is rendered
-/// with an agent id.
+/// is never born with an empty tree — boot scaffolds the reserved `Agents/`
+/// root (and, until issue #645, an empty `Desks/` beside it) — so what it
+/// proves here is that the resolver answers with exactly that and invents
+/// nothing else. A member folder is *not* part of that baseline; this mints one
+/// to pin the authorship projection (#326), which is the only place in the
+/// GraphQL surface where `WorkspaceOrigin` is rendered with an agent id.
 #[tokio::test]
 async fn empty_surfaces_resolve_to_empty_lists() {
     let home_dir = home();
@@ -842,15 +895,13 @@ async fn empty_surfaces_resolve_to_empty_lists() {
         .map(|node| node["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["Agents", "Desks", "maya"]);
-    for root in ["Agents", "Desks"] {
-        let node = tree
-            .iter()
-            .find(|node| node["name"] == serde_json::json!(root))
-            .unwrap();
-        assert_eq!(node["createdBy"]["kind"], "seed");
-        assert!(node["createdBy"]["agentId"].is_null());
-    }
+    assert_eq!(names, vec!["Agents", "maya"]);
+    let root = tree
+        .iter()
+        .find(|node| node["name"] == serde_json::json!("Agents"))
+        .unwrap();
+    assert_eq!(root["createdBy"]["kind"], "seed");
+    assert!(root["createdBy"]["agentId"].is_null());
     let folder = tree
         .iter()
         .find(|node| node["name"] == serde_json::json!("maya"))
@@ -1039,6 +1090,8 @@ async fn skills_and_workflows_resolve_from_source_dir() {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1113,6 +1166,8 @@ async fn company_skills_project_the_pinned_snapshot_of_a_registry_install() {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1228,6 +1283,8 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
                     .to_string(),
             }],
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1322,6 +1379,8 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
                     .to_string(),
             }],
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1379,6 +1438,82 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
     assert_eq!(rest_ids, gql_ids, "REST and GraphQL disagree on the id set");
 }
 
+/// `Company.workspaceSearch` (issue #607), over the same shared helper the REST
+/// route and the agent tool use.
+///
+/// The hit shape is what this pins: a nested `FsNode`, the logical path a flat
+/// hit list cannot derive from `parentId`, what matched, and the excerpt — plus
+/// `total`, so a caller can tell a full answer from a first page.
+#[tokio::test]
+async fn workspace_search_resolves_hits_with_paths_and_totals() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+
+    let id = CompanyId::new("acme");
+    let workspace = state.registry().get(&id).unwrap().workspace().clone();
+    let folder = crate::ports::workspace::WorkspaceNode {
+        id: "f-std".to_string(),
+        name: "Standards".to_string(),
+        kind: crate::ports::workspace::NodeKind::Folder,
+        parent_id: None,
+        updated_at_millis: 1_000,
+        created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    workspace.create(&id, &folder, None).await.unwrap();
+    let note = crate::ports::workspace::WorkspaceNode {
+        id: "n-support".to_string(),
+        name: "Support.md".to_string(),
+        kind: crate::ports::workspace::NodeKind::File,
+        parent_id: Some("f-std".to_string()),
+        ..folder.clone()
+    };
+    workspace
+        .create(&id, &note, Some("Escalate a REFUND request to the CEO."))
+        .await
+        .unwrap();
+
+    let app = router(state);
+    let value = query(
+        app.clone(),
+        r#"{"query":"{ company(id:\"acme\"){ workspaceSearch(query:\"refund\"){ total hits { path matched excerpt node { id name kind } } } } }"}"#,
+    )
+    .await;
+    let results = &value["data"]["company"]["workspaceSearch"];
+    assert_eq!(results["total"], 1, "{value}");
+    let hits = results["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["matched"], "content");
+    assert_eq!(hits[0]["node"]["id"], "n-support");
+    assert_eq!(hits[0]["node"]["kind"], "file");
+    assert!(
+        hits[0]["excerpt"].as_str().unwrap().contains("REFUND"),
+        "{value}"
+    );
+
+    // A name match carries no excerpt — null, not an empty string, so a client
+    // cannot mistake "no body matched" for "the body matched nothing".
+    let value = query(
+        app,
+        r#"{"query":"{ company(id:\"acme\"){ workspaceSearch(query:\"agents\"){ total hits { matched excerpt } } } }"}"#,
+    )
+    .await;
+    let hits = value["data"]["company"]["workspaceSearch"]["hits"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "the scaffolded `Agents` root matches: {value}"
+    );
+    assert_eq!(hits[0]["matched"], "name");
+    assert!(hits[0]["excerpt"].is_null(), "{value}");
+}
+
 /// The committed SDL snapshot freezes the read contract. Regenerate with
 /// `cargo test -- --ignored regenerate_sdl_snapshot` after any schema change.
 #[test]
@@ -1398,4 +1533,201 @@ fn regenerate_sdl_snapshot() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/graphql/schema.graphql");
     std::fs::write(&path, super::sdl()).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// A binary node is not a note, on either read surface (issue #669)
+// ---------------------------------------------------------------------------
+
+/// Mints a real binary node in the store, the way an upload or a publish does.
+async fn given_a_binary_node(state: &AppState, name: &str, mime: &str, bytes: &[u8]) -> String {
+    let id = CompanyId::new("acme");
+    let workspace = state.registry().get(&id).unwrap().workspace().clone();
+    let node = crate::ports::workspace::WorkspaceNode {
+        id: crate::ports::generate_id(),
+        name: name.to_string(),
+        kind: crate::ports::workspace::NodeKind::File,
+        parent_id: None,
+        updated_at_millis: 1_700_000_000_000,
+        created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        mime: Some(mime.to_string()),
+        size: None,
+        sha256: None,
+    };
+    workspace.create_binary(&id, &node, bytes).await.unwrap();
+    node.id
+}
+
+/// The headline of #669: `workspaceFile` reported a payload as an ordinary note
+/// with no content, so a 4 MB PNG and a genuinely empty note were the same
+/// response — on the surface whose entire job is to be unambiguous.
+///
+/// Asserted against the REST twin in the same test rather than in isolation.
+/// The two are documented as differing only in timestamp shape, and the bug was
+/// precisely that they disagreed about something much larger than that; a test
+/// that pinned only the GraphQL half would not notice them drifting apart again
+/// in the other direction.
+#[tokio::test]
+async fn graphql_and_rest_agree_that_a_binary_node_holds_no_text() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff];
+    let id = given_a_binary_node(&state, "hero.png", "image/png", png).await;
+
+    // GraphQL: an error naming the route that does serve the bytes, and no
+    // `content: ""` masquerading as an empty note.
+    let value = query(
+        router(state.clone()),
+        &format!(
+            r#"{{"query":"{{ company(id:\"acme\"){{ workspaceFile(id:\"{id}\"){{ name content }} }} }}"}}"#
+        ),
+    )
+    .await;
+    let errors = value["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a payload must not resolve as a note: {value}"));
+    let message = errors[0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("image/png") && message.contains("workspace/blob/"),
+        "the refusal must name the type and the route that works: {message}"
+    );
+    assert!(
+        value["data"]["company"]["workspaceFile"].is_null(),
+        "no half-answer alongside the error: {value}"
+    );
+
+    // REST, the twin, for the same node: the same refusal.
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/company/workspace/file/{id}"))
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let rest = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        rest.contains("image/png") && rest.contains("workspace/blob/"),
+        "REST must still refuse the same way: {rest}"
+    );
+}
+
+/// The other half of #669, and the reason refusing above is not merely a harder
+/// `null`: the tree now carries the three fields that let a consumer discover a
+/// binary exists **before** it asks for text it cannot have.
+///
+/// Without these the refusal would be a dead end — a GraphQL client would have
+/// no way to reach a payload at all, because nothing in the schema said payloads
+/// were a thing. The REST `FsNode` has carried them since #553.
+#[tokio::test]
+async fn the_tree_projects_a_binary_nodes_mime_size_and_digest() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let png: &[u8] = &[0x89, b'P', b'N', b'G', 0xff];
+    given_a_binary_node(&state, "hero.png", "image/png", png).await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ workspaceTree { name mime size sha256 } } }"}"#,
+    )
+    .await;
+    assert!(value["errors"].is_null(), "{value}");
+    let tree = value["data"]["company"]["workspaceTree"]
+        .as_array()
+        .unwrap();
+    let image = tree
+        .iter()
+        .find(|node| node["name"] == serde_json::json!("hero.png"))
+        .unwrap_or_else(|| panic!("the binary node is in the tree: {value}"));
+
+    assert_eq!(image["mime"], "image/png");
+    assert_eq!(
+        image["size"].as_f64().unwrap(),
+        png.len() as f64,
+        "the size the store computed, not the None this test sent in"
+    );
+    let sha = image["sha256"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a digest is projected: {image}"));
+    assert_eq!(sha.len(), 64, "the store's sha256, hex-encoded");
+}
+
+/// A folder and a prose note both leave all three null. The console reads
+/// `mime`'s **presence** as "render or download this instead of editing it", so
+/// a projection that invented an empty string here would put every note behind
+/// a download card.
+///
+/// Both are asserted because only one of them is a real test of the rule: a
+/// folder can never carry a payload, so its nulls are structural, whereas a note
+/// is a `File` exactly like the binary above and `mime` is the single field
+/// telling them apart.
+#[tokio::test]
+async fn a_prose_note_projects_no_binary_metadata() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = CompanyId::new("acme");
+    let workspace = state.registry().get(&id).unwrap().workspace().clone();
+    crate::company::workspace_scaffold::ensure_agent_folder(workspace.as_ref(), &id, "maya")
+        .await
+        .unwrap();
+
+    // A folder is the easy half. The note is the half that matters: it is a
+    // `File` like the payload above, so `mime`'s absence is the *only* thing
+    // separating the two, and a projection that reached for a default here
+    // would put every note in the company behind a download card.
+    let note = crate::ports::workspace::WorkspaceNode {
+        id: crate::ports::generate_id(),
+        name: "Charter.md".to_string(),
+        kind: crate::ports::workspace::NodeKind::File,
+        parent_id: None,
+        updated_at_millis: 1_700_000_000_000,
+        created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    workspace
+        .create(&id, &note, Some("# Charter\n\nprose, not bytes.\n"))
+        .await
+        .unwrap();
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ workspaceTree { name kind mime size sha256 } } }"}"#,
+    )
+    .await;
+    assert!(value["errors"].is_null(), "{value}");
+    let tree = value["data"]["company"]["workspaceTree"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the tree resolves: {value}"));
+    let find = |name: &str| {
+        tree.iter()
+            .find(|node| node["name"] == serde_json::json!(name))
+            .unwrap_or_else(|| panic!("`{name}` is in the tree: {value}"))
+            .clone()
+    };
+
+    let folder = find("maya");
+    assert!(folder["mime"].is_null(), "{folder}");
+    assert!(folder["size"].is_null(), "{folder}");
+    assert!(folder["sha256"].is_null(), "{folder}");
+
+    let note = find("Charter.md");
+    assert_eq!(
+        note["kind"], "file",
+        "a note is a file, not a folder: {note}"
+    );
+    assert!(note["mime"].is_null(), "{note}");
+    assert!(note["size"].is_null(), "{note}");
+    assert!(note["sha256"].is_null(), "{note}");
 }

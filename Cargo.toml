@@ -1,28 +1,13 @@
-[workspace]
-# The host is the single configurable backend. Business types are data-only
-# definitions under companies/ (a company.toml manifest + docs), loaded at
-# runtime via `opencompany serve --company companies/<name>` — not Cargo crates.
-# The operator console is a Vite/TypeScript app under frontend/.
-members = [".", "frontend/src-tauri"]
-resolver = "3"
-
-[workspace.package]
+# This package deliberately is not a Cargo workspace root. OpenHuman's modular
+# dependencies (TinyBus, TinyMemory, TinyDocs, and TinyWallet) each own nested
+# workspaces, which Cargo cannot resolve beneath another workspace root. The
+# Tauri package under frontend/src-tauri is therefore its own workspace.
+[package]
+name = "opencompany"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/opencompany"
-
-# Shared dependency each example harness inherits from the parent crate.
-[workspace.dependencies]
-opencompany = { path = "." }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-
-[package]
-name = "opencompany"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
 description = "Company operating system scaffold built on OpenHuman and TinyHumans Rust modules."
 readme = "README.md"
 keywords = ["company", "agents", "openhuman", "tinyagents", "axum"]
@@ -44,13 +29,37 @@ required-features = ["openhuman"]
 async-graphql = "7"
 async-graphql-axum = "7"
 async-trait = "0.1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+# `multipart` is what lets the workspace accept a file upload at all (issue
+# #553): the existing create route takes a JSON body, and JSON cannot carry
+# bytes. Scoped to the one upload route, which sets its own `DefaultBodyLimit`.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "tokio"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+# Direct, not incidental: `Bytes` is the chunk type of `ports::workspace::BlobStream`,
+# so it appears in the port's public signature and cannot be a transitive detail.
+bytes = "1"
+# Extension → media type for uploads and for publishing a generated file. The
+# alternative is a hand-rolled table that is wrong for everything nobody thought
+# of, on a value the console uses to decide whether to render or download.
+mime_guess = "2"
+# `ReaderStream`, which turns the file `FsOps` already has on disk into the
+# `BlobStream` the port returns — so a large download is never resident.
+# `compat` bridges the same helper onto GridFS, whose streams implement
+# `futures_io`'s traits rather than tokio's.
+tokio-util = { version = "0.7", features = ["compat", "io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 toml = "1"
+# The *writing* half of `config.toml`, for the first-run setup flow
+# (`src/server/setup.rs`). `toml::to_string` would round-trip the `ConfigFile` struct
+# and in doing so delete every comment in the file — including the commented
+# `[[default_mcp_server]]` PLACEHOLDER block that `docs/spec/runtime/config.md` treats
+# as the shipped source of truth for what an install registers. `toml_edit` mutates the
+# parsed document in place, so an operator's comments, key order and formatting all
+# survive a write. Pinned to the version `toml` itself builds on, so the dependency
+# graph gains no second copy.
+toml_edit = "0.25"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
@@ -76,7 +85,7 @@ fs2 = "0.4"
 # and `axum`, so this is a direct-use declaration, not new compilation.
 tower = { version = "0.5", features = ["util"] }
 
-tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite", "repl"] }
+tinyagents = { path = "vendor/openhuman/vendor/tinyagents", optional = true, features = ["sqlite"] }
 
 # WS4: openhuman embedded as a library (the harness). Only links under the
 # `openhuman` feature; the default build pulls none of this enormous native
@@ -94,10 +103,8 @@ tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite"
 # OpenHuman's own skill *read* tools (`list_workflows` / `describe_workflow` /
 # `read_workflow_resource`), which live in the gated `openhuman::skills`
 # domain. The feature carries no extra deps (`skills = []` upstream) — it only
-# recompiles the skills domain modules. Keep `vendor/tinyagents` on the
-# same commit openhuman's own `vendor/tinyagents` pins: the two are a
-# lockstep pair, and a skew fails to compile (only under this feature, which
-# CI does not build).
+# recompiles the skills domain modules. TinyAgents is consumed from OpenHuman's
+# own pin so both crates always share one trait identity and cannot drift.
 openhuman_core = { package = "openhuman", path = "vendor/openhuman", optional = true, default-features = false, features = ["skills", "mcp"] }
 # The openhuman `Provider`/`Memory` traits return `anyhow::Result` and log via
 # the `log` facade; both only link under the `openhuman` feature.
@@ -105,26 +112,36 @@ anyhow = { version = "1", optional = true }
 log = { version = "0.4", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 # Console MCP OAuth (issue #90): base64url for PKCE (S256 challenge + verifier
-# entropy) and URL building for the `/authorize` redirect. Both are already in
-# the tree via `openhuman_core` + `reqwest`, so pinning them as direct deps adds
-# no new Cargo.lock entries; they link only under the `mcp` feature.
+# entropy) and URL building for the `/authorize` redirect. Already in the tree
+# via `openhuman_core` + `reqwest`, so pinning it as a direct dep adds no new
+# Cargo.lock entry; it links only under the `mcp` feature.
 base64 = { version = "0.22", optional = true }
-url = { version = "2", optional = true }
+# NOT optional, deliberately (issue #673). `src/policy/consequence.rs` derives a
+# standing grant's host scope with this parser, and it must be *the same* parser
+# `reqwest` uses to perform the fetch — a grant key computed by a second,
+# hand-rolled reader is a bypass waiting to be found, which is precisely how the
+# `https://evil.com\@docs.rs/` confusion arose in review of that issue.
+#
+# Feature-gating it would put the security boundary behind `#[cfg]` and, worse,
+# make its regression tests vacuous in the default lane — a suite that cannot
+# run the hostile-input table is not protecting anything. Already in the tree
+# via `reqwest`, so this adds no new Cargo.lock entry either way.
+url = "2"
 
 # Issue #29 (epic #26): the tinyflows workflow engine, embedded directly. It is
 # host-agnostic and Config-free — `Capabilities` is a plain struct of trait
 # objects — so a company's workflows run on it without booting any OpenHuman
 # global `Config`/registry. Only links under the `openhuman` feature; the
 # `[patch.crates-io]` entry below already redirects it at the vendored copy
-# (`vendor/openhuman/vendor/tinyflows`, 0.6.x — 0.5.x before the #499 pin bump).
+# (`vendor/openhuman/vendor/tinyflows`, 0.8.x — 0.6.x before the #840 resync).
 # The requirement below tracks that major-for-0.x move because a `[patch]`
 # replaces the crate's SOURCE, not the version requirement it has to satisfy, so
 # a stale `0.5` fails resolution outright rather than quietly building the old
 # copy. Its `tinyagents` requirement resolves to the already-vendored
-# `vendor/tinyagents`, so this adds no new lockstep.
+# `vendor/openhuman/vendor/tinyagents`, so this adds no second copy.
 # We deliberately do NOT enable openhuman's own `flows` feature: that drags in
 # rhai + the builder tools, defeating the point of running tinyflows directly.
-tinyflows = { version = "0.6", optional = true }
+tinyflows = { version = "0.8", optional = true }
 
 # Issue #105: attribute-tolerant `<tool_call>` tag normalization in the harness
 # tool dispatcher. The staging model emits `<tool_call id="…">…</tool_call>`
@@ -138,7 +155,7 @@ regex = { version = "1", optional = true }
 
 # Optional network client shared by the feature-gated integrations below; the
 # default build links no network crates.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"], optional = true }
 
 # Real HMAC-SHA256 webhook signing. Pure-Rust, no system libs, no network beyond
 # the shared `reqwest` client used by `HttpWebhookSink`.
@@ -152,7 +169,7 @@ hmac = { version = "0.12", optional = true }
 # would push `#[cfg]` through StorageHandles, three backends, and the
 # conformance suite to defend nothing.
 sha2 = "0.10"
-getrandom = "0.2"
+getrandom = "0.4"
 
 # Argon2id password hashing. Unconditional for the same reason as sha2: a build
 # that cannot verify a password cannot log a human in. Pure-Rust RustCrypto, no
@@ -214,13 +231,21 @@ mail-parser = { version = "0.11", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 webpki-roots = { version = "1", optional = true }
 
-# Offline crypto for the tiny.place economy identity. All three are optional and
-# only link under the `tinyplace` feature; the default build pulls none of them.
+# Offline Ed25519 + base58. Not optional, because wallet sign-in
+# (`[users].mode = "wallet"`) is one of the three answers a company may configure
+# for how humans authenticate, and it verifies an Ed25519 signature over a
+# base58 address. Behind a feature, a shipped binary would parse
+# `mode = "wallet"`, report it on `/auth/config`, and then be unable to check a
+# single signature — a configuration the build silently does not implement.
+#
+# The tiny.place economy identity uses the same three for the same reason a
+# second implementation was never wanted: one signer, one base58 handling.
 # `rand_core`'s `getrandom` feature provides `OsRng` for seed generation; we call
-# `SigningKey::from_bytes` so dalek's own `rand_core` feature stays off.
-ed25519-dalek = { version = "2", default-features = false, features = ["std"], optional = true }
-bs58 = { version = "0.5", default-features = false, features = ["std"], optional = true }
-rand_core = { version = "0.6", default-features = false, features = ["getrandom"], optional = true }
+# `SigningKey::from_bytes` so dalek's own `rand_core` feature stays off. All
+# three are pure Rust with no native dependency.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+bs58 = { version = "0.5", default-features = false, features = ["std"] }
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 
 [features]
 # `oauth` ships in the standard build: the connection write routes
@@ -254,7 +279,7 @@ openhuman = ["tiny", "dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.
-mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64", "dep:url"]
+mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64"]
 # Image/video generation tools (issue #109, epic #26 Cell B). Bridges
 # OpenHuman's `media_generation` tools (`media_generate_image`,
 # `media_generate_video`, `media_list_models`) into a company agent's toolbelt
@@ -303,8 +328,7 @@ medulla = ["dep:reqwest"]
 # features share one reviewed signing implementation instead of growing a
 # second one, which is the outcome worth avoiding: two curves, or two base58
 # key parsers, is how a signature check comes to differ between two callers.
-identity = ["dep:ed25519-dalek", "dep:bs58", "dep:rand_core"]
-tinyplace = ["identity", "dep:reqwest"]
+tinyplace = ["dep:reqwest"]
 # The Agent Client Protocol: the `/acp` endpoint's session/permission surface
 # and the `RunTurn` implementation over an ACP agent.
 #
@@ -318,7 +342,7 @@ acp = ["openhuman"]
 # Dispatch folds an ACP turn into a `TurnOutcome`, which lives behind
 # `openhuman` along with the `RunTurn` seam it satisfies, and drives it over the
 # `AcpAgent` port from `acp`.
-runner = ["identity", "acp"]
+runner = ["acp"]
 # Real HTTP POST webhook delivery + HMAC-SHA256 signing. The `WebhookSink` trait,
 # the offline `RecordingWebhookSink`, and the deterministic default signer
 # compile without this; only `HttpWebhookSink`/`HmacSha256Signer` are gated here.
@@ -379,12 +403,21 @@ telegram = ["dep:reqwest"]
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).
 oauth = ["dep:reqwest"]
+# Issue #788: Chargebee billing integrated as backend service code, surfaced to
+# agents as callable tools. NOT a separate MCP server and NOT a second binary —
+# the integration lives in the tenant workload so the credential can be
+# per-company, held in that company's own SecretStore. The only gated dependency
+# is the shared `reqwest` client the REST calls use; `src/chargebee/` compiles
+# only under this feature, so the default build is unaffected.
+chargebee = ["dep:reqwest"]
+# Issue #789: PayPal wallet + transaction reads, same shape as `chargebee`
+# above — backend service code, per-company credentials, only `reqwest` gated.
+paypal = ["dep:reqwest"]
 
 [patch.crates-io]
-# opencompany's own vendored tinyagents (2.1.0). Satisfies openhuman's `^2.1`.
-# Kept on the exact commit openhuman's own `vendor/tinyagents` pins — see the
-# lockstep note on `openhuman_core` above.
-tinyagents = { path = "vendor/tinyagents" }
+# Reuse OpenHuman's own TinyAgents pin (2.1.0). This satisfies OpenHuman's
+# `^2.1` requirement while keeping a single checkout and crate identity.
+tinyagents = { path = "vendor/openhuman/vendor/tinyagents" }
 # WS4: openhuman's own Cargo.toml `[patch.crates-io]` is ignored when it is a
 # path dependency, so its vendored-submodule patches must be replicated here
 # (paths rebased onto `vendor/openhuman/vendor/...`). These entries are inert in
@@ -392,7 +425,10 @@ tinyagents = { path = "vendor/tinyagents" }
 # `openhuman` feature is on — so they leave the offline build unaffected.
 tinyflows = { path = "vendor/openhuman/vendor/tinyflows" }
 tinycortex = { path = "vendor/openhuman/vendor/tinycortex" }
-tinyjuice = { path = "vendor/openhuman/vendor/tinyjuice" }
+# `tinymemory-core` consumes the TinyCortex contract by version while
+# OpenHuman consumes the implementation by path. Keep both on one checkout so
+# their public trait identities remain identical.
+tinycortex-api = { path = "vendor/openhuman/vendor/tinycortex/api" }
 tinychannels = { path = "vendor/openhuman/vendor/tinychannels" }
 tinyplace = { path = "vendor/openhuman/vendor/tinyplace/sdk/rust" }
 # Arrived with the #499 pin bump, and is NOT a submodule — openhuman vendors it
@@ -407,3 +443,23 @@ whisper-rs-sys = { git = "https://github.com/tinyhumansai/whisper-rs-sys.git", b
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` only — for `#[tokio::test(start_paused = true)]`, which the git
+# deadline test needs to fire a timeout deterministically instead of racing a
+# real child process. Dev-only: under resolver v2 this feature is not unified
+# into normal builds, so the shipped binary is unchanged.
+tokio = { version = "1", features = ["test-util"] }
+
+# Issue #392: measures what a per-append flush costs, so the per-record-kind
+# durability policy rests on a number rather than an intuition. Default features
+# off — the plotting and rayon extras would be dead weight in every test lane's
+# dependency graph, and this bench reports numbers rather than charts.
+criterion = { version = "0.8", default-features = false, features = [
+  "cargo_bench_support",
+] }
+
+# Opt-in only (`cargo bench --bench journal_append`). Not wired into CI: it is a
+# measurement of the host's storage, and a shared runner's numbers would mean
+# nothing to gate on.
+[[bench]]
+name = "journal_append"
+harness = false

@@ -13,10 +13,16 @@
 //! the per-tenant provider re-resolves this config every turn — *once the
 //! company is already on the harness cognition path*. Which brain a company runs
 //! is chosen once, at build time, so a company that resolved **no** inference
-//! source at boot is on the offline echo brain and stays there until the process
-//! restarts, no matter what is saved here. That one transition is reported as
+//! source at boot is on the offline echo brain until its runtime is rebuilt in
+//! place (issue #290) or the process restarts. That transition is reported as
 //! [`InferenceStatusDto::restart_required`] rather than papered over with a
 //! "next turn" promise the runtime cannot keep (issue #266).
+//!
+//! Setting the key on the `managed` provider is an ordinary case, not a BYOK
+//! edge (issue #585): it keeps the platform endpoint and swaps only the
+//! credential, so the company pays for its own agents on the TinyHumans brain.
+//! `resolve_endpoint` has always preferred a stored key over the env default
+//! here; what was missing was anywhere for an admin to type one.
 
 use std::collections::BTreeMap;
 
@@ -27,9 +33,10 @@ use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::app::config::EnvSource;
 use crate::company::Inference;
 use crate::company::inference::{
-    self, InferenceSource, RuntimeInference, clear_runtime_config, resolve_effective,
+    self, EnvDefault, InferenceSource, RuntimeInference, clear_runtime_config, resolve_effective,
     save_runtime_config, store_key, validate_runtime,
 };
 use crate::company::runtime::CompanyRuntime;
@@ -68,6 +75,7 @@ pub fn router() -> Router<AppState> {
         get(get_status).put(set_config).delete(revert_config),
     )
     .merge(scoped("/inference/test", post(test_config)))
+    .merge(scoped("/inference/restart", post(restart_runtime)))
 }
 
 /// The company's effective inference status as the console renders it. **Never**
@@ -79,7 +87,11 @@ struct InferenceStatusDto {
     provider: String,
     /// The stable telemetry slug (`managed` / `openrouter` / `byok` / `ollama`).
     slug: String,
-    /// Resolved OpenAI-compatible base URL.
+    /// Resolved OpenAI-compatible base URL — the endpoint requests actually
+    /// travel to, including the platform default this deployment was pointed at
+    /// with `OPENCOMPANY_INFERENCE_URL`. A `managed` provider inherits that
+    /// endpoint, so resolving this without the platform default printed the
+    /// built-in production constant on every staging tenant (issue #597).
     base_url: String,
     /// Abstract-tier → concrete model id.
     models: BTreeMap<String, String>,
@@ -253,14 +265,95 @@ pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
     RunnerGap::NotWired
 }
 
-/// Resolves the effective status DTO. The ops layer resolves *tenant* config
-/// only (no env default), so a company with nothing configured reports the
-/// managed default rather than a synthesized env decl.
+/// This deployment's platform-injected managed default — the same
+/// `(base_url, credential)` pair the harness routes on
+/// ([`harness_inference_from_env`](crate::harness::provider::harness_inference_from_env)),
+/// read from the environment and never from a tenant secret.
+///
+/// `None` when no managed credential resolves — which is exactly when the
+/// harness resolves no env default either. Deriving it from that one function
+/// rather than reading `OPENCOMPANY_INFERENCE_URL` directly is what keeps
+/// display and routing honest in both directions: a bare URL with no credential
+/// routes nowhere, so the card must not advertise it as the endpoint in use.
+///
+/// Also `None` off the `openhuman` feature, which is a shipped configuration
+/// (`Dockerfile`'s `FEATURES` arg defaults to empty, and `deploy/README.md`
+/// suggests sets like `medulla tinyplace sqlite`) — but not a gap. Nothing
+/// outside `src/harness/` reads `OPENCOMPANY_INFERENCE_URL`, so in such a build
+/// there is no injected endpoint for the card to misreport: the built-in
+/// constant is the only inference endpoint that exists, and the company is on
+/// the echo or hosted brain, which `cognition` reports on its own. The medulla
+/// hosted path talks to `DEFAULT_API_URL` over its own socket protocol rather
+/// than an OpenAI-compatible surface, so it is not an endpoint `baseUrl`
+/// describes either.
+fn platform_default(env: &dyn EnvSource) -> Option<EnvDefault> {
+    #[cfg(feature = "openhuman")]
+    {
+        crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| EnvDefault {
+            base_url: config.base_url,
+            credential: config.credential,
+        })
+    }
+    #[cfg(not(feature = "openhuman"))]
+    {
+        let _ = env;
+        None
+    }
+}
+
+/// Resolves the effective status DTO against the real process environment.
 async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto, ApiError> {
+    effective_status_with(
+        runtime,
+        platform_default(&crate::app::config::ProcessEnv).as_ref(),
+    )
+    .await
+}
+
+/// [`effective_status`] against an explicit platform default, so the resolution
+/// is testable without touching the process environment.
+///
+/// Two resolves, deliberately, because the card answers two different questions
+/// (issue #597):
+///
+/// - **What did the tenant configure?** — resolved with no env default, and the
+///   only thing `source`, `keyConfigured` and `restartRequired` may see. A
+///   platform endpoint is not tenant config: reporting it as `source: "default"`
+///   would move the badge, reporting the platform token as `keyConfigured` would
+///   tell an operator a key they never set is stored (and that blanking the
+///   field "keeps" it), and feeding it to [`restart_pending`] would strand a
+///   company behind a restart that changes nothing. That is the intent the old
+///   `None` argument was protecting, and it survives here intact.
+/// - **Where do requests actually go?** — resolved *with* the platform default,
+///   and used for `baseUrl` alone. `managed` inherits the platform endpoint, so
+///   without it every non-production tenant rendered the built-in production
+///   constant: both the `None` arm below and any tenant whose own config names
+///   `managed` without its own `base_url`.
+async fn effective_status_with(
+    runtime: &CompanyRuntime,
+    platform: Option<&EnvDefault>,
+) -> Result<InferenceStatusDto, ApiError> {
     let manifest = manifest_inference(runtime).await?;
-    let decl = resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref())
+    let secrets = runtime.secrets().as_ref();
+    let decl = resolve_effective(runtime.id(), &manifest, None, secrets)
         .await
         .map_err(ApiError)?;
+    let base_url = match platform {
+        // Re-resolve with the platform default in place rather than
+        // reconstructing `resolve_endpoint`'s precedence here — the tenant's own
+        // `base_url` still outranks it, and only the `managed` kind inherits it.
+        Some(platform) => resolve_effective(runtime.id(), &manifest, Some(platform), secrets)
+            .await
+            .map_err(ApiError)?
+            .map_or_else(|| inference::MANAGED_BASE_URL.to_string(), |d| d.base_url),
+        // No platform endpoint on this deployment: nothing to inherit, so the
+        // tenant resolve already holds the whole answer and the second read is
+        // skipped.
+        None => decl.as_ref().map_or_else(
+            || inference::MANAGED_BASE_URL.to_string(),
+            |d| d.base_url.clone(),
+        ),
+    };
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
@@ -268,7 +361,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto
         Some(d) => InferenceStatusDto {
             provider: d.provider.clone(),
             slug: d.telemetry_slug().to_string(),
-            base_url: d.base_url.clone(),
+            base_url,
             models: d.models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),
@@ -279,7 +372,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto
         None => InferenceStatusDto {
             provider: "managed".to_string(),
             slug: "managed".to_string(),
-            base_url: inference::MANAGED_BASE_URL.to_string(),
+            base_url,
             models: BTreeMap::new(),
             source: "managed".to_string(),
             key_configured: false,
@@ -406,6 +499,51 @@ async fn revert_config(company: AdminScopedCompany) -> Result<Json<MutationRespo
     }))
 }
 
+/// `POST …/inference/restart` — rebuild this company's runtime in place, now.
+///
+/// The action behind the console's "Restart required" notice. Saving inference
+/// already attempts this rebuild ([`set_config`]), so this route exists for the
+/// cases that attempt could not cover: a company that was already sitting in the
+/// restart-required state before #290 landed, one whose rebuild failed
+/// transiently, and one an operator arrives at without touching the form at all.
+/// Without it the notice is a dead end — it names a restart the operator of a
+/// hosted tenant has no way to perform, since the container is the unit of
+/// restart and the control plane has no button for it.
+///
+/// Requires authority over the company, like the save it mirrors: rebuilding
+/// swaps the brain every agent thinks with.
+///
+/// **Idempotent and safe to call when nothing is pending.** A rebuild of a
+/// company that is already live is a no-op from the operator's point of view —
+/// same journal, same parked approvals, same grants (see
+/// [`rebuild`](crate::runtime::rebuild)) — so this does not gate on
+/// `restart_required` first. Gating would introduce a race in which the check
+/// and the rebuild disagree, and would refuse the one case most worth allowing:
+/// an operator trying to recover a company whose state the console is reading
+/// wrongly.
+async fn restart_runtime(
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
+) -> Result<Json<MutationResponse>, ApiError> {
+    let id = company.runtime.id().clone();
+    let successor = crate::runtime::rebuild_company(&state, &id)
+        .await
+        .map_err(ApiError)?;
+    // Read the status off the *successor*, never off the runtime we came in
+    // with: a rebuild that landed on the same brain must still report honestly
+    // rather than claim a success the runtime cannot back up.
+    let status = effective_status(successor.as_ref()).await?;
+    Ok(Json(MutationResponse {
+        note: if status.restart_required {
+            RESTART_NOTE
+        } else {
+            REBUILT_NOTE
+        }
+        .to_string(),
+        status,
+    }))
+}
+
 /// `POST …/inference/test` — a live one-message probe of the resolved provider.
 ///
 /// Gated on the `openhuman` feature (the HTTP provider lives there); without it
@@ -421,11 +559,14 @@ async fn test_config(company: ScopedCompany) -> Response {
         Ok(m) => m,
         Err(err) => return err.into_response(),
     };
-    let decl =
-        match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
-            Ok(d) => d,
-            Err(err) => return ApiError(err).into_response(),
-        };
+    let secrets = runtime.secrets().as_ref();
+    // Gate on *tenant* config, with no platform default: the button probes what
+    // the company configured, so "nothing configured" stays a 409 instead of
+    // quietly probing the platform brain on the operator's behalf.
+    let decl = match resolve_effective(runtime.id(), &manifest, None, secrets).await {
+        Ok(d) => d,
+        Err(err) => return ApiError(err).into_response(),
+    };
     match decl {
         None => (
             StatusCode::CONFLICT,
@@ -436,23 +577,45 @@ async fn test_config(company: ScopedCompany) -> Response {
             })),
         )
             .into_response(),
-        Some(decl) => match crate::harness::provider::probe(&decl).await {
-            Ok(()) => Json(serde_json::json!({
-                "ok": true,
-                "provider": decl.provider,
-                "note": "Reached the provider and got a reply.",
-            }))
-            .into_response(),
-            Err(err) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("Inference probe failed: {err}"),
-                    "code": "probe_failed",
-                })),
-            )
+        Some(tenant) => {
+            // Probe with the platform default in place. A `managed` config
+            // inherits both the platform endpoint and its credential, so
+            // resolving without it aimed the probe at the built-in production
+            // URL carrying no bearer at all — a staging tenant whose routing is
+            // perfectly fine would be told its provider is unreachable, on the
+            // same card that was already misreporting the URL (issue #597).
+            let decl = match platform_default(&crate::app::config::ProcessEnv) {
+                None => tenant,
+                Some(platform) => {
+                    match resolve_effective(runtime.id(), &manifest, Some(&platform), secrets).await
+                    {
+                        // Adding the platform default can only add a source,
+                        // never remove the one that just resolved — fall back to
+                        // it rather than inventing an error path for a case that
+                        // cannot happen.
+                        Ok(d) => d.unwrap_or(tenant),
+                        Err(err) => return ApiError(err).into_response(),
+                    }
+                }
+            };
+            match crate::harness::provider::probe(&decl).await {
+                Ok(()) => Json(serde_json::json!({
+                    "ok": true,
+                    "provider": decl.provider,
+                    "note": "Reached the provider and got a reply.",
+                }))
                 .into_response(),
-        },
+                Err(err) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("Inference probe failed: {err}"),
+                        "code": "probe_failed",
+                    })),
+                )
+                    .into_response(),
+            }
+        }
     }
 }
 
@@ -470,6 +633,8 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use serde_json::{Value, json};
     use tower::ServiceExt;
+
+    use super::*;
 
     use crate::company::CompanyManifest;
     use crate::ports::types::{CompanyId, CompanyRecord};
@@ -491,14 +656,13 @@ mod tests {
         toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
     }
 
-    async fn state_with_company(home: &std::path::Path) -> AppState {
+    /// Commits `manifest` as `id`'s record — what `manifest_inference` reads.
+    async fn save_record(home: &std::path::Path, id: &CompanyId, manifest: &CompanyManifest) {
         use crate::ports::CompanyStore;
-        let store = FsCompanyStore::new(home.to_path_buf());
-        let id = CompanyId::new("acme");
-        store
+        FsCompanyStore::new(home.to_path_buf())
             .save(&CompanyRecord {
                 id: id.clone(),
-                manifest: manifest(),
+                manifest: manifest.clone(),
                 ledger: Vec::new(),
                 lifecycle: "running".to_string(),
                 overlay_agents: Vec::new(),
@@ -507,12 +671,19 @@ mod tests {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
             })
             .await
             .unwrap();
+    }
+
+    async fn state_with_company(home: &std::path::Path) -> AppState {
+        let id = CompanyId::new("acme");
+        save_record(home, &id, &manifest()).await;
         let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
             .with_id(id.clone())
             .build()
@@ -522,6 +693,104 @@ mod tests {
         state.registry().insert(id, std::sync::Arc::new(runtime));
         crate::server::test_support::seed_fixed_admin(&state, "acme").await;
         state
+    }
+
+    /// A rebuilder that rebuilds over the handover, as the binary's does.
+    struct Working {
+        home: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::RuntimeRebuilder for Working {
+        async fn rebuild(
+            &self,
+            _state: &AppState,
+            request: crate::runtime::RebuildRequest,
+        ) -> crate::Result<crate::company::runtime::CompanyRuntime> {
+            RuntimeBuilder::new(self.home.clone(), request.manifest)
+                .with_id(request.id)
+                .with_handover(request.handover)
+                .build()
+                .await
+        }
+    }
+
+    /// `POST …/inference/restart` rebuilds the runtime in place, so the console's
+    /// "Restart required" notice has an action behind it rather than being a
+    /// dead end pointing at a container the operator may not be able to touch.
+    #[tokio::test]
+    async fn restart_rebuilds_the_registered_runtime() {
+        let home_dir = home();
+        let home = home_dir.path();
+        let id = CompanyId::new("acme");
+        let state = state_with_company(home)
+            .await
+            .with_rebuilder(std::sync::Arc::new(Working {
+                home: home.to_path_buf(),
+            }));
+        state.set_boot_inputs(id.clone(), crate::runtime::BootInputs::default());
+        let before = state.registry().get(&id).expect("registered");
+
+        let (status, resp, raw) =
+            send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+
+        // A genuinely different runtime is registered — the point of the route.
+        let after = state.registry().get(&id).expect("registered");
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "the restart must actually swap the runtime, not report success and leave it"
+        );
+        // And it is taking work, rather than stuck in the quiesce window. A
+        // company parked there refuses every cycle forever, which is worse than
+        // the stale brain the rebuild was replacing.
+        assert!(!after.is_quiesced());
+        assert!(resp["status"].is_object(), "{raw}");
+    }
+
+    /// Calling it twice is not an error. The console offers the button off a
+    /// status read, so it can always be a moment stale — refusing when nothing
+    /// is pending would turn a harmless retry into a failure an operator has to
+    /// interpret.
+    #[tokio::test]
+    async fn restarting_a_healthy_company_is_a_no_op_not_a_refusal() {
+        let home_dir = home();
+        let home = home_dir.path();
+        let id = CompanyId::new("acme");
+        let state = state_with_company(home)
+            .await
+            .with_rebuilder(std::sync::Arc::new(Working {
+                home: home.to_path_buf(),
+            }));
+        state.set_boot_inputs(id, crate::runtime::BootInputs::default());
+
+        for attempt in 1..=2 {
+            let (status, _, raw) =
+                send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+            assert_eq!(status, StatusCode::OK, "attempt {attempt}: {raw}");
+        }
+    }
+
+    /// A host that wired no rebuilder cannot do this, and must say so rather
+    /// than report a success that changed nothing. This is the pre-#290
+    /// deployment, and the console keeps showing the restart notice.
+    #[tokio::test]
+    async fn a_host_that_cannot_rebuild_says_so() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, _, raw) =
+            send(&state, "POST", "/api/v1/company/inference/restart", None).await;
+        assert_ne!(status, StatusCode::OK, "{raw}");
+        assert!(
+            raw.contains("restart the process"),
+            "the failure must tell the operator what will work instead: {raw}"
+        );
+
+        // Critically, the company is still serving. A failed rebuild that left
+        // it quiesced would turn a cosmetic dead end into an outage.
+        let (status, _, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     async fn send(
@@ -551,6 +820,212 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, value, raw)
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #597 — the card must report the endpoint requests actually reach,
+    // not the built-in production constant.
+    // ---------------------------------------------------------------------
+
+    /// Where a staging deployment is pointed with `OPENCOMPANY_INFERENCE_URL`.
+    const STAGING_URL: &str = "https://staging-api.tinyhumans.ai/openai/v1";
+
+    /// The platform default a staging tenant is injected with.
+    fn staging_platform() -> EnvDefault {
+        EnvDefault {
+            base_url: STAGING_URL.to_string(),
+            credential: crate::company::credentials::Credential::from_value(
+                "platform-token".to_string(),
+            ),
+        }
+    }
+
+    /// A built runtime whose committed manifest is `manifest_toml`.
+    async fn runtime_with(home: &std::path::Path, manifest_toml: &str) -> CompanyRuntime {
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        save_record(home, &id, &manifest).await;
+        RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    const NO_INFERENCE: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
+
+    const MANAGED_MANIFEST: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         [inference]\nprovider = \"managed\"\n";
+
+    #[tokio::test]
+    async fn unconfigured_company_reports_the_platform_url_not_the_built_in_default() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+
+        // No platform endpoint on this deployment — the built-in constant is
+        // still the only honest answer, and this arm must not regress.
+        let dto = effective_status_with(&runtime, None).await.unwrap();
+        assert_eq!(dto.base_url, inference::MANAGED_BASE_URL);
+
+        // Pointed at staging, the card follows — and *only* the URL moves.
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, STAGING_URL);
+        assert_eq!(dto.provider, "managed");
+        assert_eq!(
+            dto.source, "managed",
+            "a platform endpoint is not tenant config"
+        );
+        assert!(
+            !dto.key_configured,
+            "the platform token is not a stored tenant key"
+        );
+        assert!(
+            !dto.restart_required,
+            "a platform endpoint strands no tenant config behind a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_managed_manifest_also_inherits_the_platform_url() {
+        // The half of #597 the report did not cover: `resolve_endpoint` falls
+        // back to the built-in constant for *any* `managed` config that names no
+        // base URL of its own, so a tenant with `[inference] provider =
+        // "managed"` printed the production URL too — under a `manifest` badge
+        // rather than the `managed` one the report reproduced.
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), MANAGED_MANIFEST).await;
+
+        let dto = effective_status_with(&runtime, None).await.unwrap();
+        assert_eq!(dto.base_url, inference::MANAGED_BASE_URL);
+
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, STAGING_URL);
+        assert_eq!(dto.source, "manifest");
+        assert!(
+            !dto.key_configured,
+            "the platform token must not read as a tenant key on a managed manifest"
+        );
+    }
+
+    /// Three inputs converge on `keyConfigured`, and exactly one of them must
+    /// never feed it. Today the tenant sources are a manifest `api_key_secret`
+    /// and a console `PUT`; #634 makes the console path the ordinary way an
+    /// admin sets the key on `managed`, which is precisely the provider that
+    /// inherits the platform credential. So the field has to keep answering
+    /// "did the *tenant* store a credential" and never "is there a credential",
+    /// on the one company where both are true at once.
+    ///
+    /// Pinned here rather than left to review: without it the distinction this
+    /// PR's two-resolve split exists to preserve is enforced by nothing.
+    #[tokio::test]
+    async fn a_platform_token_never_reads_as_a_console_set_key() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), MANAGED_MANIFEST).await;
+        let platform = staging_platform();
+
+        // The platform credential is doing the outbound work, and the card still
+        // says no key is configured — because none of it is the tenant's.
+        let dto = effective_status_with(&runtime, Some(&platform))
+            .await
+            .unwrap();
+        assert!(
+            !dto.key_configured,
+            "the platform token is not a stored tenant key"
+        );
+        assert_eq!(dto.base_url, STAGING_URL);
+
+        // An admin sets one from the console — the write #634's screen performs.
+        inference::store_key(runtime.id(), runtime.secrets().as_ref(), "sk-console-set")
+            .await
+            .unwrap();
+
+        let dto = effective_status_with(&runtime, Some(&platform))
+            .await
+            .unwrap();
+        assert!(
+            dto.key_configured,
+            "a console-set key must read as configured even on managed"
+        );
+        // Same company, same injected platform default, opposite answer — and the
+        // endpoint is unmoved either way: paying for your own agents on the
+        // managed brain does not take you off it.
+        assert_eq!(dto.base_url, STAGING_URL);
+    }
+
+    #[tokio::test]
+    async fn an_explicit_tenant_base_url_outranks_the_platform_default() {
+        let home_dir = home();
+        let runtime = runtime_with(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [inference]\nprovider = \"managed\"\nbase_url = \"https://byo.example/v1\"\n",
+        )
+        .await;
+
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, "https://byo.example/v1");
+    }
+
+    #[tokio::test]
+    async fn a_non_managed_provider_ignores_the_platform_default() {
+        // Only `managed` inherits the platform endpoint; every other kind uses
+        // its own resolved URL verbatim.
+        let home_dir = home();
+        let runtime = runtime_with(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [inference]\nprovider = \"openrouter\"\n",
+        )
+        .await;
+
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL);
+        assert_eq!(dto.source, "manifest");
+    }
+
+    /// The probe's gate stays keyed on *tenant* config. Pointing a deployment at
+    /// a platform endpoint gives the probe somewhere real to aim, but it must not
+    /// turn "nothing configured" into a live probe of the platform brain — that
+    /// 409 is the honest answer to "test my provider" from a company that has
+    /// not named one.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn probing_an_unconfigured_company_stays_not_configured() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, body, _) = send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "not_configured");
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn platform_default_follows_the_injected_inference_url() {
+        use crate::app::config::MapEnv;
+
+        let env = MapEnv::new([
+            ("TINYHUMANS_API_KEY", "platform-key"),
+            ("OPENCOMPANY_INFERENCE_URL", STAGING_URL),
+        ]);
+        assert_eq!(
+            platform_default(&env).map(|d| d.base_url),
+            Some(STAGING_URL.to_string())
+        );
+
+        // A URL with no credential resolves to nothing — the same answer the
+        // harness gives, so the card never advertises an endpoint that would
+        // route nowhere.
+        let bare = MapEnv::new([("OPENCOMPANY_INFERENCE_URL", STAGING_URL)]);
+        assert!(platform_default(&bare).is_none());
     }
 
     #[tokio::test]
@@ -617,6 +1092,67 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp["status"]["provider"], "managed");
         assert_eq!(resp["status"]["source"], "managed");
+    }
+
+    /// Issue #585: the company's key on the *managed* brain — set, rotate, and
+    /// clear — is the whole point of the screen, and the route must never echo
+    /// any of the three tokens back.
+    #[tokio::test]
+    async fn managed_key_can_be_set_rotated_and_cleared() {
+        const ROTATED: &str = "sk-rotated-inference-token-ABC";
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        // Set: the company pays for its own agents on the platform endpoint.
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["provider"], "managed");
+        assert_eq!(resp["status"]["slug"], "managed");
+        assert_eq!(resp["status"]["source"], "runtime");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        // Setting only a key must not move the tenant off the managed endpoint.
+        assert_eq!(
+            resp["status"]["baseUrl"],
+            crate::company::inference::MANAGED_BASE_URL
+        );
+        assert!(!raw.contains(TOKEN), "PUT leaked the token: {raw}");
+
+        // Rotate: a second key replaces the first, still write-only.
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": ROTATED })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        assert!(!raw.contains(TOKEN), "PUT leaked the old token: {raw}");
+        assert!(!raw.contains(ROTATED), "PUT leaked the new token: {raw}");
+
+        // Clear: an explicit empty key removes it (the console's "Remove key").
+        let (status, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["status"]["keyConfigured"], false);
+
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["keyConfigured"], false);
+        for token in [TOKEN, ROTATED] {
+            assert!(!raw.contains(token), "GET leaked a token: {raw}");
+        }
     }
 
     #[tokio::test]

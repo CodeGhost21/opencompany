@@ -50,6 +50,21 @@ impl ApiError {
             OpenCompanyError::Quiescing(_) => StatusCode::SERVICE_UNAVAILABLE,
             OpenCompanyError::ToolNotGranted(_) => StatusCode::FORBIDDEN,
             OpenCompanyError::BudgetExceeded(_) => StatusCode::PAYMENT_REQUIRED,
+            // 413 — for both ways an upload can be too big. The store's per-file
+            // cap raises this variant with the file and the limit named; the
+            // upload route's `DefaultBodyLimit` backstop raises it too, after
+            // classifying the parse failure axum reports (issue #647). The two
+            // limits are deliberately *different* numbers, but they are one
+            // cause as far as a caller is concerned, so they share this status
+            // and the `workspace_quota_exceeded` code rather than splitting into
+            // two vocabularies for "too big".
+            OpenCompanyError::WorkspaceQuota(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            // The company is at its concurrent-run ceiling (issue #401). The run
+            // was never started; the operator waits for a slot or raises the cap,
+            // so this is a rate-limit refusal — 429, the same status
+            // `provision.rs` already answers when a tenant asks for too much at
+            // once — rather than a 4xx that reads as a bad request.
+            OpenCompanyError::WorkflowRunLimit { .. } => StatusCode::TOO_MANY_REQUESTS,
             // tiny.place transport: an unreachable backend degrades to 503 so
             // callers retry; any other protocol failure is an upstream 502.
             OpenCompanyError::Tinyplace { code, .. } if code == "unreachable" => {
@@ -101,6 +116,12 @@ mod test {
 
         let tool = ApiError(OpenCompanyError::ToolNotGranted("payment.send".into()));
         assert_eq!(tool.status(), StatusCode::FORBIDDEN);
+
+        // Issue #401: the concurrent-run ceiling renders as 429, and its stable
+        // code is what the console (and the orchestrator tool) branch on.
+        let run_cap = ApiError(OpenCompanyError::WorkflowRunLimit { limit: 8 });
+        assert_eq!(run_cap.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(run_cap.0.code(), "workflow_run_limit");
 
         let other = ApiError(OpenCompanyError::Store("disk full".into()));
         assert_eq!(other.status(), StatusCode::INTERNAL_SERVER_ERROR);

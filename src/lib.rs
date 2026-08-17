@@ -6,6 +6,10 @@
 
 pub mod app;
 pub mod brain;
+/// Chargebee billing (issue #788): the REST client and the billing operations
+/// the agent's tools call. The toolbelt bridge lives in `harness::chargebee`.
+#[cfg(feature = "chargebee")]
+pub mod chargebee;
 pub mod company;
 /// Local-only runtime host used by the packaged Tauri desktop application.
 /// It embeds the existing operator API and ships the curated company presets;
@@ -24,6 +28,9 @@ pub mod harness;
 /// (usage samples, ledger, `[budget]`). No I/O; WS2 wraps these in GraphQL.
 pub mod metering;
 pub mod openhuman;
+/// PayPal wallet + transaction visibility (issue #789).
+#[cfg(feature = "paypal")]
+pub mod paypal;
 pub mod policy;
 pub mod ports;
 /// The `x-sdk-name: opencompany` identity attached to this crate's own

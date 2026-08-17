@@ -20,6 +20,81 @@ The cost is that no root `cargo` invocation reaches the desktop, including
 and tests it; without that lane the crate would be compiled by nothing, which is
 [issue #475](https://github.com/tinyhumansai/opencompany/issues/475)'s shape.
 
+There is a second Tauri crate in the tree — `frontend/src-tauri/`, the console's
+wrapper — and it is an independent workspace with its own `Cargo.lock` for the
+same reason this one is separate: OpenHuman's vendored dependencies own nested
+workspaces, which Cargo cannot resolve beneath another workspace root.
+
+Which one a `tauri` invocation picks up is decided by the working directory, and
+not the way most people expect: **the CLI searches subfolders of the working
+directory, not ancestors.** From `frontend/` it finds the wrapper; from the
+repository root or from `src-tauri/` it finds this one. That is worth knowing
+before reading a build failure, because the two apps share a `productName`.
+
+## Packaging is a claim the lane has to make
+
+Compiling and packaging are different claims. `cargo fmt`, `cargo clippy` and
+`cargo test` drive `cargo` directly; none of them reads `tauri.conf.json`, so a
+lane built from those three can be green over an app that cannot be assembled at
+all. That is what happened: `beforeBuildCommand` named a path that escaped the
+repository, `cargo tauri build` and `cargo tauri dev` failed on their first step
+for every developer, and the `Desktop` lane never noticed because it builds the
+console itself with `working-directory: frontend` and then calls `cargo`.
+
+The `Package` steps close that. They run the real CLI —
+`tauri build --debug --no-bundle` — so the config is executed rather than merely
+committed. `--debug` because the `Test` step already compiled that graph in the
+dev profile and a release build would recompile the host for no extra claim;
+`--no-bundle` because the failure being gated happens at the first step of
+`tauri build`, long before a `.deb` exists.
+
+There are two of them, from the repository root and from `src-tauri/`. Every
+other step in this lane runs from the repository root, which is the one place
+the broken hook happened to work — a single-directory packaging step is how #616
+stayed invisible. Nothing working-directory-dependent survives in the config
+today, so what the pair defends now is that none comes back.
+
+### Build the console first: there is no `beforeBuildCommand`
+
+Both hooks are empty, and that is deliberate. **Build `frontend/dist` before you
+package**:
+
+```sh
+npm --prefix frontend run build     # from the repository root
+cargo tauri build                   # or: frontend/node_modules/.bin/tauri build
+```
+
+`frontendDist` is resolved relative to `src-tauri/`, where `tauri.conf.json`
+lives, so it means the same thing from every working directory. A hook does not:
+Tauri runs it from an app directory it *derives*, by scanning for a
+`package.json`, and which one it finds is not stable across machines. The
+committed `../frontend` escaped the repository entirely from `src-tauri/`
+([#616](https://github.com/tinyhumansai/opencompany/issues/616)), and the
+opposite prefix fails from the repository root — each is correct in exactly the
+directory that hides the other:
+
+| hook value    | from repo root | from `src-tauri/` |
+| ------------- | -------------- | ----------------- |
+| `../frontend` | passes         | **fails** — what shipped |
+| `frontend`    | **fails**      | passes            |
+
+Resolving the path inside the hook does not rescue it either. `$(git rev-parse
+--show-toplevel)/frontend` passes from both of those, and still broke in CI: the
+hook landed in `vendor/openhuman/` — another directory with a `package.json`,
+reached first because a Linux runner enumerates directories in a different order
+than a developer's macOS checkout — and `git rev-parse` inside a submodule
+answers with the *submodule's* root. The CLI offers no flag, config key or
+environment variable naming the app directory, so nothing computed from the
+working directory can be trusted.
+
+Deleting the hook removes the whole class. The cost is that `tauri dev` no longer
+starts Vite for you — run `npm --prefix frontend run dev` alongside it; `devUrl`
+already points at `localhost:5173` — and that packaging a stale console is now
+possible locally, where before it was merely likely. The failure mode is at least
+legible: Tauri reports `Unable to find your web assets … frontendDist is set to
+"../frontend/dist"` with the absolute path it resolved, rather than an `npm
+ENOENT` for a directory nobody named.
+
 ## N connections, and no active one
 
 `frontend/src/connections/registry.ts` holds a map of connections and
@@ -39,6 +114,49 @@ same name; connection alone is wrong as soon as one host serves two companies.
 Anything reading or writing that state must depend on **both** — a callback that
 closes over the scope but depends only on the company will write under the host
 the operator just switched away from.
+
+### On the desktop a base url is absolute or it is nothing
+
+A browser can be given anything, including the empty string, which means *same
+origin* — that is how every web deployment finds its host, since
+`opencompany serve` mounts the console at the origin serving the assets.
+
+The desktop is the runtime with a rule. `ProxyTransport` hands the base url to
+Rust, which joins it to a path by concatenation, so anything without an
+authority yields a *relative* url and `reqwest` refuses it at `send`. The
+request never reaches a socket, and the console reports "couldn't reach a
+company host" about a host that was never addressed.
+`isAddressableBaseUrl()` is the one place that says so — both the bootstrap add
+in `App.tsx` and `restoreConnections()` ask it, and `ProxyRegistry::upsert`
+enforces the same thing from below, at the last moment the caller is still on
+the stack.
+
+The empty string is the form
+[#613](https://github.com/tinyhumansai/opencompany/issues/613) reported, and
+only the shortest one: `/api` and `localhost:8080` fail identically, and the
+second is what someone types into "Add a host". Parsing is not enough either —
+`URL` accepts `tauri://localhost` and `file:///x`, and neither is a company
+host — so the check is `http:` or `https:`.
+
+Whether that host may then be *trusted with a secret* is a separate question,
+answered separately — see "Where a credential may travel" below. Collapsing the
+two would either forbid anonymous HTTP or permit credentialed HTTP.
+
+Two consequences follow, and both are load-bearing
+([#613](https://github.com/tinyhumansai/opencompany/issues/613)):
+
+- **The desktop can hold zero connections.** The embedded host arrives over IPC
+  and may never arrive at all. The rail therefore stays on screen at a count of
+  zero — it holds the only "add a host" there is — and the console renders the
+  absence rather than an empty pane.
+- **Launch selection is stated, not sorted.** Restored hosts are added before
+  the embedded one, so list order records when a host was learned about, not
+  which one a person means. `App` selects the embedded host when nothing has
+  been chosen.
+
+Only the same-origin *default* is refused. A desktop pointed at a real host
+through `?api=` or an injected `OPENCOMPANY_CONFIG` still gets its bootstrap
+connection.
 
 ## The transport seam
 
@@ -65,6 +183,34 @@ compares, because the console's error handling reads the status, the body and a
 response header — a transport that differed in any of them would produce
 different `ApiError`s on the desktop for the same server behaviour.
 
+### One reader of `window.__TAURI__`
+
+`app.withGlobalTauri` assigns that global the whole `@tauri-apps/api` bundle, and
+**v2 namespaces it by module**: the keys are `app`, `core`, `dpi`, `event`,
+`image`, `menu`, `path`, `tray`, `webview`, `webviewWindow` and `window`, and
+`invoke` and `Channel` are under `core`. The bare `__TAURI__.invoke` is the v1
+shape and reads `undefined`.
+
+`frontend/src/api/transport/bridge.ts` is the only file that touches the global.
+Before [#616](https://github.com/tinyhumansai/opencompany/issues/616) two
+transports read it separately and both read the v1 shape, so `bridge()` resolved
+to `null`, `oc_connect` never ran, no connection was registered and the console
+reported an unreachable host — a network-shaped symptom for a bug that never
+opened a socket.
+
+The unit tests could not catch it, because they asserted the same wrong shape:
+every mock hand-wrote `{ invoke, Channel }` at the top level, and 82 desktop
+tests passed against a fixture the runtime never produces. So
+`test/unit/desktop-bridge.test.ts` now reads the shape off `@tauri-apps/api`
+itself and asserts the v1 form is **refused** — a mock is evidence only if
+something ties it to the real thing.
+
+`isDesktopRuntime()` still probes for presence alone, deliberately: a `__TAURI__`
+whose `core.invoke` does not resolve is a broken desktop rather than a browser,
+and `ProxyTransport` throwing "the desktop bridge is unavailable" names that,
+where falling back to `BrowserTransport` would bury it in a CORS failure against
+every host.
+
 ### Registration precedes traffic
 
 The core resolves a connection id against its own registry, so the console must
@@ -82,6 +228,48 @@ is attached. `RequestBuilder::header` appends and axum reads the *first* value,
 so a header from the webview would otherwise be the one the host honoured.
 Keeping the token out of the webview is worth little if the webview still
 decides what a request authenticates as.
+
+### Where a credential may travel
+
+Addressability is not the only question a base url has to answer. A host can be
+perfectly reachable over a wire anyone on the path can read, and the desktop's
+credential is a device session — a person's standing authority on a company,
+attached to every request and to the whole life of the event stream, and
+replayable by whoever copies it down
+([#731](https://github.com/tinyhumansai/opencompany/issues/731)).
+
+So a second rule sits beside the first: **a credential travels over HTTPS, or to
+a host on this machine, and nowhere else.** `may_carry_a_credential` in
+`src-tauri/src/proxy/mod.rs` is the one that enforces it, with
+`mayCarryACredential` in `frontend/src/api/transport/index.ts` as the console's
+copy — the same arrangement as `isAddressableBaseUrl`, and for the same reason:
+a check in the console alone is bypassed by anything reaching the proxy
+directly, and a check in Rust alone arrives as an opaque IPC rejection that
+`client.ts` flattens into "cannot reach the company host".
+
+Loopback is exempt because `http://127.0.0.1:<port>` is how the embedded host is
+reached, on a port that changes every launch and so can never carry a
+certificate; `localhost` and its subdomains come with it, per RFC 6761. The
+private ranges are deliberately **not** exempt — an office LAN is precisely
+where someone else is on the path.
+
+The rule turns on the credential rather than on the scheme, which is what keeps
+a home-lab or staging host without a certificate usable: an anonymous connection
+to one still registers and still reads, because nothing is exposed that a
+passer-by could not have asked the host for themselves. Three surfaces apply it:
+
+- `ProxyRegistry::upsert` refuses to register a credentialed connection to such
+  a host, by name — `this host is not encrypted`, not `not an absolute host url`,
+  because an operator told the second goes to debug a network that is working.
+- `claim` in `commands.rs` refuses the pairing exchange before opening a socket.
+  This is the one place a session token is *created* rather than replayed — the
+  code goes out in the request and the token comes back in the response — and it
+  never touches the registry, so `upsert`'s refusal does not cover it. Its client
+  also refuses redirects: a 307 from an HTTPS base to an HTTP one would re-send
+  the claim, body and all, over the wire the check just refused.
+- `probe` in `registry.ts` marks such a connection `down` with the reason,
+  before contacting it, so the row says what is wrong instead of blaming the
+  network.
 
 The webview also runs under a CSP (`src-tauri/tauri.conf.json`) whose
 `connect-src` allows the IPC origin only. All host traffic goes through Rust and
@@ -108,6 +296,77 @@ valid evidence about embedded mode too.
 data root. The console renders that as a row; the desktop still holds remote
 hosts, which is the point of holding several.
 
+### First run
+
+`embedded::start` calls `opencompany::desktop::bootstrap_companies` before it
+binds, because a host with an empty registry cannot be signed into
+([issue #632](https://github.com/tinyhumansai/opencompany/issues/632)). Sign-in
+is per-company — `/api/v1/companies/{id}/auth/…`, or the sole-company alias —
+so an empty registry leaves the console rendering a login form for a company
+that does not exist.
+
+The two ways a company normally reaches the registry are both closed to a
+packaged application. Nobody types `serve --company <dir>` at a double-clicked
+app, and `POST /api/v1/companies` demands the `platform` scope, which
+`PlatformScope` grants only against a configured `platform_auth` — a prosumer
+host has no machine credential to hand out, deliberately. So the desktop
+bootstraps its own:
+
+1. **Adopt** every company bundle the data root already holds, skipping
+   `archived` ones (archiving removes a company from the registry on purpose,
+   and re-registering it at the next launch would undo that quietly). The
+   bundle is the only authority — a desktop company has no source directory to
+   re-read — and `RuntimeBuilder::build` carries the persisted record's
+   console-created desks, agents and workflows forward.
+2. **Seed** the `DEFAULT_PRESET_ID` preset when there were none, stamping the
+   preset slug as the record's template provenance. Fallback rather than
+   unconditional: seeding on every launch would hand the operator a second
+   starter company per run.
+
+`AppConfig.admin_email` is set to `DESKTOP_OPERATOR_EMAIL` — the same seam the
+hosted control plane fills with `OPENCOMPANY_ADMIN_EMAIL`, and the reason a
+person is eligible to sign in at all (`eligibility` in `src/server/users/`
+admits an existing user, a bootstrap admin, or an invite, and a fresh install
+has none of the three). The seeded manifest names the same address in its own
+`[users].admins`, so the company is self-describing if it is ever served
+elsewhere.
+
+Nothing is mailed: the host binds loopback, so `is_local_only` holds and
+`auth/request` returns the login code in its own response (`dev_code`), which
+the console redeems in place. `oc_embedded` carries `operatorEmail` so the
+sign-in form can offer the address — a person cannot guess it, and every other
+address gets the same silent `202`. It is a suggestion, not a lock: the field
+stays editable, which is what an operator who invites someone else needs.
+
+### One row, however many launches
+
+The ephemeral port is not free: it means the embedded host's *address* is
+different on every launch, and `addConnection` recognises a host by address. So
+each launch read as a first meeting — a new connection id, a new row, and the
+previous launch's row left behind pointing at a closed port. They persist, so
+they accumulated, and they all carry the same label; the sidebar filled with
+indistinguishable "This computer" entries, all but one broken (issue #615).
+
+`oc_embedded` therefore also reports `instance_id`, read from the data root
+(see [`instance.rs`](../../../src/app/instance.rs)) rather than derived from the
+address, and the console registers this host through `adoptEmbeddedHost` rather
+than `addConnection`. That function matches on the identity, re-points the
+remembered connection at the new port, and drops anything else claiming to be
+this application's host — enforcing the invariant that at most one embedded
+connection exists at a time.
+
+Reusing the remembered id is what carries the tour state, the last-read channel
+and the mail draft across a relaunch, all of them keyed by connection id. A
+*different* `instance_id` — a second data root — is deliberately not adopted:
+that is a different host, and merging its local state is the failure the
+`(connection, company)` namespace exists to prevent.
+
+Profiles written before the identity was reported carry neither it nor an
+`origin` marker, so `embeddedProfiles` recognises them by the signature the bug
+left: this client's own label for its host, at a loopback address. Narrow on
+purpose — a host an operator added by hand is labelled by authority
+(`127.0.0.1:8080`), never with that string.
+
 ## Authenticating as a person
 
 A desktop cannot hold a session cookie: `SameSite=Lax` means the browser never
@@ -125,7 +384,9 @@ a paired session by connection id. Pairing runs entirely in Rust —
 answers with the company, device id and expiry — so the token exists for one
 HTTP response that the webview is not on the path of. That is the difference
 between a design where the webview *should not* hold the credential and one
-where it *cannot*.
+where it *cannot*. The claim itself is a plain `claim()` rather than command
+logic, so the rules on it can be tested without starting a GUI — see "Where a
+credential may travel" for the one it enforces.
 
 The console's `Credential { kind: "device", ref }` is therefore a record that
 this machine is paired, not something the core is told. `ref` is the host's

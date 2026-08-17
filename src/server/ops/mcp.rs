@@ -29,6 +29,9 @@ use crate::company::mcp::{
 };
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::types::CompanyRecord;
+use crate::runtime::builder::agent_effective_grants;
+use crate::runtime::tools::grants_cover_server;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
@@ -59,7 +62,11 @@ struct McpServerDto {
     name: String,
     endpoint: String,
     description: Option<String>,
-    /// `manifest` (committed) or `runtime` (console-added).
+    /// `manifest` (committed), `runtime` (console-added), or `default`
+    /// (shipped by the install — issue #527). The console renders this as the
+    /// source badge, so the three stay distinguishable: a shipped default is
+    /// not something this operator added, and must not be labelled as if it
+    /// were.
     source: McpSource,
     enabled: bool,
     allowed_tools: Vec<String>,
@@ -67,6 +74,19 @@ struct McpServerDto {
     timeout_secs: u64,
     /// Whether an outbound credential is stored — never the credential itself.
     auth_configured: bool,
+    /// The ids of the company's agents whose effective tool grants cover this
+    /// server — who can actually call it (issue #568). Computed over the same
+    /// roster the harness builds (manifest agents + promoted overlay teammates),
+    /// through the shared
+    /// [`grants_cover_server`](crate::runtime::tools::grants_cover_server), so the
+    /// console cannot disagree with the harness about reachability. **An empty
+    /// list is meaningful**: an *enabled*, healthy server no teammate can reach
+    /// is almost always a misconfiguration, and the console flags it rather than
+    /// showing an empty list silently. A **disabled** server is always empty —
+    /// the harness hands out no tool for it whatever the grants say — so the
+    /// console reads the empty case against `enabled` and stays quiet there.
+    /// Always serialized (even when empty).
+    reachable_by: Vec<String>,
     /// The last recorded probe outcome (scrubbed), or `None` when never probed.
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<McpHealth>,
@@ -216,9 +236,13 @@ async fn manifest_servers(runtime: &CompanyRuntime) -> Result<Vec<McpServer>, Ap
 }
 
 /// Projects an effective decl (already merged + auth-resolved) to the console
-/// DTO, reducing the resolved credential to a boolean and attaching the last
-/// (scrubbed) probe health.
-fn dto_from_decl(decl: &mcp::McpServerDecl, health: Option<McpHealth>) -> McpServerDto {
+/// DTO, reducing the resolved credential to a boolean, listing the agents that
+/// can reach it (issue #568), and attaching the last (scrubbed) probe health.
+fn dto_from_decl(
+    decl: &mcp::McpServerDecl,
+    reachable_by: Vec<String>,
+    health: Option<McpHealth>,
+) -> McpServerDto {
     McpServerDto {
         name: decl.name.clone(),
         endpoint: decl.endpoint.clone(),
@@ -229,24 +253,117 @@ fn dto_from_decl(decl: &mcp::McpServerDecl, health: Option<McpHealth>) -> McpSer
         disallowed_tools: decl.disallowed_tools.clone(),
         timeout_secs: decl.timeout_secs,
         auth_configured: decl.auth.is_configured(),
+        reachable_by,
         health,
     }
+}
+
+/// Every roster agent's *effective* tool grants (issue #568), as
+/// `(agent_id, grants)`.
+///
+/// `pub(super)` since issue #245: the repositories surface answers the same
+/// question about a different namespace ("who can read this?"), and a second
+/// roster walk beside this one is exactly how the two consoles would come to
+/// disagree with each other and with the harness. The roster is exactly what the harness builds in
+/// `build_roster`: the manifest agents (each with its own `tools` narrowed by
+/// the company `allow`), plus the promoted overlay teammates — each narrowed by
+/// **its own** `tools` line the same way (issue #661), which for the common
+/// empty line is still the full company `allow`, the standard grant
+/// `overlay_agent_to_manifest` gives it. An overlay id already claimed by a
+/// manifest agent is skipped, both mirroring the harness so console
+/// reachability equals what an agent is actually granted.
+pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)> {
+    let allow = &record.manifest.tools.allow;
+    let mut grants: Vec<(String, Vec<String>)> = record
+        .manifest
+        .agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.id.clone(),
+                agent_effective_grants(allow, &agent.tools),
+            )
+        })
+        .collect();
+    let manifest_ids: std::collections::HashSet<&str> = record
+        .manifest
+        .agents
+        .iter()
+        .map(|agent| agent.id.as_str())
+        .collect();
+    for overlay in &record.overlay_agents {
+        if manifest_ids.contains(overlay.id.as_str()) {
+            continue;
+        }
+        // The overlay teammate's **own** tools line, read through the same
+        // function and with the same empty-means-inherit rule as the manifest
+        // half above — matching `overlay_agent_to_manifest` (issue #740).
+        //
+        // This read was hard-coded empty until #661 gave `OverlayAgent` a tools
+        // list. The comment that stood here ("no manifest tools row → the
+        // company's standard grant") described a fact that expired with that
+        // change, which is why it read as a decision rather than a stale
+        // assumption: a scoped teammate reported as reaching every enabled
+        // server, and the console asserted a connection the harness does not
+        // grant.
+        grants.push((
+            overlay.id.clone(),
+            agent_effective_grants(allow, &overlay.tools),
+        ));
+    }
+    grants
+}
+
+/// The ids of the agents whose effective `grants` reach `decl` (issue #568),
+/// read through the shared [`grants_cover_server`] so this agrees with the
+/// harness registry. Empty ⇒ no teammate can reach the server.
+///
+/// A **disabled** server reaches nobody regardless of grants: `registry_for_agent`
+/// filters on `decl.enabled && grants_cover_server(..)`, so an agent granted
+/// `mcp:<slug>` still gets no such tool while the server is off. Mirroring both
+/// halves of that filter here is what keeps the console from claiming a
+/// reachability the harness does not hand out.
+fn reachers_of(roster_grants: &[(String, Vec<String>)], decl: &mcp::McpServerDecl) -> Vec<String> {
+    if !decl.enabled {
+        return Vec::new();
+    }
+    roster_grants
+        .iter()
+        .filter(|(_, grants)| grants_cover_server(grants, &decl.name))
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// `GET …/mcp/servers` — the company's effective MCP servers, each with its last
 /// recorded (scrubbed) probe health.
 async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let manifest = manifest_servers(runtime).await?;
-    let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    // One record load feeds both the manifest servers (merged into the effective
+    // set) and the roster used for reachability (issue #568), rather than loading
+    // it twice. The install-wide defaults (issue #527) are the layer *underneath*
+    // the manifest, so they come off the runtime rather than the record.
+    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
+    let manifest = record
+        .as_ref()
+        .map(|r| r.manifest.mcp_servers.clone())
+        .unwrap_or_default();
+    let decls = resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
+    // Resolve every agent's effective grants once, then ask per server who is
+    // covered — the wildcard-heavy work happens N(agents) times, not N×M.
+    let grants = record.as_ref().map(roster_grants).unwrap_or_default();
     let mut out = Vec::with_capacity(decls.len());
     for decl in &decls {
         let health = load_health(runtime.id(), &decl.name, runtime.secrets().as_ref())
             .await
             .map_err(ApiError)?;
-        out.push(dto_from_decl(decl, health));
+        out.push(dto_from_decl(decl, reachers_of(&grants, decl), health));
     }
     Ok(Json(out))
 }
@@ -336,12 +453,22 @@ async fn update_server(
         .map_err(ApiError)?;
 
     // The base to patch: an existing runtime entry (override or runtime server),
-    // else the manifest server (creating a fresh override), else 404.
+    // else the manifest server (creating a fresh override), else the install
+    // default (creating the operator's first override — the way a default is
+    // disabled, `delete_server` points the console at this route), else 404. A
+    // default shadowed by a manifest entry never reaches the third arm: the
+    // manifest entry is the effective declaration and is patched instead.
     let position = index.iter().position(|s| s.name.trim() == name);
-    let mut server = match (position, &manifest_entry) {
-        (Some(i), _) => index[i].clone(),
-        (None, Some(m)) => m.clone(),
-        (None, None) => {
+    let default_entry = runtime
+        .default_mcp_servers()
+        .iter()
+        .find(|d| d.name.trim() == name)
+        .cloned();
+    let mut server = match (position, &manifest_entry, &default_entry) {
+        (Some(i), _, _) => index[i].clone(),
+        (None, Some(m), _) => m.clone(),
+        (None, None, Some(d)) => d.clone(),
+        (None, None, None) => {
             return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
                 "no MCP server named `{name}`."
             ))));
@@ -411,6 +538,20 @@ async fn delete_server(
             "`{name}` is declared in company.toml — disable it instead of deleting."
         ))));
     }
+    // Same guard, same reason, for an install-wide default (issue #527): the
+    // declaration lives in the instance `config.toml`, not in this company's
+    // runtime index, so deleting the index row would not remove it — the next
+    // resolution would merge it straight back and the delete would read as
+    // broken. Disabling writes an override that *does* persist.
+    if runtime
+        .default_mcp_servers()
+        .iter()
+        .any(|d| d.name.trim() == name)
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(format!(
+            "`{name}` ships as an install default — disable it instead of deleting."
+        ))));
+    }
 
     let mut index = load_runtime_index(runtime.id(), runtime.secrets().as_ref())
         .await
@@ -451,20 +592,39 @@ async fn mutation_response(
     // DTO so the response and a later `GET` agree.
     let test = probe_and_persist(runtime, name).await;
 
-    let manifest = manifest_servers(runtime).await?;
-    let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    // One record load: the manifest servers merged into the effective set, and
+    // the roster the mutated server's reachability is computed against (#568).
+    // Install-wide defaults (#527) sit under the manifest and come off the
+    // runtime, so the mutation response reflects the same three-layer merge a
+    // later `GET` will.
+    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
+    let manifest = record
+        .as_ref()
+        .map(|r| r.manifest.mcp_servers.clone())
+        .unwrap_or_default();
+    let decls = resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
     let decl = decls.iter().find(|d| d.name == name).ok_or_else(|| {
         ApiError(OpenCompanyError::InvalidRequest(format!(
             "`{name}` not found"
         )))
     })?;
+    let reachable_by = record
+        .as_ref()
+        .map(roster_grants)
+        .map(|grants| reachers_of(&grants, decl))
+        .unwrap_or_default();
     let health = load_health(runtime.id(), name, runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
     Ok(Json(MutationResponse {
-        server: dto_from_decl(decl, health),
+        server: dto_from_decl(decl, reachable_by, health),
         note: NEXT_TURN_NOTE.to_string(),
         test,
         warning,
@@ -478,9 +638,14 @@ async fn mutation_response(
 #[cfg(feature = "openhuman")]
 async fn probe_and_persist(runtime: &CompanyRuntime, name: &str) -> Option<McpHealth> {
     let manifest = manifest_servers(runtime).await.ok()?;
-    let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .ok()?;
+    let decls = resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .ok()?;
     let decl = decls.iter().find(|d| d.name == name)?;
     // `probe_server` already scrubs its message; persist that scrubbed health.
     let health = crate::harness::mcp_probe::probe_server(decl).await;
@@ -530,7 +695,14 @@ async fn discover_tools(
         Ok(m) => m,
         Err(err) => return err.into_response(),
     };
-    let decls = match resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref()).await {
+    let decls = match resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    {
         Ok(d) => d,
         Err(err) => return ApiError(err).into_response(),
     };
@@ -599,7 +771,14 @@ async fn test_server(company: ScopedCompany, Path(NamePath { name }): Path<NameP
         Ok(m) => m,
         Err(err) => return err.into_response(),
     };
-    let decls = match resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref()).await {
+    let decls = match resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    {
         Ok(d) => d,
         Err(err) => return ApiError(err).into_response(),
     };
@@ -653,9 +832,14 @@ async fn start_oauth(
 
     // Resolve the effective server so OAuth uses the same endpoint agents will.
     let manifest = manifest_servers(runtime).await?;
-    let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    let decls = resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
     let decl = decls
         .iter()
         .find(|d| d.name == name)
@@ -693,4 +877,104 @@ async fn discover_tools(
 ) -> Response {
     let _ = (company, name);
     crate::server::ops::not_wired("mcp tool discovery")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::company::CompanyManifest;
+    use crate::ports::types::{CompanyId, OverlayAgent};
+
+    /// A company allowing two MCP families, with one manifest agent that lists
+    /// none (so it inherits both).
+    fn record(overlay_agents: Vec<OverlayAgent>) -> CompanyRecord {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[tools]
+allow = ["mcp:notion", "mcp:linear"]
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+"#,
+        )
+        .expect("manifest parses");
+        CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents,
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        }
+    }
+
+    fn teammate(id: &str, tools: Vec<&str>) -> OverlayAgent {
+        OverlayAgent {
+            id: id.to_string(),
+            name: id.to_string(),
+            role: "Growth".to_string(),
+            description: None,
+            tools: tools.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    /// Issue #740: a scoped overlay teammate must not read back here as
+    /// reaching everything.
+    ///
+    /// `roster_grants` is what every MCP server row's `reachableBy` is computed
+    /// from. #661 gave `OverlayAgent` a tools list and taught two of the three
+    /// readers to honour it; this one still passed an empty grant, so a
+    /// teammate scoped to one server reported as reaching all of them — the
+    /// console asserting a connection the harness does not grant.
+    #[test]
+    fn a_scoped_overlay_teammate_does_not_read_back_as_reaching_everything() {
+        let scoped = record(vec![teammate("jamie", vec!["mcp:notion"])]);
+        let grants = roster_grants(&scoped);
+        let jamie = grants
+            .iter()
+            .find(|(id, _)| id == "jamie")
+            .expect("the overlay teammate is on the roster");
+        assert_eq!(
+            jamie.1,
+            vec!["mcp:notion".to_string()],
+            "a scoped teammate reaches only what it was scoped to"
+        );
+
+        // The manifest agent lists nothing and still inherits everything, so
+        // the narrowing above is the teammate's own and not a company change.
+        let ceo = grants
+            .iter()
+            .find(|(id, _)| id == "ceo")
+            .expect("on roster");
+        assert_eq!(
+            ceo.1,
+            vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
+    /// The empty-means-inherit rule (#264) is untouched: a teammate written
+    /// before #661, and every teammate created without a scope, still reads
+    /// back holding the company's whole grant.
+    #[test]
+    fn an_unscoped_overlay_teammate_still_inherits_the_company_grant() {
+        let grants = roster_grants(&record(vec![teammate("jamie", Vec::new())]));
+        let jamie = grants.iter().find(|(id, _)| id == "jamie").expect("roster");
+        assert_eq!(
+            jamie.1,
+            vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
 }

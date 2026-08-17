@@ -13,6 +13,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import type { TaskDeliverable } from "@/api/tasks";
 import { setInboxEnabled } from "@/api/inbox";
 import {
   ApiError,
@@ -54,6 +55,7 @@ import {
   dmChannelId,
   findChannel,
   firstChannel,
+  offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
   type DecidedApproval,
@@ -126,6 +128,13 @@ interface Props {
   /** The verdict each card is waiting on, and the ones already witnessed. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
   decidedApprovals?: Record<string, DecidedApproval>;
+  /**
+   * Decisions that did not land, per approval id (#842) — the message to show
+   * on that item. Owned by the shell, like the two maps above, because a
+   * failure has to outlive this view unmounting: the operator's next move after
+   * one is often to open the Approvals page and come back.
+   */
+  failedApprovals?: Record<string, string>;
 }
 
 /**
@@ -160,6 +169,7 @@ export function ChatView({
   onDecideApproval,
   decidingApprovals,
   decidedApprovals,
+  failedApprovals,
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
@@ -585,7 +595,7 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    */
-  async function send(text: string, parentId?: string) {
+  async function send(text: string, deliverable?: TaskDeliverable, parentId?: string) {
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
@@ -598,7 +608,13 @@ export function ChatView({
     // below — two bubbles for one turn.
     if (chatId) onSendStart?.(chatId);
     try {
-      const reply = await client.chat(text, company, chatId, toHostMessageId(parentId));
+      const reply = await client.chat(
+        text,
+        company,
+        chatId,
+        toHostMessageId(parentId),
+        deliverable,
+      );
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
             makeMessage("company", r.text, {
@@ -825,6 +841,7 @@ export function ChatView({
               now={now}
               askerNames={askerNames}
               decidingApprovals={decidingApprovals}
+              failedApprovals={failedApprovals}
               onDecideApproval={onDecideApproval}
             />
             {consoleOnlyMember && (
@@ -843,7 +860,12 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
-              onSend={(text) => void send(text)}
+              onSend={(text, deliverable) => void send(text, deliverable)}
+              // Channel *and* DM composers offer "do it once" vs "build me the
+              // workflow" (issues #580, #845) — see `offersDeliverableChoice`,
+              // which owns the rule. Only the thread and copilot composers below
+              // go without.
+              deliverableChoice={offersDeliverableChoice(active.kind)}
             />
           </div>
 
@@ -853,7 +875,7 @@ export function ChatView({
               parent={parent}
               replies={threadReplies}
               sending={sending}
-              onSend={(text) => void send(text, parent.id)}
+              onSend={(text) => void send(text, undefined, parent.id)}
               onClose={() => setOpenThreadId(null)}
             />
           )}
@@ -872,6 +894,28 @@ export function ChatView({
               }}
               onAdd={() => setAddOpen(true)}
               onMessage={(m) => selectChannel(dmChannelId(m))}
+              /**
+               * The way from this channel to the desk it is (issue #485).
+               *
+               * Only for a host-backed desk channel. A DM is not a desk, and a
+               * fallback desk (`lib/desks.ts`) carries no `memberIds` because
+               * the host has no desks surface at all — the chart would have
+               * nothing to open. Both simply get no link rather than one that
+               * lands nowhere.
+               *
+               * A desk's channel id **is** its desk id (`deskFromDto`), so
+               * there is no mapping to keep in step. Written to the hash rather
+               * than routed through a callback, as `ArtifactsTab`'s "Open in
+               * workspace" does: this is a cross-view address, and the shell
+               * only hands chat a chat-scoped navigate.
+               */
+              onManageDesk={
+                active.kind === "channel" && active.memberIds
+                  ? () => {
+                      window.location.hash = `/company/${active.id}`;
+                    }
+                  : undefined
+              }
               canEditBudget={isAdmin && fromHost}
               onEditBudget={setBudgetFor}
               onRemoveCap={(m) => void applyBudget(m, null)}

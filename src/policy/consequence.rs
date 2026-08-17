@@ -68,6 +68,8 @@ use crate::ports::types::EffectGroup;
 ///   #238): it changes nothing but the backend bills per request, and parking
 ///   it would be worse than useless — openhuman resolves a `RequireApproval`
 ///   inline, so a parked search is a search that never happens.
+///   [`ExternalRead`](Self::ExternalRead) is the fourth (issue #559), for the
+///   same reason with the billing removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
     /// Nothing changes and nothing is spent. Runs in every mode, `readonly`
@@ -76,6 +78,18 @@ pub enum Reach {
     /// Nothing changes, but the call is billed. Runs under `supervised`,
     /// denied under `readonly`.
     Money,
+    /// A third party's own data is read with the company's connected
+    /// credential. Nothing changes anywhere and nothing is billed, but the
+    /// account being read is not the company's own — so `supervised` allows it
+    /// and `readonly` still denies it (issue #559).
+    ///
+    /// Distinct from [`Money`](Self::Money) rather than folded into it, and the
+    /// reason is [`costs_money`](Self::costs_money): that predicate feeds the
+    /// daily spend cap, so reusing `Money` here would bill an operator for
+    /// every page of every mailbox they read. Distinct from
+    /// [`Nothing`](Self::Nothing) because a `readonly` desk reaching into a
+    /// counterparty's account is exactly what that tier promises not to do.
+    ExternalRead,
     /// State changes, a counterparty is reached, arbitrary code runs, an
     /// arbitrary address is reached, or operator-owned guidance is overwritten.
     /// Parks under `supervised`, denied under `readonly`.
@@ -107,17 +121,77 @@ impl Reach {
 /// operator-owned state is [`PerCall`](Self::PerCall) however innocuous its
 /// name; a read scoped to one connected account is
 /// [`Grantable`](Self::Grantable) however alarming the tool carrying it sounds.
+///
+/// # This now decides two different things (issue #560)
+///
+/// Since the `auto` tier, [`Consequence::parks_under_auto`] reads this field to
+/// mean "may run **unattended for everyone** while the company sits in `auto`"
+/// — a wider grant than the per-teammate, until-a-deadline one the name
+/// describes. Loosening a tool to [`Grantable`](Self::Grantable) for a
+/// delegation reason therefore also stops it parking under `auto`, for every
+/// agent, with no operator in the loop. That is sound because this field is
+/// decided by what a tool can *reach* rather than by what it is called — but it
+/// is two decisions in one edit, and the second one is easy to make by
+/// accident. `the_auto_tier_line_is_pinned_tool_by_tool` in this module's tests
+/// walks the whole table and fails loudly if a tool crosses that line.
+///
+/// # Which is why the two questions are now separable (issue #673)
+///
+/// [`ScopedGrantable`](Self::ScopedGrantable) answers the first question `yes`
+/// and the second `no`: an operator may delegate it to one teammate until a
+/// deadline, and it still parks under `auto`. That variant exists because an
+/// outward fetch needs the delegation half and must not have the unattended
+/// half — see its own documentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
-    /// An operator may grant this to a teammate until a deadline.
+    /// An operator may grant this to a teammate until a deadline — **and**,
+    /// since issue #560, may run unattended under the `auto` tier. See the note
+    /// on [`Standing`] before loosening a tool to this.
     Grantable,
+    /// An operator may grant this to a teammate until a deadline, but it still
+    /// parks under `auto` (issue #673).
+    ///
+    /// The variant exists because the two questions [`Standing`] answers pull
+    /// apart for an outward fetch. "May maya fetch `https://docs.rs` for the
+    /// next few days?" is a sentence an operator can consent to. "May every
+    /// agent fetch any address, unattended, for as long as the company sits in
+    /// `auto`?" is not — and marking the tool [`Grantable`](Self::Grantable) to
+    /// obtain the first would have silently bought the second, because
+    /// [`Consequence::parks_under_auto`] reads exactly that field.
+    ///
+    /// A tool declared this way is only ever grantable **with a scope**: its
+    /// declaration is argument-classified, so a call whose scope cannot be
+    /// derived falls back to [`PerCall`](Self::PerCall) rather than minting an
+    /// unscoped grant. That matters because
+    /// [`StandingGrant::admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)
+    /// treats an unscoped grant as admitting *everything* — correct for a
+    /// journal line predating the field, catastrophic for a fetch grant that
+    /// failed to name a host.
+    ScopedGrantable,
     /// Every call is its own decision.
     PerCall,
 }
 
 impl Standing {
-    /// May this be granted standing?
+    /// May this be granted standing to one teammate until a deadline?
+    ///
+    /// True for both grantable variants. This is the mint-and-spend question —
+    /// the one the field is named for — and it is deliberately **not** the
+    /// question the `auto` tier asks; see
+    /// [`runs_unattended_under_auto`](Self::runs_unattended_under_auto).
     pub fn is_grantable(self) -> bool {
+        matches!(self, Self::Grantable | Self::ScopedGrantable)
+    }
+
+    /// May this run unattended, for every agent, while the company sits in
+    /// `auto` (issue #560)?
+    ///
+    /// Split out from [`is_grantable`](Self::is_grantable) by issue #673. The
+    /// two used to be the same predicate, which meant reaching for a standing
+    /// grant on any tool also stopped it parking under `auto`. They are
+    /// different sentences an operator consents to, and only
+    /// [`Grantable`](Self::Grantable) means both.
+    pub fn runs_unattended_under_auto(self) -> bool {
         matches!(self, Self::Grantable)
     }
 }
@@ -131,6 +205,77 @@ pub struct Consequence {
     pub reach: Reach,
     /// Whether it can be granted standing.
     pub standing: Standing,
+}
+
+impl Consequence {
+    /// Does this park for an operator under `auto` (issue #560)?
+    ///
+    /// `auto` is the tier between `supervised` — which parks every write and
+    /// every outward read, so companies drown — and `full`, which parks nothing
+    /// but the `always_approve` list. Its contract, in the operator's words:
+    /// **the agent works without interrupting me, and stops before anything
+    /// that leaves the building or spends money.**
+    ///
+    /// # Why this reads two fields instead of adding a third
+    ///
+    /// The split `auto` needs is already declared. [`Standing::Grantable`]
+    /// marks exactly the calls whose consequence stays inside this company —
+    /// the agent's own scratch writes (`file_write`, `edit`, `apply_patch`,
+    /// `csv_export`, `memory_store`) and a read scoped to one connected account.
+    /// Everything that can execute arbitrary code, reach an arbitrary address,
+    /// overwrite operator-authored guidance, spend on generation, or perform an
+    /// effect this layer cannot see is [`Standing::PerCall`] — deliberately, and
+    /// argued tool by tool in [`DECLARED`]. So the tier is a *reader* of that
+    /// work, not a second table to be kept in step with it. A fresh list would
+    /// be the exact hand-maintained carve-out this module was written to delete,
+    /// and it would drift the same silent way.
+    ///
+    /// # What the operator is consenting to
+    ///
+    /// [`Standing`] answers "may an operator hand this to one teammate until a
+    /// deadline?", and this reuses it to mean "may it run unattended for
+    /// everyone while the company sits in `auto`?" — which is a genuinely wider
+    /// grant than a standing grant, not the same one. It is sound because
+    /// [`Standing`] is decided by what a tool can *reach* rather than by how
+    /// alarming its name is, and because the widening is exactly the choice the
+    /// operator makes when they select the tier. It is recorded here so a future
+    /// edit that loosens `Grantable` knows it is loosening two things.
+    ///
+    /// # Two boundaries this does not draw
+    ///
+    /// [`Reach::Money`] does **not** park. `web_search` is billed but changes
+    /// nothing, and it already runs unattended under `supervised` for a reason
+    /// that binds harder here: openhuman resolves a `RequireApproval` inline and
+    /// never re-dispatches, so a parked search is a search that never happens
+    /// and an agent with no search invents citations. `auto` must not be
+    /// stricter than the tier it replaces. The per-agent daily cap is the
+    /// boundary that actually holds spend, and it sits above the tier dispatch.
+    /// Generation that spends on *submit* — `media_generate_image`,
+    /// `media_generate_video` — is [`Reach::Consequence`] and `PerCall`, so it
+    /// parks.
+    ///
+    /// `always_approve` is not consulted here either: it is checked above the
+    /// tier dispatch in
+    /// [`ApprovalPolicy::check`](crate::harness::policy::ApprovalPolicy) and
+    /// wins over every tier, `full` included.
+    ///
+    /// # Stable across issue #559
+    ///
+    /// A Composio read is `Grantable` today while still carrying
+    /// [`Reach::Consequence`]; #559 reclassifies its *reach* without touching
+    /// its standing. This predicate returns `false` — runs unattended — in both
+    /// worlds, because the `Grantable` half already decides it. The two changes
+    /// can land in either order and neither can silently invert the other.
+    /// # Reads the narrower of the two questions since issue #673
+    ///
+    /// This used to read `is_grantable()`, which fused "may be delegated to one
+    /// teammate" with "runs unattended for everyone under `auto`". An outward
+    /// fetch needs the first and must not have the second, so the predicate it
+    /// reads is now [`Standing::runs_unattended_under_auto`] and
+    /// [`Standing::ScopedGrantable`] sits on the parking side of this line.
+    pub fn parks_under_auto(self) -> bool {
+        self.reach.parks_under_supervision() && !self.standing.runs_unattended_under_auto()
+    }
 }
 
 /// One tool's declaration.
@@ -148,7 +293,42 @@ pub const COMPOSIO_EXECUTE: &str = "composio_execute";
 
 /// The argument key `composio_execute` carries the action slug under, on the
 /// wire and in both this crate's tool and openhuman's.
-const COMPOSIO_ACTION_KEY: &str = "tool";
+///
+/// `pub(crate)` so the test fixtures in
+/// [`crate::policy::test_support`] build their arguments from the same constant
+/// this classifier reads. Issue #470: fixtures across five modules hard-coded a
+/// key of their own, the two drifted apart, and every one of those tests
+/// silently stopped reaching the catalogue lookup it claimed to cover.
+pub(crate) const COMPOSIO_ACTION_KEY: &str = "tool";
+
+/// The shell tool, classified by the command it was handed rather than by this
+/// name (issue #875).
+pub const SHELL: &str = "shell";
+
+/// The argument key [`SHELL`] carries the command line under.
+///
+/// A required parameter of the vendored tool's schema, so a call that omits it
+/// could not have run anyway; a call this cannot read stays gated.
+pub(crate) const SHELL_COMMAND_KEY: &str = "command";
+
+/// The optional argument the model may use to declare what its own command
+/// does. Read **escalate-only**, exactly as upstream reads it: a self-declared
+/// class may raise the requirement, never lower it. A model that could talk its
+/// way down a tier by labelling `rm -rf` a read would be the whole gate.
+pub(crate) const SHELL_CATEGORY_KEY: &str = "category";
+
+/// The outward-fetch tool a standing grant may be scoped to a host on (#673).
+///
+/// Only this one of the three web tools. `http_request` and `curl` can mutate,
+/// so a host-scoped grant on them would consent to *writing* to that host —
+/// a different act from the read this issue is about, and one nobody asked for.
+pub const WEB_FETCH: &str = "web_fetch";
+
+/// The argument key [`WEB_FETCH`] carries its absolute URL under.
+///
+/// A required parameter of the vendored tool's schema, so a call that omits it
+/// could not have run anyway; a call this cannot read simply stays `PerCall`.
+pub(crate) const WEB_FETCH_URL_KEY: &str = "url";
 
 /// Every tool this crate can wire onto an agent, and what it can reach.
 ///
@@ -166,10 +346,54 @@ const DECLARED: &[Declared] = &[
     d("query_company", EffectGroup::Other, Reach::Nothing),
     d("spawn_task", EffectGroup::Other, Reach::Nothing),
     d("delegate_to_desk", EffectGroup::Other, Reach::Nothing),
+    // Issue #884: `delegate_to_teammate` is `delegate_to_desk` resolved to a
+    // person instead of a desk. Same class exactly — it runs a turn inside this
+    // company and nothing leaves it.
+    d("delegate_to_teammate", EffectGroup::Other, Reach::Nothing),
     d("add_agent", EffectGroup::Other, Reach::Nothing),
     d("create_workflow", EffectGroup::Other, Reach::Nothing),
     d("assign_task", EffectGroup::Other, Reach::Nothing),
     d("review_task", EffectGroup::Other, Reach::Nothing),
+    // Issue #661 (M7). `read_workflow` is a pure read of this company's own
+    // saved graphs — the same class as `query_company`, which already lists
+    // them.
+    d("read_workflow", EffectGroup::Other, Reach::Nothing),
+    // `update_workflow` takes `create_workflow`'s classification, and gets it by
+    // re-deriving rather than by copying. Four properties separate it from
+    // `workspace_write`, which is the tool it superficially resembles and which
+    // is deliberately `Reach::Consequence`:
+    //
+    //  * every content-changing update is **undoable by construction** — issue
+    //    #274 snapshots the prior body inside the same write lock, so the thing
+    //    an operator would want to have seen is still there afterwards;
+    //  * the tool refuses a scheduled target, so every workflow it CAN edit is
+    //    manual-run only: a bad edit's consequence materialises solely through
+    //    `run_workflow`, which parks;
+    //  * `expected_version` is required, so it cannot clobber state nobody read;
+    //  * validation is identical to the console's, including #682's per-kind
+    //    config rules — an agent edit cannot persist a graph an operator's
+    //    could not.
+    //
+    // Parking every fix-up save of a draft the agent itself just created would
+    // also recreate the #558/#561 no-consequence-interrupt pattern against the
+    // exact flow M7 exists to enable.
+    //
+    // The honest residual, recorded rather than quietly carried: `Reach::Nothing`
+    // means a `readonly` desk can edit a workflow. But `create_workflow` above is
+    // already `Nothing`, so such a desk can already author one — this is a
+    // pre-existing classification, not a new hole. If it is wrong, create and
+    // update are reclassified TOGETHER; neither moves alone.
+    d("update_workflow", EffectGroup::Other, Reach::Nothing),
+    // `delete_workflow` does not, and the argument is `workspace_delete`'s
+    // (#671) almost verbatim — with the object strictly worse. Deleting a
+    // workflow removes the graph AND cascades its whole #274 revision history
+    // away in the same call, so unlike an update there is no prior body left to
+    // restore from and unlike a workspace delete there is no artifact chain
+    // outliving it. `PerCall` for #671's second reason too: a standing grant on
+    // deletion is the shape that turns one bad turn into a company whose
+    // processes are quietly gone by the end of it, and per-call parking makes
+    // each removal its own card naming its own workflow.
+    d("delete_workflow", EffectGroup::Other, Reach::Consequence),
     // Running a saved workflow performs whatever that workflow performs, which
     // this layer cannot see. It parks, and it stays a per-call decision.
     d("run_workflow", EffectGroup::Other, Reach::Consequence),
@@ -178,16 +402,18 @@ const DECLARED: &[Declared] = &[
     // nothing an operator authored — same class as `query_company`.
     d("read_run_output", EffectGroup::Other, Reach::Nothing),
     // ---- The agent's own sandboxed workspace: reads ------------------------
-    // All four are pure reads inside the workspace the agent is pinned to.
+    // All six are pure reads inside the workspace the agent is pinned to.
     // `file_read`, `glob`, `grep` and `image_info` PARKED before this table
     // existed — not by anyone's decision, but because the read-only-prefix
     // heuristic keys on the *start* of the name and none of them begins with
-    // one. `list`, `read_workspace_state` and `memory_recall` happened to.
+    // one. `list` and `memory_recall` happened to.
+    //
+    // `read_workspace_state` was the seventh member of this list until issue
+    // #459; it is classified with `shell` below, for the reason given there.
     d("file_read", EffectGroup::Other, Reach::Nothing),
     d("glob", EffectGroup::Other, Reach::Nothing),
     d("grep", EffectGroup::Other, Reach::Nothing),
     d("list", EffectGroup::Other, Reach::Nothing),
-    d("read_workspace_state", EffectGroup::Other, Reach::Nothing),
     d("memory_recall", EffectGroup::Other, Reach::Nothing),
     d("image_info", EffectGroup::Other, Reach::Nothing),
     // ---- The agent's own sandboxed workspace: writes -----------------------
@@ -212,9 +438,52 @@ const DECLARED: &[Declared] = &[
     // grant on "anything the sandbox permits", which is not a sentence an
     // operator can consent to.
     d("shell", EffectGroup::Other, Reach::Consequence),
+    // `read_workspace_state` sits here rather than with its fellow workspace
+    // reads because of what it does, not what it is called (issue #459). It
+    // shells out to `git status` and `git log` in
+    // `{root}/{company}/{agent}/workspace` — the same directory `file_write`
+    // writes into — and the vendored `run_git` sets no `GIT_CONFIG_NOSYSTEM`,
+    // no `-c` overrides and no environment scrub. Several git config keys name
+    // a command to run and `git status` invokes `core.fsmonitor`, so a
+    // `.git/config` the agent authored decides what executes. That is the
+    // `shell` shape wearing a read's name, and `namespace_of` already maps it
+    // into the `shell` namespace for capability gating.
+    //
+    // This is a consistency fix rather than a judgement call: `git_operations`
+    // below is already `Reach::Consequence`, and its `run_git_command_in` is
+    // the same unscrubbed `Command::new("git")`. The identical primitive was
+    // gated in one tool and open in the other; `read_workspace_state` was the
+    // odd one out.
+    //
+    // THIS IS A STOPGAP, and deliberately the blunt one: it costs an approval
+    // on a routine orientation step. The fix that restores the ergonomics is
+    // upstream, in openhuman's `run_git`
+    // (`src/openhuman/tools/impl/system/workspace_state.rs`). It is not merely
+    // unwritten — it is not straightforward: the exposure is the *repository*
+    // config in an agent-writable directory, which `GIT_CONFIG_NOSYSTEM` and
+    // `GIT_CONFIG_GLOBAL` do not reach, so a real fix has to refuse unknown
+    // config rather than scrub a list of known-bad keys. That path is
+    // byte-identical on openhuman `main` today, so there is no pin to bump to.
+    // Revert this to `Reach::Nothing` once a hardened `run_git` is vendored,
+    // and not before.
+    //
+    // The revert condition is tracked where the work has to happen —
+    // tinyhumansai/openhuman#5494 — not only in this comment. A stopgap whose
+    // removal condition lives as prose next to the stopgap, in a different repo
+    // from its fix, is how these become permanent: nothing surfaces it when
+    // somebody bumps the openhuman pin.
+    d(
+        "read_workspace_state",
+        EffectGroup::Other,
+        Reach::Consequence,
+    ),
     d("http_request", EffectGroup::Other, Reach::Consequence),
     d("curl", EffectGroup::Other, Reach::Consequence),
-    d("web_fetch", EffectGroup::Other, Reach::Consequence),
+    // `web_fetch` keeps its row so `declared_tools` still walks it, but its
+    // standing is decided from the call's URL — see `web_fetch_consequence`
+    // (issue #673). This row's `PerCall` is the answer for a call whose URL
+    // cannot be read, which is exactly what that function falls back to.
+    d(WEB_FETCH, EffectGroup::Other, Reach::Consequence),
     // ---- The company workspace: the shared note tree ------------------------
     // Reads are free (issue #237). `workspace_write` overwrites guidance the
     // operator wrote, which is why `is_external_effect` has always refused to
@@ -231,11 +500,51 @@ const DECLARED: &[Declared] = &[
     // tree without ever asking.
     d("workspace_list", EffectGroup::Other, Reach::Nothing),
     d("workspace_read", EffectGroup::Other, Reach::Nothing),
+    // `workspace_search` (issue #607) is a read of the same tree by the same
+    // rules — it can surface nothing `workspace_read` could not already be asked
+    // for, and it exists precisely so that asking costs one call instead of one
+    // per candidate. Anything stricter would price the cheap path above the
+    // expensive one it replaces.
+    //
+    // Note which grant it rides, because the name invites the wrong guess: the
+    // `workspace` READ grant, never the metered `search` grant. `web_search`
+    // spends money at a backend; this reads the company's own notes.
+    d("workspace_search", EffectGroup::Other, Reach::Nothing),
     d("workspace_create", EffectGroup::Other, Reach::Consequence),
     d("workspace_write", EffectGroup::Other, Reach::Consequence),
+    // `workspace_delete` and `workspace_rename` (issue #671) take the same
+    // classification, and again by re-deriving it rather than by copying.
+    //
+    // Both are confined to the agent's own `Agents/<self>/` folder, which is
+    // narrower than either tool above — so the temptation is to price them
+    // lower. That would be backwards. Reach here is about what a call costs the
+    // company, and a delete removes a node **and its authorship record** from a
+    // tree the operator and every teammate read; a rename moves what somebody
+    // may have linked to by path. Neither is undone by the agent that did it,
+    // and the operator's undo is a console session, not a retry. `Consequence`
+    // is what "the operator would want to have seen this" means.
+    //
+    // `PerCall` follows for the same reason it does above, with one more: a
+    // standing grant on deletion is precisely the shape that turns one bad turn
+    // into a folder that is quietly empty by the end of it. Per-call parking
+    // makes each removal its own card naming its own path.
+    d("workspace_delete", EffectGroup::Other, Reach::Consequence),
+    d("workspace_rename", EffectGroup::Other, Reach::Consequence),
     // ---- Publishing --------------------------------------------------------
     // Externally visible and not reversible by the company alone.
-    d("publish_artifact", EffectGroup::Publish, Reach::Consequence),
+    // `Reach::Consequence` because a publish does change state, and a
+    // `supervised` desk should still see one before it lands. But `Grantable`,
+    // not `PerCall` (issue #903): handing a finished file to the operator does
+    // not leave the company. `harness::publish` writes into the company's own
+    // workspace and artifact chain — no counterparty, no address, nothing sent
+    // — and the write is versioned (`…/artifacts/{id}/versions`, `…/diff`), so
+    // it is reversible by the company alone, unlike the tools this section's
+    // neighbours classify. `auto` already promises that the agent's own
+    // sandbox writes run unattended; this is that promise applied to the step
+    // that makes the work visible. An operator who wants a human on every
+    // hand-over keeps one by choosing `supervised`, or by naming
+    // `publish_artifact` in `always_approve`, which wins over every tier.
+    d_grantable("publish_artifact", EffectGroup::Publish, Reach::Consequence),
     // ---- Priced backend calls ----------------------------------------------
     // `web_search` is billed per request but changes nothing (issue #238).
     // Media generation moves real money on submit (issue #109); listing the
@@ -253,19 +562,29 @@ const DECLARED: &[Declared] = &[
         Reach::Consequence,
     ),
     d("media_list_models", EffectGroup::Other, Reach::Nothing),
-    // ---- Skills / workflow catalogue ---------------------------------------
+    // ---- Skills catalogue --------------------------------------------------
     // The three OpenHuman skill *read* tools, scoped to this agent's own
     // materialized skill tree under its workspace. All local, all reads.
     //
     // `describe_workflow` PARKED before this table existed, for the same
     // reason `file_read` did and with nobody reporting either: the read-only
     // rule matched a name *prefix* and "describe" is not one of the words. The
-    // persona hands an agent all three in one sentence — "use `list_workflows`
-    // to enumerate them, `describe_workflow` to inspect one" — so two ran and
+    // persona hands an agent all three in one sentence — "use `list_skills`
+    // to enumerate them, `describe_skill` to inspect one" — so two ran and
     // the middle one interrupted an operator.
-    d("list_workflows", EffectGroup::Other, Reach::Nothing),
-    d("describe_workflow", EffectGroup::Other, Reach::Nothing),
-    d("read_workflow_resource", EffectGroup::Other, Reach::Nothing),
+    //
+    // Issue #845 renamed all three off upstream's "workflow" wording, which is
+    // a *skill* upstream and a saved graph here. `describe_skill` inherits
+    // exactly the hazard above — "describe" is still not a read-only prefix —
+    // so these three rows are what keep the rename from re-parking it.
+    //
+    // Spelled as literals, not as `harness::skills::naming`'s constants: this
+    // table is compiled in every build and that module is behind `openhuman`.
+    // `skill_read_tools_are_declared_reads` (in that module, where the constants
+    // are) is what pins the two spellings together.
+    d("list_skills", EffectGroup::Other, Reach::Nothing),
+    d("describe_skill", EffectGroup::Other, Reach::Nothing),
+    d("read_skill_resource", EffectGroup::Other, Reach::Nothing),
     // ---- MCP ---------------------------------------------------------------
     // The agent persona *instructs* every agent to call `mcp_list_servers` (and
     // `mcp_list_tools` for a specific server) rather than answer a capability
@@ -290,6 +609,42 @@ const DECLARED: &[Declared] = &[
         Reach::Nothing,
     ),
     d("mcp_call_tool", EffectGroup::Other, Reach::Consequence),
+    // Billing (issues #788, #789). Both integrations read the company's OWN
+    // Chargebee site and PayPal account, so the reads are `Nothing` rather than
+    // `ExternalRead`: that tier exists for reaching into a *counterparty's*
+    // account, and a `readonly` desk answering "has Alan paid?" about the
+    // company's own ledger changes nothing and bills nothing.
+    d("chargebee_get_invoice", EffectGroup::Other, Reach::Nothing),
+    d(
+        "chargebee_list_invoices",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    d("chargebee_get_customer", EffectGroup::Other, Reach::Nothing),
+    d(
+        "paypal_get_wallet_balance",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    d(
+        "paypal_list_transactions",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    // Raising an invoice reaches a real customer of a real business and creates
+    // a demand for money, so it is `Send` and it parks.
+    d(
+        "chargebee_send_invoice",
+        EffectGroup::Send,
+        Reach::Consequence,
+    ),
+    // Writes a record into an external billing system. No money moves, but it
+    // is still a change somebody else's system will keep.
+    d(
+        "chargebee_create_customer",
+        EffectGroup::Other,
+        Reach::Consequence,
+    ),
     d(
         "mcp_registry_tool_call",
         EffectGroup::Other,
@@ -317,6 +672,59 @@ const DECLARED: &[Declared] = &[
         EffectGroup::Identity,
         Reach::Consequence,
     ),
+    // ---- Bound repositories -------------------------------------------------
+    // Issue #245's agent half. The classification is re-derived rather than
+    // borrowed from the nearest-looking neighbour, because both names read like
+    // reads and neither is one in the sense this table means.
+    //
+    // `Consequence`, not `Nothing`, for two reasons that hold independently:
+    //
+    //  1. **Both pull third-party-authored content into the agent's context.**
+    //     A repository's source and a pull request's diff are written by people
+    //     outside this company, and the agent is about to reason over them. That
+    //     is the same shape as `web_fetch` — which is `Consequence` for exactly
+    //     this reason — not the shape of reading the company's own notes.
+    //  2. **Both reach the forge host-side under the operator's credential.**
+    //     `repo_checkout` refreshes the mirror over the network before it
+    //     clones; `repo_pr` is a GitHub API call. An agent deciding when a
+    //     company's credential is used is a decision an operator would want to
+    //     have seen.
+    //
+    // `repo_checkout` additionally materializes thousands of files into a
+    // sandbox the same agent may hold `shell` over, which is why it is denied
+    // under `readonly` — a tier whose contract is that nothing changes cannot
+    // admit a tool whose whole purpose is to write a tree.
+    //
+    // `PerCall` for both, and this is the part a future edit is most likely to
+    // want to loosen: a standing grant here would be a week of unattended
+    // "check out anything bound, whenever you like", which is precisely the
+    // permission the `Standing` field refuses to describe. `EffectGroup::Other`
+    // because there is no consequence word for it — the label and the
+    // permission are separate answers (issue #444).
+    d("repo_checkout", EffectGroup::Other, Reach::Consequence),
+    d("repo_pr", EffectGroup::Other, Reach::Consequence),
+    // `repo_publish` (issue #735) is classified by what the CALL does, which is
+    // deliberately NOT what its approval settles. The call stages the agent's
+    // committed work onto a host-side `oc/<company>/<task>` ref in the mirror and
+    // records an operator approval. It reaches no counterparty, spends nothing,
+    // and the stage is reversible and never leaves the host — so `Nothing` at the
+    // tool layer. The irreversible push to the real remote is a separate native
+    // effect (`repo.publish`, `EffectGroup::Publish`) that the runtime performs
+    // ONLY on the operator's approval, so *that* effect is where the consequence
+    // and its gate live — see the `repo.publish` arm of `perform_effect`.
+    //
+    // `Nothing`, not `Consequence`, is load-bearing rather than a downgrade: a
+    // `Consequence` call PARKS under `supervised`, and a parked call whose
+    // `execute` never ran would have nothing to stage — the checkout it stages
+    // from is deleted at turn end. So the call must run in every mode, and it
+    // does no external harm in any of them: no agent-driven change reaches a
+    // remote without an operator approving the push, which is the property
+    // `readonly` actually promises, kept here by the approval rather than by
+    // refusing a harmless local stage. `EffectGroup::Publish` is the label the
+    // operator's approval card carries; `PerCall` because a standing "publish
+    // whenever" is exactly the grant the `Standing` field refuses to describe,
+    // and every push already parks as its own approval regardless.
+    d("repo_publish", EffectGroup::Publish, Reach::Nothing),
 ];
 
 /// A per-call declaration — the default. `const fn` so [`DECLARED`] stays a
@@ -359,6 +767,18 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
     if name == COMPOSIO_EXECUTE {
         return composio_execute_consequence(args);
     }
+    // Issue #673: the second argument-classified tool. Its declaration below
+    // stays as the shape every reader of `DECLARED` expects — this only decides
+    // whether the operator gets a host to consent to.
+    if name == WEB_FETCH {
+        return web_fetch_consequence(args);
+    }
+    // Issue #875: the third. `shell` is the tool an agent reaches for to look
+    // at its own workspace, and classifying the NAME made a `grep` cost an
+    // operator the same interruption as `rm -rf /`.
+    if name == SHELL {
+        return shell_consequence(args);
+    }
     match DECLARED.iter().find(|d| d.tool == name) {
         Some(found) => Consequence {
             group: found.group,
@@ -366,6 +786,28 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
             standing: found.standing,
         },
         None => undeclared(&name),
+    }
+}
+
+/// Why a tool whose *name* reads like a read is nonetheless gated (issue #459).
+///
+/// `None` for almost everything, and that is right: "'shell' mutates or reaches
+/// outside" needs no elaboration, and neither does `http_request`. The entries
+/// here are the tools where the classification contradicts the name, so the
+/// denial is the one an operator reads twice — `readonly` refusing something
+/// called `read_*` looks like a bug in the tier, and without a reason the
+/// operator has no way to tell it from one.
+///
+/// Appended to the `readonly` denial, which is where a confused operator ends
+/// up: the `supervised` park explains itself by offering a card to approve.
+pub fn denial_reason(tool: &str) -> Option<&'static str> {
+    match tool.to_ascii_lowercase().as_str() {
+        "read_workspace_state" => Some(
+            "it runs `git status` and `git log` in the agent's workspace, and git \
+             takes its configuration from that same directory — so it is gated \
+             like `shell` rather than like a read",
+        ),
+        _ => None,
     }
 }
 
@@ -398,28 +840,122 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
 /// might do anything, so it parks and it cannot be granted standing. Same for a
 /// slug whose toolkit has no catalogue, a missing or non-string `tool`
 /// argument, and — in a build without the harness compiled in — every slug.
+///
+/// ## Two different reasons for the same verdict
+///
+/// "The catalogue has never heard of this slug" and "these arguments carry no
+/// slug at all" both end in a send, and that is right — but only one of them is
+/// a caller bug. Issue #470 survived for as long as it did precisely because
+/// the two were indistinguishable from outside: fixtures named their action
+/// under a key nothing reads, every call fell through to the fallback, and the
+/// verdicts still looked plausible. The verdict stays cautious either way; the
+/// second case now says so in the log, via [`ActionKeyMiss`], so a caller
+/// building the wrong argument shape is visible rather than silently safe.
 fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
     let send = Consequence {
         group: EffectGroup::Send,
         reach: Reach::Consequence,
         standing: Standing::PerCall,
     };
-    let Some(slug) = args.get(COMPOSIO_ACTION_KEY).and_then(|v| v.as_str()) else {
-        return send;
+    let slug = match composio_action_slug(args) {
+        Ok(slug) => slug,
+        Err(miss) => {
+            tracing::warn!(
+                "[policy] a '{COMPOSIO_EXECUTE}' call carries no readable \
+                 '{COMPOSIO_ACTION_KEY}' argument ({}); classifying it as a send, which is \
+                 the cautious answer but not the one the catalogue would have given — the \
+                 caller is building an argument shape the tool's own schema rejects",
+                miss.describe()
+            );
+            return send;
+        }
     };
     if composio_action_is_read(slug) {
-        // A read still reaches a third-party account, so `readonly` denies it
-        // and `supervised` parks it the first time. What changes is that the
-        // operator now has something to say other than yes-again: the card
-        // offers a standing scope, and the reads stop asking for its duration.
+        // A read reaches a third-party account, so `readonly` denies it — but
+        // it changes nothing and is billed for nothing, so `supervised` lets it
+        // through (issue #559).
+        //
+        // It used to be `Reach::Consequence`, which parks. The intent was that
+        // the operator consent once and grant a standing scope; the effect was
+        // that checking a mailbox interrupted a person, refused the call and
+        // dead-ended the turn — per page, per list. A first-time park is not a
+        // cheap price for a read, it is the whole cost.
+        //
+        // `Standing::Grantable` stays — but not for the reason the issue gives.
+        // It does **not** govern `readonly`: that brake denies off
+        // `Reach::denied_under_readonly` before any grant is consulted
+        // (`harness::policy::check`, "readonly outranks a grant"), and it never
+        // reads `Standing` at all. Under `supervised` nothing parks here now,
+        // so the admission path this used to feed is unreachable for a
+        // catalogue read in every tier that exists today.
+        //
+        // What it still governs is the **mint** side: a standing grant may only
+        // be minted for a grantable call
+        // (`Effect::may_be_granted_standing`, and the re-check in
+        // `standing_grant_allows`), and a Composio *send* arriving under this
+        // same tool name must never be mintable. It is also the field any
+        // unattended tier has to read to tell a read it may run from a send it
+        // may not — the `auto` tier proposed in #560 derives exactly that line.
+        // Removing it would make both of those decisions unrepresentable.
         Consequence {
             group: EffectGroup::Other,
-            reach: Reach::Consequence,
+            reach: Reach::ExternalRead,
             standing: Standing::Grantable,
         }
     } else {
         send
     }
+}
+
+/// Why a `composio_execute` call carries no action slug this classifier can
+/// read (issue #470).
+///
+/// Every variant classifies as a send, so this changes no verdict. It exists so
+/// the log line can say *which* shape arrived: a caller that omits the key, one
+/// that sends a number where a slug belongs, and one naming an action the
+/// catalogue has never heard of are three different mistakes, and only the last
+/// is a legitimate call to an unclassified action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActionKeyMiss {
+    /// The arguments are not a JSON object at all.
+    NotAnObject,
+    /// An object, but with no [`COMPOSIO_ACTION_KEY`] property — the shape the
+    /// `tool_slug` fixtures of #470 had.
+    KeyAbsent,
+    /// The key is present but not a string.
+    NotAString,
+    /// The key is present and a string, but empty, so no lookup can succeed.
+    Empty,
+}
+
+impl ActionKeyMiss {
+    /// A short phrase for the log line, in the caller's terms.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            Self::NotAnObject => "the arguments are not an object",
+            Self::KeyAbsent => "the key is absent",
+            Self::NotAString => "the key is present but not a string",
+            Self::Empty => "the key is present but empty",
+        }
+    }
+}
+
+/// The action slug in a `composio_execute` call's arguments, or why there
+/// isn't one.
+pub(crate) fn composio_action_slug(args: &serde_json::Value) -> Result<&str, ActionKeyMiss> {
+    let Some(object) = args.as_object() else {
+        return Err(ActionKeyMiss::NotAnObject);
+    };
+    let Some(value) = object.get(COMPOSIO_ACTION_KEY) else {
+        return Err(ActionKeyMiss::KeyAbsent);
+    };
+    let Some(slug) = value.as_str() else {
+        return Err(ActionKeyMiss::NotAString);
+    };
+    if slug.trim().is_empty() {
+        return Err(ActionKeyMiss::Empty);
+    }
+    Ok(slug)
 }
 
 /// Which slice of a tool one standing grant is confined to (issue #457).
@@ -446,12 +982,273 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
 /// the first place — `without_the_catalogue_every_composio_action_is_a_send`
 /// pins that — so there is no scoped grant there for `None` to widen.
 ///
+/// # No live caller, and retained on purpose (issue #610)
+///
+/// **Nothing in any current tier routes a Composio call to this.** Since #559 a
+/// catalogue read no longer parks under `supervised`, so the tier allows it well
+/// above the grant checks; under `readonly` the #243 emergency brake denies
+/// every external effect *above* them; under `full` everything is allowed. The
+/// scope is minted and stored, and no tier spends it.
+///
+/// That is dormancy, not death, and the distinction is written here because a
+/// mechanism with no caller and no note is indistinguishable from dead code —
+/// and this one is a reviewed security boundary. It is what any future durable
+/// allowlist would consult, and rebuilding it later would mean re-deriving the
+/// same decision: that consent attaches to a *provider*, that a slug the
+/// catalogue cannot place resolves to `None`, and that a scoped grant refuses
+/// `None` rather than guessing permissively. #563 proposed one such feature and
+/// was closed because its **card-promotion** shape cannot work under `auto`: a
+/// tool parks under `auto` exactly when it is not [`Standing::Grantable`], and
+/// the standing-grant control is offered only for `Grantable` tools, so no card
+/// under `auto` can ever offer "don't ask again" — exact complements on the
+/// parked set, a partition rather than a gap. A console- or manifest-managed
+/// allowlist consulted **before** the tier check has no such problem, and would
+/// use this.
+///
+/// Deleting it is therefore a decision to re-derive it later, and should be made
+/// as one. `the_minted_scope_is_the_scope_a_grant_admits` pins this function
+/// against [`StandingGrant::admits_scope`] directly, so the pairing keeps its
+/// coverage while no caller connects them.
+///
+/// [`Standing::Grantable`]: crate::policy::consequence::Standing::Grantable
 /// [`StandingGrant::admits_scope`]: crate::runtime::grants::StandingGrant::admits_scope
+/// The `scheme://host[:port]` a [`WEB_FETCH`] call addresses, or `None` when the
+/// argument cannot be read as an absolute `http(s)` URL (issue #673).
+///
+/// This is the grant scope *and* the grantability test — see
+/// [`web_fetch_consequence`]. `None` is therefore never a widening: it drops the
+/// call back to [`Standing::PerCall`], which parks.
+///
+/// # Parsed by `url`, which is the parser that performs the fetch
+///
+/// The key is derived with [`url::Url`] rather than by reading the string here.
+/// That is a security property, not a convenience: `reqwest` — and therefore the
+/// vendored `web_fetch` — resolves the host with this same crate, so deriving the
+/// grant key any other way means two parsers deciding what "the host" is, and
+/// **every disagreement between them is a bypass**.
+///
+/// This is not hypothetical. The hand-rolled reader this replaced split the
+/// authority on `/`, `?` and `#` only. Per WHATWG, `\` is also a path separator
+/// in an http(s) URL, so `https://evil.com\@docs.rs/` is fetched from
+/// `evil.com` — while that reader saw the authority as `evil.com\@docs.rs`,
+/// took everything after the last `@`, and minted a grant for **`docs.rs`**. An
+/// operator approving "fetch from docs.rs" would have authorised `evil.com`.
+/// Tab, newline and carriage return are stripped by the URL parser before
+/// parsing and were a second family of the same bug.
+///
+/// # What is in the key, and why
+///
+/// **The scheme**, so a grant approved for `https://docs.rs` cannot be spent on
+/// `http://docs.rs`. The operator consented to a fetch that could not be read or
+/// rewritten in transit, and silently honouring the cleartext twin would hand
+/// back the guarantee they were shown.
+///
+/// **The port only when it is not the scheme's default**, which is
+/// [`Url::port`]'s own normalization — so `https://docs.rs:443` and
+/// `https://docs.rs` are one scope, as they are one service. A non-default port
+/// stays in the key because `example.com:8443` is a different service.
+///
+/// **The host as `url` normalizes it** — lowercased, IDNA-encoded, IPv6 in
+/// brackets. Matching is exact: no suffix, so a grant for `docs.rs` cannot admit
+/// `evil-docs.rs`, and no subdomain, so it cannot admit `evil.docs.rs`. Both are
+/// hosts the operator never read on the card.
+///
+/// Credentials are discarded, because [`Url::host_str`] returns the host and
+/// never the userinfo — `https://docs.rs@evil.example/` is `evil.example`. A
+/// URL that does not parse, names no host, or carries a non-http(s) scheme
+/// resolves to `None`, which parks.
+fn web_fetch_scope_of(args: &serde_json::Value) -> Option<String> {
+    let raw = args.get(WEB_FETCH_URL_KEY)?.as_str()?;
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(match parsed.port() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
+}
+
+/// The consequence of one [`WEB_FETCH`] call (issue #673).
+///
+/// Argument-classified, exactly as `composio_execute` is and for the same
+/// reason: what an operator can consent to is a property of *this call's*
+/// arguments, not of the tool's name. "Fetch from `docs.rs` for the next few
+/// days" is a sentence; "make any HTTP request" is not.
+///
+/// The classification is [`Standing::ScopedGrantable`] **only when a host can be
+/// read**, and [`Standing::PerCall`] otherwise. That coupling is load-bearing
+/// rather than tidy: a grant is minted with the scope
+/// [`standing_scope_of`] returns, and
+/// [`StandingGrant::admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)
+/// treats an unscoped grant as admitting **everything**. Were an unreadable URL
+/// still grantable, approving one card would mint a grant admitting every host
+/// on earth. Tying the two answers to one function makes that unrepresentable.
+///
+/// [`Reach`] is untouched: a fetch still reaches outside the company, so it
+/// still parks under `supervised`, and — via [`Standing::ScopedGrantable`] —
+/// still parks under `auto`. What changes is only that the operator now has
+/// something bounded to say yes to.
+fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
+    Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: match web_fetch_scope_of(args) {
+            Some(_) => Standing::ScopedGrantable,
+            None => Standing::PerCall,
+        },
+    }
+}
+
+/// The consequence of running one shell command (issue #875).
+///
+/// ## Why the command and not the tool name
+///
+/// `shell` is how an agent looks at its own workspace. Classifying the name
+/// meant `grep -c foo *.log` and `rm -rf /` were the same input to this
+/// function, so an agent that investigates by grepping bought the operator an
+/// approval card per command — under `supervised` and under `auto`, whose whole
+/// contract is that it stops only before what leaves the company or spends
+/// money. A `grep` in the agent's own workspace does neither.
+///
+/// ## Where the read/act answer comes from
+///
+/// The vendored runtime's own classifier, [`SecurityPolicy::classify_command`],
+/// which OpenHuman gates its `ShellTool` with on the desktop product. It splits
+/// the command into unquoted segments, classifies each against a curated
+/// safe-read allowlist, and takes the **maximum** — so `grep x && rm -rf /` is
+/// `Destructive`, not `Read` — then lifts anything with a redirect or `tee` to
+/// `Write`. Anything it does not recognise is `Write`, which is the cautious
+/// direction.
+///
+/// Reused rather than restated. A second list here would be a second thing to
+/// keep current, and the moment the two disagreed the safer one would not
+/// reliably be ours.
+///
+/// ## Only `Read` is downgraded
+///
+/// Every other class keeps exactly today's verdict — `Reach::Consequence` and
+/// `Standing::PerCall`, so it parks under `supervised` and `auto` and can hold
+/// no standing grant. A build without the harness feature has no classifier
+/// linked in and gates everything, the same seam the Composio catalogue
+/// straddles and answered the same way.
+///
+/// ## A read must also stay lexically inside the agent's own directory
+///
+/// `classify_command` grades by command *name*, never by path — `cat
+/// /etc/passwd` and `cat notes.md` classify identically. Nothing on this path
+/// (or upstream's own `ShellTool::run_with_security_in_context`, which never
+/// calls the vendored `validate_command_execution`/`is_command_allowed`
+/// allowlist) confines a `Read`-class command to the workspace at execution
+/// time; the only backstop the vendored runtime ships,
+/// `scan_command_for_cross_profile`, exists for a different boundary
+/// (sibling-profile isolation) and says so itself: "airtight process
+/// confinement … is deliberate follow-up work, not provided here." So a bare
+/// classifier-`Read` command is not yet a safe zero-approval command in this
+/// codebase's threat model, where "the agent's own workspace" is the entire
+/// premise the free pass rests on (see the issue's own framing). Every read
+/// this downgrades is additionally checked by
+/// [`shell_command_reaches_outside_cwd`] and gated back to `Consequence` if
+/// any argument names an absolute path, a `~` home-dir reference, or a `..`
+/// traversal segment — the three ways a token can point outside the working
+/// directory without resolving anything against the real workspace root.
+fn shell_consequence(args: &serde_json::Value) -> Consequence {
+    let gated = Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: Standing::PerCall,
+    };
+    let Some(command) = args.get(SHELL_COMMAND_KEY).and_then(|v| v.as_str()) else {
+        // The tool's own schema requires it, so this is a call that could not
+        // have run. Gate it rather than guess.
+        return gated;
+    };
+    let declared = args.get(SHELL_CATEGORY_KEY).and_then(|v| v.as_str());
+    if shell_command_is_read(command, declared) && !shell_command_reaches_outside_cwd(command) {
+        // A read of the agent's own workspace changes nothing, reaches nobody
+        // and is billed for nothing — the shape `glob` and `grep` (the tools)
+        // have carried since #462.
+        return Consequence {
+            group: EffectGroup::Other,
+            reach: Reach::Nothing,
+            standing: Standing::PerCall,
+        };
+    }
+    gated
+}
+
+/// Lexical backstop for [`shell_consequence`]: does any whitespace-separated
+/// token in `command` name a location outside the agent's working directory?
+///
+/// This is deliberately a text scan, not a path resolver — it needs no
+/// `action_dir`/cwd context, so it stays a pure function of the command
+/// string like the rest of this module's classifiers. It catches the
+/// realistic, non-adversarial escape vectors a reviewer would actually type —
+/// an absolute path (`/etc/passwd`), a home-dir reference (`~/.ssh/id_rsa`),
+/// a `--flag=/absolute/value`, or a `..` traversal segment — without claiming
+/// to be airtight: a symlink inside the workspace pointing outside it is
+/// invisible to a lexical scan, and so would be a `cd` out of the workspace
+/// followed by a relative read, except that `cd` is not itself in the
+/// vendored classifier's `READ_ONLY_BASES`, so any segment naming it already
+/// fails the *whole* command closed to `Write` before this function is ever
+/// consulted (`classify_command` takes the max across `;`/`&&`/`||`-separated
+/// segments). Full process-level confinement remains upstream follow-up work,
+/// same as it is for the cross-profile guard this mirrors.
+fn shell_command_reaches_outside_cwd(command: &str) -> bool {
+    command.split_whitespace().any(|word| {
+        // A `--flag=/value` or `--flag=~/value` carries the path after `=`.
+        let candidate = word.rsplit('=').next().unwrap_or(word);
+        let candidate = candidate.trim_matches(|c| c == '"' || c == '\'');
+        candidate.starts_with('/')
+            || candidate.starts_with('~')
+            || candidate.split('/').any(|segment| segment == "..")
+    })
+}
+
+/// Is this command provably read-only, according to the vendored runtime's own
+/// classifier? A self-declared `category` may only escalate.
+#[cfg(feature = "openhuman")]
+fn shell_command_is_read(command: &str, declared: Option<&str>) -> bool {
+    use openhuman_core::openhuman::security::{CommandClass, SecurityPolicy};
+
+    // `classify_command` is a pure function of the command text — it reads no
+    // field of the policy it hangs off — so the default instance is the whole
+    // configuration this needs. The tier question is answered above this layer,
+    // by the `Reach` this returns.
+    let policy = SecurityPolicy::default();
+    let mut class = policy.classify_command(command);
+    if let Some(declared) = declared.and_then(SecurityPolicy::parse_declared_class) {
+        class = class.max(declared);
+    }
+    matches!(class, CommandClass::Read)
+}
+
+/// Without the harness feature the classifier is not linked in, so nothing here
+/// can tell a read from an act — and the cautious answer is that it is an act.
+#[cfg(not(feature = "openhuman"))]
+fn shell_command_is_read(_command: &str, _declared: Option<&str>) -> bool {
+    false
+}
+
 pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String> {
+    // Issue #673: the same one-function rule the Composio arm follows, for the
+    // same reason — the mint side and the live call must read the host with the
+    // identical code, or a grant could be minted that never matches its own tool.
+    if tool.eq_ignore_ascii_case(WEB_FETCH) {
+        return web_fetch_scope_of(args);
+    }
     if !tool.eq_ignore_ascii_case(COMPOSIO_EXECUTE) {
         return None;
     }
-    let slug = args.get(COMPOSIO_ACTION_KEY).and_then(|v| v.as_str())?;
+    // Same reader as the classifier, so a call it could not read a slug out of
+    // cannot resolve a toolkit here either — a scoped grant refuses to admit
+    // `None`, which is the safe direction.
+    let slug = composio_action_slug(args).ok()?;
     composio_toolkit_of(slug)
 }
 
@@ -515,6 +1312,11 @@ fn composio_action_is_read(_slug: &str) -> bool {
 /// over-prompt. The coverage test is what stops a *registered* tool reaching
 /// this path at all.
 fn undeclared(name: &str) -> Consequence {
+    // `describe` is deliberately absent. This fallback is a courtesy for an
+    // unregistered read, not a second classifier to trust with an unreviewed
+    // capability: adding it would let an undeclared tool claim it only reads.
+    // Declare a known `describe_*` tool instead, as `describe_skill` does for
+    // issue #845, so its reach is an explicit policy decision.
     const READ_ONLY_PREFIXES: &[&str] = &[
         "read",
         "list",
@@ -569,6 +1371,420 @@ mod tests {
         consequence_of(tool, &json!({}))
     }
 
+    // -----------------------------------------------------------------------
+    // Issue #673: a host-scoped fetch grant, and the `auto` line it must not
+    // cross
+    // -----------------------------------------------------------------------
+
+    /// A `web_fetch` call carrying a real URL, as the policy layer sees it.
+    fn fetching(url: &str) -> serde_json::Value {
+        json!({ WEB_FETCH_URL_KEY: url })
+    }
+
+    /// **The entire reason [`Standing::ScopedGrantable`] exists, as a rule.**
+    ///
+    /// The naive fix for #673 — declaring `web_fetch` [`Standing::Grantable`] to
+    /// obtain a scoped grant — was tried and rejected: because
+    /// [`Consequence::parks_under_auto`] read `is_grantable`, it also stopped the
+    /// tool parking under `auto`, for every agent, with no card and therefore no
+    /// scope ever consulted. `the_auto_tier_line_is_pinned_tool_by_tool` catches
+    /// that, and this states the invariant that must hold for the *repair* not to
+    /// re-open the same hole from the other side.
+    ///
+    /// Exhaustive over [`Reach`] rather than sampled, because the variant is
+    /// argument-classified and so appears nowhere in [`DECLARED`] for a table
+    /// walk to find.
+    #[test]
+    fn a_scoped_grantable_call_is_delegable_but_never_unattended_under_auto() {
+        assert!(
+            Standing::ScopedGrantable.is_grantable(),
+            "the point of the variant is that an operator CAN delegate it"
+        );
+        assert!(
+            !Standing::ScopedGrantable.runs_unattended_under_auto(),
+            "and that it still parks under auto — collapsing these two answers \
+             back together is exactly the bug issue #673 fixed"
+        );
+
+        for reach in [
+            Reach::Nothing,
+            Reach::Money,
+            Reach::ExternalRead,
+            Reach::Consequence,
+        ] {
+            let verdict = Consequence {
+                group: EffectGroup::Other,
+                reach,
+                standing: Standing::ScopedGrantable,
+            };
+            assert_eq!(
+                verdict.parks_under_auto(),
+                reach.parks_under_supervision(),
+                "a scoped-grantable tool must park under `auto` wherever it parks \
+                 under `supervised` — {reach:?} disagreed"
+            );
+        }
+    }
+
+    /// The same rule walked over the declaration table, so a tool that becomes
+    /// scoped-grantable later is covered without editing this test.
+    ///
+    /// The `seen` counter is the point: every tool here is probed with arguments
+    /// rich enough to reach the argument-classified branches, and a walk that
+    /// found no scoped-grantable verdict at all would pass while asserting
+    /// nothing.
+    #[test]
+    fn every_scoped_grantable_tool_in_the_table_parks_under_auto() {
+        let probe = json!({
+            WEB_FETCH_URL_KEY: "https://docs.rs/serde",
+            COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
+        });
+        let mut seen = 0;
+        for tool in declared_tools() {
+            let verdict = consequence_of(tool, &probe);
+            if verdict.standing == Standing::ScopedGrantable {
+                seen += 1;
+                assert!(
+                    verdict.parks_under_auto(),
+                    "`{tool}` is scoped-grantable and must still park under auto"
+                );
+            }
+        }
+        assert!(
+            seen > 0,
+            "the walk reached no scoped-grantable tool, so it proved nothing"
+        );
+    }
+
+    /// A fetch of a named host is grantable and scoped to that host; the same
+    /// call with an unreadable URL is neither.
+    ///
+    /// The second half is not tidiness. A grant is minted with whatever
+    /// `standing_scope_of` returned, and an unscoped grant admits *everything*
+    /// (`StandingGrant::admits_scope`), so a URL-less call that stayed grantable
+    /// would let one approval mint a grant over every host on earth. The two
+    /// answers come from one function precisely so that cannot be represented.
+    #[test]
+    fn a_fetch_is_grantable_only_when_its_host_can_be_read() {
+        let verdict = consequence_of(WEB_FETCH, &fetching("https://docs.rs/serde/latest"));
+        assert_eq!(verdict.standing, Standing::ScopedGrantable);
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/serde/latest")),
+            Some("https://docs.rs".to_string())
+        );
+
+        for unreadable in [
+            json!({}),                         // no url at all
+            fetching("not-a-url"),             // no scheme
+            fetching("file:///etc/passwd"),    // not http(s)
+            fetching("ftp://example.com/x"),   // not http(s)
+            fetching("https://"),              // no host
+            fetching("https://:8080/"),        // a port naming no host
+            fetching("https://exa mple.com/"), // outside the host alphabet
+        ] {
+            let verdict = consequence_of(WEB_FETCH, &unreadable);
+            assert_eq!(
+                verdict.standing,
+                Standing::PerCall,
+                "an unreadable URL must not be grantable: {unreadable}"
+            );
+            assert_eq!(
+                standing_scope_of(WEB_FETCH, &unreadable),
+                None,
+                "{unreadable}"
+            );
+        }
+    }
+
+    /// **The userinfo trap.** `https://docs.rs@evil.example/` fetches
+    /// `evil.example` — everything before the last `@` is credentials. A reader
+    /// that took the authority left-to-right would hand this call the `docs.rs`
+    /// scope and let any URL claim any grant, so it is asserted rather than
+    /// trusted to the shape of the code.
+    #[test]
+    fn credentials_in_a_url_cannot_claim_another_hosts_scope() {
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://docs.rs@evil.example/x")),
+            Some("https://evil.example".to_string())
+        );
+        // Two `@` — the host is still what follows the LAST one.
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://a@b@evil.example/x")),
+            Some("https://evil.example".to_string())
+        );
+        // A backslash is a path separator per WHATWG, so it terminates the
+        // authority exactly as `/` does. Without this split the URL would read
+        // `docs.rs` as the host and let `evil.example` satisfy a grant minted
+        // for `docs.rs` — the userinfo trap re-opened through a delimiter this
+        // split never handled.
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://evil.example\\@docs.rs/x")),
+            Some("https://evil.example".to_string())
+        );
+    }
+
+    /// The host key is exact. Neither a suffix nor a subdomain of a granted host
+    /// resolves to that host's scope, because both are hosts the operator never
+    /// read on the card.
+    #[test]
+    fn the_host_key_admits_neither_a_suffix_nor_a_subdomain() {
+        let granted = standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/")).unwrap();
+        for impostor in [
+            "https://evil-docs.rs/", // suffix match would admit this
+            "https://evil.docs.rs/", // subdomain match would admit this
+            "https://docs.rs.evil/", // prefix match would admit this
+            "http://docs.rs/",       // the cleartext twin
+            "https://docs.rs:8443/", // a different service on the same host
+        ] {
+            assert_ne!(
+                standing_scope_of(WEB_FETCH, &fetching(impostor)),
+                Some(granted.clone()),
+                "`{impostor}` must not resolve to the scope granted for docs.rs"
+            );
+        }
+    }
+
+    /// A host is case-insensitive and `:443` is what `https` means, so these
+    /// spellings must produce one scope — otherwise a grant an operator approved
+    /// stops matching the very next call and the feature reads as broken.
+    #[test]
+    fn one_host_in_two_spellings_is_one_scope() {
+        // The concrete scope is asserted first, not just the spellings against
+        // each other: a regression that returned `None` for every spelling would
+        // otherwise satisfy this test vacuously.
+        let canonical = standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/serde"));
+        assert_eq!(canonical.as_deref(), Some("https://docs.rs"));
+        for spelling in [
+            "HTTPS://Docs.RS/Serde",
+            "https://docs.rs:443/serde",
+            "https://user:pw@docs.rs/serde",
+        ] {
+            assert_eq!(
+                standing_scope_of(WEB_FETCH, &fetching(spelling)),
+                canonical,
+                "`{spelling}` names the same service and must share its scope"
+            );
+        }
+    }
+
+    /// **The bypass class this key must never re-open.**
+    ///
+    /// Found in review of this change. The key was originally derived by reading
+    /// the URL string here — splitting the authority on `/`, `?` and `#`, then
+    /// taking whatever followed the last `@`. But `\` is *also* a path separator
+    /// in an http(s) URL, so `https://evil.com\@docs.rs/` is fetched from
+    /// `evil.com` while that reader minted a grant for `docs.rs`: an operator
+    /// approving "fetch from docs.rs" would have authorised `evil.com`. Tab,
+    /// newline and CR are stripped before parsing and were a second family of
+    /// the same bug.
+    ///
+    /// The repair was to stop hand-parsing and derive the key from [`url::Url`],
+    /// the parser `reqwest` uses to perform the fetch — so there is no second
+    /// reader left to disagree with. This test is what keeps that true: it
+    /// consults `url` **independently** for the host each URL really resolves to,
+    /// and asserts the scope names that host. It is therefore not a tautology
+    /// restating the implementation — it is a cross-check that fails the moment
+    /// anyone reintroduces a bespoke reader, however carefully written.
+    ///
+    /// Both directions are in the table on purpose. A key naming a host the fetch
+    /// will *not* reach lets a grant be spent elsewhere; a key naming a host the
+    /// operator did not see on the card is the same confusion pointed the other
+    /// way. Neither is acceptable.
+    #[test]
+    fn the_scope_names_the_host_the_fetching_client_will_actually_use() {
+        for (raw, really_fetches) in [
+            // The reported case: `\` terminates the authority, so everything
+            // after it — including the `@` — is path.
+            (r"https://evil.com\@docs.rs/", "evil.com"),
+            // The same trick pointed the other way.
+            (r"https://docs.rs\@evil.com/", "docs.rs"),
+            // Mixed separators, both orders.
+            (r"https://docs.rs\/@evil.com/", "docs.rs"),
+            (r"https://docs.rs/\@evil.com", "docs.rs"),
+            // Stripped-whitespace family: removed before parsing, so the `@`
+            // that survives is a real userinfo delimiter.
+            ("https://docs.rs\t@evil.com/", "evil.com"),
+            ("https://docs.rs\n@evil.com/", "evil.com"),
+            ("https://evil.com@\tdocs.rs/", "docs.rs"),
+            // Stripping plus a backslash, together.
+            ("https://\revil.com\\@docs.rs/", "evil.com"),
+            // The plain userinfo case that was already defended.
+            ("https://docs.rs@evil.example/x", "evil.example"),
+        ] {
+            // The fetching client's own answer, consulted here rather than
+            // assumed — if a `url` upgrade ever changes it, this fails loudly
+            // instead of the fixture quietly going stale.
+            let client_host = url::Url::parse(raw)
+                .unwrap_or_else(|e| panic!("fixture must parse: {raw:?}: {e}"))
+                .host_str()
+                .unwrap_or_else(|| panic!("fixture must name a host: {raw:?}"))
+                .to_string();
+            assert_eq!(
+                client_host, really_fetches,
+                "fixture drift: {raw:?} no longer resolves where this table says"
+            );
+
+            assert_eq!(
+                standing_scope_of(WEB_FETCH, &fetching(raw)).as_deref(),
+                Some(format!("https://{really_fetches}").as_str()),
+                "the grant scope for {raw:?} must name the host the fetch reaches"
+            );
+        }
+    }
+
+    /// The `auto` line, named tool by tool and taken from the whole table
+    /// rather than a sample (issue #560).
+    ///
+    /// [`Consequence::parks_under_auto`] is easy to check as a predicate; what
+    /// an operator actually feels is *which tools* stopped asking. And since
+    /// #560, [`Standing::Grantable`] decides two things at once — may be
+    /// delegated to one teammate, **and** runs unattended for everyone under
+    /// `auto` — so an edit loosening one tool for a delegation reason moves it
+    /// across this line as a side effect.
+    ///
+    /// This walks [`declared_tools`], so a tool joining or leaving the
+    /// unattended set fails here and has to be named deliberately. The
+    /// predicate test alone would not notice.
+    #[test]
+    fn the_auto_tier_line_is_pinned_tool_by_tool() {
+        // The whole of what `auto` changes: parks for an operator under
+        // `supervised`, runs unattended under `auto`. Every entry is the
+        // agent's own sandbox or this company's own memory — nothing here
+        // leaves the building or spends money.
+        const MOVED_BY_AUTO: &[&str] = &[
+            "apply_patch",
+            "csv_export",
+            "edit",
+            "file_write",
+            "memory_store",
+            // Issue #903, and the one entry that is not the agent's private
+            // sandbox: it writes into the company's shared workspace. Declared
+            // deliberately. A publish still reaches no counterparty and no
+            // address, and the artifact chain versions it, so the company can
+            // undo it alone — the two properties every other name here has.
+            // What it buys is that a finished deliverable reaches the operator
+            // without a per-file decision, which is the whole point of `auto`.
+            "publish_artifact",
+        ];
+
+        let crossers = |args: &serde_json::Value| {
+            let mut moved: Vec<&str> = declared_tools()
+                .filter(|tool| {
+                    let verdict = consequence_of(tool, args);
+                    verdict.reach.parks_under_supervision() && !verdict.parks_under_auto()
+                })
+                .collect();
+            moved.sort_unstable();
+            moved
+        };
+
+        assert_eq!(
+            crossers(&json!({})),
+            MOVED_BY_AUTO,
+            "a tool crossed the `auto` line. If that is intended, say so here — \
+             `Standing::Grantable` now also means 'runs unattended for every agent \
+             while the company sits in auto', which is wider than the standing \
+             grant the field is named for"
+        );
+
+        // The same walk with arguments (issue #673). Two tools are classified
+        // from their arguments rather than their name, so the empty-args walk
+        // above cannot see the verdict they actually produce in service — a
+        // `web_fetch` reading a real URL is the grantable shape, and the bare
+        // name is not. Without this the line would be pinned only for the tools
+        // whose classification the walk happens to be able to reach, and a
+        // `web_fetch` loosened to `Standing::Grantable` would cross this line
+        // unobserved.
+        assert_eq!(
+            crossers(&json!({
+                WEB_FETCH_URL_KEY: "https://docs.rs/serde",
+                COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
+            })),
+            MOVED_BY_AUTO,
+            "a tool crossed the `auto` line once its arguments were read. An \
+             outward fetch must be delegable to one teammate (`ScopedGrantable`) \
+             WITHOUT running unattended for everyone under `auto` — see issue #673"
+        );
+
+        // The other direction, spelled out: the tools an operator would be
+        // most alarmed to find running unattended still park.
+        for tool in [
+            "shell",
+            "http_request",
+            "git_operations",
+            "workspace_write",
+            "workspace_delete",
+            "workspace_rename",
+            "media_generate_image",
+            "media_generate_video",
+            "mcp_call_tool",
+            "run_workflow",
+            // Issue #661 (M7): removing a workflow takes its whole revision
+            // history with it, so there is nothing to restore afterwards. Its
+            // read and update siblings deliberately do NOT park (see `DECLARED`)
+            // — naming the one that does is how that split stays a decision.
+            "delete_workflow",
+            // Issue #245: both reach a forge under the company's credential and
+            // pull third-party-authored content into the agent's context, and
+            // one of them writes a tree.
+            "repo_checkout",
+            "repo_pr",
+            "some_tool_nobody_declared",
+        ] {
+            assert!(
+                c(tool).parks_under_auto(),
+                "`{tool}` leaves the company, spends money, or cannot be seen into — \
+                 it must still park under auto"
+            );
+        }
+
+        // And the boundary `auto` deliberately does not draw: a billed read is
+        // not a park. `web_search` runs under `supervised` because openhuman
+        // resolves a `RequireApproval` inline — a parked search never happens —
+        // and `auto` must not be stricter than the tier it replaces. The daily
+        // cap is what holds spend.
+        assert!(!c("web_search").parks_under_auto());
+        assert!(c("web_search").reach.costs_money());
+
+        // The other boundary `auto` deliberately does not draw (issue #903):
+        // handing a finished file to the operator. `publish_artifact` changes
+        // state, so it keeps `Reach::Consequence` and still parks under
+        // `supervised` — but it reaches no counterparty and no address, writes
+        // only into the company's own workspace and artifact chain, and is
+        // versioned, so it is reversible by the company alone. Parking it under
+        // `auto` made every deliverable wait on a human: one 9-node pipeline
+        // run generated 15 of these.
+        assert!(
+            !c("publish_artifact").parks_under_auto(),
+            "handing a file to the operator does not leave the company"
+        );
+        assert!(
+            c("publish_artifact").reach.parks_under_supervision(),
+            "a supervised desk must still see a publish before it lands"
+        );
+        assert!(
+            !c("publish_artifact").reach.costs_money(),
+            "a publish is not a spend, so the daily cap must not bill for it"
+        );
+    }
+
+    /// The argument-classified half of the same line: a Composio read runs
+    /// unattended under `auto`, a send does not — and the cautious fallback
+    /// keeps an unclassified action on the parking side.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn the_auto_line_reads_composio_arguments_not_the_tool_name() {
+        let auto = |slug: &str| {
+            consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": slug })).parks_under_auto()
+        };
+        assert!(!auto("GITHUB_LIST_PULL_REQUESTS"), "a catalogue read runs");
+        assert!(auto("GMAIL_SEND_EMAIL"), "a send still parks");
+        assert!(
+            auto("GITHUB_INVENT_A_NEW_VERB"),
+            "an action nobody has classified is a send, in this tier too"
+        );
+    }
+
     #[test]
     fn the_table_names_each_tool_once() {
         let mut seen: Vec<&str> = DECLARED.iter().map(|d| d.tool).collect();
@@ -603,10 +1819,14 @@ mod tests {
             "web_fetch",
             "workspace_create",
             "workspace_write",
+            "workspace_delete",
+            "workspace_rename",
             "git_operations",
             "run_workflow",
             "mcp_call_tool",
             "mcp_registry_tool_call",
+            "repo_checkout",
+            "repo_pr",
         ] {
             assert_eq!(
                 c(tool).standing,
@@ -644,8 +1864,10 @@ mod tests {
         );
         assert_eq!(read.group, EffectGroup::Other);
         assert_eq!(read.standing, Standing::Grantable);
-        // …and it still parks the first time, because it does reach GitHub.
-        assert_eq!(read.reach, Reach::Consequence);
+        // …and since issue #559 it does not park: it reaches GitHub, so
+        // `readonly` still denies it, but it changes nothing and costs nothing,
+        // so `supervised` runs it.
+        assert_eq!(read.reach, Reach::ExternalRead);
 
         let send = consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": "GMAIL_SEND_EMAIL" }));
         assert_eq!(send.group, EffectGroup::Send);
@@ -673,6 +1895,62 @@ mod tests {
                 "an unclassifiable action must read as a send: {args}"
             );
             assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+        }
+    }
+
+    /// Same verdict, different reasons — and the reasons are now separable
+    /// (issue #470). A slug the catalogue cannot place is a legitimate call to
+    /// an unclassified action; an argument shape with no readable slug is a
+    /// caller bug that the send verdict would otherwise hide, which is exactly
+    /// how the `tool_slug` fixtures passed for as long as they did.
+    #[test]
+    fn a_missing_action_key_is_distinguishable_from_an_unknown_action() {
+        assert_eq!(
+            composio_action_slug(&json!({ "tool": "NOTAREALTOOLKIT_LIST_THINGS" })),
+            Ok("NOTAREALTOOLKIT_LIST_THINGS"),
+            "an uncatalogued slug is still a slug — the catalogue, not this reader, \
+             is what declines it"
+        );
+        for (args, expected) in [
+            (
+                json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+                ActionKeyMiss::KeyAbsent,
+            ),
+            (
+                json!({ "arguments": { "owner": "acme" } }),
+                ActionKeyMiss::KeyAbsent,
+            ),
+            (json!({}), ActionKeyMiss::KeyAbsent),
+            (json!({ "tool": 7 }), ActionKeyMiss::NotAString),
+            (json!({ "tool": null }), ActionKeyMiss::NotAString),
+            (json!({ "tool": "" }), ActionKeyMiss::Empty),
+            (json!({ "tool": "   " }), ActionKeyMiss::Empty),
+            (json!("GMAIL_SEND_EMAIL"), ActionKeyMiss::NotAnObject),
+            (json!(null), ActionKeyMiss::NotAnObject),
+        ] {
+            assert_eq!(composio_action_slug(&args), Err(expected), "{args}");
+            // …and the verdict is unchanged by any of it: the log line is the
+            // only thing that differs, so this can never loosen a decision.
+            assert_eq!(
+                consequence_of(COMPOSIO_EXECUTE, &args).group,
+                EffectGroup::Send,
+                "{args}"
+            );
+        }
+    }
+
+    /// A grant scope is read through the same reader, so a call whose slug the
+    /// classifier could not find cannot resolve a toolkit either — `None`, and
+    /// a scoped grant refuses to admit `None`.
+    #[test]
+    fn an_unreadable_action_key_resolves_no_grant_scope() {
+        for args in [
+            json!({ "tool_slug": "GITHUB_LIST_PULL_REQUESTS" }),
+            json!({ "tool": "" }),
+            json!({ "tool": 7 }),
+            json!({}),
+        ] {
+            assert_eq!(standing_scope_of(COMPOSIO_EXECUTE, &args), None, "{args}");
         }
     }
 
@@ -736,6 +2014,10 @@ mod tests {
     /// The sibling defects the same sweep turned up: four pure reads of the
     /// agent's own workspace that parked because the read-only-prefix rule
     /// keys on the *start* of a name and none of them begins with one.
+    ///
+    /// `read_workspace_state` was in this list until issue #459 showed it is
+    /// not a read at all — see
+    /// [`reading_workspace_state_is_classified_with_shell_because_it_runs_git`].
     #[test]
     fn a_workspace_read_never_parks_whatever_its_name_begins_with() {
         for tool in [
@@ -744,10 +2026,10 @@ mod tests {
             "grep",
             "image_info",
             "list",
-            "read_workspace_state",
             "memory_recall",
             "workspace_list",
             "workspace_read",
+            "workspace_search",
             "media_list_models",
             "composio_list_toolkits",
             "composio_list_connections",
@@ -755,6 +2037,41 @@ mod tests {
         ] {
             assert_eq!(c(tool).reach, Reach::Nothing, "`{tool}` is a read");
         }
+    }
+
+    /// Issue #459: `read_workspace_state` is not the read its name promises.
+    /// It runs `git` in `{root}/{company}/{agent}/workspace`, and git reads
+    /// `.git/config` from that directory — a file the agent's own `file_write`
+    /// can author, and one whose keys can name a command to run. Until the
+    /// vendored `run_git` refuses untrusted repository config, it is
+    /// classified with `shell`.
+    ///
+    /// The standing assertion is the one that matters most: `file_write` is
+    /// grantable, so if this were grantable too, the pair could be handed over
+    /// together for a week and the hole would be open for the length of the
+    /// grant with nobody watching.
+    #[test]
+    fn reading_workspace_state_is_classified_with_shell_because_it_runs_git() {
+        let verdict = c("read_workspace_state");
+        assert_eq!(verdict.reach, Reach::Consequence);
+        assert!(
+            verdict.reach.parks_under_supervision(),
+            "running git under config the agent wrote must reach an operator"
+        );
+        assert!(
+            verdict.reach.denied_under_readonly(),
+            "`readonly` promises nothing runs; a config key can name a command"
+        );
+        assert_eq!(
+            verdict.standing,
+            Standing::PerCall,
+            "a standing grant here would reopen the hole for its whole duration"
+        );
+        assert_eq!(
+            verdict.reach,
+            c("shell").reach,
+            "it is the `shell` shape and should stay pinned to `shell`'s verdict"
+        );
     }
 
     /// The feature keeps its point: the tools an agent uses to actually do work
@@ -774,6 +2091,100 @@ mod tests {
             // They mutate, so `readonly` must still deny and `supervised` must
             // still park the first call.
             assert!(verdict.reach.parks_under_supervision(), "`{tool}`");
+        }
+    }
+
+    /// Issue #559, every acceptance criterion in one place — the four verdicts
+    /// `ExternalRead` has to give, and the one it must not.
+    ///
+    /// The three predicates are the whole of the behaviour: `Reach` is never
+    /// matched exhaustively outside this module, so adding a variant changes
+    /// nothing anywhere until one of these answers differently.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_composio_read_runs_under_supervision_and_is_still_denied_under_readonly() {
+        use crate::policy::test_support::{COMPOSIO_READ_SLUG, composio_read_args};
+
+        let read = consequence_of(COMPOSIO_EXECUTE, &composio_read_args());
+        assert_eq!(
+            read.reach,
+            Reach::ExternalRead,
+            "`{COMPOSIO_READ_SLUG}` is tagged `Read` in the vendored catalogue"
+        );
+
+        // 1. Under `supervised` it runs, instead of costing the operator a card.
+        assert!(
+            !read.reach.parks_under_supervision(),
+            "reading a mailbox must not interrupt a person"
+        );
+        // 2. Under `readonly` it is still denied: that tier's contract is that
+        //    nothing outside the company is reached at all.
+        assert!(read.reach.denied_under_readonly());
+        // 3. And it is NOT spend. This is the criterion that rules out reusing
+        //    `Reach::Money`, whose `costs_money()` feeds the daily cap — every
+        //    page of every mailbox would have counted against it.
+        assert!(
+            !read.reach.costs_money(),
+            "a read is not billed; folding it into `Money` would bill it"
+        );
+        assert_ne!(read.group, EffectGroup::Spend);
+
+        // 4. The standing answer is unchanged — it stops mattering for
+        //    `supervised` now that nothing parks there, but still governs
+        //    `readonly` and any tier added later.
+        assert_eq!(read.standing, Standing::Grantable);
+        assert_eq!(read.group, EffectGroup::Other);
+    }
+
+    /// The other half of #559: only the **read** branch moved.
+    ///
+    /// The `send` binding is shared by the missing-key path and the non-read
+    /// path, so these hold structurally — but nothing stops a later edit from
+    /// touching that shared binding, which is the whole reason to assert them.
+    #[test]
+    fn a_composio_send_and_every_unclassifiable_call_still_park() {
+        use crate::policy::test_support::{composio_send_args, composio_unclassified_args};
+
+        let cases: [(&str, serde_json::Value); 6] = [
+            ("a catalogued send", composio_send_args()),
+            ("an uncatalogued action", composio_unclassified_args()),
+            (
+                "an unrecognised slug in a real toolkit",
+                json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" }),
+            ),
+            ("a non-string `tool`", json!({ "tool": 7 })),
+            ("an empty slug", json!({ "tool": "" })),
+            ("a missing `tool` key", json!({ "arguments": { "q": "x" } })),
+        ];
+
+        for (what, args) in cases {
+            let verdict = consequence_of(COMPOSIO_EXECUTE, &args);
+            assert_eq!(verdict.reach, Reach::Consequence, "{what}: {args}");
+            assert!(
+                verdict.reach.parks_under_supervision(),
+                "{what} must still park: {args}"
+            );
+            assert!(verdict.reach.denied_under_readonly(), "{what}: {args}");
+            assert_eq!(verdict.group, EffectGroup::Send, "{what}: {args}");
+            assert_eq!(verdict.standing, Standing::PerCall, "{what}: {args}");
+        }
+    }
+
+    /// `ExternalRead` must not leak into the spend cap from any other tool.
+    ///
+    /// `web_search_is_still_a_priced_call` pins the `Money`→`Spend` direction;
+    /// this pins that no *declared* tool picked up the new variant by accident,
+    /// so the only thing carrying it is the Composio read branch.
+    #[test]
+    fn no_declared_tool_claims_the_external_read_bucket() {
+        let args = json!({});
+        for tool in declared_tools() {
+            assert_ne!(
+                consequence_of(tool, &args).reach,
+                Reach::ExternalRead,
+                "`{tool}` is a declared tool; `ExternalRead` is for the Composio \
+                 read branch, which is classified from its arguments"
+            );
         }
     }
 
@@ -818,6 +2229,88 @@ mod tests {
             .standing,
             Standing::Grantable,
             "the curated lookup is case-insensitive on the slug too"
+        );
+    }
+
+    /// The two halves of #457's scoping, exercised **together and directly**
+    /// (issue #610).
+    ///
+    /// [`standing_scope_of`] mints the scope and
+    /// [`StandingGrant::admits_scope`] spends it, and since #559 no tier routes
+    /// a Composio read through both — see the retention note on
+    /// `standing_scope_of`. Each half is pinned on its own elsewhere, and each
+    /// of those tests spells the toolkit as its own `"github"` literal. Two
+    /// literals in two files are not an agreement: change what
+    /// `standing_scope_of` returns and both suites can be made green
+    /// separately while the pairing they describe is broken, with no live
+    /// caller left to notice.
+    ///
+    /// So nothing here is written down. Every scope comes out of
+    /// `standing_scope_of` and goes straight into a grant or into
+    /// `admits_scope`, which makes this a test of whether the two functions
+    /// still agree rather than of what either one says.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn the_minted_scope_is_the_scope_a_grant_admits() {
+        use crate::runtime::grants::{GrantId, StandingGrant};
+
+        let scope_of = |slug: &str| standing_scope_of(COMPOSIO_EXECUTE, &json!({ "tool": slug }));
+
+        let minted = scope_of("GITHUB_LIST_BRANCHES");
+        assert!(
+            minted.is_some(),
+            "a catalogued action must resolve a toolkit, or this test proves nothing"
+        );
+        // Minted the way the cycle mints one: from the parked effect's payload.
+        let grant = StandingGrant {
+            id: GrantId::new("g610"),
+            agent: "ops".to_string(),
+            tool: COMPOSIO_EXECUTE.to_string(),
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("a610"),
+            at_millis: 1_000,
+            expires_at_millis: u64::MAX,
+            origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+            scope: minted,
+        };
+
+        // A second read from the provider the operator named. Scoped by
+        // toolkit and not by slug, so a *different* GitHub action passes.
+        assert!(
+            grant.admits_scope(scope_of("GITHUB_LIST_PULL_REQUESTS").as_deref()),
+            "the operator consented to a provider, not to one action slug"
+        );
+        // Another provider's read: every other dimension matches and the scope
+        // is the one thing that says no.
+        assert!(
+            !grant.admits_scope(scope_of("GMAIL_FETCH_EMAILS").as_deref()),
+            "'read from GitHub' is not consent to read the company's mail"
+        );
+        // An action the catalogue cannot place resolves to `None`, and a scoped
+        // grant refuses `None` rather than guessing permissively.
+        assert_eq!(
+            scope_of("NOT_A_REAL_TOOLKIT_DO_SOMETHING"),
+            None,
+            "an unplaceable action must not resolve a toolkit"
+        );
+        assert!(
+            !grant.admits_scope(scope_of("NOT_A_REAL_TOOLKIT_DO_SOMETHING").as_deref()),
+            "unknown is a send here too"
+        );
+        // And the unscoped grant a pre-#457 journal line replays into still
+        // admits whatever its `(agent, tool)` pair already admitted.
+        let unscoped = StandingGrant {
+            scope: None,
+            ..grant
+        };
+        assert!(
+            unscoped.admits_scope(scope_of("GMAIL_FETCH_EMAILS").as_deref()),
+            "an unscoped grant must keep behaving as it did before scopes existed"
         );
     }
 
@@ -916,11 +2409,15 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn the_declared_names_are_the_names_the_tools_return() {
-        use crate::harness::{orchestrator, publish, search, workspace_tools};
+        use crate::harness::{orchestrator, publish, search, workflow_admin, workspace_tools};
         for name in [
+            workflow_admin::READ_WORKFLOW_TOOL,
+            workflow_admin::UPDATE_WORKFLOW_TOOL,
+            workflow_admin::DELETE_WORKFLOW_TOOL,
             orchestrator::QUERY_COMPANY_TOOL,
             orchestrator::SPAWN_TASK_TOOL,
             orchestrator::DELEGATE_TO_DESK_TOOL,
+            orchestrator::DELEGATE_TO_TEAMMATE_TOOL,
             orchestrator::ADD_AGENT_TOOL,
             orchestrator::CREATE_WORKFLOW_TOOL,
             orchestrator::ASSIGN_TASK_TOOL,
@@ -930,8 +2427,11 @@ mod tests {
             search::WEB_SEARCH_TOOL,
             workspace_tools::WORKSPACE_LIST_TOOL,
             workspace_tools::WORKSPACE_READ_TOOL,
+            workspace_tools::WORKSPACE_SEARCH_TOOL,
             workspace_tools::WORKSPACE_CREATE_TOOL,
             workspace_tools::WORKSPACE_WRITE_TOOL,
+            workspace_tools::WORKSPACE_RENAME_TOOL,
+            workspace_tools::WORKSPACE_DELETE_TOOL,
             crate::harness::composio_catalog::LIST_TOOLS_TOOL,
             crate::harness::composio_catalog::LIST_TOOLKITS_TOOL,
         ] {
@@ -940,5 +2440,433 @@ mod tests {
                 "`{name}` is a live tool constant with no declaration"
             );
         }
+    }
+
+    /// Where the console keeps the words an operator reads instead of a tool
+    /// name. Named once so both the parser and every failure message point at
+    /// the same file.
+    const LANGUAGE_TS: &str = "frontend/src/lib/language.ts";
+
+    /// One object literal in [`LANGUAGE_TS`], read as `key -> sentence`.
+    ///
+    /// A line parser rather than the two alternatives, and the reasons are the
+    /// same ones that make this a `cargo test` at all:
+    ///
+    /// * a **checked-in generated manifest** of the declared set would give the
+    ///   contract two failure sites and a window between the declaration commit
+    ///   and the regenerate commit where nothing is wrong;
+    /// * a **CI grep** would have no local signal for the Rust contributor who
+    ///   adds the next `Reach::Consequence` line — and that is who introduced
+    ///   all three instances of this defect (#372, #551 → #671, now #701).
+    ///
+    /// It is deliberately literal about the shape it accepts: an object literal
+    /// opened by `const <NAME>` on a line ending in `{` and closed by a `};`
+    /// line. Anything else panics rather than returning a short list, because a
+    /// parser that silently reads nothing turns this test into a green light
+    /// for the exact regression it exists to catch — see the vacuity guards in
+    /// [`every_consequence_tool_has_a_console_label`].
+    ///
+    /// It returns pairs rather than keys (issue #743) because the distinctness
+    /// half needs the sentences, and one parse feeding both halves is the point:
+    /// this test exists because a hand-maintained restatement of the declared
+    /// set drifts from it, and a second parser over the same file would be that
+    /// same mistake one level down.
+    ///
+    /// Values are taken literally — the text between the first `:` and the
+    /// trailing comma, unquoted. Every entry in both tables is a plain string
+    /// literal on one line today; a template literal or a concatenation would
+    /// arrive here as its own source text and, being unequal to any other
+    /// entry, would pass the distinctness check without asserting anything about
+    /// what an operator reads. That is the one shape to reject rather than
+    /// tolerate, and the `>=` floors below are what would catch a table that
+    /// reshaped into it wholesale.
+    fn label_pairs(source: &str, decl: &str) -> Vec<(String, String)> {
+        let mut lines = source.lines();
+        let opened = lines.any(|line| {
+            let line = line.trim_start();
+            line.starts_with(&format!("const {decl}")) && line.ends_with('{')
+        });
+        assert!(
+            opened,
+            "no `const {decl} … {{` line in {LANGUAGE_TS}. If the table was \
+             renamed or reshaped, update this parser — do not delete the test"
+        );
+
+        let mut pairs = Vec::new();
+        for line in lines {
+            let line = line.trim();
+            if line == "};" {
+                return pairs;
+            }
+            if line.is_empty() || line.starts_with("//") || line.starts_with('*') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            pairs.push((
+                key.trim().trim_matches('"').to_string(),
+                value
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim()
+                    .trim_matches('"')
+                    .to_string(),
+            ));
+        }
+        panic!("`const {decl}` in {LANGUAGE_TS} is never closed by a `}};` line");
+    }
+
+    /// Every tool that reaches an operator resolves to a sentence, not to
+    /// "Use one of its tools" (issue #701).
+    ///
+    /// The console's `approvalAction` resolves `EFFECT_LABELS` → `TOOL_LABELS`
+    /// → a generic fallback, so a gated tool in neither table asks an operator
+    /// to consent to "use one of its tools" — the #372 defect. It has now
+    /// recurred three times, and every time the commit that caused it was a
+    /// Rust one adding a `Reach::Consequence` declaration with no reason to
+    /// open the frontend at all. So the coupling belongs here, next to
+    /// [`DECLARED`], where that contributor's `cargo test` reports it.
+    ///
+    /// Scoped to the whole [`Reach::Consequence`] class rather than to the
+    /// per-call subset. The grantable ones (`file_write`, `edit`,
+    /// `apply_patch`, `csv_export`) park exactly the same way, and they are
+    /// *also* the ones issue #374's Standing-permissions list renders through
+    /// `toolAction` with no payload block to disambiguate them. A test scoped
+    /// to `Standing::PerCall` would ship blind to four instances of the class
+    /// it exists to kill.
+    #[test]
+    fn every_consequence_tool_has_a_console_label() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/lib/language.ts"
+        ));
+        // Read as pairs, not keys: the distinctness half below needs the
+        // sentences. `label_keys` is the same parse, so the two halves cannot
+        // disagree about what the tables hold.
+        let effect_labels = label_pairs(source, "EFFECT_LABELS");
+        let tool_labels = label_pairs(source, "TOOL_LABELS");
+        let effects: Vec<&str> = effect_labels.iter().map(|(k, _)| k.as_str()).collect();
+        let tools: Vec<&str> = tool_labels.iter().map(|(k, _)| k.as_str()).collect();
+
+        // Vacuity guards. A parse that quietly returned nothing would report
+        // every gated tool as unlabelled — noisy, and therefore self-correcting.
+        // A parse that quietly returned *the wrong block* would report none of
+        // them, which is the failure that matters: the test would pass forever
+        // while the console regressed. These anchors are entries with no reason
+        // to move, so a reformat of `language.ts` breaks here loudly instead.
+        for anchor in ["payment.send", "workflow.approve"] {
+            assert!(
+                effects.contains(&anchor),
+                "parsed EFFECT_LABELS from {LANGUAGE_TS} without `{anchor}` — \
+                 the parser is reading the wrong block, not the table shrinking"
+            );
+        }
+        for anchor in ["shell", "workspace_create"] {
+            assert!(
+                tools.contains(&anchor),
+                "parsed TOOL_LABELS from {LANGUAGE_TS} without `{anchor}` — \
+                 the parser is reading the wrong block, not the table shrinking"
+            );
+        }
+        assert!(
+            effects.len() >= 15 && tools.len() >= 10,
+            "parsed only {} EFFECT_LABELS and {} TOOL_LABELS keys from \
+             {LANGUAGE_TS}; both tables are larger than that, so the parser is \
+             stopping early",
+            effects.len(),
+            tools.len()
+        );
+
+        let gated: Vec<&str> = declared_tools()
+            .filter(|tool| c(tool).reach.parks_under_supervision())
+            .collect();
+
+        // The walk's own vacuity guard (issue #743). A distinctness check over
+        // an empty or truncated set passes having asserted nothing, which is
+        // precisely the fail-open shape the guards above exist to refuse — and
+        // the shape that made #706's reproduction wrong by half.
+        //
+        // A floor rather than an exact count, matching the `>=` idiom above: the
+        // gated set is 25 today and grows whenever a `Reach::Consequence` line
+        // is declared, so pinning it exactly would fail every such commit for
+        // being correct. What must never happen is the walk *shrinking* toward
+        // the four hardcoded names this widened.
+        assert!(
+            gated.len() >= 20,
+            "only {} tools were selected as gated; the declaration table holds \
+             far more `Reach::Consequence` entries than that, so the walk is \
+             selecting almost nothing and everything below it is vacuous",
+            gated.len()
+        );
+
+        let mut unlabelled: Vec<&str> = gated
+            .iter()
+            .copied()
+            .filter(|tool| !effects.iter().any(|k| k == tool) && !tools.iter().any(|k| k == tool))
+            .collect();
+        unlabelled.sort_unstable();
+        assert!(
+            unlabelled.is_empty(),
+            "{unlabelled:?} park for an operator but have no entry in either \
+             label map in {LANGUAGE_TS}, so their approval card reads \"Use one \
+             of its tools\". Add each to TOOL_LABELS — a gated tool's label \
+             only ever appears above the payload block, which is what \
+             EFFECT_LABELS entries do not assume and why its \
+             EFFECT_DONE_LABELS mirror would demand a past-tense twin these \
+             kinds never reach"
+        );
+
+        // ...and no two of them read the same sentence (issue #743).
+        //
+        // Checked after the unlabelled walk on purpose: an unlabelled pair would
+        // collide here too, on the fallback, and reporting that as "these two
+        // read alike" would name the symptom while the assertion above names the
+        // cause. Ordering the two is what keeps one failure message honest.
+        //
+        // Resolved through the console's own rung order — `EFFECT_LABELS` then
+        // `TOOL_LABELS` — because that is what `toolAction` does, and a tool
+        // present in both resolves to the effect sentence. Comparing the tables
+        // separately would miss exactly the collision that ordering creates.
+        let sentence = |tool: &str| -> &str {
+            effect_labels
+                .iter()
+                .chain(tool_labels.iter())
+                .find(|(key, _)| key == tool)
+                .map(|(_, value)| value.as_str())
+                .expect("every gated tool is labelled — asserted directly above")
+        };
+
+        let mut by_sentence: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+        for tool in &gated {
+            by_sentence.entry(sentence(tool)).or_default().push(tool);
+        }
+        let collisions: Vec<String> = by_sentence
+            .iter()
+            .filter(|(_, sharing)| sharing.len() > 1)
+            .map(|(reads, sharing)| format!("{sharing:?} all read {reads:?}"))
+            .collect();
+        assert!(
+            collisions.is_empty(),
+            "two gated tools render the same sentence: {}. The Standing \
+             permissions list (#374) puts no payload block under a row, so two \
+             rows reading alike are two permissions an operator cannot choose \
+             between — and on an approval card the payload only disambiguates \
+             them if they happen to carry different arguments. Give each its own \
+             words in {LANGUAGE_TS}",
+            collisions.join("; ")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #875: `shell`, classified by the command it was handed
+    // -----------------------------------------------------------------------
+
+    // Gated to match its callers. Every test below that grades a shell command
+    // is `#[cfg(feature = "openhuman")]`, so without the feature they compile
+    // away and this helper is left with none — `dead_code` under the default
+    // lane's `-D warnings`, which is what turned the `Rust` job red.
+    #[cfg(feature = "openhuman")]
+    fn shell(command: &str) -> Consequence {
+        consequence_of(SHELL, &json!({ SHELL_COMMAND_KEY: command }))
+    }
+
+    /// The complaint this issue is about: an agent looking at its own workspace
+    /// paid an approval per command. These are the exact shapes an operator was
+    /// approving on staging.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_read_of_the_agents_own_workspace_runs_unattended() {
+        for command in [
+            "grep -l -i \"resets\\|forgot\" session_raw/*.jsonl",
+            "grep -c -i plus session_raw/*.jsonl",
+            "find . -maxdepth 4 -type d",
+            "cat notes.md",
+            "ls -la",
+            "wc -l src/main.rs",
+        ] {
+            let c = shell(command);
+            assert_eq!(
+                c.reach,
+                Reach::Nothing,
+                "`{command}` reads and changes nothing"
+            );
+            assert!(
+                !c.reach.parks_under_supervision(),
+                "`{command}` must not park under any acting tier"
+            );
+        }
+    }
+
+    /// A command the vendored classifier grades `Read` — because it grades by
+    /// command name, never by path — must still park when its arguments name a
+    /// location outside the agent's own directory. Falsified against the
+    /// pre-fix behaviour: before `shell_command_reaches_outside_cwd` existed,
+    /// `shell_command_is_read` alone was sufficient and every one of these
+    /// downgraded to `Reach::Nothing` — `cat`/`ls`/`grep`/`readlink` are all in
+    /// the vendored `READ_ONLY_BASES` regardless of what they are pointed at.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_read_that_reaches_outside_the_workspace_still_parks() {
+        for command in [
+            "cat /etc/passwd",
+            "cat ~/.ssh/id_rsa",
+            "ls /root",
+            "grep -r secret /etc",
+            "readlink ~",
+            "cat ../../secrets.env",
+            "head --lines=5 /var/log/auth.log",
+            "cat notes/../../../etc/passwd",
+        ] {
+            let c = shell(command);
+            assert_eq!(
+                c.reach,
+                Reach::Consequence,
+                "`{command}` reaches outside the workspace and must still park"
+            );
+            assert!(
+                c.parks_under_auto(),
+                "`{command}` must still park under auto"
+            );
+        }
+    }
+
+    /// The lexical backstop alone, independent of the classifier — pins the
+    /// exact set of shapes it does and does not flag. No `openhuman` feature
+    /// needed: this is pure string logic with no classifier dependency.
+    #[test]
+    fn shell_command_reaches_outside_cwd_flags_the_realistic_escapes() {
+        for command in [
+            "cat /etc/passwd",
+            "ls ~/.ssh",
+            "cat ../secret.env",
+            "cat notes/../../etc/passwd",
+            "head --lines=5 /var/log/auth.log",
+            "cat \"/etc/passwd\"",
+        ] {
+            assert!(
+                shell_command_reaches_outside_cwd(command),
+                "`{command}` should be flagged as reaching outside the cwd"
+            );
+        }
+
+        for command in [
+            "cat notes.md",
+            "grep -l foo session_raw/*.jsonl",
+            "find . -maxdepth 4 -type d",
+            "ls -la",
+            "wc -l src/main.rs",
+        ] {
+            assert!(
+                !shell_command_reaches_outside_cwd(command),
+                "`{command}` stays inside the cwd and should not be flagged"
+            );
+        }
+    }
+
+    /// Everything that is not provably a read keeps exactly the verdict it had
+    /// before this issue: it parks, and it can hold no standing grant.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn anything_that_acts_still_parks() {
+        for command in [
+            "rm -rf /",
+            "curl https://example.com",
+            "npm install -g something",
+            "echo hi > file.txt",
+            "git push origin main",
+            "chmod 777 /etc/passwd",
+        ] {
+            let c = shell(command);
+            assert_eq!(c.reach, Reach::Consequence, "`{command}` acts");
+            assert_eq!(
+                c.standing,
+                Standing::PerCall,
+                "`{command}` may hold no standing grant"
+            );
+            assert!(
+                c.parks_under_auto(),
+                "`{command}` must still park under auto"
+            );
+        }
+    }
+
+    /// The classifier takes the maximum across segments, so a read cannot carry
+    /// an act through on its coat-tails. This is the property that makes
+    /// downgrading reads safe at all.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_read_chained_to_an_act_is_an_act() {
+        for command in [
+            "grep -r foo . && rm -rf /tmp/x",
+            "ls; curl https://example.com",
+            "cat a.txt | tee b.txt",
+            "find . -type f > listing.txt",
+        ] {
+            assert_eq!(
+                shell(command).reach,
+                Reach::Consequence,
+                "`{command}` contains an act and must park"
+            );
+        }
+    }
+
+    /// The model's own label may raise the requirement and never lower it.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_declared_category_escalates_only() {
+        // A read the model calls destructive parks…
+        let escalated = consequence_of(
+            SHELL,
+            &json!({ SHELL_COMMAND_KEY: "ls -la", SHELL_CATEGORY_KEY: "destructive" }),
+        );
+        assert_eq!(escalated.reach, Reach::Consequence);
+
+        // …and an act the model calls a read does not stop parking.
+        let attempted_downgrade = consequence_of(
+            SHELL,
+            &json!({ SHELL_COMMAND_KEY: "rm -rf /", SHELL_CATEGORY_KEY: "read" }),
+        );
+        assert_eq!(attempted_downgrade.reach, Reach::Consequence);
+    }
+
+    /// A call this cannot read is gated. The tool's schema requires `command`,
+    /// so every one of these is a call that could not have run — and none of
+    /// them is a reason to guess.
+    #[test]
+    fn an_unreadable_shell_call_is_gated() {
+        for args in [
+            json!({}),
+            json!({ SHELL_COMMAND_KEY: 7 }),
+            json!({ SHELL_COMMAND_KEY: null }),
+            json!(null),
+            json!("ls"),
+        ] {
+            let c = consequence_of(SHELL, &args);
+            assert_eq!(c.reach, Reach::Consequence, "{args}");
+            assert!(c.parks_under_auto(), "{args}");
+        }
+    }
+
+    /// The name-level declaration is untouched: every reader that asks about
+    /// `shell` without arguments — the permissions list, the console labels,
+    /// the coverage test — still sees the gated answer.
+    #[test]
+    fn the_declaration_still_reads_as_gated_without_arguments() {
+        assert_eq!(c(SHELL).reach, Reach::Consequence);
+    }
+
+    /// Without the harness feature there is no classifier, and the fallback
+    /// answers "act" for everything. Nothing pinned that: the gated-call test
+    /// above passes only malformed arguments, which return before
+    /// `shell_command_is_read` is ever reached, so the fallback could regress to
+    /// permissive and every default-feature lane would stay green. A command
+    /// that IS a read under the classifier is the case that separates them.
+    #[test]
+    #[cfg(not(feature = "openhuman"))]
+    fn a_read_command_still_parks_when_no_classifier_is_linked_in() {
+        let c = consequence_of(SHELL, &json!({ SHELL_COMMAND_KEY: "ls -la" }));
+        assert_eq!(c.reach, Reach::Consequence);
+        assert!(c.parks_under_auto());
     }
 }

@@ -11,20 +11,31 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { OpenCompanyClient } from "@/api/client";
+import type { SignIn } from "@/api/auth";
 import { ApiError, type CompanyStatus } from "@/api/types";
 import { AppShell } from "@/components/app-shell";
 import { CompanyPicker } from "@/components/company-picker";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { ConnectionScopeProvider } from "@/connections/ConnectionContext";
-import { probe, useConnection } from "@/connections/registry";
+import { adoptSession, probe, useConnection } from "@/connections/registry";
 import type { ConnectionId } from "@/connections/types";
 import { Login } from "@/views/Login";
+import { SetupWizard } from "@/views/setup/SetupWizard";
 
 type Phase =
   | { kind: "loading" }
   | { kind: "error"; message: string; hint?: string }
   | { kind: "login"; company: string | null; notice?: string }
+  // A host that has never been through the first-run setup flow. Entered ahead
+  // of `login` on purpose: an unconfigured host may have no company and no
+  // users at all, so a sign-in form there addresses nobody.
+  | { kind: "setup" }
+  // A configured host (setup has completed) that nonetheless has no
+  // companies — an operator who ran setup for host settings alone, or who
+  // deleted the only company afterward. Distinct from `error`: this is not a
+  // connection problem, and the way out is back into setup, not a retry.
+  | { kind: "no-company" }
   | { kind: "picker"; companies: CompanyStatus[] }
   | {
       kind: "console";
@@ -43,6 +54,14 @@ interface Props {
   notice?: string;
   /** Forces the sign-in view — a magic link that failed to redeem, say. */
   forceLogin?: boolean;
+  /**
+   * An address to offer the sign-in form, when the caller knows one.
+   *
+   * Only the embedded host has one: this client starts it, so it can be told
+   * who that host admits (#632). Undefined everywhere else, and the form is
+   * blank as before.
+   */
+  suggestedEmail?: string;
 }
 
 export function ConnectionConsole({
@@ -51,6 +70,7 @@ export function ConnectionConsole({
   defaultCompany,
   notice,
   forceLogin,
+  suggestedEmail,
 }: Props) {
   const [phase, setPhase] = useState<Phase>(
     forceLogin ? { kind: "login", company: defaultCompany, notice } : { kind: "loading" },
@@ -72,12 +92,20 @@ export function ConnectionConsole({
   // Re-probe this connection and re-run the boot effect. A reload would tear
   // down every *other* connection's stream to recover this one; bumping the
   // epoch keeps the recovery local.
-  const reBoot = useCallback(() => {
-    void probe(connectionId).then(() => {
-      setPhase({ kind: "loading" });
-      setBootEpoch((n) => n + 1);
-    });
-  }, [connectionId]);
+  const reBoot = useCallback(
+    (result?: SignIn) => {
+      // Store the session *before* probing. A cross-origin sign-in's token is
+      // the only proof this connection has — no cookie was set — and adopting
+      // it replaces the client, so a probe that ran first would authenticate
+      // with the pre-sign-in client and conclude the host still refuses us.
+      if (result?.session) adoptSession(connectionId, result.session);
+      void probe(connectionId).then(() => {
+        setPhase({ kind: "loading" });
+        setBootEpoch((n) => n + 1);
+      });
+    },
+    [connectionId],
+  );
 
   useEffect(() => {
     // `forceLogin` forces the sign-in view until the *first* boot; a sign-in
@@ -87,6 +115,23 @@ export function ConnectionConsole({
     const set = (p: Phase) => !cancelled && setPhase(p);
 
     async function boot() {
+      // Ask the host whether it has ever been configured. `/spec` is the
+      // unauthenticated handshake, which is what makes this answerable before
+      // sign-in — and it has to be, because an unconfigured host has no users
+      // to sign in as. A host too old to carry the field omits it, and
+      // `!== false` leaves those on the existing path unchanged.
+      try {
+        const spec = await client.spec();
+        if (spec.setup_complete === false) {
+          set({ kind: "setup" });
+          return;
+        }
+      } catch {
+        // A host that cannot answer `/spec` is a connection problem, not an
+        // unconfigured one. Fall through to discovery, which reports it
+        // properly.
+      }
+
       // Explicit company wins: go straight to its console.
       if (defaultCompany) {
         try {
@@ -112,11 +157,7 @@ export function ConnectionConsole({
         } else if (companies.length > 1) {
           set({ kind: "picker", companies });
         } else {
-          set({
-            kind: "error",
-            message: "No companies are running on this host.",
-            hint: "Start one with `opencompany serve --company <dir>`.",
-          });
+          set({ kind: "no-company" });
         }
       } catch (listErr) {
         // Fall back to the single-company alias (prosumer serve).
@@ -139,12 +180,15 @@ export function ConnectionConsole({
     async (id: string, companies: CompanyStatus[]) => {
       try {
         const status = await client.status(id);
+        if (phase.kind === "console" && phase.company !== id) {
+          clearEntityHash();
+        }
         setPhase({ kind: "console", company: id, status, companies, canGoBack: true });
       } catch (err) {
         setPhase(connectionError(client, err, id));
       }
     },
-    [client],
+    [client, phase],
   );
 
   const backToPicker = useCallback(() => {
@@ -160,12 +204,18 @@ export function ConnectionConsole({
     [connectionId, consoleCompany],
   );
 
-  if (refused && phase.kind !== "login") {
+  // A 401 must not preempt setup. An instance that has never been configured
+  // can have no companies and no users at all, so every authenticated route on
+  // it answers 401 — and letting that swap the wizard for a sign-in form would
+  // put the operator back at the dead end this flow exists to remove, asking
+  // them to authenticate against a roster that does not exist yet.
+  if (refused && phase.kind !== "login" && phase.kind !== "setup" && phase.kind !== "no-company") {
     return (
       <Login
         client={client}
         company={defaultCompany}
         notice={notice}
+        suggestedEmail={suggestedEmail}
         onSignedIn={reBoot}
       />
     );
@@ -181,12 +231,16 @@ export function ConnectionConsole({
         </FullScreen>
       );
 
+    case "setup":
+      return <SetupWizard client={client} onDone={reBoot} />;
+
     case "login":
       return (
         <Login
           client={client}
           company={phase.company}
           notice={phase.notice}
+          suggestedEmail={suggestedEmail}
           onSignedIn={reBoot}
         />
       );
@@ -206,6 +260,24 @@ export function ConnectionConsole({
             </Alert>
             <Button className="w-full" onClick={() => location.reload()}>
               Retry
+            </Button>
+          </div>
+        </FullScreen>
+      );
+
+    case "no-company":
+      return (
+        <FullScreen>
+          <div className="w-full max-w-md space-y-4" data-testid="no-company">
+            <Alert variant="destructive">
+              <AlertTitle>No companies are running on this host</AlertTitle>
+              <AlertDescription>
+                Start one from setup, or with{" "}
+                <span className="font-mono text-xs">opencompany serve --company &lt;dir&gt;</span>.
+              </AlertDescription>
+            </Alert>
+            <Button className="w-full" onClick={() => setPhase({ kind: "setup" })}>
+              Open setup
             </Button>
           </div>
         </FullScreen>
@@ -240,6 +312,17 @@ export function ConnectionConsole({
         </ConnectionScopeProvider>
       );
   }
+}
+
+function clearEntityHash() {
+  const [path] = window.location.hash.replace(/^#\/?/, "").split("?");
+  const [view, sub] = path.split("/").filter(Boolean);
+  if (!view || !sub) return;
+
+  // A hash sub-route names an entity within the current company. The shell
+  // remounts for a company switch, so remove that stale identity before the
+  // new shell reads the route as an intentional deep link.
+  window.history.replaceState(null, "", `#/${view}`);
 }
 
 function FullScreen({ children }: { children: React.ReactNode }) {

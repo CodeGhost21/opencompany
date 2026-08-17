@@ -26,8 +26,24 @@ pub struct WorkflowRun {
     /// The final run state after the terminal node(s) completed. Its shape is
     /// the engine's `{ "run": …, "nodes": { "<id>": { "items": [ … ] } } }` map.
     pub output: Value,
-    /// Node ids that paused the run awaiting human approval. Empty for a run
-    /// that reached its terminal node(s) without gating.
+    /// Node ids the run is waiting on a human for. Empty for a run that
+    /// reached its terminal node(s) without stopping for anybody.
+    ///
+    /// **Two producers, deliberately unioned** (issue #881). The original is
+    /// the tinyflows engine's own gate-node list: a `tool_call` node marked
+    /// `requires_approval` pauses the engine, lands here, and resumes through
+    /// [`workflow_resume`](crate::runtime::workflow_resume). The second is a
+    /// node the *host* blocked — an agent node whose turn had a tool call
+    /// parked for approval (see [`blocked_nodes`](Self::blocked_nodes)), which
+    /// the engine never learns about because the refusal happens inside the
+    /// model's tool loop.
+    ///
+    /// They are unioned because the question this field answers — "which nodes
+    /// is this run waiting on me for?" — has the same answer for both, and the
+    /// console renders every entry as a node name. What differs is what
+    /// approving does: a paused gate resumes the run, a blocked node does not
+    /// (see [`blocked_nodes`](Self::blocked_nodes)), which is why the two stay
+    /// separable through that field rather than only through this one.
     pub pending_approvals: Vec<String>,
     /// One row per attempt to route a reached `output` node's report to its
     /// configured destination (issue #170), in graph order.
@@ -71,6 +87,208 @@ pub struct WorkflowRun {
     /// written before this field existed still loads, as an empty list.
     #[serde(default)]
     pub nodes: Vec<WorkflowRunNodeRow>,
+    /// System notices raised *about* this run that the operator needs and that
+    /// no other field can carry (issue #638).
+    ///
+    /// Today there is exactly one producer: a node whose turn gated more tool
+    /// calls than [`MAX_APPROVAL_REQUESTS_PER_TURN`](crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN)
+    /// allows, whose excess is discarded. The chat path says that out loud as
+    /// its own bubble (#561); a run has no conversation to speak on, so before
+    /// this the only trace was a `tracing::warn!` — and a log line is not the
+    /// operator learning anything.
+    ///
+    /// **Deliberately not `error`.** A run that overflowed the cap did not
+    /// fail: its nodes ran, its output is valid, and marking it failed would
+    /// inflate the failure count and hide a real failure among them. Same
+    /// reasoning [`cancelled`](Self::cancelled) is a flag rather than an error
+    /// string.
+    ///
+    /// **And not a `DeliveryReport` row**, which is per-`output`-node and per
+    /// delivery attempt: a run with no `output` node produces no rows at all,
+    /// and this notice is about the run, not about a delivery.
+    ///
+    /// `#[serde(default)]` so a payload written before this field existed still
+    /// loads, as empty — and empty is the overwhelmingly common case.
+    #[serde(default)]
+    pub notices: Vec<String>,
+    /// One row per board write this run's agent nodes performed (issue #661 /
+    /// M5), in the order they were executed.
+    ///
+    /// A workflow node's turn may open a card and set who owns it — that is the
+    /// whole of what a run may do to the board, and it is what makes the shipped
+    /// `→ task cards` seed able to produce one. Every other lifecycle move stays
+    /// the operator's, refused at the tool boundary; see
+    /// [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim).
+    ///
+    /// **A card is real once written, so a row is a receipt rather than an
+    /// intention.** A `spawned` row means the `TaskStore` took the write; a
+    /// `spawnFailed` row means it did not, and the run still succeeded — a board
+    /// write that failed must not discard a completed turn's work, so the
+    /// failure is reported here instead of failing the node.
+    ///
+    /// Empty for every run whose nodes touched no card, which is nearly all of
+    /// them — hence `#[serde(default)]`, which also loads a `WorkflowRun`
+    /// deserialized from a payload written before this field existed.
+    #[serde(default)]
+    pub board: Vec<WorkflowRunBoardRow>,
+    /// One row per node this run **blocked** on a human (issue #881), in the
+    /// order the nodes reported.
+    ///
+    /// A node blocks when a tool call inside its agent turn was parked for
+    /// operator approval. Before this, that node returned the model's apology
+    /// as its output, reported `ok`, and the graph carried the apology into the
+    /// next node's input — so a run that delivered nothing finished green.
+    ///
+    /// **Not a failure, and not a pause either.** The branch stops (see
+    /// [`WorkflowNodeStatus::Blocked`](crate::ports::types::WorkflowNodeStatus))
+    /// but the run is not parked for auto-resume: an agent node is not
+    /// re-enterable, so resuming would run a fresh turn that parks a *new*
+    /// approval, forever. Approving lets the operator re-run; it does not
+    /// continue this one.
+    ///
+    /// `#[serde(default)]` so a `WorkflowRun` deserialized from a payload
+    /// written before this field existed still loads, as empty — which is every
+    /// run that blocked on nobody.
+    #[serde(default)]
+    pub blocked_nodes: Vec<WorkflowBlockedNode>,
+    /// One row per approval this run **parked** (issue #880), in the order the
+    /// parks were attempted.
+    ///
+    /// Three real feature-pipeline runs each reported every node `ok` with an
+    /// empty [`pending_approvals`](Self::pending_approvals) and an empty
+    /// [`deliveries`](Self::deliveries) while the company's approval queue held
+    /// fifteen `publish_artifact` cards those very runs had opened. Both of
+    /// those fields were *truthful* — they mean the engine's gate nodes and
+    /// `output`-node routing respectively — and neither answers what the run
+    /// view is asked. This field does.
+    ///
+    /// # It is a receipt, which is why it is named for what the run parked
+    ///
+    /// Not `pending_approvals_opened`, not "still outstanding". A settle-time
+    /// snapshot of what is *still* waiting rots into a fresh lie the moment the
+    /// operator approves one; a record that this run parked two cards is true
+    /// forever. The console's wording follows from the name — "parked N
+    /// approvals", never "waiting on N".
+    ///
+    /// **The failure rows are the ones that matter most.** Before this, a park
+    /// that could not be performed — no approvals queue wired, or a store that
+    /// refused the write — was recorded only by a `tracing::error!`, which is
+    /// the sole trace that a call the operator will never be asked about was
+    /// dropped. A failure row is a receipt, never a node failure; the same
+    /// stance [`WorkflowRunBoardRow`] takes for a board write that did not land.
+    ///
+    /// `#[serde(default)]` so a payload written before this field existed still
+    /// loads, and `skip_serializing_if` so a run that parked nothing — nearly
+    /// all of them — serializes byte-for-byte as it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<WorkflowRunApprovalRow>,
+}
+
+/// One node a workflow run blocked on a human (issue #881).
+///
+/// **Structural only**, the same discipline [`WorkflowRunBoardRow`] keeps: the
+/// node, the tools whose calls were gated, and the ids of the cards that were
+/// opened. No model prose, no policy error text — so a blocked node cannot
+/// become a channel for a turn's apology into the journal, the run response, or
+/// a host log. The console writes its own sentence from these ids.
+///
+/// One shape rides all three surfaces — the `WorkflowRunFinished` journal
+/// event, `GET …/workflows/runs`, and the synchronous run response — hence the
+/// camelCase serde here rather than at each HTTP DTO. The [`DeliveryReport`]
+/// precedent, for the same reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowBlockedNode {
+    /// The node that blocked.
+    pub node_id: String,
+    /// The tools whose calls the node's turn had gated, deduplicated and in
+    /// first-seen order. A tool *name*, never its arguments.
+    pub tools: Vec<String>,
+    /// The approvals this node's gated calls actually opened.
+    ///
+    /// Empty when every park failed — which is strictly worse than a parked
+    /// one, because then nobody can unblock the node at all. The per-call
+    /// receipts on [`WorkflowRun::approvals`] say which of the two happened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_ids: Vec<String>,
+    /// How many of this node's gated calls could **not** be parked.
+    ///
+    /// Non-zero is the loud case: the call was refused, the operator will never
+    /// be asked about it, and re-running is the only way forward. Skipped when
+    /// zero, which is the ordinary case.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unparkable: usize,
+}
+
+/// `skip_serializing_if` predicate for a count that is almost always zero.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// What became of one gated tool call a workflow run tried to park (issue
+/// #880), as a closed set.
+///
+/// Three arms because there are exactly three real outcomes at the drain, and
+/// an operator reading a run wants to tell them apart: the card is on the
+/// Approvals page, the card could not be written, or the call was dropped
+/// before parking was even attempted. Carries no payload by construction, so
+/// nothing a model or a store wrote can ride an outcome into a log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowApprovalOutcome {
+    /// A decidable card is on the Approvals page. The row's `approvalId` names
+    /// it.
+    Parked,
+    /// The park was attempted and did not land — the store refused the write,
+    /// or this runtime has no approvals queue wired at all. **Nobody will ever
+    /// be asked about this call.**
+    ParkFailed,
+    /// The call was dropped before parking: the turn gated more calls than
+    /// [`MAX_APPROVAL_REQUESTS_PER_TURN`](crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN)
+    /// allows and this one was in the excess. The drain caps and drops in one
+    /// step, so which tool it was is not recoverable — hence a row with no
+    /// `tool`.
+    Discarded,
+}
+
+impl WorkflowApprovalOutcome {
+    /// Whether this row records a call the operator will **never** be asked
+    /// about.
+    pub fn unparkable(&self) -> bool {
+        matches!(self, Self::ParkFailed | Self::Discarded)
+    }
+}
+
+/// One gated tool call a workflow run's agent node tried to park (issue #880).
+///
+/// **Structural only** — the node, the tool's name, the outcome, and the
+/// approval id when one was minted. No arguments, no policy reason, no store
+/// error text: the same rule [`WorkflowRunBoardRow`] follows, so a row cannot
+/// become a channel for a turn's payload into the journal or a host log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunApprovalRow {
+    /// The agent node whose turn made the call.
+    ///
+    /// Absent only where node identity is unavailable — the vendored
+    /// `AgentRunner` trait boundary carries no node id of its own, so a graph
+    /// authored without one leaves this unset rather than inventing a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// The tool whose call was gated.
+    ///
+    /// Absent on [`Discarded`](WorkflowApprovalOutcome::Discarded): the drain
+    /// caps and drops the excess in one step, so by the time the count is known
+    /// the entries are gone. A row with no tool is the honest shape — "one more
+    /// call was dropped" — rather than a name guessed from the survivors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// What became of the park attempt.
+    pub outcome: WorkflowApprovalOutcome,
+    /// The card the operator can decide, on the
+    /// [`Parked`](WorkflowApprovalOutcome::Parked) arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
 }
 
 /// One node's structural outcome inside a run (issue #542).
@@ -89,6 +307,105 @@ pub struct WorkflowRunNodeRow {
     pub status: WorkflowNodeStatus,
     /// Wall-clock duration of the node's execution, in milliseconds.
     pub elapsed_ms: u64,
+}
+
+/// What a workflow run's node did to the task board, as a closed set (issue
+/// #661 / M5).
+///
+/// Four arms rather than a `bool` beside a kind, because the two axes are not
+/// independent in any way a reader benefits from: an operator looking at a run
+/// wants "opened a card" / "could not open a card" / "set an owner" / "could not
+/// set an owner", and those are exactly the four sentences a console renders.
+///
+/// **The failure arms are not run failures.** They record that the store refused
+/// a write the node's turn had already been told would happen — the same class of
+/// honesty [`DeliveryStatus::Failed`] provides for a report that did not send. A
+/// run whose every board write failed still finished its graph and still returns
+/// `Ok`.
+///
+/// Carries no payload by construction, so nothing a model or a transport wrote
+/// can ride an action into a log. The row beside it carries the ids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowBoardAction {
+    /// A card was opened in To-do (`spawn_task`). The row's `taskId` is that
+    /// card's id, so a console can link straight to it.
+    Spawned,
+    /// An existing card's owner was set or cleared (`assign_task`). **No column
+    /// moved** — see [`WorkflowRun::board`].
+    Assigned,
+    /// `spawn_task` did not produce a card: the store refused the write, or this
+    /// runtime has no task board wired at all. No `taskId`, because there is no
+    /// card to point at.
+    SpawnFailed,
+    /// `assign_task` did not change the card's owner: the store refused the
+    /// write, the card is no longer on the board, or the name did not resolve to
+    /// anybody on the roster (issue #205 — an unresolvable owner is deliberately
+    /// not written, leaving the previous one in place).
+    AssignFailed,
+}
+
+impl WorkflowBoardAction {
+    /// Whether this row records a write that did **not** land.
+    ///
+    /// Used to decide whether the row is worth a `tracing::error` beside it: a
+    /// board write the node was told would happen and that did not is the one
+    /// thing on this path an operator cannot infer from the card itself.
+    pub fn failed(&self) -> bool {
+        matches!(self, Self::SpawnFailed | Self::AssignFailed)
+    }
+}
+
+/// One board write a workflow run's agent node performed (issue #661 / M5).
+///
+/// **Structural only**, and deliberately the same discipline
+/// [`WorkflowRunNodeRow`] keeps: the action, the ids involved, and nothing else.
+/// No error string, no note text, no instruction the model wrote — so a row
+/// cannot become a channel for a node's prose into the journal, the run
+/// response, or a host log.
+///
+/// One shape rides all three surfaces — the `WorkflowRunFinished` journal event,
+/// `GET …/workflows/runs`, and the synchronous run response — which is why the
+/// serde renaming is camelCase here rather than at each HTTP DTO: the
+/// [`DeliveryReport`] precedent, for the same reason. A console reads the same
+/// keys wherever it finds a run.
+///
+/// # `title` is the only field that carries authored text, and it is the card's own
+///
+/// A spawned card's title is what the operator will read off their board a
+/// moment later, so it is not new exposure — the board read already serves it
+/// under the same `ScopedCompany` guard. It is present only on the spawn arms,
+/// where the delegation named it; an assign row leaves it absent rather than
+/// re-transcribing a card the console can already resolve by id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunBoardRow {
+    /// What was attempted, and whether it landed.
+    pub action: WorkflowBoardAction,
+    /// The card the row is about.
+    ///
+    /// Absent on [`SpawnFailed`](WorkflowBoardAction::SpawnFailed) — no card was
+    /// written, so there is no id, and synthesizing one would name a card that
+    /// is not on the board. Present on every other arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The title the node asked for, on the two spawn arms.
+    ///
+    /// Absent on the assign arms: `assign_task` names a card by id and never
+    /// carries a title, so anything here would be a second transcription of a
+    /// card the reader can already look up — the drift `plan` avoids by being
+    /// projected verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The owner the node asked for, as the node wrote it.
+    ///
+    /// `None` when the node named nobody (a `spawn_task` with no assignee, which
+    /// lands unowned in To-do). Deliberately the **requested** name rather than
+    /// the resolved roster id: on an `assignFailed` row the requested name is the
+    /// only thing that explains the failure, and on a successful row the two
+    /// agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 /// What became of one attempt to deliver an `output` node's report.
@@ -150,7 +467,10 @@ pub enum DeliveryStatus {
 pub enum DeliveryReason {
     /// This build wired no delivery ports at all, so nothing could be sent.
     NotWired,
-    /// An `owner` report reached the company's admin mailbox.
+    /// An `owner` report reached one of the company's admin mailboxes — an
+    /// active admin from the user store, or a standing admin invite (a manifest
+    /// `[users] admins` entry or the deployment's bootstrap admin) not yet signed
+    /// in (issue #661 / M8).
     OwnerEmailed,
     /// An `email` report reached the named recipient on an established thread.
     RecipientEmailed,
@@ -160,8 +480,10 @@ pub enum DeliveryReason {
     /// `owner` had no mailbox to send from, so the report went to the operator
     /// channel instead.
     OwnerFellBackNoMailbox,
-    /// `owner` had a mailbox but no active admin with an address, so the report
-    /// went to the operator channel instead.
+    /// `owner` had a mailbox but no admin address to send to — no active admin
+    /// in the user store and no standing admin invite (manifest `[users] admins`
+    /// or the deployment's bootstrap admin) either (issue #661 / M8) — so the
+    /// report went to the operator channel instead.
     OwnerFellBackNoAdminAddress,
     /// `owner`'s operator-channel fallback itself failed, so nothing was sent.
     OwnerFallbackFailed,

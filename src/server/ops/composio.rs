@@ -62,11 +62,15 @@
 
 use axum::Json;
 use axum::Router;
-use axum::routing::{get, post, put};
+use axum::extract::Path;
+use axum::routing::{delete, get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::composio::{backend_url_or_default, store_token, token_configured};
+// `token_configured` is gone from this list deliberately: the status route no
+// longer re-derives the credential tier from booleans, it asks the resolver
+// (`resolve_credential`) — see `credential_source_for` below.
+use crate::company::composio::{CatalogEntry, backend_url_or_default, store_token};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
@@ -112,7 +116,12 @@ async fn effective_toolkits(
         (
             false,
             OpenModeToolkits {
-                toolkits: manifest.to_vec(),
+                // A manifest allowlist is slugs and nothing else — the company
+                // wrote it by hand, and the catalog is deliberately not
+                // consulted here (it must not be able to widen a list that
+                // narrowed on purpose). So these entries carry no metadata, and
+                // the console falls back to its own typography for them.
+                toolkits: manifest.iter().map(CatalogEntry::from_slug).collect(),
                 source: CatalogSource::Manifest,
                 notice: None,
             },
@@ -136,6 +145,18 @@ async fn open_mode_toolkits(runtime: &CompanyRuntime) -> OpenModeToolkits {
     OpenModeToolkits::from_outcome(outcome)
 }
 
+/// Drop this company's cached catalog.
+///
+/// Exposed because the catalog is a property of the **credential**, not of the
+/// Composio token alone: changing the company's TinyHumans key
+/// ([`ops::company_key`](super::company_key)) can change which account the
+/// backend resolves and therefore which catalog it serves. Both writes evict
+/// through here rather than each reaching into the cache with its own key
+/// derivation.
+pub(crate) fn evict_catalog_cache(runtime: &CompanyRuntime) {
+    composio_toolkits::cache().evict(&catalog_cache_key(runtime));
+}
+
 /// This company's catalog cache key. The backend URL is resolved the same way
 /// the status DTO resolves it, so a company repointed at a different backend
 /// does not read the old backend's catalog.
@@ -155,11 +176,25 @@ fn catalog_cache_key(runtime: &CompanyRuntime) -> String {
 /// `Err` is a plain-language reason the console can show — never a bare
 /// fall-through to a short list that would look authoritative.
 #[cfg(feature = "composio")]
-async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<String>, String> {
+async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<CatalogEntry>, String> {
     // No credential of any tier means there is nothing to dial the backend
     // with. Say that, rather than spending the timeout to discover it.
-    let config = resolve_tenant(runtime).await.map_err(|_| {
-        "this company has no Composio credential yet, so the catalog cannot be read".to_string()
+    //
+    // But say only that when it is what happened. `resolve_tenant` answers
+    // `Conflict` for "nothing configured" and propagates anything else — a
+    // secret-store read failure among them. Collapsing every error into "no
+    // credential yet" would tell an operator whose store hiccupped that they
+    // never set a key, which is the confident-wrong-answer this credential work
+    // exists to remove (see `company_key::resolve`).
+    let config = resolve_tenant(runtime).await.map_err(|err| {
+        if matches!(err.0, crate::error::OpenCompanyError::Conflict(_)) {
+            "this company has no Composio credential yet, so the catalog cannot be read".to_string()
+        } else {
+            format!(
+                "this company's Composio credential could not be resolved: {}",
+                err.0
+            )
+        }
     })?;
     let fetch = crate::harness::composio::list_catalog_toolkits(&config);
     match tokio::time::timeout(composio_toolkits::FETCH_TIMEOUT, fetch).await {
@@ -179,7 +214,7 @@ async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<String>, String> 
 /// The status route still answers (reporting `inBuild:false`), and it says so
 /// rather than presenting the fallback as the backend's list.
 #[cfg(not(feature = "composio"))]
-async fn fetch_catalog(_runtime: &CompanyRuntime) -> Result<Vec<String>, String> {
+async fn fetch_catalog(_runtime: &CompanyRuntime) -> Result<Vec<CatalogEntry>, String> {
     Err("Composio is not compiled into this build".to_string())
 }
 
@@ -187,16 +222,25 @@ async fn fetch_catalog(_runtime: &CompanyRuntime) -> Result<Vec<String>, String>
 ///
 /// The read/write-token plane (`GET …/composio`, `PUT …/composio/token`) is
 /// always present. The per-provider OAuth sign-in plane (`POST
-/// …/composio/authorize`, `GET …/composio/connections`) is **also** always
-/// present in the route table — mirroring how `get_status` stays wired and
-/// reports `inBuild:false` rather than `#[cfg]`-ing itself out — but its
-/// handlers only reach the live Composio client under the `composio` feature;
-/// otherwise they answer `409 Conflict` "not in this build".
+/// …/composio/authorize`, `GET …/composio/connections`, `DELETE
+/// …/composio/connections/{connection_id}`) is **also** always present in the
+/// route table — mirroring how `get_status` stays wired and reports
+/// `inBuild:false` rather than `#[cfg]`-ing itself out — but its handlers only
+/// reach the live Composio client under the `composio` feature; otherwise they
+/// answer `409 Conflict` "not in this build".
 pub fn router() -> Router<AppState> {
     scoped("/composio", get(get_status))
         .merge(scoped("/composio/token", put(set_token)))
         .merge(scoped("/composio/authorize", post(authorize)))
         .merge(scoped("/composio/connections", get(connections)))
+        .merge(scoped(
+            "/composio/connections/{connection_id}",
+            delete(disconnect),
+        ))
+        .merge(scoped(
+            "/composio/connections/{connection_id}/default",
+            put(set_default).delete(clear_default),
+        ))
 }
 
 /// The company's Composio status as the console renders it. **Never** carries the
@@ -240,6 +284,26 @@ struct ComposioStatusDto {
     /// mode this is still not a hard limit: any slug the backend permits can be
     /// authorized by typing it.
     effective_toolkits: Vec<String>,
+    /// The same providers as [`Self::effective_toolkits`], in the same order,
+    /// carrying whatever display metadata the backend published for each —
+    /// name, description, logo URL, and Composio's own category names (issue
+    /// #600).
+    ///
+    /// **Additive, and deliberately so.** The slug list above is the contract
+    /// every existing consumer reads and the only thing an authorize call
+    /// needs; this is the render model beside it. Replacing the slug list with
+    /// this one would have bought nothing and broken that contract.
+    ///
+    /// Empty metadata is a real state, not a bug: a manifest allowlist, a
+    /// fallback list, and a backend predating the dynamic catalog all yield
+    /// slug-only entries, and the console renders those with its own
+    /// typography.
+    ///
+    /// The categories are forwarded **verbatim**, uninterpreted. The console
+    /// buckets them by substring, which is what lets a Composio integration
+    /// added tomorrow land in the right group with no change on either side of
+    /// this wire.
+    effective_catalog: Vec<CatalogEntry>,
     /// Where [`Self::effective_toolkits`] came from — `manifest`, `backend`, or
     /// `fallback` (issue #397).
     ///
@@ -292,29 +356,90 @@ struct AuthorizeDto {
 /// One per-toolkit connected state in the `GET …/composio/connections`
 /// response: `connected` is true when the company has at least one active
 /// connection for that toolkit.
+///
+/// [`accounts`](Self::accounts) was added for the provider detail view (issue
+/// #404) **additively**: `toolkit` and `connected` keep their exact previous
+/// meaning, so the tile grid and the post-authorize poll that read only those
+/// two are untouched by it. A detail view therefore needs no second route and
+/// no second round-trip — the call the page already makes now carries enough to
+/// open a provider.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectionDto {
     toolkit: String,
     connected: bool,
+    /// Every connection this company holds for the toolkit, oldest id first.
+    ///
+    /// Usually one. Composio permits several accounts per toolkit, and a company
+    /// that connected Gmail twice needs to see which is which before revoking
+    /// one — the concrete reason `connected: bool` alone could not back a
+    /// disconnect.
+    accounts: Vec<ConnectedAccountDto>,
+    /// The account this company chose for the toolkit, when it has chosen one
+    /// (issue #820) — the id `composio_execute` sends as `connectionId`.
+    ///
+    /// **Omitted, not defaulted.** Absent means the company has expressed no
+    /// intent and Composio resolves the account itself; there is no implicit
+    /// default here to report, and inventing one (the oldest, the first in the
+    /// sort) would be a claim the console makes and the harness does not honour.
+    /// That absence is the honest state and stays the ordinary one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_connection_id: Option<String>,
 }
 
-/// Which tier a company's Composio credential comes from, mirroring the harness
-/// resolver's precedence: the company's **own** stored token wins, else this
-/// instance's platform identity, else nothing.
+/// One connected account inside a [`ConnectionDto`] (issue #404).
 ///
-/// Takes the environment as a seam so the matrix is testable without mutating the
-/// process environment.
-fn credential_source_for(
-    stored: bool,
-    env: &dyn crate::app::config::EnvSource,
-) -> CredentialSource {
-    if stored {
-        return CredentialSource::Static;
-    }
-    TinyhumansTokenSource::from_env(env)
-        .map(|source| source.credential_source())
-        .unwrap_or(CredentialSource::None)
+/// A non-secret projection of
+/// [`ComposioConnectionRow`](crate::harness::composio::ComposioConnectionRow) —
+/// see its docs for why the id is safe to hand the console.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectedAccountDto {
+    /// Composio's connection id — the path segment `DELETE …/connections/{id}`
+    /// takes.
+    id: String,
+    /// Composio's raw status string, forwarded verbatim so the console can tell
+    /// "never set up" from "set up and expired".
+    status: String,
+    /// Whether this individual account is usable.
+    connected: bool,
+    /// When Composio recorded the connection, when it says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    /// The account label, when the provider published one. Omitted rather than
+    /// guessed — see the row type's docs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
+    /// Whether this is the account the company chose for the toolkit (issue
+    /// #820). At most one account per toolkit carries it, and none does until
+    /// somebody says so.
+    is_default: bool,
+}
+
+/// Which tier a company's Composio credential comes from.
+///
+/// Asks the resolver itself rather than restating its precedence. The console
+/// must never be able to name a tier the agents are not on, and a second copy of
+/// the rule is a second place to forget to update — which is how a status route
+/// ends up confidently reporting a credential that no longer resolves.
+///
+/// Takes the instance identity already resolved, rather than an `&dyn
+/// EnvSource`: a trait object with no `Send + Sync` bound held across the await
+/// below makes the whole handler future non-`Send`, which axum rejects. Callers
+/// resolve it from whichever environment they mean, so the matrix stays testable
+/// without mutating the process environment.
+async fn credential_source_for(
+    runtime: &CompanyRuntime,
+    token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
+) -> Result<CredentialSource, ApiError> {
+    Ok(crate::company::composio::resolve_credential(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        token_source,
+    )
+    .await
+    .map_err(ApiError)?
+    .source())
 }
 
 /// Resolves the Composio status DTO for a company.
@@ -327,11 +452,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         ),
         None => (false, Vec::new()),
     };
-    // Mirrors the harness resolver: this company's own token wins, else the
-    // instance's platform identity, else nothing.
-    let stored = token_configured(runtime.id(), runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
     let env = crate::app::config::ProcessEnv;
     let (env_url, api_url) = {
         use crate::app::config::EnvSource;
@@ -340,7 +460,11 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
             env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
         )
     };
-    let credential_source = credential_source_for(stored, &env);
+    let credential_source = credential_source_for(
+        runtime,
+        TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
+    )
+    .await?;
     let (open_mode, effective) = effective_toolkits(runtime, &toolkits).await;
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
@@ -349,7 +473,8 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         backend_url: backend_url_or_default(env_url, api_url),
         toolkits,
         open_mode,
-        effective_toolkits: effective.toolkits,
+        effective_toolkits: effective.slugs(),
+        effective_catalog: effective.toolkits,
         catalog_source: effective.source,
         catalog_notice: effective.notice,
     })
@@ -382,7 +507,7 @@ async fn set_token(
     // cached one rather than serving the previous account's answer for up to
     // `CATALOG_TTL` — the response below re-reads the status, so the operator
     // sees the new list immediately.
-    composio_toolkits::cache().evict(&catalog_cache_key(runtime));
+    evict_catalog_cache(runtime);
     // After the store, so the journal records a completed change. An empty
     // value is a clear, not a set — the two are worth telling apart in an
     // audit trail, since one grants access and the other withdraws it.
@@ -487,22 +612,32 @@ pub(crate) async fn resolve_tenant(
     let env = crate::app::config::ProcessEnv;
     let backend_env = env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV);
     let api_env = env.get(crate::company::composio::TINYHUMANS_API_URL_ENV);
-    crate::harness::composio::TenantComposio::resolve(
+    // Resolved here rather than through `TenantComposio::resolve` so a store
+    // read failure stays distinguishable from "nothing configured". This is the
+    // path that *establishes* a connection, and a connection lives on the
+    // backend keyed by the account the bearer resolves to — so guessing here
+    // would attribute a company's Gmail to whichever identity happened to
+    // resolve during the outage. The roster path can afford to shrug and
+    // withhold tools; this one must say what went wrong and connect nothing.
+    let credential = crate::company::composio::resolve_credential(
         runtime.id(),
         runtime.secrets().as_ref(),
-        toolkits,
-        backend_env,
-        api_env,
         crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
     )
     .await
-    .ok_or_else(|| {
-        ApiError(crate::error::OpenCompanyError::Conflict(
-            "no Composio credential is available for this company — this instance has no platform \
-             identity, so paste the company's Composio token first"
+    .map_err(ApiError)?;
+    if !credential.configured() {
+        return Err(ApiError(crate::error::OpenCompanyError::Conflict(
+            "no Composio credential is available for this company — set the company's TinyHumans \
+             credential, or paste its own Composio token"
                 .to_string(),
-        ))
-    })
+        )));
+    }
+    Ok(crate::harness::composio::TenantComposio::new(
+        backend_url_or_default(backend_env, api_env),
+        credential,
+        toolkits,
+    ))
 }
 
 #[cfg(feature = "composio")]
@@ -525,7 +660,7 @@ async fn authorize_impl(
 #[cfg(feature = "composio")]
 async fn connections_impl(runtime: &CompanyRuntime) -> Result<Json<Vec<ConnectionDto>>, ApiError> {
     let config = resolve_tenant(runtime).await?;
-    let states = crate::harness::composio::list_connection_states(&config)
+    let rows = crate::harness::composio::list_connections_detailed(&config)
         .await
         .map_err(|err| {
             ApiError(crate::error::OpenCompanyError::TinyHumans {
@@ -533,12 +668,310 @@ async fn connections_impl(runtime: &CompanyRuntime) -> Result<Json<Vec<Connectio
                 message: err.to_string(),
             })
         })?;
-    Ok(Json(
-        states
-            .into_iter()
-            .map(|(toolkit, connected)| ConnectionDto { toolkit, connected })
-            .collect(),
-    ))
+    let defaults =
+        crate::company::composio::load_defaults(runtime.id(), runtime.secrets().as_ref())
+            .await
+            .map_err(ApiError)?;
+    let defaults = drop_dangling_defaults(runtime, &rows, defaults).await?;
+    Ok(Json(group_by_toolkit(rows, &defaults)))
+}
+
+/// Drop every stored choice naming a connection `rows` does not contain, and
+/// return what is left (issue #820).
+///
+/// Housekeeping on the one path that holds both halves of the answer. Such a pin
+/// is not merely stale — it would be sent on the next `composio_execute` and
+/// refused, so an account revoked outside this console (at Composio itself)
+/// would silently break the toolkit for every agent. The console polls this
+/// route, so the repair lands on its own. Deliberately a *removal of a dangling
+/// reference* and nothing else: it cannot pick a different account, only stop
+/// naming one that is gone.
+///
+/// Split out from the handler for the same reason [`group_by_toolkit`] is: the
+/// decision is testable without standing up a Composio backend, and the rows a
+/// test has to invent are exactly the ones the handler was handed.
+#[cfg(feature = "composio")]
+async fn drop_dangling_defaults(
+    runtime: &CompanyRuntime,
+    rows: &[crate::harness::composio::ComposioConnectionRow],
+    defaults: crate::company::composio::ComposioDefaults,
+) -> Result<crate::company::composio::ComposioDefaults, ApiError> {
+    let live: std::collections::BTreeSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+    // Iterated over a snapshot, one write per stale toolkit, and `defaults` is
+    // reassigned from each write rather than mutated here: `clear_default`
+    // re-reads the stored blob and returns the whole map as it now stands, so
+    // the last iteration's return is the fully reduced map and the answer this
+    // returns cannot drift from what was actually persisted. With nothing stale
+    // the loop does not run and the map passed in is returned untouched — no
+    // write on the ordinary read.
+    let mut defaults = defaults;
+    for (toolkit, id) in defaults
+        .clone()
+        .into_iter()
+        .filter(|(_, id)| !live.contains(id.as_str()))
+    {
+        tracing::info!(
+            company = %runtime.id(),
+            toolkit = %toolkit,
+            connection_id = %id,
+            "[composio] the chosen account no longer exists at Composio; clearing the choice"
+        );
+        defaults = crate::company::composio::clear_default(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            &toolkit,
+        )
+        .await
+        .map_err(ApiError)?;
+    }
+    Ok(defaults)
+}
+
+/// Fold per-connection rows into the per-toolkit response shape.
+///
+/// `connected` is `true` when **any** account for the toolkit is active — the
+/// same rule the pre-#404 route applied, kept here so the boolean the tile grid
+/// reads cannot drift from what it meant before the accounts were added.
+///
+/// A `BTreeMap` gives the toolkit ordering the route has always had; the rows
+/// arrive already sorted by `(toolkit, id)`, so the per-toolkit account order is
+/// stable too. Split out from the handler so it is testable without a live
+/// Composio backend.
+#[cfg(feature = "composio")]
+fn group_by_toolkit(
+    rows: Vec<crate::harness::composio::ComposioConnectionRow>,
+    defaults: &crate::company::composio::ComposioDefaults,
+) -> Vec<ConnectionDto> {
+    let mut by_toolkit: std::collections::BTreeMap<String, ConnectionDto> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        let chosen = defaults.get(&row.toolkit).map(String::as_str);
+        let entry = by_toolkit
+            .entry(row.toolkit.clone())
+            .or_insert_with(|| ConnectionDto {
+                toolkit: row.toolkit.clone(),
+                connected: false,
+                accounts: Vec::new(),
+                default_connection_id: chosen.map(str::to_string),
+            });
+        entry.connected = entry.connected || row.connected;
+        entry.accounts.push(ConnectedAccountDto {
+            is_default: chosen == Some(row.id.as_str()),
+            id: row.id,
+            status: row.status,
+            connected: row.connected,
+            created_at: row.created_at,
+            account: row.account,
+        });
+    }
+    by_toolkit.into_values().collect()
+}
+
+/// `DELETE …/composio/connections/{id}` — revoke one connected account
+/// (issue #404).
+///
+/// **Admin-only** (issue #403), for the same reason `authorize` is: the
+/// connection belongs to the company, so removing the account its agents act
+/// through is a decision made on the company's behalf. Journaled on success
+/// only, alongside the connect it reverses.
+///
+/// What this does and does not revoke matters, and the console says so before
+/// asking: it removes the connection **at Composio**, so agents lose the
+/// capability on their next turn. It does not sign the company out of the
+/// provider, and it does not touch the native `oauth/{provider}` catalog entry,
+/// which is a separate credential this plane has never owned.
+async fn disconnect(
+    company: AdminScopedCompany,
+    Path(ConnectionPath { connection_id }): Path<ConnectionPath>,
+) -> Result<Json<DisconnectDto>, ApiError> {
+    let dto = disconnect_impl(company.runtime.as_ref(), &connection_id).await?;
+    journal(&company, "provider_disconnected", None).await?;
+    Ok(dto)
+}
+
+/// The sub-resource path (`connection_id`); the scope `id` is consumed by the
+/// extractor.
+#[derive(Debug, Deserialize)]
+struct ConnectionPath {
+    connection_id: String,
+}
+
+/// `DELETE …/composio/connections/{id}` response. A body rather than a bare 204
+/// so the console can state what happened in the same words the host used.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisconnectDto {
+    /// Plain-language confirmation, scoped to what was actually revoked.
+    note: String,
+}
+
+#[cfg(feature = "composio")]
+async fn disconnect_impl(
+    runtime: &CompanyRuntime,
+    connection_id: &str,
+) -> Result<Json<DisconnectDto>, ApiError> {
+    use crate::harness::composio::DisconnectError;
+
+    let config = resolve_tenant(runtime).await?;
+    crate::harness::composio::delete_connection(&config, connection_id)
+        .await
+        // An id this company cannot see is a `404`, not a `502`. Both were the
+        // latter until the route was actually run: the console would have told
+        // an operator the provider was unreachable about a call that never left
+        // the host, and a retry — the obvious response to a bad gateway — would
+        // fail identically forever.
+        .map_err(|err| match err {
+            DisconnectError::NotFound(message) => {
+                ApiError(crate::error::OpenCompanyError::NotFound(message))
+            }
+            DisconnectError::Upstream(err) => {
+                ApiError(crate::error::OpenCompanyError::TinyHumans {
+                    code: "composio_disconnect".to_string(),
+                    message: err.to_string(),
+                })
+            }
+        })?;
+    // A pin naming the account just revoked would be sent on the next execute
+    // and refused — so disconnecting the account a company *did not* choose
+    // must not be what breaks the one it did (issue #820).
+    crate::company::composio::forget_connection(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        connection_id,
+    )
+    .await
+    .map_err(ApiError)?;
+    Ok(Json(DisconnectDto {
+        note: "Disconnected at Composio. Agents lose these tools on their next turn.".to_string(),
+    }))
+}
+
+#[cfg(not(feature = "composio"))]
+async fn disconnect_impl(
+    _runtime: &CompanyRuntime,
+    _connection_id: &str,
+) -> Result<Json<DisconnectDto>, ApiError> {
+    Err(not_in_build())
+}
+
+/// `PUT …/composio/connections/{id}/default` — make that account the one this
+/// company's agents act as for its toolkit (issue #820).
+///
+/// **Admin-only** (issue #403), for the reason `authorize` and `disconnect` are:
+/// "send from billing@, not ops@" is a decision about what the company does, not
+/// a per-operator preference — every agent in the company acts through the one
+/// answer.
+///
+/// The account is named by **connection id**, not by toolkit-plus-id, because
+/// the toolkit is already a property of the connection: asking the caller to
+/// repeat it would invite the two to disagree, and the id alone is what the
+/// console has in hand from `GET …/connections`.
+async fn set_default(
+    company: AdminScopedCompany,
+    Path(ConnectionPath { connection_id }): Path<ConnectionPath>,
+) -> Result<Json<DefaultDto>, ApiError> {
+    let dto = set_default_impl(company.runtime.as_ref(), &connection_id).await?;
+    journal(
+        &company,
+        "provider_default_account_set",
+        Some(dto.0.toolkit.clone()),
+    )
+    .await?;
+    Ok(dto)
+}
+
+/// `DELETE …/composio/connections/{id}/default` — stop naming an account for
+/// that connection's toolkit, returning it to Composio's own resolution.
+///
+/// Unlike [`set_default`] this makes **no upstream call** and validates nothing
+/// against Composio: the whole point of clearing is to be able to undo a pin
+/// when the account is gone or the provider is unreachable, which is exactly
+/// when a validating clear would refuse. It removes any pin naming this id and
+/// says so; a request for an id that was never pinned is a no-op, not an error.
+async fn clear_default(
+    company: AdminScopedCompany,
+    Path(ConnectionPath { connection_id }): Path<ConnectionPath>,
+) -> Result<Json<DefaultDto>, ApiError> {
+    let cleared = crate::company::composio::forget_connection(
+        company.runtime.id(),
+        company.runtime.secrets().as_ref(),
+        &connection_id,
+    )
+    .await
+    .map_err(ApiError)?;
+    if cleared {
+        journal(&company, "provider_default_account_cleared", None).await?;
+    }
+    Ok(Json(DefaultDto {
+        toolkit: String::new(),
+        connection_id: None,
+        note: if cleared {
+            "Cleared. Composio picks the account for this provider again, as it did before."
+                .to_string()
+        } else {
+            "That account was not the default; nothing changed.".to_string()
+        },
+    }))
+}
+
+/// The `…/default` response: what is now pinned, and a sentence saying so.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultDto {
+    /// The toolkit the change applied to. Empty on a clear, where the caller
+    /// named a connection rather than a toolkit and may be clearing a pin for
+    /// an account that no longer exists.
+    toolkit: String,
+    /// The account now acting for that toolkit — `None` after a clear.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection_id: Option<String>,
+    /// Plain-language confirmation, in the same words the console repeats.
+    note: String,
+}
+
+#[cfg(feature = "composio")]
+async fn set_default_impl(
+    runtime: &CompanyRuntime,
+    connection_id: &str,
+) -> Result<Json<DefaultDto>, ApiError> {
+    use crate::harness::composio::DisconnectError;
+
+    let config = resolve_tenant(runtime).await?;
+    let toolkit = crate::harness::composio::set_default_connection(
+        &config,
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        connection_id,
+    )
+    .await
+    // Same split as `disconnect`: an id this company cannot see is a `404`
+    // about a call that never left the host, not a `502` about a provider that
+    // is up.
+    .map_err(|err| match err {
+        DisconnectError::NotFound(message) => {
+            ApiError(crate::error::OpenCompanyError::NotFound(message))
+        }
+        DisconnectError::Upstream(err) => ApiError(crate::error::OpenCompanyError::TinyHumans {
+            code: "composio_set_default".to_string(),
+            message: err.to_string(),
+        }),
+    })?;
+    Ok(Json(DefaultDto {
+        note: format!(
+            "Agents act as this account for {toolkit} from their next turn. Other accounts stay \
+             connected."
+        ),
+        toolkit,
+        connection_id: Some(connection_id.to_string()),
+    }))
+}
+
+#[cfg(not(feature = "composio"))]
+async fn set_default_impl(
+    _runtime: &CompanyRuntime,
+    _connection_id: &str,
+) -> Result<Json<DefaultDto>, ApiError> {
+    Err(not_in_build())
 }
 
 /// A `409 Conflict` "Composio is not in this build" — the OAuth plane's off-state
@@ -566,7 +999,9 @@ async fn connections_impl(_runtime: &CompanyRuntime) -> Result<Json<Vec<Connecti
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogSource, ComposioStatusDto, CredentialSource, credential_source_for};
+    use super::{
+        CatalogEntry, CatalogSource, ComposioStatusDto, CredentialSource, credential_source_for,
+    };
     use crate::server::ops::composio_toolkits;
 
     use axum::body::{Body, to_bytes};
@@ -620,6 +1055,8 @@ mod tests {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -756,9 +1193,24 @@ mod tests {
             .expect("company is registered")
     }
 
-    /// A hundred-slug catalog, the shape the backend actually returns.
+    /// A hundred-provider catalog, the shape the backend actually returns —
+    /// each entry carrying the display metadata #600 stopped discarding.
+    fn hundred_entries() -> Vec<CatalogEntry> {
+        (0..100)
+            .map(|i| CatalogEntry {
+                slug: format!("provider{i:03}"),
+                name: format!("Provider {i:03}"),
+                description: format!("Does provider-{i:03} things."),
+                logo: Some(format!("https://logos.example.test/provider{i:03}")),
+                categories: vec!["productivity".to_string()],
+            })
+            .collect()
+    }
+
+    /// Just the slugs of [`hundred_entries`], for asserting on the slug list
+    /// the wire has always carried.
     fn hundred_slugs() -> Vec<String> {
-        (0..100).map(|i| format!("provider{i:03}")).collect()
+        hundred_entries().into_iter().map(|e| e.slug).collect()
     }
 
     /// The heart of the reopened issue: in open mode the console is offered the
@@ -779,7 +1231,7 @@ mod tests {
             "[company]\nname = \"Catalog Co\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n",
         )
         .await;
-        let catalog = hundred_slugs();
+        let catalog = hundred_entries();
         composio_toolkits::cache().store(
             &super::catalog_cache_key(runtime_of(&state, "catalogco").as_ref()),
             Ok(catalog.clone()),
@@ -801,7 +1253,7 @@ mod tests {
         );
         assert_eq!(
             dto["effectiveToolkits"],
-            json!(catalog),
+            json!(hundred_slugs()),
             "open mode must serve what the backend permits, verbatim"
         );
         assert!(
@@ -830,7 +1282,7 @@ mod tests {
         .await;
         composio_toolkits::cache().store(
             &super::catalog_cache_key(runtime_of(&state, "narrowco").as_ref()),
-            Ok(hundred_slugs()),
+            Ok(hundred_entries()),
             std::time::Instant::now(),
         );
 
@@ -910,7 +1362,7 @@ mod tests {
         )
         .await;
         let key = super::catalog_cache_key(runtime_of(&state, "rotateco").as_ref());
-        composio_toolkits::cache().store(&key, Ok(hundred_slugs()), std::time::Instant::now());
+        composio_toolkits::cache().store(&key, Ok(hundred_entries()), std::time::Instant::now());
 
         let (status, resp, raw) = send_for(
             &state,
@@ -1008,10 +1460,18 @@ mod tests {
 
     /// The hosted shape, driven through the env seam (no process mutation): a
     /// company that pasted nothing reads `attested` from the instance identity,
-    /// its own token still outranks that, and neither yields `none`.
-    #[test]
-    fn credential_source_matrix_follows_the_resolver_precedence() {
+    /// its own TinyHumans key outranks that, its own Composio token outranks
+    /// both, and with none of the three the answer is `none`.
+    ///
+    /// Drives the **real** resolver through a real secret store rather than a
+    /// restatement of its precedence. A pure function that merely mirrored the
+    /// rule would keep passing after the resolver lost a tier — which is exactly
+    /// what the negative control for issue #586 caught.
+    #[tokio::test]
+    async fn credential_source_matrix_follows_the_resolver_precedence() {
         use crate::app::config::MapEnv;
+        use crate::company::company_key;
+        use crate::company::composio::store_token;
 
         let dir = tempfile::Builder::new()
             .prefix("oc-dto-")
@@ -1024,28 +1484,95 @@ mod tests {
             path.display().to_string(),
         )]);
 
+        /// The instance identity a given environment resolves to.
+        fn source_of(
+            env: &dyn crate::app::config::EnvSource,
+        ) -> Option<std::sync::Arc<super::TinyhumansTokenSource>> {
+            super::TinyhumansTokenSource::from_env(env).map(std::sync::Arc::new)
+        }
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "matrix", GRANTED).await;
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("matrix"))
+            .expect("registered");
+        let secrets = runtime.secrets();
+        let id = runtime.id().clone();
+
         // Nothing stored + a projected instance identity → attested.
         assert_eq!(
-            credential_source_for(false, &projected),
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
             CredentialSource::Attested
         );
-        // The company's own token outranks the instance identity.
+        // Nothing stored at all → nothing obtainable, so no tools.
         assert_eq!(
-            credential_source_for(true, &projected),
-            CredentialSource::Static
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
+            CredentialSource::None
         );
-        // A static instance key is the static tier too.
+        // A static instance key is the static tier.
         assert_eq!(
             credential_source_for(
-                false,
-                &MapEnv::new([(crate::company::credentials::API_KEY_ENV, "th_static")])
-            ),
+                &runtime,
+                source_of(&MapEnv::new([(
+                    crate::company::credentials::API_KEY_ENV,
+                    "th_static"
+                )]))
+            )
+            .await
+            .unwrap(),
             CredentialSource::Static
         );
-        // Neither → nothing obtainable, so no tools.
+
+        // The company's own TinyHumans key outranks the instance identity — a
+        // company with a key set connects providers as *itself*, not as the pod
+        // it happens to run in (issue #586)…
+        company_key::store_key(&id, secrets.as_ref(), "th_company")
+            .await
+            .unwrap();
         assert_eq!(
-            credential_source_for(false, &MapEnv::default()),
-            CredentialSource::None
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
+            CredentialSource::Company
+        );
+        // …and is the whole credential when the instance carries none, which is
+        // the case this issue exists to fix.
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
+            CredentialSource::Company
+        );
+
+        // The company's own Composio token outranks everything.
+        store_token(&id, secrets.as_ref(), "byo-composio")
+            .await
+            .unwrap();
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
+            CredentialSource::Static
+        );
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
+            CredentialSource::Static
+        );
+
+        // Clearing it falls back exactly one tier, not all the way to nothing.
+        store_token(&id, secrets.as_ref(), "").await.unwrap();
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
+            CredentialSource::Company
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1064,25 +1591,28 @@ mod tests {
             toolkits: vec!["gmail".to_string()],
             open_mode: false,
             effective_toolkits: vec!["gmail".to_string()],
+            effective_catalog: vec![CatalogEntry::from_slug("gmail")],
             catalog_source: CatalogSource::Manifest,
             catalog_notice: None,
         };
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["credentialSource"], "attested");
         assert_eq!(json["catalogSource"], "manifest");
-        let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        let mut keys: Vec<&String> = json.as_object().unwrap().keys().collect();
+        keys.sort_unstable();
         assert_eq!(
             keys,
             vec![
-                "inBuild",
-                "granted",
-                "credentialSource",
                 "backendUrl",
-                "toolkits",
-                "openMode",
-                "effectiveToolkits",
+                "catalogNotice",
                 "catalogSource",
-                "catalogNotice"
+                "credentialSource",
+                "effectiveCatalog",
+                "effectiveToolkits",
+                "granted",
+                "inBuild",
+                "openMode",
+                "toolkits",
             ],
             "the read shape must stay exactly this: {keys:?}"
         );
@@ -1405,5 +1935,344 @@ mod tests {
             send(&state, "GET", "/api/v1/company/composio/connections", None).await;
         assert_eq!(status, StatusCode::CONFLICT, "{raw}");
         assert_eq!(body["code"], "conflict", "{body}");
+    }
+
+    /// The disconnect added for #404 is wired on the same terms as the rest of
+    /// the OAuth plane: present in the route table whatever the build, and a
+    /// `409` — never a `404` — when there is no usable client. A `404` here
+    /// would read as "no such connection", which is a claim about the company's
+    /// accounts that this build cannot make.
+    #[tokio::test]
+    async fn disconnect_route_conflicts_without_build_or_token() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(
+            &home,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n[tools.composio]\ntoolkits = [\"gmail\"]\n",
+        )
+        .await;
+
+        let (status, body, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(body["code"], "conflict", "{body}");
+    }
+
+    /// The ops tests that are decidable only in a build carrying `composio`.
+    ///
+    /// Gathered under one module so a CI lane can *name* them. A feature-gated
+    /// test's default fate in this repo is "compiled by `Check
+    /// (--all-features)`, executed by nothing" (issue #770), and the composio
+    /// lane has to select by filter rather than run this whole module: with the
+    /// feature on, `an_admin_is_unaffected` dials `api.tinyhumans.ai` for real
+    /// (issue #801). One filter on this module runs every gated test here and
+    /// none of that, and a gated test added later is picked up by joining the
+    /// module rather than by remembering to edit `ci.yml`.
+    #[cfg(feature = "composio")]
+    mod gated_tests {
+        use super::*;
+        use crate::server::ops::composio::{drop_dangling_defaults, group_by_toolkit};
+
+        /// Issue #404: the per-toolkit shape the tile grid reads is a fold over the
+        /// per-connection rows, and the fold must not lose an account or flip a
+        /// boolean. Pure — no live backend needed.
+        #[test]
+        fn grouping_keeps_every_account_and_ors_their_connected_state() {
+            use crate::harness::composio::ComposioConnectionRow;
+
+            let row = |id: &str, toolkit: &str, connected: bool, account: Option<&str>| {
+                ComposioConnectionRow {
+                    id: id.to_string(),
+                    toolkit: toolkit.to_string(),
+                    status: if connected { "ACTIVE" } else { "INITIATED" }.to_string(),
+                    connected,
+                    created_at: None,
+                    account: account.map(str::to_string),
+                }
+            };
+
+            let out = group_by_toolkit(
+                vec![
+                    row("c1", "gmail", false, Some("a@acme.test")),
+                    row("c2", "gmail", true, Some("b@acme.test")),
+                    row("c3", "slack", false, None),
+                ],
+                &Default::default(),
+            );
+
+            assert_eq!(out.len(), 2, "one entry per toolkit");
+            assert_eq!(out[0].toolkit, "gmail");
+            assert!(
+                out[0].connected,
+                "a toolkit is connected when ANY of its accounts is — the second row \
+                 here, which a first-row-wins fold would have missed"
+            );
+            assert_eq!(
+                out[0]
+                    .accounts
+                    .iter()
+                    .map(|a| (a.id.as_str(), a.connected))
+                    .collect::<Vec<_>>(),
+                vec![("c1", false), ("c2", true)],
+                "both accounts survive, in the order the rows arrived"
+            );
+            assert_eq!(out[1].toolkit, "slack");
+            assert!(!out[1].connected, "no active account, so not connected");
+            assert_eq!(out[1].accounts.len(), 1);
+
+            // Nothing pinned: nothing is marked, and no default is reported. This
+            // is the shape #819 asks the console to render honestly, and it stays
+            // the shape until somebody chooses.
+            assert!(out.iter().all(|dto| dto.default_connection_id.is_none()));
+            assert!(
+                out.iter()
+                    .flat_map(|dto| dto.accounts.iter())
+                    .all(|account| !account.is_default),
+                "an unchosen account is never marked as the default"
+            );
+        }
+
+        /// Issue #820: once a company has chosen, the choice is reported on the
+        /// toolkit **and** marked on the one account it names — the console needs
+        /// both to draw a list with one row marked and the rest offering to become
+        /// it.
+        #[test]
+        fn grouping_marks_the_chosen_account_and_only_that_one() {
+            use crate::harness::composio::ComposioConnectionRow;
+
+            let row = |id: &str, toolkit: &str| ComposioConnectionRow {
+                id: id.to_string(),
+                toolkit: toolkit.to_string(),
+                status: "ACTIVE".to_string(),
+                connected: true,
+                created_at: None,
+                account: None,
+            };
+            let defaults: crate::company::composio::ComposioDefaults =
+                [("gmail".to_string(), "c2".to_string())]
+                    .into_iter()
+                    .collect();
+
+            let out = group_by_toolkit(
+                vec![row("c1", "gmail"), row("c2", "gmail"), row("c3", "slack")],
+                &defaults,
+            );
+
+            assert_eq!(out[0].default_connection_id.as_deref(), Some("c2"));
+            assert_eq!(
+                out[0]
+                    .accounts
+                    .iter()
+                    .map(|a| (a.id.as_str(), a.is_default))
+                    .collect::<Vec<_>>(),
+                vec![("c1", false), ("c2", true)],
+                "exactly one account carries the mark"
+            );
+            assert!(
+                out[1].default_connection_id.is_none(),
+                "a choice made for gmail says nothing about slack: {:?}",
+                out[1].default_connection_id
+            );
+        }
+
+        /// Issue #820: an account revoked **at Composio** — not through this console,
+        /// so nothing here saw the disconnect — leaves a choice naming a connection
+        /// that no longer exists. That choice is not merely stale: it is sent on the
+        /// next `composio_execute` and refused, so the toolkit stops working for
+        /// every agent for a reason nothing on screen explains. The read the console
+        /// polls repairs it.
+        ///
+        /// Driven through the handler's own helper rather than the route, because
+        /// the route needs a live Composio backend and the decision under test is
+        /// the one made *after* it answers. What it must not do is as load-bearing
+        /// as what it must: a live choice is untouched, and a toolkit whose chosen
+        /// account is gone falls back to "Composio picks" rather than being
+        /// re-pointed at a sibling account nobody chose.
+        #[tokio::test]
+        async fn the_connections_read_forgets_a_choice_composio_no_longer_lists() {
+            use crate::company::composio::{load_defaults, set_default};
+            use crate::harness::composio::ComposioConnectionRow;
+
+            let home_dir = home();
+            let state = state_with_manifest(home_dir.path(), GRANTED).await;
+            let runtime = runtime_of(&state, "acme");
+            let (id, secrets) = (runtime.id(), runtime.secrets());
+
+            // gmail names an account still live; slack names one revoked since.
+            for (toolkit, connection) in [("gmail", "c1"), ("slack", "c_revoked")] {
+                set_default(id, secrets.as_ref(), toolkit, connection)
+                    .await
+                    .unwrap();
+            }
+
+            let row = |id: &str, toolkit: &str| ComposioConnectionRow {
+                id: id.to_string(),
+                toolkit: toolkit.to_string(),
+                status: "ACTIVE".to_string(),
+                connected: true,
+                created_at: None,
+                account: None,
+            };
+            // The company still holds a slack account — just not the chosen one.
+            let rows = vec![row("c1", "gmail"), row("c9", "slack")];
+
+            let left = drop_dangling_defaults(
+                runtime.as_ref(),
+                &rows,
+                load_defaults(id, secrets.as_ref()).await.unwrap(),
+            )
+            .await
+            .expect("the cleanup completes");
+
+            assert_eq!(
+                left.get("gmail").map(String::as_str),
+                Some("c1"),
+                "a choice naming a live account is untouched"
+            );
+            assert!(
+                !left.contains_key("slack"),
+                "the choice naming a revoked account is dropped: {left:?}"
+            );
+            assert_eq!(
+                load_defaults(id, secrets.as_ref()).await.unwrap(),
+                left,
+                "the repair is stored, not merely reflected in this one response — \
+                 otherwise the next agent turn still sends the dead id"
+            );
+
+            let out = group_by_toolkit(rows, &left);
+            assert_eq!(out[1].toolkit, "slack");
+            assert!(
+                out[1].default_connection_id.is_none()
+                    && out[1].accounts.iter().all(|account| !account.is_default),
+                "with its choice gone slack is unchosen again — the surviving account \
+                 is not silently promoted into a decision nobody made: {:?}",
+                out[1]
+            );
+            assert_eq!(out[0].default_connection_id.as_deref(), Some("c1"));
+        }
+    }
+
+    /// The choice plane is wired on the same terms as the rest of the OAuth
+    /// plane: in the route table whatever the build, and a `409` — never a
+    /// `404` — when there is no usable client, since "no such connection" is a
+    /// claim about this company's accounts that a build without Composio cannot
+    /// make.
+    #[tokio::test]
+    async fn set_default_route_conflicts_without_build_or_token() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+
+        let (status, body, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(body["code"], "conflict", "{body}");
+    }
+
+    /// Clearing is the deliberate exception: it takes no upstream call, so it
+    /// works in a build without Composio and — the case that matters — when the
+    /// provider is unreachable or the account is already gone. A clear that
+    /// needed the network would refuse exactly when it is most needed.
+    #[tokio::test]
+    async fn clearing_a_choice_needs_no_client_and_is_idempotent() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+
+        let (status, body, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            body["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nothing changed"),
+            "clearing what was never chosen says so rather than claiming a change: {body}"
+        );
+
+        // Now with something stored, the same call reports the real change and
+        // leaves nothing behind.
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        crate::company::composio::set_default(
+            runtime.id(),
+            runtime.secrets().as_ref(),
+            "gmail",
+            "conn-1",
+        )
+        .await
+        .unwrap();
+
+        let (status, body, raw) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert!(
+            body["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Cleared"),
+            "{body}"
+        );
+        assert!(
+            crate::company::composio::load_defaults(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Choosing the account a company acts as is an admin's decision, like
+    /// connecting and disconnecting one: every agent in the company acts
+    /// through the single answer, so it is not a per-operator preference.
+    #[tokio::test]
+    async fn a_member_cannot_choose_the_account_the_company_acts_as() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), GRANTED).await;
+        let member = crate::server::test_support::seed_session(
+            &state,
+            "acme",
+            crate::ports::UserRole::Member,
+        )
+        .await;
+
+        for method in ["PUT", "DELETE"] {
+            let (status, body, raw) = send_as(
+                &state,
+                method,
+                "/api/v1/company/composio/connections/conn-1/default",
+                None,
+                Auth::Cookie(member.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method}: {raw}");
+            assert_eq!(body["code"], "forbidden", "{method}: {body}");
+        }
+
+        // And the refusal is real: nothing was stored by either attempt.
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        assert!(
+            crate::company::composio::load_defaults(runtime.id(), runtime.secrets().as_ref())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

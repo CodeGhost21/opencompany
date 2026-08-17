@@ -1,27 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  AlertTriangle,
-  Check,
-  ChevronDown,
-  KeyRound,
-  Loader2,
-  LogIn,
-  Plug,
-  Save,
-  Search,
-  ShieldCheck,
-  Trash2,
-} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, KeyRound, Loader2, Plug, Save, ShieldCheck, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import {
-  getComposioStatus,
-  listComposioConnections,
-  setComposioToken,
-  startComposioAuthorize,
-  type ComposioStatus,
-} from "@/api/composio";
+import { getComposioStatus, setComposioToken, type ComposioStatus } from "@/api/composio";
 import { ApiError } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,12 +11,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  buildProviderRows,
-  catalogWarning,
-  toolkitLabel,
-  visibleProviderRows,
-} from "@/lib/composio-catalog";
 
 interface Props {
   client: OpenCompanyClient;
@@ -45,94 +21,58 @@ interface Props {
    * they act through.
    *
    * **Courtesy, not enforcement.** The host refuses both writes with a 403
-   * whatever this says. What it prevents is offering a Sign in button that
-   * cannot complete, or a token field whose Save is refused only after the
-   * operator has already pasted a live credential into it.
+   * whatever this says. What it prevents is offering a token field whose Save is
+   * refused only after the operator has already pasted a live credential into
+   * it.
    */
   canManage: boolean;
+  /**
+   * Called after the stored token changes.
+   *
+   * The provider grid's status and routing are downstream of which credential
+   * this company reaches Composio with — setting or clearing a token here flips
+   * `credentialSource`, and every tile's route with it. Without this the grid
+   * would keep rendering the old answer while this section reported the new one:
+   * the same two-surfaces-disagreeing failure #582 is about, arriving through
+   * the credential rather than through the connection list.
+   */
+  onChanged: () => void;
 }
 
 /**
- * Per-tenant Composio connection management (issue #110, Cell D).
+ * Which credential this company reaches Composio with (issue #110, Cell D).
  *
- * Two layers, and they are independent:
+ * **Only that.** This section used to carry a second thing — a per-provider
+ * "Sign in per provider" grid — and that grid was one of the two provider lists
+ * issue #582 collapsed. The page now has a single grid, `ProvidersSection`,
+ * built from the reconciled `GET …/connections` status; what is left here is the
+ * credential layer, which is genuinely independent of it:
  *
- * 1. **Which credential this company reaches Composio with**, reported as
- *    `credentialSource`:
- *    - `attested` (hosted) — the instance already holds a platform identity, so
- *      there is nothing to paste and nothing stored here. A company that wants
- *      to use its OWN Composio account can still override.
- *    - `static` — a token this company pasted, or a static instance key.
- *    - `none` — no credential can be obtained, so there is nothing to authorize
- *      against and agents get no Composio tools.
- * 2. **Which providers are connected**, via a per-provider OAuth "Sign in" list
- *    driven by the granted toolkits. Composio runs the hosted OAuth; we open it
- *    in a tab and poll until the toolkit reports connected.
+ * - `attested` (hosted) — the instance already holds a platform identity, so
+ *   there is nothing to paste and nothing stored here. A company that wants to
+ *   use its OWN Composio account can still override.
+ * - `company` (issue #586) — this company's own TinyHumans credential, set by
+ *   its admin. Composio is brokered through it, so there is nothing to paste
+ *   here either. The override still exists for a company that wants its own
+ *   Composio account.
+ * - `static` — a Composio token this company pasted, or a static instance key.
+ * - `none` — no credential can be obtained, so there is nothing to authorize
+ *   against and agents get no Composio tools.
  *
  * The pasted token is WRITE-ONLY: stored and never shown again. A set/clear
  * takes effect on the agents' next turn, no restart. Hidden entirely when the
  * feature is not in the build.
  */
-export function ComposioSection({ client, company, canManage }: Props) {
+export function ComposioSection({ client, company, canManage, onChanged }: Props) {
   const [load, setLoad] = useState<"loading" | "ready" | "unavailable">("loading");
   const [status, setStatus] = useState<ComposioStatus | null>(null);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<"save" | "clear" | null>(null);
-  // toolkit slug -> connected. Absent = unknown / not yet fetched.
-  const [connected, setConnected] = useState<Record<string, boolean>>({});
-  // toolkit slug currently mid-sign-in (open tab + poll).
-  const [signingIn, setSigningIn] = useState<string | null>(null);
-  // Only meaningful in the attested state, where the paste card is an override
-  // rather than the way in.
+  // Only meaningful in the credentialled states, where the paste card is an
+  // override rather than the way in.
   const [showOverride, setShowOverride] = useState(false);
-  // Open mode only: a slug typed into the "connect by slug" field. It is now an
-  // escape hatch rather than the way to reach the tail — the rows above are the
-  // backend's real catalog — but it still earns its place: it is the only way to
-  // connect a provider when the catalog could not be fetched, and the only way
-  // to reach one the catalog happens to omit (issue #397).
-  const [otherToolkit, setOtherToolkit] = useState("");
-  // Slugs connected through that field this session, so they get a row of their
-  // own instead of vanishing after a successful sign-in.
-  const [extraToolkits, setExtraToolkits] = useState<string[]>([]);
-  // Provider search. In open mode the host now hands over the backend's real
-  // catalog — roughly a hundred toolkits — so finding one by scrolling stopped
-  // being reasonable (issue #397).
-  const [query, setQuery] = useState("");
-  // Whether the operator asked to see past the preview.
-  const [expanded, setExpanded] = useState(false);
 
   const requestGeneration = useRef(0);
-  const pollTimers = useRef<Record<string, number>>({});
-
-  // Clear any in-flight poll timers on unmount / company switch.
-  useEffect(() => {
-    const timers = pollTimers.current;
-    return () => {
-      Object.values(timers).forEach((id) => window.clearTimeout(id));
-      pollTimers.current = {};
-    };
-  }, [company]);
-
-  const refreshConnections = useCallback(
-    async (s: ComposioStatus) => {
-      // Listing connections needs *a* credential — any tier. With none there is
-      // nothing to authorize against, and the call 409s. Keyed off the
-      // EFFECTIVE list, not the manifest one: in open mode the manifest list is
-      // empty precisely because everything is allowed (issue #397).
-      if (s.credentialSource === "none" || s.effectiveToolkits.length === 0) {
-        setConnected({});
-        return;
-      }
-      try {
-        const rows = await listComposioConnections(client, company);
-        setConnected(Object.fromEntries(rows.map((r) => [r.toolkit.toLowerCase(), r.connected])));
-      } catch {
-        // Non-fatal: leave the provider rows in their "sign in" state.
-        setConnected({});
-      }
-    },
-    [client, company],
-  );
 
   const refresh = useCallback(async () => {
     const generation = ++requestGeneration.current;
@@ -142,21 +82,15 @@ export function ComposioSection({ client, company, canManage }: Props) {
       setStatus(s);
       // Hide the whole section when the feature is not compiled into this build.
       setLoad(s.inBuild ? "ready" : "unavailable");
-      if (s.inBuild) void refreshConnections(s);
     } catch {
       if (generation !== requestGeneration.current) return;
       setLoad("unavailable");
     }
-  }, [client, company, refreshConnections]);
+  }, [client, company]);
 
   useEffect(() => {
     setStatus(null);
-    setConnected({});
     setShowOverride(false);
-    setOtherToolkit("");
-    setExtraToolkits([]);
-    setQuery("");
-    setExpanded(false);
     setLoad("loading");
     void refresh();
   }, [refresh]);
@@ -169,7 +103,7 @@ export function ComposioSection({ client, company, canManage }: Props) {
       setStatus(res.status);
       setToken("");
       toast.success(res.note);
-      void refreshConnections(res.status);
+      onChanged();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not save the token.");
     } finally {
@@ -183,11 +117,10 @@ export function ComposioSection({ client, company, canManage }: Props) {
       const res = await setComposioToken(client, company, "");
       setStatus(res.status);
       setToken("");
-      setConnected({});
-      // Clearing an override falls back to whatever tier remains — re-probe
-      // rather than assuming there is no credential left.
+      // Clearing an override falls back to whatever tier remains — the status
+      // the host just returned says which, and the grid re-probes for itself.
       toast.success("Composio token cleared.");
-      void refreshConnections(res.status);
+      onChanged();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not clear the token.");
     } finally {
@@ -195,92 +128,41 @@ export function ComposioSection({ client, company, canManage }: Props) {
     }
   }
 
-  // Per-provider OAuth: open Composio's hosted connect URL in a new tab, then
-  // poll the connection list every 2s up to ~2 minutes until this toolkit flips
-  // to connected (Composio completes the OAuth on its side — no local callback).
-  async function signIn(toolkit: string) {
-    // Guard the shared flag AND a poll already in flight for this toolkit.
-    if (signingIn || pollTimers.current[toolkit] !== undefined) return;
-    setSigningIn(toolkit);
-    const label = toolkitLabel(toolkit);
-    try {
-      const { connectUrl } = await startComposioAuthorize(client, company, toolkit);
-      window.open(connectUrl, "_blank", "noopener,noreferrer");
-      toast.message(`Complete ${label} sign-in in the new tab.`);
-      const deadline = Date.now() + 120_000;
-      const poll = async () => {
-        delete pollTimers.current[toolkit];
-        if (Date.now() > deadline) {
-          setSigningIn((t) => (t === toolkit ? null : t));
-          toast.message(`${label} sign-in timed out. Try again if it didn't complete.`);
-          return;
-        }
-        try {
-          const rows = await listComposioConnections(client, company);
-          const map = Object.fromEntries(rows.map((r) => [r.toolkit.toLowerCase(), r.connected]));
-          setConnected(map);
-          if (map[toolkit.toLowerCase()]) {
-            setSigningIn((t) => (t === toolkit ? null : t));
-            toast.success(`Connected ${label}.`);
-            return;
-          }
-        } catch {
-          // Ignore transient probe errors while the operator finishes sign-in.
-        }
-        pollTimers.current[toolkit] = window.setTimeout(() => void poll(), 2_000);
-      };
-      pollTimers.current[toolkit] = window.setTimeout(() => void poll(), 2_000);
-    } catch (err) {
-      setSigningIn((t) => (t === toolkit ? null : t));
-      toast.error(err instanceof ApiError ? err.message : `Couldn't start ${label} sign-in.`);
-    }
-  }
-
-  // Ordered once per status/connection change: connected first, then the
-  // handful everyone reaches for, then the tail alphabetically. Ordering and
-  // filtering live in `@/lib/composio-catalog` so they are testable without a
-  // document — see `vitest.config.ts` on where the line sits.
-  const rows = useMemo(
-    () => buildProviderRows(status?.effectiveToolkits ?? [], extraToolkits, connected),
-    [status?.effectiveToolkits, extraToolkits, connected],
-  );
-  const { visible, hidden } = visibleProviderRows(rows, query, expanded);
-  const degraded = status ? catalogWarning(status) : null;
-
   if (load === "unavailable") return null;
 
   const attested = status?.credentialSource === "attested";
+  // The company's own key already authorizes Composio (issue #586), so this
+  // reads like `attested` everywhere the question is "is there anything to
+  // paste?" — the difference is whose identity it is, which the copy states.
+  const companyKey = status?.credentialSource === "company";
   const byoToken = status?.credentialSource === "static";
-  // No credential of any tier: there is nothing to authorize a provider against.
-  const noCredential = status?.credentialSource === "none";
-  // Issue #397: gate on the EFFECTIVE list. The old gate read
-  // `toolkits.length > 0`, and an empty manifest list means "defer to the
-  // backend allowlist" — allow everything — so the one value meaning *every
-  // provider* rendered *no* providers on 19 of 20 shipped templates.
-  const showProviders = load === "ready" && status !== null && status.effectiveToolkits.length > 0;
-  const openMode = status?.openMode === true;
   // In the attested state the paste card is a deliberate override; everywhere
   // else it is the only way to connect, so it is always on screen.
   // Issue #403: the credential card is an admin's. A member still sees the
   // status line above ("token set" / "linked via cluster identity"), which is
   // what tells them why their agents can reach Gmail; what they do not get is a
   // field that invites them to paste a credential the host will refuse.
-  const showTokenCard = canManage && (!attested || showOverride || byoToken);
+  // A company already brokered through its own key is in the same position as an
+  // attested one: the paste card is a deliberate override, not the way in.
+  const credentialed = attested || companyKey;
+  const showTokenCard = canManage && (!credentialed || showOverride || byoToken);
 
   return (
     <section className="space-y-3">
       <div className="flex items-center gap-2">
         <Plug className="size-4 text-muted-foreground" />
         <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          Composio (Gmail / Slack / GitHub)
+          Composio credential
         </h3>
       </div>
       <p className="text-sm text-muted-foreground">
         {!canManage
           ? "Your agents reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
           : attested
-          ? "Give your agents Gmail, Slack & GitHub via Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Sign in per provider below."
-          : "Give your agents Gmail, Slack & GitHub via Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then sign in per provider below. A change takes effect on the next turn, no restart."}
+            ? "Your agents reach providers through Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Connect providers in the grid below."
+            : companyKey
+              ? "Your agents reach providers through Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Connect providers in the grid below; every agent in the company can then use what you connect."
+              : "Your agents reach providers through Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then connect providers in the grid below. A change takes effect on the next turn, no restart."}
       </p>
 
       {load === "loading" ? (
@@ -293,11 +175,15 @@ export function ComposioSection({ client, company, canManage }: Props) {
                 {status.granted ? "granted" : "not granted"}
               </Badge>
               {attested ? (
-                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <ShieldCheck className="size-3" /> Linked via cluster identity — nothing stored
                 </span>
+              ) : companyKey ? (
+                <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
+                  <ShieldCheck className="size-3" /> Linked via this company&apos;s own credential
+                </span>
               ) : byoToken ? (
-                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <Check className="size-3" /> token set
                 </span>
               ) : (
@@ -314,123 +200,12 @@ export function ComposioSection({ client, company, canManage }: Props) {
             </p>
           )}
 
-          {showProviders && status && (
-            <Card>
-              <CardContent className="space-y-2 py-4">
-                <p className="text-xs font-medium text-muted-foreground">Sign in per provider</p>
-                {noCredential && (
-                  <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-                    No Composio credential is available for this company yet, so there is nothing to
-                    authorize against. Paste a token below first.
-                  </p>
-                )}
-                {degraded ? (
-                  // The host could not read Composio's catalog. Say so — a
-                  // built-in list rendered like a fetched one is a claim we
-                  // cannot back (issue #397).
-                  <p className="flex items-start gap-2 rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
-                    <AlertTriangle className="mt-px size-3 shrink-0" />
-                    <span>{degraded}</span>
-                  </p>
-                ) : (
-                  openMode && (
-                    <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-                      This company allows <span className="font-medium">any</span> provider Composio
-                      offers — {rows.length} in total, most-used first. Search to narrow them.
-                    </p>
-                  )
-                )}
-                {rows.length > 8 && (
-                  <div className="relative">
-                    <Search className="absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                    <Input
-                      aria-label="Search providers"
-                      autoComplete="off"
-                      className="pl-7"
-                      placeholder={`Search ${rows.length} providers…`}
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                    />
-                  </div>
-                )}
-                <ul className="divide-y divide-border">
-                  {visible.map((row) => {
-                    const isSigningIn = signingIn === row.slug;
-                    return (
-                      <li key={row.slug} className="flex items-center justify-between py-2">
-                        <span className="text-sm">{row.label}</span>
-                        {row.connected ? (
-                          <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
-                            <Check className="size-3" /> connected
-                          </span>
-                        ) : !canManage ? (
-                          <span className="text-xs text-muted-foreground">not connected</span>
-                        ) : (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={signingIn !== null || noCredential}
-                            onClick={() => void signIn(row.slug)}
-                          >
-                            {isSigningIn ? (
-                              <Loader2 className="size-4 animate-spin" />
-                            ) : (
-                              <LogIn className="size-4" />
-                            )}
-                            Sign in
-                          </Button>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-                {visible.length === 0 && query.trim() !== "" && (
-                  <p className="py-2 text-xs text-muted-foreground">
-                    No provider matches “{query.trim()}”. Composio&apos;s slug may differ from the
-                    product name — try connecting it by slug below.
-                  </p>
-                )}
-                {hidden > 0 && (
-                  <Button size="sm" variant="ghost" onClick={() => setExpanded(true)}>
-                    <ChevronDown className="size-4" />
-                    Show all {rows.length} providers
-                  </Button>
-                )}
-                {openMode && canManage && (
-                  <div className="flex items-end gap-2 border-t border-border pt-3">
-                    <div className="flex-1 space-y-1">
-                      <Label htmlFor="composio-other-toolkit" className="text-xs">
-                        Connect by slug
-                      </Label>
-                      <Input
-                        id="composio-other-toolkit"
-                        autoComplete="off"
-                        placeholder="composio toolkit slug, e.g. hubspot"
-                        value={otherToolkit}
-                        disabled={noCredential}
-                        onChange={(e) => setOtherToolkit(e.target.value)}
-                      />
-                    </div>
-                    <Button
-                      variant="outline"
-                      disabled={signingIn !== null || noCredential || !otherToolkit.trim()}
-                      onClick={() => {
-                        const slug = otherToolkit.trim().toLowerCase();
-                        setOtherToolkit("");
-                        setExtraToolkits((t) => (t.includes(slug) ? t : [...t, slug]));
-                        void signIn(slug);
-                      }}
-                    >
-                      <LogIn className="size-4" />
-                      Sign in
-                    </Button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-          {canManage && attested && !showTokenCard && (
+          {/* Gated on `credentialed`, not `attested`: a company brokered through
+              its own TinyHumans key is equally "already credentialled", so it
+              equally needs a way back to the BYO card. Gating this on `attested`
+              alone left a company-key admin with the paste card hidden and no
+              control to reveal it — the override became unreachable. */}
+          {canManage && credentialed && !showTokenCard && (
             <Button variant="outline" size="sm" onClick={() => setShowOverride(true)}>
               <KeyRound className="size-4" />
               Use your own Composio account instead
@@ -440,13 +215,25 @@ export function ComposioSection({ client, company, canManage }: Props) {
           {showTokenCard && (
             <Card>
               <CardContent className="space-y-4 py-4">
-                {attested && (
+                {/* The explainer has to name what the token would displace,
+                    and that differs by tier: an attested company falls back to
+                    the pod's cluster identity, a company-key one falls back to
+                    its own credential. Saying "cluster identity" to the latter
+                    would describe a fallback it does not have. */}
+                {companyKey ? (
+                  <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
+                    Optional. This company&apos;s own TinyHumans credential already authorizes
+                    Composio. A token set here replaces it for Composio only — use it when the
+                    company has a separate Composio account. Clear it to go back to the company
+                    credential.
+                  </p>
+                ) : attested ? (
                   <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
                     Optional. A token set here overrides the instance identity for this company only
                     — use it when the company has its own Composio account. Clear it to go back to
                     the cluster identity.
                   </p>
-                )}
+                ) : null}
                 <div className="space-y-1">
                   <Label htmlFor="composio-token" className="text-xs">
                     Composio token {byoToken ? "— set (paste a new value to rotate)" : ""}

@@ -269,6 +269,7 @@ async fn harness(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(meter.clone()),
         workspace_root: dir.to_path_buf(),
+        audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
         tasks: None,
         artifacts: None,
@@ -278,6 +279,7 @@ async fn harness(
         // this fixture installs no skills at all, so an empty library is the
         // whole truth here and leaves the search path under test untouched.
         skills_registry: std::sync::Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
@@ -287,6 +289,8 @@ async fn harness(
         pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
         workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
         run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+        run_output_store: None,
+        workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),
@@ -295,6 +299,10 @@ async fn harness(
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
@@ -309,6 +317,9 @@ async fn harness(
         // test exercises the #238 search path only, and an unwired store is the
         // fail-closed default everywhere but the runtime builder.
         workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: crate::harness::repo::CheckoutLedger::default(),
     };
 
     let record = CompanyRecord {
@@ -322,6 +333,8 @@ async fn harness(
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
+        overlay_policy: None,
+        overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,

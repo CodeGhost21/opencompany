@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Recruiting Company harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -7,37 +7,17 @@ name = "Agentic Recruiting Company"
 output = "Sourced, screened, and scheduled candidates"
 human_role = "Final hiring decisions"
 
-[[agent]]
-id = "candidate_sourcer"
-role = "Candidate Sourcer"
-description = "Source candidates for open roles."
-
-[[agent]]
-id = "outreach_agent"
-role = "Outreach Agent"
-description = "Run personalized candidate outreach."
-
-[[agent]]
-id = "resume_analyst"
-role = "Resume Analyst"
-description = "Screen and rank resumes against the spec."
-
-[[agent]]
-id = "interviewer"
-role = "Interviewer"
-description = "Conduct first-round interviews."
-
-[[agent]]
-id = "scheduler"
-role = "Scheduler"
-description = "Coordinate interview scheduling."
-
-[[agent]]
-id = "offer_generator"
-role = "Offer Generator"
-description = "Draft and generate offers."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["hiring_pipeline"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

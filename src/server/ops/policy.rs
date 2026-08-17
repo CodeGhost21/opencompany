@@ -1,0 +1,623 @@
+//! The autonomy-tier write plane: `GET`/`PUT`/`DELETE {scope}/policy`
+//! (issue #562).
+//!
+//! An operator drowning in approval cards had no way to stop it. The tier is
+//! read from `[policy].mode` in the company manifest, and nothing in the console
+//! read or wrote it — so the only ways to change it were editing a
+//! version-controlled file and redeploying, or, on a hosted tenant where the
+//! manifest is a read-only boot snapshot baked into the image, nothing at all.
+//!
+//! This is the company-scoped twin of the per-teammate budget surface in
+//! [`team`](crate::server::ops::team), and it keeps the same three rules for the
+//! same reasons:
+//!
+//! - **Admin-only, and attributed.** Loosening the approval gate is a privilege
+//!   boundary at least as sharp as raising a spend cap, so both writes go through
+//!   [`require_admin`](crate::server::users::admin::require_admin) and stamp who
+//!   did it and when. The console renders that attribution: a tier that can be
+//!   loosened anonymously is not much of a gate.
+//! - **Absent is not empty.** An omitted key leaves that field on the manifest's
+//!   value; `"alwaysApprove": []` is an operator deliberately clearing the
+//!   always-ask list. Those are different stored states and different
+//!   behaviours, so the body uses a double option and an empty `{}` is a `422`
+//!   rather than a silent no-op.
+//! - **Reset is its own verb.** `DELETE` drops the override so the manifest's
+//!   `[policy]` applies again, which no `PUT` body can express — writing the
+//!   manifest's *current* values would pin them, and the manifest can change
+//!   under a rebuild.
+//!
+//! ## Why this writes an overlay and not the manifest
+//!
+//! A rebuild re-persists `record.manifest` **from the seed**, merging only
+//! `[workflows].enabled`; every other field is seed-authoritative, *"and for
+//! `[tools]` / `[policy]` that is a security property"* (`runtime::builder`). A
+//! manifest write would be wiped by the next rebuild **and** would contradict
+//! that invariant. So this route writes
+//! [`PolicyOverride`](crate::ports::types::PolicyOverride), which
+//! [`CompanyRecord::effective_policy`](crate::ports::types::CompanyRecord::effective_policy)
+//! resolves *ahead* of the manifest at read time.
+//!
+//! ## When a change takes effect, stated precisely
+//!
+//! On the company's **next turn**, not on the turn already running.
+//! `ApprovalPolicy` is built once per roster build, and
+//! `HarnessPool::ensure` rebuilds the roster when the policy fingerprint moves
+//! (issue #562's `policy_fingerprint`). So the write lands, the next `ensure`
+//! rebuilds, and the following turn runs on the new tier — an in-flight turn
+//! finishes under the old one. Since "stop the flood **now**" is the motivating
+//! complaint, the response says so rather than leaving an operator to discover
+//! it: see [`PolicyDto::takes_effect`].
+
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+
+use crate::AppState;
+use crate::company::{POLICY_MODES, Policy};
+use crate::error::OpenCompanyError;
+use crate::ports::now_millis;
+use crate::ports::store::company_write_lock;
+use crate::ports::types::{Actor, ActorKind, CompanyRecord, PolicyOverride};
+use crate::server::error::ApiError;
+use crate::server::ops::team::double_option;
+use crate::server::ops::{ScopedCompany, scoped};
+use crate::server::users::admin::require_admin;
+
+/// What the console tells an operator about when a tier change bites.
+///
+/// A constant rather than prose invented at the call site, so the two write
+/// routes and the read route cannot describe the timing differently.
+const TAKES_EFFECT: &str =
+    "on the next turn — a turn already running finishes under the previous tier";
+
+/// Builds the policy route fragment.
+pub fn router() -> Router<AppState> {
+    scoped(
+        "/policy",
+        get(read_policy).put(set_policy).delete(clear_policy),
+    )
+}
+
+/// One tier as the console renders it: the value, and what it means in the
+/// operator's own words rather than in tier names.
+///
+/// The descriptions live here rather than in the frontend because they describe
+/// *this* runtime's behaviour — `auto`'s line in particular is the contract
+/// `Consequence::parks_under_auto` implements — and a copy in TypeScript would
+/// drift from the gate it claims to describe.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TierDto {
+    /// The `[policy].mode` word.
+    value: &'static str,
+    /// The operator-facing label.
+    label: &'static str,
+    /// What choosing it means, in consequences rather than in tier vocabulary.
+    description: &'static str,
+}
+
+/// The operator-facing text for every tier this console knows how to describe,
+/// in increasing order of autonomy.
+///
+/// **Not** what gets offered — [`selectable_tiers`] filters this by
+/// [`POLICY_MODES`], so the console offers exactly what the runtime accepts.
+/// The two are separate because they move independently: `auto` is issue #560,
+/// landing in its own PR, and hard-coding it here would either offer a tier the
+/// gate would silently downgrade to `supervised` (if #562 landed first) or need
+/// a cross-PR edit to appear (if #560 did).
+///
+/// With the filter, neither happens: an entry ahead of the runtime is inert, and
+/// the day `auto` joins `POLICY_MODES` it appears in the console with no further
+/// change. An entry *behind* the runtime is the real error, and
+/// `every_runtime_tier_has_console_text` fails on it.
+const TIER_TEXT: &[TierDto] = &[
+    TierDto {
+        value: "readonly",
+        label: "Read-only",
+        description: "The agents can look at things but change nothing and spend nothing.",
+    },
+    TierDto {
+        value: "supervised",
+        label: "Supervised",
+        description: "The agents ask before every change, including their own scratch files.",
+    },
+    TierDto {
+        value: "auto",
+        label: "Auto",
+        description: "The agents work on their own and stop before anything that leaves the \
+                      company or spends money.",
+    },
+    TierDto {
+        value: "full",
+        label: "Full",
+        description: "The agents act without asking, except for the few things on the \
+                      always-ask list.",
+    },
+];
+
+/// The tiers this company can actually be set to: [`TIER_TEXT`] narrowed to the
+/// modes [`POLICY_MODES`] accepts, in `POLICY_MODES` order.
+///
+/// Driving the order from `POLICY_MODES` rather than from `TIER_TEXT` keeps one
+/// list authoritative about what exists; `TIER_TEXT` is only authoritative about
+/// how it reads.
+fn selectable_tiers() -> Vec<&'static TierDto> {
+    tiers_for(POLICY_MODES)
+}
+
+/// [`selectable_tiers`] over an explicit mode list.
+///
+/// Split out so the filter can be tested against a list that is not
+/// `POLICY_MODES`. That is not ceremony: `TIER_TEXT` and `POLICY_MODES` now hold
+/// the same four tiers (issue #560 landed `auto`), so a test driven off
+/// `POLICY_MODES` alone can no longer tell a filtered list from an unfiltered
+/// one — deleting the filter would leave every such assertion passing. A test
+/// that has stopped discriminating looks exactly like coverage, which is worse
+/// than no test at all.
+fn tiers_for(modes: &[&str]) -> Vec<&'static TierDto> {
+    modes
+        .iter()
+        .filter_map(|mode| TIER_TEXT.iter().find(|tier| tier.value == *mode))
+        .collect()
+}
+
+/// The policy surface as the console reads it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PolicyDto {
+    /// The tier actually in force.
+    mode: String,
+    /// The always-ask list actually in force. The operator's real lever: it
+    /// wins over every tier, `full` included.
+    always_approve: Vec<String>,
+    /// The manifest's tier, so the console can show what "reset" would restore
+    /// rather than describing it abstractly.
+    manifest_mode: String,
+    /// The manifest's always-ask list, for the same reason.
+    manifest_always_approve: Vec<String>,
+    /// Whether an operator override is in force. Distinct from comparing the
+    /// values: an override that happens to match the manifest is still an
+    /// override, and still what `DELETE` would remove.
+    overridden: bool,
+    /// Who set the override, if one is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    set_by: Option<String>,
+    /// When it was set (epoch millis), if one is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    set_at_millis: Option<u64>,
+    /// The selectable tiers with their operator-facing consequences.
+    tiers: Vec<&'static TierDto>,
+    /// When a change bites. Stated because "stop the flood now" is what an
+    /// operator comes here to do, and this is not quite that.
+    takes_effect: &'static str,
+}
+
+impl PolicyDto {
+    fn build(record: &CompanyRecord) -> Self {
+        let effective: Policy = record.effective_policy();
+        let manifest = &record.manifest.policy;
+        Self {
+            mode: effective.mode,
+            always_approve: effective.always_approve,
+            manifest_mode: manifest.mode.clone(),
+            manifest_always_approve: manifest.always_approve.clone(),
+            overridden: record.overlay_policy.is_some(),
+            set_by: record.overlay_policy.as_ref().map(|o| o.set_by.id.clone()),
+            set_at_millis: record.overlay_policy.as_ref().map(|o| o.at_millis),
+            tiers: selectable_tiers(),
+            takes_effect: TAKES_EFFECT,
+        }
+    }
+}
+
+/// The set-policy body.
+///
+/// Both fields are **double options** so "leave this alone" and "set it to this"
+/// stay apart on the wire:
+///
+/// | body | parses as | means |
+/// |---|---|---|
+/// | `{"mode": "auto"}` | `Some(Some("auto"))` | run `auto`; leave the list alone |
+/// | `{"alwaysApprove": []}` | `Some(Some([]))` | clear the always-ask list |
+/// | `{"mode": null}` | `Some(None)` | stop overriding the tier |
+/// | `{}` | *rejected* | — |
+///
+/// `#[serde(default)]` on each field makes an omitted key legal individually —
+/// otherwise setting the tier would force the caller to restate the whole list —
+/// but a body that sets *neither* is refused by [`set_policy`] rather than
+/// stored, because a row with both fields `None` says nothing while still
+/// rendering in the console as "overridden".
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetPolicy {
+    #[serde(default, deserialize_with = "double_option")]
+    mode: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    always_approve: Option<Option<Vec<String>>>,
+}
+
+/// `GET {scope}/policy` — the tier in force, what the manifest would restore,
+/// and the selectable tiers with their consequences.
+async fn read_policy(company: ScopedCompany) -> Result<Json<PolicyDto>, Response> {
+    let record = load_record(&company).await?;
+    Ok(Json(PolicyDto::build(&record)))
+}
+
+/// `PUT {scope}/policy` — set the tier and/or the always-ask list. Admin-only,
+/// attributed, in force on the next turn.
+async fn set_policy(
+    company: ScopedCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    Json(body): Json<SetPolicy>,
+) -> Result<Json<PolicyDto>, Response> {
+    let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
+
+    if body.mode.is_none() && body.always_approve.is_none() {
+        return Err(refusal(
+            "Nothing to set. Send `mode`, `alwaysApprove`, or both — or `DELETE` \
+             this endpoint to go back to the manifest's policy.",
+        ));
+    }
+
+    // Validate against the same list `company.toml` is validated against, so a
+    // tier the console accepts is one the manifest would have accepted too. An
+    // A stored unknown mode falls back to the manifest for version-skew safety,
+    // but a fresh write must still be refused: accepting it would leave the
+    // console showing a tier the gate was not running.
+    if let Some(Some(mode)) = &body.mode
+        && !POLICY_MODES.contains(&mode.as_str())
+    {
+        return Err(refusal(&format!(
+            "`mode` must be one of {} — you sent `{mode}`.",
+            POLICY_MODES.join(", ")
+        )));
+    }
+
+    let write_lock = company_write_lock(company.id());
+    let _lock = write_lock.lock().await;
+
+    let mut record = load_record(&company).await?;
+
+    // Merge onto whatever is already stored, so setting the tier does not
+    // silently discard an always-ask list a previous call set (and vice versa).
+    // The outer `Option` is "did the caller mention this field"; the inner one is
+    // the value or an explicit "stop overriding it".
+    let held = record.overlay_policy.clone();
+    let mode = match body.mode {
+        Some(value) => value,
+        None => held.as_ref().and_then(|o| o.mode.clone()),
+    };
+    let always_approve = match body.always_approve {
+        Some(value) => value,
+        None => held.as_ref().and_then(|o| o.always_approve.clone()),
+    };
+
+    let entry = PolicyOverride {
+        mode,
+        always_approve,
+        set_by: Actor {
+            kind: ActorKind::User,
+            id: admin.user_id,
+        },
+        at_millis: now_millis(),
+    };
+    // A merge that cleared both fields is a reset, and storing an empty row
+    // would leave the console showing "overridden" over the manifest's own
+    // values. `DELETE`'s outcome is the honest one.
+    record.overlay_policy = (!entry.is_empty()).then_some(entry);
+
+    save(&company, &record).await?;
+    Ok(Json(PolicyDto::build(&record)))
+}
+
+/// `DELETE {scope}/policy` — drop the override so the manifest's `[policy]`
+/// applies again.
+///
+/// Not expressible as a `PUT`: writing the manifest's current values would pin
+/// them, and a later `company.toml` edit would then be silently overridden by
+/// the values it replaced. Deleting when nothing is stored is a no-op rather
+/// than a `404` — the caller's intent ("this company should follow the
+/// manifest") is already satisfied.
+async fn clear_policy(
+    company: ScopedCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+) -> Result<Json<PolicyDto>, Response> {
+    require_admin(&headers, &state, &company.runtime, peer).await?;
+
+    let write_lock = company_write_lock(company.id());
+    let _lock = write_lock.lock().await;
+
+    let mut record = load_record(&company).await?;
+    record.overlay_policy = None;
+    save(&company, &record).await?;
+    Ok(Json(PolicyDto::build(&record)))
+}
+
+fn refusal(message: &str) -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, message.to_string()).into_response()
+}
+
+async fn load_record(company: &ScopedCompany) -> Result<CompanyRecord, Response> {
+    company
+        .runtime
+        .store()
+        .load(company.id())
+        .await
+        .map_err(|e| ApiError(e).into_response())?
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())).into_response()
+        })
+}
+
+async fn save(company: &ScopedCompany, record: &CompanyRecord) -> Result<(), Response> {
+    company
+        .runtime
+        .store()
+        .save(record)
+        .await
+        .map_err(|e| ApiError(e).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use crate::company::CompanyManifest;
+    use crate::ports::CompanyStore;
+    use crate::ports::types::CompanyId;
+    use crate::runtime::RuntimeBuilder;
+    use crate::server::router;
+    use crate::store::FsCompanyStore;
+    use crate::{AppConfig, AppState};
+
+    const MANIFEST: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+         [policy]\nmode = \"supervised\"\n\
+         always_approve = [\"payment.send\", \"filing.submit\"]\n";
+
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-policy-")
+            .tempdir()
+            .expect("tempdir")
+    }
+
+    async fn state(home: &std::path::Path) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(MANIFEST).unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    async fn call(state: &AppState, method: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri("/api/v1/company/policy")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header("content-type", "application/json");
+        let request = match body {
+            Some(value) => request.body(Body::from(value.to_string())).unwrap(),
+            None => request.body(Body::empty()).unwrap(),
+        };
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// `GET` reports the manifest's policy when nothing is overridden, and says
+    /// so — `overridden` is what the console keys the reset control off.
+    #[tokio::test]
+    async fn get_reports_the_manifest_policy_when_nothing_is_overridden() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["mode"], "supervised");
+        assert_eq!(body["manifestMode"], "supervised");
+        assert_eq!(body["overridden"], false);
+        assert!(body["setBy"].is_null());
+        assert!(!body["tiers"].as_array().unwrap().is_empty());
+    }
+
+    /// A tier `PUT` moves the tier and leaves the always-ask list on the
+    /// manifest's value — the independence the console's two controls rely on.
+    #[tokio::test]
+    async fn putting_a_tier_leaves_the_always_ask_list_alone() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "PUT", Some(json!({ "mode": "full" }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["mode"], "full");
+        assert_eq!(body["overridden"], true);
+        assert_eq!(
+            body["alwaysApprove"],
+            json!(["payment.send", "filing.submit"]),
+            "setting the tier must not discard the manifest's always-ask list"
+        );
+        // And it persisted, rather than only being reflected in the response.
+        let (_, reread) = call(&state, "GET", None).await;
+        assert_eq!(reread["mode"], "full");
+    }
+
+    /// An emptied always-ask list is stored as empty, not resolved back to the
+    /// manifest's three defaults.
+    #[tokio::test]
+    async fn an_emptied_always_ask_list_is_stored_as_empty() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "PUT", Some(json!({ "alwaysApprove": [] }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["alwaysApprove"], json!([]));
+        assert_eq!(body["mode"], "supervised", "the tier must not have moved");
+    }
+
+    /// A body that sets nothing is refused rather than stored, and an unknown
+    /// tier is refused rather than silently downgraded to `supervised`.
+    #[tokio::test]
+    async fn an_empty_body_and_an_unknown_tier_are_both_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let (status, _) = call(&state, "PUT", Some(json!({}))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, _) = call(&state, "PUT", Some(json!({ "mode": "supervized" }))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an unknown tier must be refused — accepting it would leave the console \
+             showing a tier the gate was not running"
+        );
+
+        // Neither refusal stored anything.
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["overridden"], false);
+    }
+
+    /// `DELETE` restores the manifest's policy and is a no-op when nothing is
+    /// stored.
+    #[tokio::test]
+    async fn delete_restores_the_manifest_policy() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        call(&state, "PUT", Some(json!({ "mode": "full" }))).await;
+        let (status, body) = call(&state, "DELETE", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["mode"], "supervised");
+        assert_eq!(body["overridden"], false);
+
+        // Deleting again is a no-op, not a 404: the caller's intent is already
+        // satisfied.
+        let (status, _) = call(&state, "DELETE", None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Every tier the runtime accepts has console text, so none is
+    /// unselectable (issue #562).
+    ///
+    /// **This assertion can no longer fail on its own, and that is recorded
+    /// rather than hidden.** It compares `selectable_tiers()` against
+    /// `POLICY_MODES`, and since #560 landed `auto` the text table holds exactly
+    /// those four tiers — so deleting the `POLICY_MODES` filter entirely leaves
+    /// this green. A revert-and-check confirmed it.
+    ///
+    /// It is kept because the invariant it states is real and will bite the next
+    /// time a tier is added to `POLICY_MODES` without text. The filter itself is
+    /// pinned by `a_tier_the_host_does_not_accept_is_not_offered`, which drives
+    /// `tiers_for` from synthetic lists and does fail against that revert.
+    ///
+    /// Asserted in **one** direction on purpose. A `POLICY_MODES` entry with no
+    /// text here is a tier an operator cannot pick — the same class of gap as a
+    /// mode the manifest validator rejects, and equally invisible, since every
+    /// other test would pass. The converse is harmless and deliberate: text for
+    /// a tier the runtime has not gained yet (`auto`, issue #560, landing in its
+    /// own PR) is filtered out by `selectable_tiers` and simply does not appear.
+    /// Asserting that direction too would force the two PRs to be stacked.
+    #[test]
+    fn every_runtime_tier_has_console_text() {
+        let offered: Vec<&str> = selectable_tiers().iter().map(|t| t.value).collect();
+        assert_eq!(
+            offered,
+            POLICY_MODES.to_vec(),
+            "a tier the runtime accepts has no console text, so an operator cannot select it"
+        );
+        for tier in selectable_tiers() {
+            assert!(
+                !tier.description.is_empty() && !tier.label.is_empty(),
+                "tier `{}` has no operator-facing text, which is the whole point \
+                 of showing tiers rather than mode names",
+                tier.value
+            );
+        }
+    }
+
+    /// The text table stays a superset of the runtime's tiers, and every entry
+    /// in it is a real mode name rather than a typo that would silently never
+    /// render.
+    #[test]
+    fn console_text_names_only_plausible_tiers() {
+        for tier in TIER_TEXT {
+            assert!(
+                POLICY_MODES.contains(&tier.value),
+                "`{}` is not an accepted mode — a typo here silently drops the \
+                 tier from the console",
+                tier.value
+            );
+        }
+    }
+
+    /// The host's mode list decides what is offered, not the text table.
+    ///
+    /// Driven off synthetic lists rather than `POLICY_MODES`, and that is the
+    /// whole point. `TIER_TEXT` and `POLICY_MODES` now hold the same four tiers,
+    /// so an assertion built on `POLICY_MODES` cannot distinguish a filtered
+    /// list from an unfiltered one, and deleting the filter would leave it
+    /// green. This one fails.
+    #[test]
+    fn a_tier_the_host_does_not_accept_is_not_offered() {
+        // A host without `auto` (every release before #560) must not be offered
+        // it, even though the text for it is compiled in.
+        let older_host = tiers_for(&["readonly", "supervised", "full"]);
+        assert_eq!(
+            older_host.iter().map(|t| t.value).collect::<Vec<_>>(),
+            vec!["readonly", "supervised", "full"],
+            "text for a tier the host does not accept must not be offered — the \
+             gate would silently downgrade it to `supervised`"
+        );
+
+        // Order follows the host's list, not the text table's.
+        let reordered = tiers_for(&["full", "readonly"]);
+        assert_eq!(
+            reordered.iter().map(|t| t.value).collect::<Vec<_>>(),
+            vec!["full", "readonly"]
+        );
+
+        // A mode with no text is skipped rather than panicking or rendering
+        // blank; `every_runtime_tier_has_console_text` is what stops that state
+        // reaching a release.
+        assert!(tiers_for(&["not_a_tier"]).is_empty());
+    }
+}

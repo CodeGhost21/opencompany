@@ -50,6 +50,19 @@ interface Props {
   onAdd: () => void;
   onMessage: (member: TeamMember) => void;
   /**
+   * Open this channel's desk on the org chart (issue #485). Absent for a DM and
+   * for a fallback desk — neither is a desk the chart draws.
+   *
+   * A link, deliberately, and not an editor bolted on here. This pane *drops* a
+   * member id that resolves to no roster teammate (see `channelMembers`), which
+   * is right for a chat — you cannot message nobody. But that ghost seat is
+   * precisely the one an operator most needs to remove, and an editor on this
+   * pane could not offer it without breaking the drop rule the pane is built
+   * on. Membership editing therefore stays on the surface that keeps ghost
+   * seats visible and badged: the chart.
+   */
+  onManageDesk?: () => void;
+  /**
    * Whether to offer the daily-budget controls at all (issue #360, ported
    * from the retired Team page): admin-only, and only for a host-backed
    * teammate — a starter-roster row is a local placeholder with no budget
@@ -88,6 +101,7 @@ export function MembersPane({
   onRemove,
   onAdd,
   onMessage,
+  onManageDesk,
   canEditBudget,
   onEditBudget,
   onRemoveCap,
@@ -158,12 +172,28 @@ export function MembersPane({
 
             return (
               <>
-                <SectionLabel className="text-foreground">In this channel</SectionLabel>
+                <div className="flex items-baseline justify-between gap-2">
+                  <SectionLabel className="text-foreground">In this channel</SectionLabel>
+                  {onManageDesk && (
+                    <ManageDeskLink onClick={onManageDesk}>Manage on the org chart</ManageDeskLink>
+                  )}
+                </div>
                 {channelMembers.length > 0 ? (
                   rows(channelMembers)
                 ) : (
+                  // An empty desk is the strongest case for reaching the
+                  // editor, so the copy carries the way there rather than
+                  // leaving the operator to find the header link.
                   <p className="px-2 py-1.5 text-xs text-muted-foreground">
                     Nobody is on this desk yet.
+                    {onManageDesk && (
+                      <>
+                        {" "}
+                        <ManageDeskLink onClick={onManageDesk} inline>
+                          Staff it on the org chart
+                        </ManageDeskLink>
+                      </>
+                    )}
                   </p>
                 )}
 
@@ -182,10 +212,41 @@ export function MembersPane({
   );
 }
 
+/**
+ * The way out to the org chart (issue #485).
+ *
+ * Quiet by design — a link, not a button. Editing membership is a different
+ * surface's job, and dressing the way there as an action here would suggest
+ * this pane could do it.
+ */
+function ManageDeskLink({
+  onClick,
+  inline,
+  children,
+}: {
+  onClick: () => void;
+  /** Sits inside a sentence rather than beside a heading. */
+  inline?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline",
+        inline ? "underline" : "shrink-0 px-2 pb-1",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 /** A section heading inside the pane's scroll body. */
 function SectionLabel({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <h3 className={cn("px-2 pb-1 text-[11px] font-medium uppercase tracking-wide", className)}>
+    <h3 className={cn("px-2 pb-1 text-2xs font-medium uppercase tracking-wide", className)}>
       {children}
     </h3>
   );
@@ -233,7 +294,7 @@ function MemberRow({
           <span className="flex items-center gap-1">
             <span className="truncate text-sm font-medium">{member.name}</span>
             {lead && (
-              <span className="shrink-0 rounded border px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              <span className="shrink-0 rounded border px-1 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
                 Lead
               </span>
             )}
@@ -306,7 +367,7 @@ function DailyBudgetLine({ member, setByLabel }: { member: TeamMember; setByLabe
   const cap = member.budgetUsdDaily;
   const attribution =
     setByLabel && member.budgetSetAtMillis !== undefined ? (
-      <span data-testid="team-budget-attribution" className="block truncate text-[10px] text-muted-foreground">
+      <span data-testid="team-budget-attribution" className="block truncate text-3xs text-muted-foreground">
         {cap === undefined ? "Uncapped by" : "Set by"} {setByLabel} ·{" "}
         {new Date(member.budgetSetAtMillis).toLocaleDateString()}
       </span>
@@ -324,7 +385,7 @@ function DailyBudgetLine({ member, setByLabel }: { member: TeamMember; setByLabe
     <span className="block">
       <span
         data-testid="team-budget"
-        className={cn("block truncate text-[10px]", overBudget ? "text-destructive" : "text-muted-foreground")}
+        className={cn("block truncate text-3xs", overBudget ? "text-destructive" : "text-muted-foreground")}
       >
         {usd(cap)}/day · {usd(spent)} spent today
         {overBudget && " · paused"}

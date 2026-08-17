@@ -1,10 +1,15 @@
 //! Translate a company [`WorkflowFile`] into a tinyflows
 //! [`WorkflowGraph`](tinyflows::model::WorkflowGraph).
 //!
-//! OpenCompany's on-disk model is a validated six-kind node/edge graph (see
-//! [`crate::company::workflow_file`]); tinyflows' runnable model is a
-//! twelve-kind graph. The mapping is mostly one-to-one, with two deliberate
-//! choices:
+//! OpenCompany's on-disk model is a validated node/edge graph whose accepted
+//! node kinds are the
+//! [`WORKFLOW_NODE_KINDS`](crate::company::workflow_file::WORKFLOW_NODE_KINDS)
+//! authoring set (see [`crate::company::workflow_file`]); tinyflows' runnable
+//! model carries the wider `NODE_KINDS` engine catalog. Every accepted kind
+//! lowers into that catalog, but the parser deliberately refuses the
+//! engine-only kinds — the authoring contract and the rejected set are spelled
+//! out in `docs/spec/runtime/workflow-vocabulary.md`. The mapping is mostly
+//! one-to-one, with two deliberate choices:
 //!
 //! * **`output` → [`Transform`](tinyflows::model::NodeKind::Transform)** —
 //!   tinyflows has no `output` kind. A `transform` node with no `set` config is
@@ -28,11 +33,14 @@
 //! An **agent** node's roster teammate id becomes the tinyflows `agent_ref` in
 //! node config, which the engine's `agent` node routes to the injected
 //! `AgentRunner` — that is how a step lands on the harness pool (see
-//! [`super::caps`]). `tool_call` and `http_request` nodes are mapped
-//! structurally; executing them end-to-end (real tool/HTTP semantics) is a
-//! documented follow-on — [`super::caps`] wires them to explicit "not yet wired"
-//! capabilities so an unreached node is inert and a reached one fails loudly
-//! rather than silently.
+//! [`super::caps`]). It also carries an `input = "=items"` binding (issue #782)
+//! so the engine resolves the full set of upstream node outputs into the node's
+//! config at run time, giving the agent a channel to the previous step's result
+//! (the runner folds it into the turn message; fan-in delivers every predecessor). `tool_call` and `http_request` nodes are mapped
+//! structurally and both execute for real: a `tool_call` node runs a Cell A
+//! toolbelt tool, fail-closed on the company's `[tools].allow` grants, and an
+//! `http_request` node routes through the SSRF-guarded `GuardedHttpClient` —
+//! both wired in [`super::caps`].
 
 use std::collections::HashSet;
 
@@ -124,9 +132,10 @@ fn tinyflows_kind(kind: WorkflowNodeKind) -> NodeKind {
 ///    defaults (so an author can override the derived `prompt`, add a
 ///    `tool_call` `slug`/`args`, or shape an `http_request` descriptor).
 /// 3. **First-class fields LAST** — `agent_ref` (bound from `agent`, so config
-///    can never rebind the node to another teammate), the `tool_call` id
-///    placeholder `slug` (only when the overlay carries none), and the
-///    engine-read `on_error` / `retry` / `requires_approval` keys.
+///    can never rebind the node to another teammate) and the engine-read
+///    `on_error` / `retry` / `requires_approval` keys. A `tool_call`'s `slug`
+///    rides in the config overlay (layer 2); author-time validation guarantees
+///    it is present, so translation adds no placeholder (issue #661).
 ///
 /// A legacy node (no `config`, no typed fields) yields exactly the pre-P1
 /// config, so translation of an unchanged file is byte-identical.
@@ -136,6 +145,18 @@ fn translate_node(def: &WorkflowNodeDef) -> Node {
     // 1. Derived defaults.
     if def.kind == WorkflowNodeKind::Agent {
         config.insert("prompt".to_string(), json!(prompt_for(def)));
+        // Issue #782: bind the FULL upstream node output so the agent's turn can
+        // reference what the previous step produced. `=items` resolves (via the
+        // engine's `resolve_config_traced`) to the `json` of every input item —
+        // i.e. every direct-predecessor item, so a fan-in (`merge -> agent`, or
+        // several edges into one agent) delivers ALL predecessors rather than
+        // silently losing all but the first. The runner folds the resolved value
+        // into the turn message (see `super::caps`); before this an agent node
+        // lowered to only a static `prompt`, so an upstream node's output had no
+        // channel to the next agent and was dropped. Kept in the derived-default
+        // layer (like `prompt`), so an author can override the binding with their
+        // own expression (e.g. `=nodes.<id>.item.text`) via node config.
+        config.insert("input".to_string(), json!("=items"));
     }
 
     // 2. User config overlay.
@@ -151,14 +172,25 @@ fn translate_node(def: &WorkflowNodeDef) -> Node {
             if let Some(agent) = def.agent.as_deref().filter(|a| !a.is_empty()) {
                 config.insert("agent_ref".to_string(), json!(agent));
             }
+            // Issue #881: which node this is. The vendored `AgentRunner` trait
+            // hands the capability only the resolved config and the trusted
+            // `agent_ref` — the node's own id is lost at that boundary — so a
+            // node that blocks on an approval could not say *which* node
+            // blocked. Written in the first-class layer beside `agent_ref`, and
+            // for the same reason: config must not be able to rebind a node's
+            // identity to another node's name.
+            config.insert("node_id".to_string(), json!(def.id));
         }
-        // A `tool_call` needs a `slug` or the engine's node errors; when the
-        // config binds none, fall back to the node id as a stable placeholder.
-        WorkflowNodeKind::ToolCall => {
-            config
-                .entry("slug".to_string())
-                .or_insert_with(|| json!(def.id));
-        }
+        // A `tool_call` needs a `slug` (the config overlay above carries it). The
+        // masking node-id default was removed (issue #661): author-time
+        // validation now rejects a slug-less `tool_call` on BOTH the on-disk seed
+        // path (`workflow_file::validate`) and the console-draft path
+        // (`validate_draft_against_record`), so a validated graph always binds a
+        // real slug. Defaulting to the node id instead pointed the engine's
+        // "missing tool" error at the wrong name and could collide with a real
+        // tool, silently invoking one the author never chose; absent a slug the
+        // engine's `tool_call` node now fails loudly on the missing key.
+        WorkflowNodeKind::ToolCall => {}
         _ => {}
     }
 
@@ -327,6 +359,32 @@ mod tests {
         );
     }
 
+    /// **Issue #782.** Every agent node carries an `input = "=items"` binding so
+    /// the engine resolves the full set of upstream node outputs into its config
+    /// at run time — the only channel an upstream step's output has to the next
+    /// agent's turn. `=items` (not `=item`) is deliberate: it is the whole
+    /// predecessor set, so a fan-in (`merge -> agent`) delivers every predecessor
+    /// rather than only the first.
+    #[test]
+    fn agent_node_binds_the_full_upstream_output() {
+        let file = parse_workflow(CAMPAIGN).expect("campaign parses");
+        let graph = translate(&file);
+        // Every translated agent node carries the binding…
+        for node in graph.nodes.iter().filter(|n| n.kind == NodeKind::Agent) {
+            assert_eq!(
+                node.config["input"], "=items",
+                "agent node {} must bind the full upstream output set",
+                node.id
+            );
+        }
+        // …and a non-agent node does not (the binding is agent-specific).
+        let research = graph.nodes.iter().find(|n| n.id == "research").unwrap();
+        assert!(
+            research.config.get("input").is_none(),
+            "a tool_call node carries no upstream-output binding"
+        );
+    }
+
     /// A condition node's `yes`/`no` labels become `true`/`false` branch ports.
     #[test]
     fn condition_labels_map_to_true_false_ports() {
@@ -389,9 +447,19 @@ mod tests {
         assert_eq!(config("brief"), json!({}));
         assert_eq!(
             config("strategist"),
-            json!({ "agent_ref": "brand_strategist", "prompt": "Turns the brief into an angle + outline." })
+            json!({
+                "agent_ref": "brand_strategist",
+                "prompt": "Turns the brief into an angle + outline.",
+                // Issue #782: the upstream-output binding every agent node carries.
+                "input": "=items",
+                // Issue #881: the node's own id, so the agent capability can say
+                // WHICH node blocked when its turn parks an approval.
+                "node_id": "strategist"
+            })
         );
-        assert_eq!(config("gate"), json!({}));
+        // The gate carries its boolean discriminant (issue #661): a condition
+        // node must name the `field` it branches on.
+        assert_eq!(config("gate"), json!({ "field": "=item.needs_research" }));
         assert_eq!(
             config("research"),
             json!({
@@ -404,16 +472,21 @@ mod tests {
             config("publish"),
             json!({
                 "agent_ref": "copywriter",
-                "prompt": "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off."
+                "prompt": "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off.",
+                // Issue #782: the upstream-output binding every agent node carries.
+                "input": "=items",
+                // Issue #881: as above.
+                "node_id": "publish"
             })
         );
         assert_eq!(config("done"), json!({}));
     }
 
-    /// A `tool_call` node whose config binds a `slug` keeps that slug; the
-    /// node-id placeholder is only a fallback when config carries none.
+    /// A `tool_call` node's config `slug` is carried into the engine config
+    /// verbatim (issue #661 removed the node-id placeholder fallback; author-time
+    /// validation now guarantees a real slug is always present).
     #[test]
-    fn config_slug_beats_the_node_id_placeholder() {
+    fn config_slug_is_carried_into_engine_config() {
         let src = r#"
             id = "wf"
             name = "WF"
@@ -486,6 +559,8 @@ mod tests {
             kind = "tool_call"
             name = "Call"
             on_error = "continue"
+            [node.config]
+            slug = "csv_export"
             [node.retry]
             max_attempts = 3
             backoff_ms = 250

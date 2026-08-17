@@ -215,6 +215,21 @@ impl Bundle {
         self.dir.join("events.jsonl")
     }
 
+    /// The company's repository mirror cache (issue #245).
+    ///
+    /// The same location
+    /// [`DataLayout::company_repos_dir`](crate::store::DataLayout::company_repos_dir)
+    /// names — resolved through the bundle so [`slug`] is applied in exactly one
+    /// place, rather than by a caller that would have to reimplement it.
+    ///
+    /// Note what it is *not*: bundle content. Nothing in the fs store reads or
+    /// creates it, and on a mongodb tenant no other part of this directory
+    /// exists at all. It shares the prefix so a company's whole footprint stays
+    /// in one subtree and one quota walk.
+    pub fn repos_dir(&self) -> PathBuf {
+        self.dir.join("repos")
+    }
+
     /// Path to the append-only ledger.
     pub fn ledger_jsonl(&self) -> PathBuf {
         self.dir.join("ledger.jsonl")
@@ -334,6 +349,19 @@ impl Bundle {
         self.dir.join("run-steps.jsonl")
     }
 
+    /// Path to the per-node run-output log (`run-outputs.jsonl`, one
+    /// [`WorkflowRunOutputRecord`] per line; last-write-wins per `run_id`,
+    /// prune-to-newest-N per company; issue #596).
+    ///
+    /// One shared log rather than a file per run — the same rule
+    /// [`runs_jsonl`](Self::runs_jsonl) states: a run id is caller-minted and must
+    /// never become a path component the store did not mint.
+    ///
+    /// [`WorkflowRunOutputRecord`]: crate::ports::run_output::WorkflowRunOutputRecord
+    pub fn run_outputs_jsonl(&self) -> PathBuf {
+        self.dir.join("run-outputs.jsonl")
+    }
+
     /// The per-company schedule-fire claim subdirectory
     /// (`schedule_fires/<hashed-schedule-id>/<minute>`, one empty-ish marker
     /// file per claimed instant; #241).
@@ -382,6 +410,23 @@ impl Bundle {
     /// Path to the skill-state deltas (`skills.json`, the full delta set).
     pub fn skills_json(&self) -> PathBuf {
         self.dir.join("skills.json")
+    }
+
+    /// Path to the per-person channel read markers (`read-state.json`, #755).
+    pub fn read_state_json(&self) -> PathBuf {
+        self.dir.join("read-state.json")
+    }
+
+    /// Path to the durable notification records (`notifications.json`, #749).
+    pub fn notifications_json(&self) -> PathBuf {
+        self.dir.join("notifications.json")
+    }
+
+    /// Path to the per-person notification read markers
+    /// (`notification-reads.json`, #749) — kept beside the records rather than
+    /// on them, because read state is per person, not per company.
+    pub fn notification_reads_json(&self) -> PathBuf {
+        self.dir.join("notification-reads.json")
     }
 
     /// The workspace subdirectory holding the seeded/edited file tree.
@@ -472,9 +517,8 @@ fn restrict_dir(_dir: &Path) -> Result<()> {
 ///
 /// Used for identity key material (`keys/agent.ed25519`, and the runner's own
 /// key). A no-op on non-unix targets, which rely on directory isolation
-/// instead. Gated to its consumers — the `identity` signer — so the default
-/// build has no dead code.
-#[cfg(all(unix, feature = "identity"))]
+/// instead.
+#[cfg(unix)]
 pub(crate) fn restrict_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -485,7 +529,7 @@ pub(crate) fn restrict_file(path: &Path) -> Result<()> {
     })
 }
 
-#[cfg(all(not(unix), feature = "identity"))]
+#[cfg(not(unix))]
 pub(crate) fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }

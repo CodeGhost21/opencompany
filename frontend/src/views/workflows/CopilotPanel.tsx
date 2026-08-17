@@ -34,11 +34,17 @@ import { Bot, Loader2, Send } from "lucide-react";
 import type { OpenCompanyClient } from "@/api/client";
 import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import { ApiError } from "@/api/types";
-import { updateWorkflow, type WorkflowGraph, type WorkflowRunOutcome } from "@/api/workflows";
+import {
+  listWorkflowToolSlugs,
+  updateWorkflow,
+  type WorkflowGraph,
+  type WorkflowRunOutcome,
+} from "@/api/workflows";
 import {
   askCopilot,
   loadCopilotHistory,
   type CopilotMessage,
+  type RosterEntry,
 } from "@/api/workflow-copilot";
 import {
   applyProposal,
@@ -125,6 +131,7 @@ export function CopilotPanel({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   // The cognition path the company actually booted onto. `null` until the read
   // lands, or when the host does not serve the route.
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
@@ -136,6 +143,16 @@ export function CopilotPanel({
   // and a fast question gets exactly the parroted reply the gate exists to
   // prevent.
   const [inferenceChecked, setInferenceChecked] = useState(false);
+  // Issue #783. The company's roster and the tool slugs a workflow may call, so
+  // a proposal names a real teammate and a real tool instead of guessing —
+  // `undefined` means "not listed on this host", which the composed message
+  // reports honestly rather than as "there is nobody / nothing".
+  const [roster, setRoster] = useState<RosterEntry[] | undefined>(undefined);
+  const [toolSlugs, setToolSlugs] = useState<string[] | undefined>(undefined);
+  // Separate from `toolSlugs` for the same reason `runsKnown` is separate from
+  // `runs`: an empty list on a host that serves the route ("no tools granted")
+  // must not read the same as a host that does not serve it ("cannot say").
+  const [toolSlugsKnown, setToolSlugsKnown] = useState(false);
   // Issue #415. One entry per company message that carried a proposal block,
   // parsed EXACTLY ONCE, when the message first appears.
   //
@@ -179,10 +196,16 @@ export function CopilotPanel({
     setReviews({});
     setThisSession(new Set());
     setError(null);
+    setHistoryError(null);
     setSending(false);
     (async () => {
       const replayed = await loadCopilotHistory(client, company, workflowId);
-      if (live) setMessages(replayed);
+      if (!live) return;
+      if (replayed.ok) {
+        setMessages(replayed.messages);
+      } else {
+        setHistoryError(`Previous copilot messages could not be loaded: ${replayed.error.message}`);
+      }
     })();
     return () => {
       live = false;
@@ -209,6 +232,48 @@ export function CopilotPanel({
         // Settled either way: this is what re-opens the composer, so it must
         // run on the failure path too or an older host disables it forever.
         if (live) setInferenceChecked(true);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  // Issue #783: the grounding the proposal path needs — the company roster and
+  // the tool slugs a workflow may call. Two independent degrade-on-failure
+  // reads, mirroring the create dialog's roster fetch: a host that serves
+  // neither leaves the copilot exactly as capable as before, only ungrounded,
+  // and the composed message says so rather than inventing teammates or tools.
+  useEffect(() => {
+    let live = true;
+    setRoster(undefined);
+    setToolSlugs(undefined);
+    setToolSlugsKnown(false);
+    (async () => {
+      try {
+        const team = await client.listTeam(company);
+        if (live) setRoster(team.map((m) => ({ id: m.id, role: m.role })));
+      } catch (e) {
+        // No roster surface on this host — leave it unlisted; the message tells
+        // the model not to invent teammate ids rather than claiming there are none.
+        console.debug("[CopilotPanel] roster unavailable", e);
+        if (live) setRoster(undefined);
+      }
+    })();
+    (async () => {
+      try {
+        const slugs = await listWorkflowToolSlugs(client, company);
+        if (live) {
+          setToolSlugs(slugs);
+          setToolSlugsKnown(true);
+        }
+      } catch (e) {
+        // The route is absent (older host): "cannot say", not "no tools".
+        console.debug("[CopilotPanel] tool slugs unavailable", e);
+        if (live) {
+          setToolSlugs(undefined);
+          setToolSlugsKnown(false);
+        }
       }
     })();
     return () => {
@@ -361,7 +426,7 @@ export function CopilotPanel({
         client,
         company,
         workflowId,
-        { graph, runs, runsKnown },
+        { graph, runs, runsKnown, roster, toolSlugs, toolSlugsKnown },
         question,
       );
       if (!mine()) return;
@@ -401,7 +466,21 @@ export function CopilotPanel({
       // composer for a NEWER question that is still in flight.
       if (mine()) setSending(false);
     }
-  }, [client, company, draft, echoing, graph, ready, runs, runsKnown, sending, workflowId]);
+  }, [
+    client,
+    company,
+    draft,
+    echoing,
+    graph,
+    ready,
+    roster,
+    runs,
+    runsKnown,
+    sending,
+    toolSlugs,
+    toolSlugsKnown,
+    workflowId,
+  ]);
 
   const placeholder = useMemo(
     () =>
@@ -421,7 +500,7 @@ export function CopilotPanel({
           <Bot className="size-4 shrink-0" aria-hidden />
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">Copilot</div>
-            <div className="truncate text-[11px] text-muted-foreground">{graph.name}</div>
+            <div className="truncate text-2xs text-muted-foreground">{graph.name}</div>
           </div>
         </div>
         <Button variant="ghost" size="sm" className="-mr-1 h-7 px-2" onClick={onClose}>
@@ -430,6 +509,11 @@ export function CopilotPanel({
       </div>
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-3">
+        {historyError && (
+          <Alert variant="destructive" data-testid="workflow-copilot-history-error">
+            <AlertDescription>{historyError}</AlertDescription>
+          </Alert>
+        )}
         {/* What it can see and what it cannot do, stated before the first
             question rather than discovered after it.
 
@@ -442,7 +526,7 @@ export function CopilotPanel({
             and a turn that says which part of a question it could not answer
             rather than reaching for the rest of the company. See the header of
             `@/api/workflow-copilot`, and `harness::confine` host-side. */}
-        <div className="rounded-lg border bg-muted/30 p-2 text-[11px] leading-snug text-muted-foreground">
+        <div className="rounded-lg border bg-muted/30 p-2 text-2xs leading-snug text-muted-foreground">
           <p>
             Answers are grounded in{" "}
             <span className="font-medium text-foreground">{graph.name}</span>: its steps and
@@ -483,7 +567,7 @@ export function CopilotPanel({
 
         {echoing && (
           <Alert variant="destructive" data-testid="workflow-copilot-echo">
-            <AlertDescription className="text-[11px] leading-snug">
+            <AlertDescription className="text-2xs leading-snug">
               This company has no inference configured, so it can't answer
               questions — it would just repeat them back. Set a provider in
               Settings → Inference, then reopen the copilot.
@@ -492,7 +576,7 @@ export function CopilotPanel({
         )}
 
         {messages.length === 0 && !echoing && (
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             No questions yet. Try “what does this workflow do?” or “why did the
             last run fail?”.
           </p>
@@ -510,7 +594,7 @@ export function CopilotPanel({
               m.role === "operator" ? "workflow-copilot-ask" : "workflow-copilot-reply"
             }
           >
-            <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <p className="mb-1 text-3xs uppercase tracking-wide text-muted-foreground">
               {m.role === "operator" ? "You" : "Company"}
             </p>
             {m.role === "operator" ? (
@@ -543,7 +627,7 @@ export function CopilotPanel({
                 with no way to apply it and no hint that one was attempted. */}
             {m.role === "company" && reviews[m.id]?.problem && (
               <Alert className="mt-2 py-1.5">
-                <AlertDescription className="text-[11px] leading-snug">
+                <AlertDescription className="text-2xs leading-snug">
                   The copilot tried to propose a change this console couldn&apos;t read.{" "}
                   {reviews[m.id].problem} Ask again, or make the change in the editor.
                 </AlertDescription>
@@ -553,7 +637,7 @@ export function CopilotPanel({
         ))}
 
         {sending && (
-          <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <p className="flex items-center gap-1.5 text-2xs text-muted-foreground">
             <Loader2 className="size-3 animate-spin" />
             Thinking…
           </p>
@@ -561,7 +645,7 @@ export function CopilotPanel({
 
         {error && (
           <Alert variant="destructive">
-            <AlertDescription className="text-[11px]">{error}</AlertDescription>
+            <AlertDescription className="text-2xs">{error}</AlertDescription>
           </Alert>
         )}
       </div>

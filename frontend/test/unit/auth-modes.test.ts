@@ -1,0 +1,86 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { fetchAuthConfig, invite, requestWalletChallenge } from "@/api/auth";
+
+/**
+ * Config-driven sign-in, on the console side.
+ *
+ * Three properties are worth pinning here rather than leaving to the view:
+ *
+ * 1. **The rollout-skew default.** A console served by a host that predates
+ *    `/auth/config` must render the screen it always did, not an error. The
+ *    fallback is the whole compatibility story for every existing deployment.
+ * 2. **Which field carries an invited identity.** The server normalizes an
+ *    email and a wallet by different rules — one is lowercased, the other must
+ *    not be — so sending the wrong field is not a cosmetic mistake, it is an
+ *    invite that grants nothing or a wallet that can never verify.
+ * 3. **base58 of the signature**, because a wrong encoding fails only at the
+ *    host, as an indistinguishable `invalid_login`.
+ */
+
+const client = (impl: { get?: unknown; post?: unknown }) =>
+  ({
+    scopeFor: () => "/api/v1/company",
+    get: vi.fn().mockImplementation(impl.get as never),
+    post: vi.fn().mockImplementation(impl.post as never),
+  }) as never;
+
+describe("fetchAuthConfig", () => {
+  it("reports the mode the host names", async () => {
+    const c = client({ get: async () => ({ mode: "wallet", passwords: false }) });
+    expect(await fetchAuthConfig(c, null)).toEqual({ mode: "wallet", passwords: false });
+  });
+
+  it("falls back to email when the host has no such route", async () => {
+    // A host predating this feature 404s here, and it signs people in by email.
+    // Anything else would put an unusable screen in front of every existing
+    // deployment the moment the console updated.
+    const c = client({
+      get: async () => {
+        throw new Error("404");
+      },
+    });
+    expect(await fetchAuthConfig(c, null)).toEqual({ mode: "email", passwords: true });
+  });
+});
+
+describe("invite", () => {
+  it("sends an email address in email mode", async () => {
+    const post = vi.fn().mockResolvedValue({});
+    const c = { scopeFor: () => "/api/v1/company", post } as never;
+    await invite(c, null, "ada@example.com", "member", "email");
+    expect(post).toHaveBeenCalledWith("/api/v1/company/users/invites", {
+      email: "ada@example.com",
+      role: "member",
+    });
+  });
+
+  it("sends a wallet address in wallet mode, and never as an email", async () => {
+    const post = vi.fn().mockResolvedValue({});
+    const c = { scopeFor: () => "/api/v1/company", post } as never;
+    await invite(c, null, "7xKXtg2CW87d97", "admin", "wallet");
+    expect(post).toHaveBeenCalledWith("/api/v1/company/users/invites", {
+      wallet: "7xKXtg2CW87d97",
+      role: "admin",
+    });
+  });
+});
+
+describe("requestWalletChallenge", () => {
+  it("asks the host for the exact bytes to sign", async () => {
+    const post = vi.fn().mockResolvedValue({
+      nonce: "n1",
+      message: "opencompany-wallet-login-v1\nacme\n7xKX\nn1\n1700000000000",
+      expiresAtMillis: 1,
+    });
+    const c = { scopeFor: () => "/api/v1/company", post } as never;
+    const challenge = await requestWalletChallenge(c, null, "7xKX");
+
+    expect(post).toHaveBeenCalledWith("/api/v1/company/auth/wallet/challenge", {
+      address: "7xKX",
+    });
+    // The console signs this verbatim; it must never rebuild the layout, or a
+    // host-side version bump silently stops verifying.
+    expect(challenge.message.split("\n")[0]).toBe("opencompany-wallet-login-v1");
+  });
+});

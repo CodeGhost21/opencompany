@@ -1,0 +1,111 @@
+# Which CI lane runs each Cargo feature's tests — and for the features no lane
+# runs, why that is deliberate. Asserted by scripts/ci/assert-feature-lanes.sh.
+#
+# Issue #770. Cargo features are additive and every test lane in ci.yml pins an
+# explicit feature set, so a feature-gated test's DEFAULT FATE is "compiled by
+# `Check (--all-features)`, executed by nothing". That is not a hypothetical:
+# six features had accumulated never-executed tests before this file existed,
+# including the `sidecar` brain's whole offline end-to-end suite and two OAuth
+# secret-lifecycle tests. Same pathology as #475, #477, #555 and #592 — a suite
+# everybody reads as coverage, selected by no lane, reporting zero without
+# failing anything.
+#
+# The point of this table is NOT that every feature must be tested. Some are
+# legitimately compile-only. The point is that DELIBERATE compile-only becomes
+# distinguishable from ACCIDENTAL, which it was not before: both looked like
+# silence. A new feature cannot merge until someone writes down which lane runs
+# its tests, or why none does.
+#
+# FORMAT — four `|`-separated columns:
+#
+#   feature | status | features | detail
+#
+#   status = tested       a lane runs this feature's tests WITHOUT a filter that
+#                         could narrow them away (a bare `--lib` or `--tests`).
+#                         `features` is the exact `--features` string that lane
+#                         passes, which must appear on a `cargo test` line in
+#                         ci.yml. `(default)` means the default feature set,
+#                         covered by the bare `cargo test --locked` in `Rust`.
+#
+#   status = partial      a lane exists but is FILTERED, so it runs the named
+#                         modules and not necessarily every gated test.
+#                         `features` as above; `detail` lists the filters, and
+#                         every one of them must also appear in ci.yml.
+#
+#   status = compile-only no lane runs this feature's tests, ON PURPOSE.
+#                         `features` is `-`; `detail` is the REASON, which is
+#                         required. The script FAILS this row if it finds any
+#                         feature-gated test under it — that is the whole
+#                         guard: a compile-only claim is checked, not trusted.
+#
+# WHEN YOU ADD A FEATURE: add a row. When you add a gated test to a
+# compile-only feature, this file fails until the row is reclassified and a lane
+# exists. That failure is the feature working.
+
+# --- Tested: a lane runs the gated tests unfiltered -------------------------
+
+default        | tested       | (default)                       | The `Rust` job's bare `cargo test --locked`.
+oauth          | tested       | (default)                       | In the default set, so the default lanes run it.
+platform-jwt   | tested       | (default)                       | In the default set (see Cargo.toml for why it ships by default).
+openhuman      | tested       | openhuman,tinycortex            | `rust-gated` runs `--tests`, which selects lib+bin units and every tests/ target.
+tinycortex     | tested       | openhuman,tinycortex            | Same lane, same unfiltered `--tests`.
+tinyplace      | tested       | tinyplace                       | Runs the whole `--lib` deliberately (issue #477) — it gates code across the tree.
+
+# --- Partial: a lane exists, but filtered ----------------------------------
+
+sqlite         | partial      | sqlite                          | store::sqlite
+mongodb        | partial      | mongodb                         | store::mongodb store::select
+acp            | partial      | acp                             | server::acp harness::acp_run_turn
+runner         | partial      | runner                          | runner
+mcp            | partial      | openhuman,mcp,telegram,media    | harness::build::tests app::types
+media          | partial      | openhuman,mcp,telegram,media    | harness::build::tests harness::toolbelt
+composio       | partial      | openhuman,tinycortex,composio   | harness::composio::isolation_tests harness::composio::ops_helper_tests harness::composio::live::live_tests server::ops::composio::tests::gated_tests
+export         | partial      | export                          | store::export
+imap           | partial      | imap,smtp                       | server::ops::imap
+chargebee      | partial      | openhuman,tinycortex,chargebee  | chargebee
+paypal         | partial      | openhuman,tinycortex,paypal     | paypal
+sidecar        | partial      | sidecar                         | brain::sidecar
+
+# --- Owed a lane: gated tests exist, and they are currently RED -------------
+#
+# Not a third kind of "fine". These are debts, listed so they are countable
+# instead of silent — which is the whole complaint of #770. Each names the issue
+# that will close it, and the script rejects an `owed` row that names no issue or
+# that turns out to have no gated tests at all.
+#
+# No lane is added for these on purpose: a lane permitted to be red is the state
+# #428 was filed about, at more expense. The lane lands with the fix.
+#
+# CURRENTLY EMPTY, and the section stays rather than leaving with its last row.
+# `sidecar` was the only entry: fourteen gated tests, twelve green, and the two
+# offline end-to-end cases the feature advertises failing. #800 fixed those and
+# the lane landed with the fix, so the row moved up to `partial`.
+#
+# The debt was paid in the shape this section promises — fix first, then lane —
+# and keeping the heading keeps that route open for the next one. A status that
+# has to be re-invented under deadline gets skipped, and the alternative to an
+# `owed` row is not a lane; it is silence.
+
+# --- Compile-only, by design ------------------------------------------------
+#
+# The shape shared by the six below: the PORT (a trait), its offline mock, and
+# the whole decision flow around it live in the default build and are tested
+# there. Only a thin real-network implementation sits behind the feature, and it
+# carries no test of its own — there is nothing to run without the network it
+# exists to reach. Verified per row: the `#[cfg(test)] mod test` blocks in these
+# files sit OUTSIDE the gated `mod http { … }`, so they already run at default
+# features.
+
+openhuman-rpc  | compile-only | - | Only `HttpOpenHumanRpc` is gated. The trait + offline mock + providers compile and test at default features; the gated module carries no test.
+github         | compile-only | - | Only `HttpGitHubClient` is gated. `GitHubClient`, its mock and the whole issue-filing flow test at default features (src/feedback/github.rs tests sit outside the gated `mod http`).
+tinyhumans     | compile-only | - | Only `HttpTinyHumansClient` / `HttpHubIdentityExchange` are gated. The trait, mock and routing decision test at default features.
+medulla        | compile-only | - | Only the HTTP/Socket.IO transport is gated. Wire types + `MockTransport` test at default features; the gated `http` module carries no test.
+webhooks       | compile-only | - | Only `HttpWebhookSink` / `HmacSha256Signer` are gated. The `WebhookSink` trait, `RecordingWebhookSink` and the deterministic default signer test at default features.
+dns            | compile-only | - | Only `HickoryDnsResolver` is gated. The `DnsResolver` trait, `StaticDnsResolver` and the pure record generation test at default features.
+
+# --- Compile-only, no gated test exists yet ---------------------------------
+
+smtp           | compile-only | - | Only `LettreMailSender` is gated and it carries no gated test; the `MailSender` trait and `RecordingMailSender` test at default features. The mail lane compiles smtp beside imap so a gated test added later has a home — RECLASSIFY THIS ROW to `partial` when one is added, which this script will force.
+telegram       | compile-only | - | Only `HttpTelegramApi` is gated and carries no gated test; the trait, inbound parsing, token scrubbing and `RecordingTelegramApi` test at default features. The feature IS enabled on the belt lane, for the belt contract rather than for tests of its own.
+tiny           | compile-only | - | A dependency switch: it brings the vendored `tinyagents` crate into scope for `openhuman`. No code is gated on `tiny` itself, so there is nothing for a lane to run.
+tinyagents     | compile-only | - | The implicit feature of the optional `tinyagents` dependency, enabled only via `tiny`. Nothing is gated on it directly.

@@ -17,10 +17,8 @@ are data-only definitions under `companies/` (a `company.toml` manifest plus a
 `frontend/`. Design notes and module specifications live in `docs/`, with
 `docs/spec/README.md` as the top-level architecture reference and
 `docs/modules/` holding per-surface design docs.
-Vendored runtime sources live under `vendor/` as Git submodules:
-
-- `vendor/openhuman/`
-- `vendor/tinyagents/`
+The vendored runtime source is the `vendor/openhuman/` Git submodule. TinyAgents
+is inherited from OpenHuman at `vendor/openhuman/vendor/tinyagents/`.
 
 Prefer small modules with focused responsibilities. Keep core type definitions
 in a dedicated `types.rs` file and package-local tests in the module file or a
@@ -35,8 +33,9 @@ dedicated `test.rs` file when they grow.
 - `cargo test`: run the full test suite.
 - `cargo run --bin opencompany`: run the CLI.
 - `cargo run --bin opencompany -- serve`: run the Axum HTTP server on `127.0.0.1:8080`.
-- `git submodule update --init --recursive`: initialize OpenHuman and TinyAgents.
-- `cargo check --features tiny`: compile against vendored TinyAgents.
+- `git submodule update --init vendor/openhuman`: initialize OpenHuman.
+- `scripts/ci/init-vendored-submodules.sh`: initialize its vendored crates.
+- `cargo check --features tiny`: compile against OpenHuman's TinyAgents pin.
 
 Run commands from the repository root unless a future workspace layout changes
 the module location.
@@ -61,6 +60,18 @@ either builds, runs and reports zero without failing anything. The gated `Rust
 per target via `scripts/ci/assert-integration-targets-run.sh`; if your target
 needs a feature set no lane builds, add the lane and run that script there too
 rather than loosening the `cfg`.
+
+A feature-gated test has the same problem one level up (issue #770). Cargo
+features are additive and every CI lane pins an explicit feature set, so a test
+behind `#[cfg(feature = "x")]` is compiled by `Check (--all-features)` and
+executed by nothing unless some lane enables `x` — and nothing reports the
+silence. Every feature therefore needs a row in `scripts/ci/feature-lanes.txt`
+saying which lane runs its tests (`tested`/`partial`) or why none does
+(`compile-only`, with a reason). `scripts/ci/assert-feature-lanes.sh` fails on an
+unclassified feature, and fails a `compile-only` row that turns out to have a
+gated test. When you add the lane, run it through
+`scripts/ci/run-scoped-suite.sh`, which asserts a non-zero count — a filter that
+selects nothing exits 0.
 
 Maintain at least 80% coverage for meaningful library behavior. Document any
 intentionally untested edge case in the PR description.

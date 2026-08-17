@@ -40,6 +40,8 @@ id = "gate"
 kind = "condition"
 name = "Store update?"
 summary = "Branch on whether the store needs a refresh."
+[node.config]
+field = "=item.store_update"
 
 [[node]]
 id = "store"

@@ -2,7 +2,11 @@ import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { DeliveryReport } from "@/api/workflows";
+import type {
+  DeliveryReport,
+  WorkflowBlockedNode,
+  WorkflowRunApprovalRow,
+} from "@/api/workflows";
 
 /**
  * One attention item off the company → operator SSE feed (issue #66). Mirrors
@@ -32,7 +36,13 @@ export type CompanyStreamEvent =
       parentId?: string;
     }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
-  | { type: "task_steered"; seq: number; atMillis: number; taskId: string; action: string }
+  | {
+      type: "task_steered";
+      seq: number;
+      atMillis: number;
+      taskId: string;
+      action: string;
+    }
   // A board card was written (issue #464) — the frame the board had no way to
   // learn about anything from. Emitted by the host's task store, so it fires
   // for a card opened from chat intake, from a delegation, from the publish
@@ -73,19 +83,34 @@ export type CompanyStreamEvent =
        *  newer host is not a type error. */
       change: string;
     }
-  // A dispatched card's run finished (issue #185). The host has projected this
-  // since #185; the console named no type for it, so it fell through to
-  // `default:` and was dropped — the same "the view does not subscribe" half of
-  // #464, one event over. A settle moves the card between columns, so the board
-  // wants it.
+  // A dispatched card's run finished (issue #185/#377). The host has projected
+  // this since #185; the console named no type for it until #464, so it fell
+  // through to `default:` and was dropped — the same "the view does not
+  // subscribe" half of #464, one event over. A settle moves the card between
+  // columns, so the board wants it.
+  //
+  // Issue #377 made it a *chat* frame as well as a board one, and reshaped it
+  // in both directions:
+  //
+  // - `chatId` in: the conversation the card was raised from, captured on the
+  //   card at raise time. Absent when nothing raised it from a chat — a
+  //   board-created card, a scheduler's. Such a settle belongs to no channel
+  //   and gets no marker, exactly as a `chatId`-less `approval_parked` stays on
+  //   the Approvals page.
+  // - `output` out: the run's prose already reaches the same channel as the
+  //   orchestrator's relay bubble, so the host stopped projecting it rather
+  //   than leave a second copy on the wire for a future reader to render.
+  //   Nothing in this console read it.
   | {
       type: "desk_task_completed";
       seq: number;
       atMillis: number;
       taskId: string;
+      /** The *responder* that ran it — an agent id, never a channel id. */
       desk: string;
-      output: string;
       column: string;
+      /** The channel the card was raised in; absent for a board-created card. */
+      chatId?: string;
     }
   | {
       type: "mcp_call_failed";
@@ -117,9 +142,27 @@ export type CompanyStreamEvent =
       kind: string;
       chatId?: string;
     }
-  | { type: "approval_resolved"; seq: number; atMillis: number; approvalId: string; verdict: string }
-  | { type: "lifecycle_changed"; seq: number; atMillis: number; from: string; to: string }
-  | { type: "payment_received"; seq: number; atMillis: number; amountUsd: number; memo: string }
+  | {
+      type: "approval_resolved";
+      seq: number;
+      atMillis: number;
+      approvalId: string;
+      verdict: string;
+    }
+  | {
+      type: "lifecycle_changed";
+      seq: number;
+      atMillis: number;
+      from: string;
+      to: string;
+    }
+  | {
+      type: "payment_received";
+      seq: number;
+      atMillis: number;
+      amountUsd: number;
+      memo: string;
+    }
   // A workflow run finished (issue #228), from either entry point. The whole
   // point is the *scheduled* case: nobody is watching a cron run, so without
   // this an owner summary that failed to send would be silent until someone
@@ -144,6 +187,26 @@ export type CompanyStreamEvent =
        * just pressed Cancel that the run finished fine.
        */
       cancelled?: boolean;
+      /**
+       * System notices raised about the run (issue #638), e.g. that gated tool
+       * calls past the per-batch cap were discarded. Absent on the vast
+       * majority of runs. Not a failure — see `WorkflowRunOutcome.notices`.
+       */
+      notices?: string[];
+      /**
+       * The nodes this run blocked on a person (issue #881). Absent when
+       * nothing blocked.
+       *
+       * A blocked run carries NO `error` and is not `cancelled`, so without
+       * reading this a console watching a run settle would paint it green —
+       * and then the history it reloads a moment later would say it blocked.
+       */
+      blockedNodes?: WorkflowBlockedNode[];
+      /**
+       * The approvals this run parked (issue #880) — a receipt of what it
+       * opened, including the parks that failed.
+       */
+      approvals?: WorkflowRunApprovalRow[];
     }
   // Issue #371/#382: the live per-node progress trail. A run announces itself,
   // then brackets each non-trigger node with a *started* frame as it begins and
@@ -303,6 +366,23 @@ interface Options {
    */
   onTaskEvent?: (event: CompanyStreamEvent) => void;
   /**
+   * Called for each `desk_task_completed` frame (issue #377) so the shell can
+   * post a card-linked system marker into the channel the card was raised in.
+   *
+   * Beside {@link Options.onTaskEvent}, not instead of it: one frame, two
+   * genuinely different reactions. The board still wants its refetch tick — a
+   * settle moves a card between columns — and the channel wants a line saying
+   * the card settled and where. Folding them would force one subscriber to be
+   * both a counter and a payload.
+   *
+   * Takes the **payload**, for the same reason {@link Options.onWorkspaceEvent}
+   * does: the reaction depends on *which* conversation and *which* column, and
+   * a counter can say neither. The frame-loss trap that made the workflow
+   * canvas fold an event window does not apply — a dropped frame costs one
+   * marker that the next hydration restores from history, never wrong state.
+   */
+  onDispatchTerminal?: (event: CompanyStreamEvent) => void;
+  /**
    * Called for each `workspace_changed` frame (issue #327) so the Workspace
    * view can re-read the tree — and the open note — live.
    *
@@ -390,6 +470,7 @@ export function useEvents(
     pendingApprovals,
     onAgentReply,
     onTaskEvent,
+    onDispatchTerminal,
     onWorkspaceEvent,
     onTurnEvent,
     onWorkflowRunEvent,
@@ -406,6 +487,10 @@ export function useEvents(
   useEffect(() => {
     onTaskEventRef.current = onTaskEvent;
   }, [onTaskEvent]);
+  const onDispatchTerminalRef = useRef(onDispatchTerminal);
+  useEffect(() => {
+    onDispatchTerminalRef.current = onDispatchTerminal;
+  }, [onDispatchTerminal]);
   const onWorkspaceEventRef = useRef(onWorkspaceEvent);
   useEffect(() => {
     onWorkspaceEventRef.current = onWorkspaceEvent;
@@ -466,6 +551,7 @@ export function useEvents(
           handleEvent(event, {
             onAgentReply: onAgentReplyRef.current,
             onTaskEvent: onTaskEventRef.current,
+            onDispatchTerminal: onDispatchTerminalRef.current,
             onWorkspaceEvent: onWorkspaceEventRef.current,
             onTurnEvent: onTurnEventRef.current,
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
@@ -503,10 +589,14 @@ export function useEvents(
  * picker), so which subscriber a type reaches is worth pinning directly rather
  * than only through a mounted hook.
  */
-export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers): void {
+export function handleEvent(
+  event: CompanyStreamEvent,
+  subscribers: Subscribers,
+): void {
   const {
     onAgentReply,
     onTaskEvent,
+    onDispatchTerminal,
     onWorkspaceEvent,
     onTurnEvent,
     onWorkflowRunEvent,
@@ -549,8 +639,22 @@ export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers)
     // toasts that do matter. The card appearing on the board IS the
     // notification.
     case "task_card_changed":
+      onTaskEvent?.(event);
+      break;
+    // Issue #377: the settle is two facts at once, so it reaches two
+    // subscribers. The board gets its tick, exactly as it has since #464 — a
+    // settle moves a card between columns. The channel the card was raised in
+    // gets a marker saying it settled and where, which is the fact that was
+    // missing: a reader watching only the relay prose could not tell a card
+    // that parked in `paused` from one that finished.
+    //
+    // Still **no toast**, and for the reason written above the board arm: this
+    // fires on every settle, and the marker appearing in the channel IS the
+    // notification. A toast on top would be the second notification for one
+    // action that #379 argues against.
     case "desk_task_completed":
       onTaskEvent?.(event);
+      onDispatchTerminal?.(event);
       break;
     // Issue #327, and **no toast** for the same reason the board frames above
     // raise none — more strongly, if anything. A workspace write is not an
@@ -589,9 +693,12 @@ export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers)
       // Refresh first, then say so. The refresh is what settles an inline card
       // whose decision was made on the Approvals page (or in another tab).
       onApprovalEvent?.(event);
-      toast(event.verdict === "approve" ? "Approval granted" : "Approval denied", {
-        description: "An approval was just resolved.",
-      });
+      toast(
+        event.verdict === "approve" ? "Approval granted" : "Approval denied",
+        {
+          description: "An approval was just resolved.",
+        },
+      );
       break;
     case "lifecycle_changed":
       toast(`Company is now ${event.to}`, {

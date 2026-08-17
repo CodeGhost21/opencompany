@@ -54,9 +54,9 @@ use crate::Result;
 use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyId;
-use crate::ports::{EventLog, WorkflowRun, WorkflowRunner};
-use crate::runtime::RunSupervisor;
+use crate::ports::{EventLog, WorkflowRun, WorkflowRunContext, WorkflowRunner};
 use crate::runtime::workflow_outcome::record_run_finished;
+use crate::runtime::{RunGuard, RunSupervisor};
 
 /// Everything starting a supervised workflow run needs, and nothing else.
 #[derive(Clone)]
@@ -109,23 +109,66 @@ impl WorkflowSpawn {
     /// [`record_run_finished`] must not write a `WorkflowRunFinished` for it any
     /// more than the runner writes a `WorkflowRunStarted`. Every entry point but
     /// the run route passes `false`; a scheduled or resumed run is always real.
+    ///
+    /// # Fallible before it spawns (issue #401)
+    ///
+    /// [`begin`](RunSupervisor::begin) admits the run against the company's
+    /// concurrency ceiling *before* any task exists, so a company at its cap
+    /// gets an `Err(WorkflowRunLimit)` here and **nothing is started** — no
+    /// task, no `WorkflowRunStarted`, no run id. A dry run counts too: it drives
+    /// the real engine and spends real inference, so it is registered like any
+    /// other run and the flag is only stamped afterwards.
     pub fn spawn(
         self,
         workflow: WorkflowFile,
         input: Value,
         scheduled: bool,
         dry_run: bool,
-    ) -> (String, JoinHandle<Result<WorkflowRun>>) {
+    ) -> Result<(String, JoinHandle<Result<WorkflowRun>>)> {
         // Issue #371 mints the id above the runner so the error arm can still
         // correlate; issue #383 mints it HERE, through the supervisor, so the
         // same id is also an address an operator can send "stop" to.
         // Deliberately not a second identifier — the run id the console already
         // correlates SSE frames on IS the cancellation handle.
         //
-        // Issue #542: the dry flag is stamped on the freshly-minted context
-        // AFTER `begin`, so the supervisor is untouched — a dry run registers
-        // and cancels exactly like a real one.
-        let (mut ctx, guard) = self.supervisor.begin(&workflow.id, scheduled);
+        // Issue #401: `begin` is the concurrency choke point and is fallible —
+        // over the cap it refuses here, before the `tokio::spawn` in
+        // `spawn_admitted`, so a rejected run leaves nothing behind to journal
+        // or reap.
+        let (ctx, guard) = self.supervisor.begin(&workflow.id, scheduled)?;
+        Ok(self.spawn_admitted(ctx, guard, workflow, input, dry_run))
+    }
+
+    /// Spawns a run whose slot the caller has **already** admitted through
+    /// [`RunSupervisor::begin`], threading in the resulting `(ctx, guard)`.
+    ///
+    /// [`spawn`](Self::spawn) is `begin` + this. The split exists for the cron
+    /// [`WorkflowScheduler`](super::WorkflowScheduler) (issue #661): it must
+    /// order admission *before* its durable minute-claim, so that a company at
+    /// its in-flight cap never claims (and durably burns) a minute it cannot
+    /// run. It therefore calls `begin` itself, on the tick thread, holds the
+    /// guard across `claim_fire`, and only then hands the admitted `(ctx, guard)`
+    /// here to start the run — with the guard already counting against the cap,
+    /// so a same-tick sibling schedule sees an exact count rather than a stale
+    /// one. Every other caller uses [`spawn`](Self::spawn) and never sees the
+    /// guard.
+    ///
+    /// Infallible: the fallible step is `begin`, which the caller has already
+    /// passed. `scheduled` for the journal is read off the admitted `ctx`, so it
+    /// cannot disagree with what `begin` registered.
+    ///
+    /// `dry_run` (issue #542) is stamped on the admitted context here rather than
+    /// at `begin`, so the supervisor is untouched — a dry run registers and
+    /// cancels exactly like a real one.
+    pub(crate) fn spawn_admitted(
+        self,
+        mut ctx: WorkflowRunContext,
+        guard: RunGuard,
+        workflow: WorkflowFile,
+        input: Value,
+        dry_run: bool,
+    ) -> (String, JoinHandle<Result<WorkflowRun>>) {
+        let scheduled = ctx.scheduled;
         ctx.dry_run = dry_run;
         let run_id = ctx.run_id.clone();
         let handle = tokio::spawn(async move {

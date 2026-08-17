@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Enterprise Sales Organization harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -7,37 +7,17 @@ name = "Agentic Enterprise Sales Organization"
 output = "Qualified pipeline and proposals"
 human_role = "Closing strategic accounts"
 
-[[agent]]
-id = "lead_gen"
-role = "Lead Generation"
-description = "Generate and qualify leads."
-
-[[agent]]
-id = "outreach_personalizer"
-role = "Outreach Personalizer"
-description = "Craft personalized outreach at scale."
-
-[[agent]]
-id = "crm_updater"
-role = "CRM Updater"
-description = "Keep CRM records accurate and current."
-
-[[agent]]
-id = "proposal_writer"
-role = "Proposal Writer"
-description = "Write tailored proposals."
-
-[[agent]]
-id = "contract_generator"
-role = "Contract Generator"
-description = "Generate contracts from templates."
-
-[[agent]]
-id = "follow_up_agent"
-role = "Follow-up Agent"
-description = "Nurture and follow up on pipeline."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["sales_pipeline"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

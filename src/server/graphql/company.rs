@@ -20,7 +20,7 @@ use super::skills::SkillGql;
 use super::tasks::TaskGql;
 use super::usage::{UsageGql, UsageRangeGql};
 use super::workflows::{WorkflowGql, WorkflowSummaryGql};
-use super::workspace::{FsNodeGql, WorkspaceFileGql};
+use super::workspace::{FsNodeGql, WorkspaceFileGql, WorkspaceSearchResultsGql};
 use super::{
     connections, finances, inbox, memory_facts, skills, tasks, usage, workflows, workspace,
 };
@@ -65,12 +65,20 @@ impl CompanyGql {
     }
 
     /// The approvals currently awaiting the operator for this company.
-    async fn approvals(&self) -> Vec<ApprovalGql> {
-        self.runtime
-            .pending_approvals()
-            .into_iter()
-            .map(ApprovalGql::from)
-            .collect()
+    ///
+    /// Contents are role-gated exactly as on the REST list (issue #618). This
+    /// is the surface that made the question worth asking: it maps the same
+    /// projection, so a redaction applied only to the REST handlers would leave
+    /// the whole boundary reachable through one GraphQL field.
+    async fn approvals(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<ApprovalGql>> {
+        let auth = ctx.data::<GqlAuth>()?;
+        Ok(crate::server::approval_visibility::for_principal(
+            auth,
+            self.runtime.pending_approvals(),
+        )
+        .into_iter()
+        .map(ApprovalGql::from)
+        .collect())
     }
 
     /// The company roster: manifest teammates plus operator-added overlays.
@@ -126,6 +134,17 @@ impl CompanyGql {
     /// One workspace file by id, with content and backlinks; null when absent.
     async fn workspace_file(&self, id: ID) -> async_graphql::Result<Option<WorkspaceFileGql>> {
         workspace::resolve_file(&self.runtime, id.as_str()).await
+    }
+
+    /// Which workspace notes mention `query`, matched case-insensitively as a
+    /// substring of note names and note bodies (issue #607).
+    async fn workspace_search(
+        &self,
+        query: String,
+        prefix: Option<String>,
+        limit: Option<i32>,
+    ) -> async_graphql::Result<WorkspaceSearchResultsGql> {
+        workspace::resolve_search(&self.runtime, &query, prefix.as_deref(), limit).await
     }
 
     /// The company-brain memory facts.
@@ -330,6 +349,19 @@ pub struct ApprovalGql {
     /// Epoch-millis the effect was parked. `Float` round-trips the full u64
     /// range that would overflow GraphQL's `Int`.
     pub at_millis: f64,
+    /// Whether `amountUsd` was withheld from this reader by their role (#618).
+    ///
+    /// Carried for the same reason it is on the REST summary: a `null` amount
+    /// otherwise means "this effect involves no money", and a Member looking at
+    /// a withheld payment would read it as a free action.
+    pub contents_hidden: bool,
+    /// The workflow run waiting on this approval, when one is (issue #880).
+    ///
+    /// Structural — a run id, nothing more — and it is what lets a reader join
+    /// a card on the Approvals page back to the run that opened it. Null for
+    /// every park with no workflow behind it (a chat turn, a scheduler tick, a
+    /// board task's attempt), which is the majority.
+    pub workflow_run_id: Option<String>,
 }
 
 impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
@@ -339,6 +371,8 @@ impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
             kind: summary.kind,
             amount_usd: summary.amount_usd,
             at_millis: summary.at_millis as f64,
+            contents_hidden: summary.contents_hidden,
+            workflow_run_id: summary.workflow_run_id,
         }
     }
 }
@@ -438,14 +472,21 @@ impl ChatGql {
             Ok(GqlAuth::User(user)) => Viewer::User(user.user_id.clone()),
             _ => Viewer::Operator,
         };
-        let first = first.max(0) as usize;
-        let (messages, total) = chat_history::history_for_desk(
+        let first = first.clamp(0, chat_history::CHAT_HISTORY_PAGE_LIMIT as i32) as usize;
+        let messages = chat_history::history_for_desk(
             &self.runtime,
             &self.desk.id,
             &self.desk.name,
             &viewer,
             before_seq,
             first,
+        )
+        .await?;
+        let total = chat_history::history_total_for_desk(
+            &self.runtime,
+            &self.desk.id,
+            &self.desk.name,
+            before_seq,
         )
         .await?;
         Ok(Page {

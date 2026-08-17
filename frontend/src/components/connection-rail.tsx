@@ -19,6 +19,7 @@
 import { Plus, Building2 } from "lucide-react";
 import { useState } from "react";
 
+import { isDesktopRuntime } from "@/api/transport";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -37,24 +38,75 @@ interface Props {
   selected: ConnectionId | null;
   onSelect: (id: ConnectionId) => void;
   onAdd: (baseUrl: string) => void;
+  /**
+   * Whether this is a hub deployment, which draws the rail at any count.
+   *
+   * Passed rather than read from config here, so this component keeps taking
+   * everything it renders from its props and stays drivable from a test
+   * without a global to arrange.
+   */
+  hub?: boolean;
 }
 
 /** How a connection's state reads, and what colour says so. */
 const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string }> = {
   connecting: { label: "Connecting…", dot: "bg-muted-foreground/50" },
-  live: { label: "Connected", dot: "bg-emerald-500" },
-  degraded: { label: "Partly available", dot: "bg-amber-500" },
+  live: { label: "Connected", dot: "bg-status-done" },
+  degraded: { label: "Partly available", dot: "bg-status-blocked" },
   down: { label: "Unreachable", dot: "bg-destructive" },
-  unauthenticated: { label: "Sign-in needed", dot: "bg-amber-500" },
+  unauthenticated: { label: "Sign-in needed", dot: "bg-status-blocked" },
 };
 
-export function ConnectionRail({ connections, selected, onSelect, onAdd }: Props) {
+/**
+ * How wide the rail is, as a CSS length — `w-14`.
+ *
+ * Exported because the app shell's sidebar is `position: fixed` and therefore
+ * positions against the viewport, not against the flex column it lives in. It
+ * has to be told how far in that column starts, and this is the only place
+ * that knows.
+ */
+export const CONNECTION_RAIL_WIDTH = "3.5rem";
+
+/**
+ * Whether the rail is on screen.
+ *
+ * One host is the ordinary web deployment, and a rail listing exactly one
+ * thing is furniture. It appears when there is a choice to make.
+ *
+ * **The desktop always draws it**, whatever the count. The old rule made an
+ * exception only for zero, on the reasoning that a browser always has its
+ * bootstrap connection so a real zero could only happen in the desktop — and
+ * that a desktop holding nothing needs the "+" the rail carries. Issue #613
+ * moved where that bites: the desktop no longer writes a same-origin bootstrap
+ * row, so a desktop whose embedded host *did* start now holds exactly **one**
+ * connection, which is its ordinary state rather than a rare one. Under the
+ * old rule that state drew no rail, and the "+" is the only way to reach a
+ * second host — so the working case became the one with no way out of it,
+ * which is the dead end the zero exception existed to prevent.
+ *
+ * **A hub always draws it too**, for the same reason and by the same argument.
+ * A hub has no bootstrap connection either (its origin serves assets, not a
+ * host), so it holds exactly the hosts someone added — and at zero the "+" in
+ * this rail is the only way to add the first one. Hiding the rail at one host
+ * would strand a hub with a single host as surely as it stranded the desktop.
+ *
+ * An ordinary same-origin browser console is unaffected: neither
+ * `isDesktopRuntime()` nor `hub` is true there, so one host still draws
+ * nothing.
+ *
+ * Exported so the shell can offset the sidebar by the same condition that
+ * draws the rail — two copies of this rule is how the sidebar ends up clipped
+ * under it again.
+ */
+export function connectionRailVisible(count: number, hub = false): boolean {
+  return count >= 2 || hub || isDesktopRuntime();
+}
+
+export function ConnectionRail({ connections, selected, onSelect, onAdd, hub }: Props) {
   const [adding, setAdding] = useState(false);
   const [url, setUrl] = useState("");
 
-  // One host is the ordinary web deployment, and a rail listing exactly one
-  // thing is furniture. It appears when there is a choice to make.
-  if (connections.length < 2) return null;
+  if (!connectionRailVisible(connections.length, hub)) return null;
 
   return (
     <nav

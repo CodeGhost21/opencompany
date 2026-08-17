@@ -32,6 +32,7 @@ use crate::harness::confine;
 // two note formats depending on which path touched it last.
 use crate::harness::lifecycle::{self, TaskRunEnd};
 use crate::harness::orchestrator;
+use crate::harness::policy::ApprovalScope;
 use crate::harness::publish::{self, WorkspaceSnapshot};
 use crate::runtime::advance::append_result;
 // `Delegation` is only named by the test-only `run_delegation` wrapper and the
@@ -70,11 +71,88 @@ use crate::ports::types::{
 };
 use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
+/// Deletes everything this turn's repository tools materialized, however the
+/// turn ends (issue #245).
+///
+/// The lifecycle a checkout needs is *exactly* a turn's, and a turn ends in five
+/// ways — a reply, an error, a steer cancel, redirect exhaustion, and a panic
+/// unwinding through the whole stack. A cleanup call written at the end of the
+/// happy path covers one of those. So the boundary is an RAII guard claimed at
+/// each entry point instead: `Drop` runs on all five, which is what makes "a
+/// checkout does not outlive the task that asked for it" a property of the
+/// control flow rather than a rule every future edit has to remember.
+///
+/// It purges on the way **in** as well, for the reason the publish claim clears
+/// on the way in: several turns share one `HarnessDeps` within a cycle, and a
+/// path that somehow left a checkout behind must not have it attributed — or
+/// silently reused — by the next one.
+///
+/// Best-effort by construction: a path that cannot be removed is logged and
+/// forgotten, and the boot sweep
+/// ([`repo::sweep_orphaned_checkouts`](crate::harness::repo::sweep_orphaned_checkouts))
+/// is the backstop. A janitor that could fail a turn would trade a disk problem
+/// for a lost answer.
+#[must_use = "the janitor deletes on drop; dropping it immediately removes this turn's checkouts"]
+pub struct CheckoutJanitor {
+    ledger: crate::harness::repo::CheckoutLedger,
+}
+
+impl CheckoutJanitor {
+    /// Claims the ledger for the span of one turn.
+    pub fn claim(ledger: &crate::harness::repo::CheckoutLedger) -> Self {
+        ledger.purge();
+        Self {
+            ledger: ledger.clone(),
+        }
+    }
+}
+
+impl Drop for CheckoutJanitor {
+    fn drop(&mut self) {
+        let removed = self.ledger.purge();
+        if removed > 0 {
+            tracing::debug!(removed, "[repo] removed this turn's checkouts");
+        }
+    }
+}
+
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
-    record: CompanyRecord,
+    /// The LLM triage escalation, built on first use (issue #678).
+    ///
+    /// Lazy because it needs the company id, and a brain outlives any one
+    /// record read; `OnceLock` because it is immutable once built and the cost
+    /// is a clone of two `Arc`s, not a model call.
+    triage: std::sync::OnceLock<crate::harness::triage::MeteredTriage>,
+    /// The company's record, **re-read from the store at the top of every
+    /// cycle** (issue #707).
+    ///
+    /// # Why this is not a build-time snapshot any more
+    ///
+    /// It used to be a plain `CompanyRecord`, assigned once in [`Self::new`] and
+    /// never again. Desk chat routing reads it — [`Self::responder_for`] →
+    /// [`Self::desk_lead`] → `effective_desk_members` → `overlay_desk_order` —
+    /// so an operator who reordered a desk, added a desk member, or created a
+    /// desk in the console kept reaching the *old* lead until the process
+    /// restarted. Nothing rebuilt the brain in between: the only caller of
+    /// [`rebuild_company`](crate::runtime::rebuild_company) is an
+    /// inference-settings change.
+    ///
+    /// It was also a **divergence**, not merely a lag. Every other consumer of
+    /// this state already loads per call — `delegate_to_desk` re-reads the
+    /// record on each tool call, and the REST desk surfaces re-read per request
+    /// — so the console and a delegation card would name the new lead while a
+    /// desk chat still routed to the old one. Refreshing here makes chat routing
+    /// do what the correct consumers already do, which removes the divergence
+    /// rather than adding a second mechanism to paper over it.
+    ///
+    /// Behind an `RwLock<Arc<…>>` so a reader is a lock-free-ish clone of a
+    /// handle rather than a copy of the manifest, and so the guard is never held
+    /// across an `await`. Private, and reached only through [`Self::record`]:
+    /// there is deliberately no way to read a stale one.
+    record: std::sync::RwLock<Arc<CompanyRecord>>,
     responder: String,
     /// The attempt records a dispatched card writes into (issue #242).
     ///
@@ -100,10 +178,71 @@ impl HarnessBrain {
         Self {
             pool,
             deps,
-            record,
+            record: std::sync::RwLock::new(Arc::new(record)),
             responder,
             runs: None,
+            triage: std::sync::OnceLock::new(),
         }
+    }
+
+    /// This company's record as of the current cycle's refresh.
+    ///
+    /// Returns a handle rather than a borrow so no lock is held across the
+    /// `await` points every caller here has. Within one cycle every call sees
+    /// the same record: the refresh happens once, at the top of
+    /// [`run_cycle`](Brain::run_cycle), so a turn cannot observe the operator
+    /// changing a desk halfway through its own routing.
+    fn record(&self) -> Arc<CompanyRecord> {
+        self.record
+            .read()
+            .expect("harness brain record poisoned")
+            .clone()
+    }
+
+    /// Edits the record in place, for tests that set a company up after the
+    /// brain exists. Production code changes this only through
+    /// [`Self::refresh_record`], which is why this is test-only.
+    #[cfg(test)]
+    fn mutate_record(&self, edit: impl FnOnce(&mut CompanyRecord)) {
+        let mut guard = self.record.write().expect("harness brain record poisoned");
+        let mut next = (**guard).clone();
+        edit(&mut next);
+        *guard = Arc::new(next);
+    }
+
+    /// Re-reads the record from the store, so this cycle routes on what the
+    /// operator has actually saved (issue #707).
+    ///
+    /// # The error path is loud, and never silently stale
+    ///
+    /// A failed load **propagates and fails the cycle**. Falling back to the
+    /// previous record would reintroduce exactly the defect this exists to fix,
+    /// and would do it invisibly — the operator would see a turn that appeared
+    /// to succeed while routing on state they had already changed. It is also
+    /// not a new failure mode: the cycle path already loads this same record
+    /// with `?` (`runtime::cycle`), so a store this broken fails the turn
+    /// either way.
+    ///
+    /// `Ok(None)` — no persisted record — **keeps the current one** rather than
+    /// clearing it. That is the same choice [`RuntimeBuilder`] makes when it
+    /// seeds a brain (an absent record contributes no overlays rather than
+    /// erasing the manifest), and the alternative would turn a company whose
+    /// record has not been written yet into one with no roster at all.
+    async fn refresh_record(&self) -> Result<()> {
+        let id = self.record().id.clone();
+        match self.deps.store.load(&id).await? {
+            Some(fresh) => {
+                *self.record.write().expect("harness brain record poisoned") = Arc::new(fresh);
+            }
+            None => {
+                tracing::warn!(
+                    company = %id,
+                    "no persisted record to refresh from; the cycle routes on the record this \
+                     brain was built with"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Overrides which roster agent answers operator messages.
@@ -170,6 +309,10 @@ impl HarnessBrain {
             tool: String,
             instruction: String,
             origin_thread: Option<String>,
+            /// The task this approval was parked from (issue #796), so the
+            /// re-issue turn can reclaim its held-across-park checkout and stamp
+            /// the ledger so `repo_publish` can name the task branch.
+            origin_task: Option<String>,
         }
 
         let grants = self.deps.approval_requests.grants();
@@ -188,6 +331,7 @@ impl HarnessBrain {
                 tool: grant.tool,
                 agent: grant.agent,
                 origin_thread: grant.origin_thread,
+                origin_task: grant.origin_task,
             }
         } else if let Some(standing) = grants.peek_standing_by_approval(approval_id) {
             // No exact-arguments pin, and deliberately so: a standing grant
@@ -204,14 +348,18 @@ impl HarnessBrain {
                 tool: standing.tool,
                 agent: standing.agent,
                 origin_thread: standing.origin_thread,
+                origin_task: standing.origin_task,
             }
         } else {
             return Ok(None);
         };
         let instruction = grant.instruction.clone();
+        // Issue #796: the task (if any) this approval resumes. Bound before the
+        // struct's fields are moved into the run below.
+        let origin_task = grant.origin_task.clone();
 
         let guard = self.deps.steer.register(
-            &self.record.id,
+            &self.record().id,
             InflightEntry {
                 key: format!("approval:{approval_id}"),
                 task_id: None,
@@ -225,6 +373,8 @@ impl HarnessBrain {
         let control = guard.control().clone();
 
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        // Bound for the runner's whole lifetime (issue #707): one turn, one record.
+        let record = self.record();
         // Issue #453: the same argument as the publish claim below, one queue
         // over. This is a full agent turn with the whole toolbelt, so it can
         // reach `review_task` / `assign_task` / `spawn_task` — and nothing here
@@ -252,13 +402,57 @@ impl HarnessBrain {
                     .pending_publishes
                     .claim(publish::PublishDestination::Conversation)
             });
+        // Issue #245: a re-dispatched approval is a full agent turn with the
+        // whole toolbelt, so it can check a repository out, and the janitor
+        // claimed here deletes what this turn creates. Issue #796 refines what
+        // "this turn's checkout" is: a turn resuming a task first reclaims that
+        // task's held-across-park tree, so the resumed step operates on the same
+        // working tree — and the commit it needs — the parked step left behind.
+        let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
+        // Issue #796: at the claim, drop any task's retained checkout whose
+        // approval was denied or expired — no live grant names it, so nothing
+        // will ever resume it. `grants` is the same live set peeked above.
+        self.deps
+            .checkouts
+            .sweep_orphans(|task| grants.any_for_task(task));
+        // Issue #735/#796: stamp the task this grant resumes so `repo_publish`
+        // can name its branch, and reclaim the checkout the parked step left so
+        // the resumed step — a commit, a publish — finds its own work. A
+        // re-dispatch with no task (a plain operator-chat approval) clears the
+        // cell and reclaims nothing, exactly as #735 did.
+        self.deps.checkouts.set_task(origin_task.clone());
+        if let Some(task) = &origin_task {
+            self.deps.checkouts.reclaim(task);
+        }
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
         let outcome = run_turn
-            .run_steered_background(&self.record.id, &grant.agent, &instruction, &control, None)
+            .run_steered_background(
+                &self.record().id,
+                &grant.agent,
+                &instruction,
+                &control,
+                None,
+            )
             .await;
         drop(guard);
+        // Issue #796: hold the task's checkout across the turn boundary on EVERY
+        // re-issue, not only one that parks a new approval.
+        //
+        // A write is a chain of separately-approved steps — checkout, edit,
+        // commit, publish — and an operator commonly approves them in a batch, so
+        // the grants exist up front. Re-issuing one grant then need NOT queue a
+        // new approval, yet the checkout it just materialized (or the commit it
+        // just made) must still be there when the next grant is re-issued in its
+        // own turn. Retaining only on a fresh park dropped exactly that tree the
+        // turn it was created. So retain unconditionally here; the checkout is
+        // reclaimed on the next re-issue, and `sweep_orphans` at the next claim
+        // deletes it once no live grant names the task — the flow finished, was
+        // denied, or expired.
+        if let Some(task) = &origin_task {
+            self.deps.checkouts.retain_for_task(task);
+        }
 
         let published = self.deps.pending_publishes.drain();
         if !published.is_empty()
@@ -292,10 +486,10 @@ impl HarnessBrain {
         // on this path. That is a strict improvement on dropping it unrun, and it
         // is recorded on the card the hand-off opens.
         let drained = match self
-            .delegation_runner(&run_turn)
+            .delegation_runner(&run_turn, &record)
             .drain_and_execute(
                 grant.origin_thread.as_deref(),
-                false,
+                delegation::MessageContext::default(),
                 delegation::HandOffs::Run,
             )
             .await
@@ -377,7 +571,7 @@ impl HarnessBrain {
             return Ok(None);
         };
         let Some(mut card) = tasks
-            .list(&self.record.id)
+            .list(&self.record().id)
             .await?
             .into_iter()
             .find(|t| t.id == task_id)
@@ -389,7 +583,7 @@ impl HarnessBrain {
 
         // Issue #205: who works this card, resolved against the FULL roster —
         // teammates, operator-overlay teammates and desks alike.
-        let resolution = assignee::resolve(&self.record, &card.assignee);
+        let resolution = assignee::resolve(&self.record(), &card.assignee);
         if let Some(reason) = resolution.rejection() {
             // The card names somebody this company does not have. Before this
             // it dispatched to the orchestrator anyway and the board kept the
@@ -438,7 +632,7 @@ impl HarnessBrain {
         if resolution.links_working_agent() && card.assignee != responder {
             card.assignee = responder.clone();
             card.updated_at_millis = now_millis();
-            tasks.upsert(&self.record.id, &card).await?;
+            tasks.upsert(&self.record().id, &card).await?;
         }
 
         // Issue #244: the dispatch-start baseline for "did this agent write
@@ -451,7 +645,7 @@ impl HarnessBrain {
         // and the whole detection path skipped rather than diffed against a
         // workspace nobody touched.
         let dispatched_responder = responder.clone();
-        let workspace = agent_workspace(&self.deps.workspace_root, &self.record.id, &responder);
+        let workspace = agent_workspace(&self.deps.workspace_root, &self.record().id, &responder);
         let workspace_at_dispatch = WorkspaceSnapshot::take(&workspace);
         // Claim the publish queue for this dispatch (#445). The claim clears on
         // the way in for the reason the bare `clear()` here always did — a chat
@@ -482,6 +676,26 @@ impl HarnessBrain {
         // redirected turn's work, which is a different decision from who is
         // entitled to queue.
         let _delegation_claim = self.deps.delegations.claim();
+        // Issue #245: and the checkout ledger, for the same span. A dispatched
+        // card is where a `repo_checkout` is most likely to happen, and the
+        // guard's `Drop` is what deletes the tree on every exit — success,
+        // error, cancel, redirect exhaustion and panic-unwind alike.
+        let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
+        // Issue #796: at the claim, drop any task's retained checkout whose
+        // approval was denied or expired — no live grant names it, so nothing
+        // will resume it.
+        {
+            let grants = self.deps.approval_requests.grants();
+            self.deps
+                .checkouts
+                .sweep_orphans(|task| grants.any_for_task(task));
+        }
+        // Issue #735: this is a dispatched card, so `repo_publish` names its
+        // branch `oc/<company>/<card>`. Stamped on the same per-turn cell the
+        // janitor above claims. A parked step of this card resumes through the
+        // approval re-issue path (which reclaims the tree there, issue #796), not
+        // by re-running the card, so nothing is reclaimed here.
+        self.deps.checkouts.set_task(Some(card.id.clone()));
         // Issue #339, same argument for staged workflow references: an operator
         // chat turn earlier in this cycle may have run a workflow through the
         // orchestrator's tool, and that run belongs to the conversation, not to
@@ -492,7 +706,7 @@ impl HarnessBrain {
         // RAII `Drop` deregisters on every exit path (success, error, redirect
         // exhaustion), so a crashed turn never leaves a ghost row in the strip.
         let guard = self.deps.steer.register(
-            &self.record.id,
+            &self.record().id,
             InflightEntry {
                 key: card.id.clone(),
                 task_id: Some(card.id.clone()),
@@ -514,6 +728,8 @@ impl HarnessBrain {
         // Route the background turn through the brain-agnostic `RunTurn` seam
         // (issue #176), re-attaching `HarnessDeps` behind `HarnessRunTurn`.
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        // Bound for the runner's whole lifetime (issue #707): one turn, one record.
+        let record = self.record();
         // Issue #242: where this attempt's own approval requests begin. The
         // queue is shared with any chat turn earlier in the same cycle and is
         // append-only until the cycle-end drain, so a position taken here stays
@@ -540,6 +756,12 @@ impl HarnessBrain {
             // part of the loop and never clears, so a nudge cannot discard what
             // the turn it is asking about published.
             self.deps.pending_publishes.clear();
+            // Issue #245, same argument for a checkout: a redirect abandons the
+            // previous turn's work, and a working tree that turn cloned is part
+            // of that work. Deleting it here also means a redirect re-runs
+            // against a fresh checkout rather than one the abandoned turn may
+            // have half-patched.
+            self.deps.checkouts.purge();
             // Issue #339: an abandoned redirect's workflow run is abandoned with
             // it, for the same reason — the card's link must name what the turn
             // that actually settled produced, not what a discarded one did.
@@ -549,7 +771,7 @@ impl HarnessBrain {
                 // discarded into the note), so its live turn frames must not leak
                 // onto the console timeline — run it un-streamed (#125 review).
                 .run_steered_background(
-                    &self.record.id,
+                    &self.record().id,
                     &responder,
                     &instruction,
                     &control,
@@ -596,7 +818,7 @@ impl HarnessBrain {
                             // way to `todo` — the hand-off did happen, and a
                             // re-dispatch should start from who it was given to.
                             let handoff = match self
-                                .delegation_runner(&run_turn)
+                                .delegation_runner(&run_turn, &record)
                                 .for_task(&card.id)
                                 // The delegate's turn is part of THIS attempt —
                                 // its steps and its spend belong to the card's
@@ -729,6 +951,17 @@ impl HarnessBrain {
                 }
             }
         };
+
+        // Issue #796: if this dispatch parked (a step it ran needs approval),
+        // hold whatever checkout it built across that park so the approved step
+        // resumes on the same tree. A dispatch that ended without parking keeps
+        // the pre-#796 behaviour — the janitor's `Drop` deletes its checkout.
+        // Orphan cleanup for the denied/expired case is the `sweep_orphans` at
+        // the next claim, which is safe against a still-pending approval in a way
+        // an unconditional purge here would not be.
+        if self.deps.approval_requests.queued() > approvals_before {
+            self.deps.checkouts.retain_for_task(&card.id);
+        }
 
         // ── Issue #244: the deliverable gate, and the one nudge ─────────────
         //
@@ -954,7 +1187,7 @@ impl HarnessBrain {
             card.column = column.to_string();
         }
         card.updated_at_millis = now_millis();
-        tasks.upsert(&self.record.id, &card).await?;
+        tasks.upsert(&self.record().id, &card).await?;
         // `guard` drops here → the run leaves the in-flight strip.
         drop(guard);
 
@@ -1064,7 +1297,7 @@ impl HarnessBrain {
         let text = format!("dispatch refused: {reason}");
         settle(&mut card, TaskRunEnd::Failed, &orchestrator, &text);
         card.updated_at_millis = now_millis();
-        tasks.upsert(&self.record.id, &card).await?;
+        tasks.upsert(&self.record().id, &card).await?;
         // A refusal is a real, terminal attempt — one that spent nothing. It
         // settles like any other ending (#242), so the card's run history shows
         // "this was tried and refused, and why" rather than a gap.
@@ -1098,7 +1331,7 @@ impl HarnessBrain {
         let run_id = run_id?;
         let runs = self.runs.as_ref()?;
         Some(Arc::new(RunTraceSink::new(
-            self.record.id.clone(),
+            self.record().id.clone(),
             run_id,
             Arc::clone(runs),
         )))
@@ -1159,11 +1392,11 @@ impl HarnessBrain {
             step_count: sink.step_count(),
         };
         if let Err(err) = runs
-            .finish_run(&self.record.id, sink.run_id(), outcome)
+            .finish_run(&self.record().id, sink.run_id(), outcome)
             .await
         {
             tracing::warn!(
-                company = %self.record.id,
+                company = %self.record().id,
                 run = %sink.run_id(),
                 error = %err,
                 "[runs] could not settle an attempt row; the dispatch itself landed"
@@ -1226,7 +1459,7 @@ impl HarnessBrain {
     ) -> Option<String> {
         let instruction = publish::nudge_instruction(brief, reply, unpublished, scan_partial);
         let outcome = run_turn
-            .run_steered_background(&self.record.id, responder, &instruction, control, sink)
+            .run_steered_background(&self.record().id, responder, &instruction, control, sink)
             .await;
         // A steer that landed during the nudge is consumed here so it cannot
         // leak into a later `control.take()` and be mistaken for a steer of the
@@ -1286,7 +1519,7 @@ impl HarnessBrain {
         // General desk.
         if let Err(err) = events
             .append(
-                &self.record.id,
+                &self.record().id,
                 CompanyEvent::AgentReply {
                     parent: None,
                     chat_id: card.id.clone(),
@@ -1310,13 +1543,27 @@ impl HarnessBrain {
         // it is strictly worse than dropping the reply.
         if let Err(err) = events
             .append(
-                &self.record.id,
+                &self.record().id,
                 CompanyEvent::DeskTaskCompleted {
                     task_id: card.id.clone(),
                     desk: responder.to_string(),
                     output: result_text,
                     column: card.column.clone(),
                     artifact_ids,
+                    // Issue #377: the conversation this card was raised from,
+                    // **captured** off the card rather than derived at
+                    // completion. `responder` above is an agent id and a
+                    // channel is a desk id, so the origin cannot be recovered
+                    // from any other field on this event — and re-deriving it
+                    // would put a second rule beside `chat_history`'s, which is
+                    // the drift issue #435 exists to have removed.
+                    //
+                    // This is the one emission point every dispatch ending
+                    // passes through (`run_task`, `refuse_dispatch`), which is
+                    // why capturing it here cannot miss a path. A board-created
+                    // card carries `None` and gets no channel marker: no
+                    // conversation raised it.
+                    origin_chat_id: card.origin_chat_id.clone(),
                 },
             )
             .await
@@ -1339,7 +1586,7 @@ impl HarnessBrain {
     /// orchestrator to name at all, which is the same empty-roster case
     /// [`orchestrator::orchestrator_id`] already tolerates.
     fn orchestrator(&self) -> String {
-        orchestrator::orchestrator_id(&self.record.manifest.agents)
+        orchestrator::orchestrator_id(&self.record().manifest.agents)
             .unwrap_or_else(|| self.responder.clone())
     }
 
@@ -1359,11 +1606,11 @@ impl HarnessBrain {
     /// text and never the link.
     async fn attempt_ordinal(&self, run_id: &str) -> Option<u32> {
         let runs = self.runs.as_ref()?;
-        match runs.get_run(&self.record.id, run_id).await {
+        match runs.get_run(&self.record().id, run_id).await {
             Ok(run) => run.map(|run| run.attempt),
             Err(err) => {
                 tracing::warn!(
-                    company = %self.record.id,
+                    company = %self.record().id,
                     run = %run_id,
                     error = %err,
                     "[runs] could not read an attempt's ordinal for the card's link; the link \
@@ -1464,7 +1711,7 @@ impl HarnessBrain {
             return Ok(Vec::new());
         };
 
-        let mut on_card = artifacts.list(&self.record.id, Some(&card.id)).await?;
+        let mut on_card = artifacts.list(&self.record().id, Some(&card.id)).await?;
         let mut written = Vec::with_capacity(published.len());
         for pending in published {
             let at = now_millis();
@@ -1491,7 +1738,7 @@ impl HarnessBrain {
                     let mut found = on_card.remove(index);
                     prior_node = found.workspace_node_id().map(str::to_string);
                     version = found.push_version(
-                        &pending.body,
+                        pending.payload.artifact_body(),
                         ArtifactAuthor::Agent,
                         author,
                         at,
@@ -1511,7 +1758,7 @@ impl HarnessBrain {
                         &card.id,
                         &pending.title,
                         pending.kind,
-                        &pending.body,
+                        pending.payload.artifact_body(),
                         author,
                         at,
                     )
@@ -1556,7 +1803,7 @@ impl HarnessBrain {
                 // the version pointing at the node that currently holds it.
                 record.stamp_workspace_node(node_id);
             }
-            artifacts.upsert(&self.record.id, &record).await?;
+            artifacts.upsert(&self.record().id, &record).await?;
 
             // **A failed mirror does not lose the deliverable.** An explicit
             // publish that could not be filed into the tree is still recorded
@@ -1571,48 +1818,112 @@ impl HarnessBrain {
                     agent_id: author,
                     task_id: &card.id,
                     source: &pending.source,
-                    body: &pending.body,
+                    payload: match &pending.payload {
+                        crate::harness::publish::PublishPayload::Text(text) => {
+                            artifact_mirror::MirrorPayload::Text(text)
+                        }
+                        crate::harness::publish::PublishPayload::Bytes { bytes, mime } => {
+                            artifact_mirror::MirrorPayload::Bytes { bytes, mime }
+                        }
+                    },
                     existing_node_id: prior_node.as_deref(),
                 };
-                match artifact_mirror::materialize(workspace.as_ref(), &self.record.id, target)
+                match artifact_mirror::materialize(workspace.as_ref(), &self.record().id, target)
                     .await
                 {
-                    Ok(node_id) => {
-                        // A second write only when the link actually changed:
-                        // a fresh publish (nothing was inherited) or a
-                        // re-publish whose node the operator deleted, which
-                        // `materialize` replaces with a new one. The ordinary
-                        // re-publish reuses its node and stores once.
-                        if record.workspace_node_id() != Some(node_id.as_str()) {
+                    Ok(mirrored) => {
+                        let node_id = mirrored.node_id;
+                        // Issue #663/#668: the version body was composed before
+                        // the store was asked, so it describes an outcome that
+                        // had not happened. Now it has — say what it was, and
+                        // record the digest the STORE computed so two versions
+                        // of one binary can be told apart.
+                        //
+                        // Always re-composed, never conditional on the link
+                        // having changed: an ordinary re-publish reuses its node
+                        // and would otherwise keep the previous version's
+                        // digest, which is precisely the "identical string"
+                        // failure #668 describes.
+                        let stored = pending.payload.artifact_body_for(
+                            crate::harness::publish::PayloadStorage::Stored {
+                                sha256: mirrored.sha256.as_deref(),
+                            },
+                        );
+                        // Only when it actually says something new. Prose is its
+                        // own body, so a text re-publish composes the identical
+                        // string and still stores once — the contract
+                        // `an_ordinary_republish_writes_the_artifact_once`
+                        // pins. A binary's body gains the store's digest, so it
+                        // differs and is worth the second write: without it the
+                        // version would keep the PREVIOUS digest, which is the
+                        // indistinguishable-versions defect (#668) with an extra
+                        // step.
+                        let body_changed =
+                            record.latest().is_some_and(|latest| latest.body != stored);
+                        if body_changed {
+                            record.amend_latest_body(stored);
+                        }
+                        let relinked = record.workspace_node_id() != Some(node_id.as_str());
+                        if relinked {
                             record.stamp_workspace_node(&node_id);
-                            // Warn rather than `?`: at this point BOTH surfaces
-                            // already hold this body and only the pointer
-                            // between them is missing, so failing the batch
-                            // would discard the remaining publishes' records to
-                            // report a link that heals on the next publish —
-                            // `materialize` finds an existing node by path and
-                            // re-adopts it rather than duplicating.
-                            if let Err(err) = artifacts.upsert(&self.record.id, &record).await {
-                                tracing::warn!(
-                                    task_id = %card.id,
-                                    source = %pending.source,
-                                    node = %node_id,
-                                    error = %err,
-                                    "[publish] the deliverable and its note are both stored but \
-                                     could not be linked; the next publish of this source \
-                                     re-adopts the note and repairs it"
-                                );
-                            }
+                        }
+                        // A second write only when the record actually changed:
+                        // a fresh publish, a re-publish whose node the operator
+                        // deleted, or a body that now carries an outcome it did
+                        // not before. Warn rather than `?` for the unchanged
+                        // reason — BOTH surfaces already hold this body and only
+                        // the record's copy is stale, so failing the batch would
+                        // discard the remaining publishes' records to report
+                        // something the next publish repairs.
+                        if (body_changed || relinked)
+                            && let Err(err) = artifacts.upsert(&self.record().id, &record).await
+                        {
+                            tracing::warn!(
+                                task_id = %card.id,
+                                source = %pending.source,
+                                node = %node_id,
+                                error = %err,
+                                "[publish] the deliverable and its note are both stored but the \
+                                 record could not be updated; the next publish of this source \
+                                 re-adopts the note and repairs it"
+                            );
                         }
                     }
-                    Err(err) => tracing::error!(
-                        task_id = %card.id,
-                        agent = %author,
-                        source = %pending.source,
-                        error = %err,
-                        "[publish] could not put the published file into the company workspace; \
-                         it is still recorded as an artifact"
-                    ),
+                    Err(err) => {
+                        // Issue #663. The record already claimed this file was
+                        // filed into the workspace. It was not, so the claim is
+                        // withdrawn rather than left standing — an operator who
+                        // opens the artifact and reads "open it there" and finds
+                        // nothing is the dangling-record failure #553 set out to
+                        // remove, arriving through the error path.
+                        //
+                        // The store's error is logged and NOT written to the
+                        // record: a version body is permanent and a backend
+                        // error can name host paths.
+                        tracing::error!(
+                            task_id = %card.id,
+                            agent = %author,
+                            source = %pending.source,
+                            error = %err,
+                            "[publish] could not put the published file into the company \
+                             workspace; the artifact record says so rather than promising a \
+                             file that is not there"
+                        );
+                        record.amend_latest_body(
+                            pending.payload.artifact_body_for(
+                                crate::harness::publish::PayloadStorage::Refused,
+                            ),
+                        );
+                        if let Err(err) = artifacts.upsert(&self.record().id, &record).await {
+                            tracing::error!(
+                                task_id = %card.id,
+                                source = %pending.source,
+                                error = %err,
+                                "[publish] the workspace refused the file AND the record could \
+                                 not be corrected; it still claims the file is stored"
+                            );
+                        }
+                    }
                 }
             }
             written.push(TaskOutputArtifact {
@@ -1678,7 +1989,7 @@ impl HarnessBrain {
             ));
         };
         let Some(mut card) = tasks
-            .list(&self.record.id)
+            .list(&self.record().id)
             .await?
             .into_iter()
             .find(|card| card.id == card_id)
@@ -1707,7 +2018,7 @@ impl HarnessBrain {
             card.assignee = agent.to_string();
         }
         card.updated_at_millis = now_millis();
-        tasks.upsert(&self.record.id, &card).await?;
+        tasks.upsert(&self.record().id, &card).await?;
         tracing::info!(
             task_id = %card.id,
             agent = %agent,
@@ -1787,6 +2098,8 @@ impl HarnessBrain {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         // The card is written **first**: an artifact's `task_id` must name a
         // card that exists. If the artifact writes then fail, the failure
@@ -1795,7 +2108,7 @@ impl HarnessBrain {
         // leave artifacts pointing at a card that was never created, which is
         // unreachable by every route and indistinguishable from the original
         // bug.
-        tasks.upsert(&self.record.id, &card).await?;
+        tasks.upsert(&self.record().id, &card).await?;
 
         // No run id: there is no attempt row behind a chat turn, and
         // `stamp_run` is skipped rather than given something invented.
@@ -1828,6 +2141,37 @@ impl HarnessBrain {
     /// orchestrator instead of the teammate the operator opened — the console
     /// would look like it were addressing an agent while talking to someone
     /// else.
+    ///
+    /// # Step 2 resolves the key rather than matching it exactly (issue #884)
+    ///
+    /// `chat` is a **human-and-console-typed** key: the console mints it from a
+    /// `TeamMember.id`, an operator can type one into a URL, and an audit script
+    /// can post one straight to the API. Matching it with the exact,
+    /// case-sensitive [`CompanyRecord::is_roster_agent`] meant any drift at all —
+    /// a capital letter, a console id that differs from the manifest id — read as
+    /// *unaddressed* and fell to arm 3, where an agent nobody asked answered
+    /// confidently and nothing said so.
+    /// [`CompanyRecord::resolve_roster_agent_id`] is documented as the resolver
+    /// for exactly this case, and returning its **canonical** id (rather than the
+    /// key as typed) is what stops the persona lookup one layer up in
+    /// [`HarnessBrain::agent_for`](crate::harness::HarnessBrain) missing on the
+    /// same difference. `is_roster_agent` keeps its exact-match contract for the
+    /// machine-written desk overlay.
+    ///
+    /// Case-folding can only claim keys that resolve to nothing today, so no
+    /// existing thread moves. The one behaviour it introduces: two roster ids
+    /// differing **only** by case make a mixed-case key order-dependent —
+    /// `resolve_roster_agent_id` returns the first match, manifest agents before
+    /// overlay ones. That roster is already ambiguous for every other typed key
+    /// (a card assignee resolves the same way), so this does not add a namespace
+    /// problem, it inherits one.
+    ///
+    /// # The fall-through warns (issue #884)
+    ///
+    /// Arm 3 answers as the orchestrator whether the message was unaddressed or
+    /// addressed to something that does not exist, and those are very different
+    /// facts. The log line is what makes the second one a greppable event in a
+    /// tenant's log instead of a silent wrong-agent answer.
     fn responder_for(&self, chat: Option<&str>) -> String {
         let Some(chat) = chat else {
             return self.responder.clone();
@@ -1835,9 +2179,16 @@ impl HarnessBrain {
         if let Some(lead) = self.desk_lead(chat) {
             return lead;
         }
-        if self.record.is_roster_agent(chat) {
-            return chat.to_string();
+        if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
+            return agent;
         }
+        tracing::warn!(
+            company = %self.record().id,
+            chat = %chat,
+            responder = %self.responder,
+            "[chat] addressed thread key matches no desk and no roster teammate; the \
+             orchestrator is answering a message that may not have been meant for it"
+        );
         self.responder.clone()
     }
 
@@ -1855,7 +2206,7 @@ impl HarnessBrain {
         // Desk-lead resolution is brain-agnostic — it reads only `CompanyRecord`
         // — so it lives on the delegation seam (issue #176); this stays a thin
         // wrapper for the routing callers on the brain.
-        delegation::desk_lead(&self.record, desk)
+        delegation::desk_lead(&self.record(), desk)
     }
 
     /// Drains the MCP failure queue **onto the operator bubble's step timeline**
@@ -1899,7 +2250,7 @@ impl HarnessBrain {
                 let server = failure.server.clone();
                 if let Err(err) = events
                     .append(
-                        &self.record.id,
+                        &self.record().id,
                         CompanyEvent::McpCallFailed {
                             task_id: task_id.map(str::to_string),
                             server: failure.server,
@@ -1958,12 +2309,26 @@ impl HarnessBrain {
     /// already-computed operator reply along with it. That is precisely the
     /// silent-disappearance failure this issue exists to fix, so each failure is
     /// logged at `error` and the drain continues.
-    async fn park_approval_requests(&self, host: &dyn CycleHost) -> Result<()> {
-        for request in self
-            .deps
-            .approval_requests
-            .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN)
-        {
+    async fn park_approval_requests(&self, host: &dyn CycleHost) -> Result<Option<String>> {
+        let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+        let drained = self.deps.approval_requests.drain(cap);
+
+        // Issue #561: the overflow used to end here, silently. The queue entries
+        // are already gone and the turn is over, so a log line is the only trace
+        // — and a log line is not something an operator reads. Kept loud for the
+        // operator's sake *and* returned, so the cycle can say it out loud.
+        if drained.discarded > 0 {
+            log::warn!(
+                "[harness::brain] {} gated tool call(s) past the per-turn cap of {cap} were \
+                 discarded and will not reach the operator",
+                drained.discarded
+            );
+        }
+
+        // No `cap` argument: the drain carries the one it was taken against, so
+        // the sentence cannot name a limit this turn was not held to.
+        let notice = drained.overflow_notice();
+        for request in drained.requests {
             match host.park_effect(request.effect).await {
                 Ok(approval_id) => log::info!(
                     "[harness::brain] parked '{}' for operator approval (id={approval_id}): {}",
@@ -1979,7 +2344,7 @@ impl HarnessBrain {
                 ),
             }
         }
-        Ok(())
+        Ok(notice)
     }
 
     /// Executes one drained delegation from the orchestrator's turn.
@@ -2010,8 +2375,9 @@ impl HarnessBrain {
         chat_id: Option<&str>,
     ) -> Result<delegation::DelegationOutcome> {
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
-        self.delegation_runner(&run_turn)
-            .run_delegation(delegation, chat_id, false)
+        let record = self.record();
+        self.delegation_runner(&run_turn, &record)
+            .run_delegation(delegation, chat_id, delegation::MessageContext::default())
             .await
     }
 
@@ -2026,17 +2392,39 @@ impl HarnessBrain {
     /// a turn that stopped at an unauthorised call produced nothing to review.
     /// Wired here, at the one factory, so every runner the brain builds settles
     /// by the same rule rather than each call site remembering to.
-    fn delegation_runner<'a>(&'a self, run_turn: &'a HarnessRunTurn<'a>) -> DelegationRunner<'a> {
+    /// `record` is passed in rather than read here because the runner borrows it
+    /// for its whole lifetime, and since issue #707 the brain's record lives
+    /// behind a lock — [`Self::record`] hands back a handle, and a handle
+    /// created inside this factory would die at the end of it. Every caller
+    /// binds one for the duration of the turn, which is also what keeps a single
+    /// turn on a single consistent record.
+    fn delegation_runner<'a>(
+        &'a self,
+        run_turn: &'a HarnessRunTurn<'a>,
+        record: &'a CompanyRecord,
+    ) -> DelegationRunner<'a> {
         DelegationRunner::new(
             run_turn,
-            &self.record,
+            record,
             self.deps.tasks.as_ref(),
             &self.deps.steer,
-            &self.record.id,
+            &record.id,
             &self.deps.delegations,
             orchestrator::MAX_DELEGATIONS_PER_TURN,
         )
         .with_approvals(&self.deps.approval_requests)
+        .with_workflow_refs(&self.deps.workflow_refs)
+        .with_triage(self.triage_escalation(&record.id))
+    }
+
+    /// The company's triage escalation, built once (issue #678).
+    fn triage_escalation(
+        &self,
+        company: &crate::ports::types::CompanyId,
+    ) -> &crate::harness::triage::MeteredTriage {
+        self.triage.get_or_init(|| {
+            crate::harness::triage::MeteredTriage::from_deps(&self.deps, company.clone())
+        })
     }
 }
 
@@ -2073,15 +2461,51 @@ fn settle(card: &mut TaskRecord, end: TaskRunEnd, responder: &str, body: &str) {
 #[async_trait]
 impl Brain for HarnessBrain {
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
-        // Idempotent — builds the roster on the first cycle, a no-op after.
-        self.pool.ensure(&self.record, &self.deps).await?;
+        // Issue #707: re-read the record before anything routes on it, so a desk
+        // reorder / new desk / added desk member saved through the console
+        // reaches this turn. Once per cycle rather than per lookup, so one turn
+        // sees one consistent company. See `refresh_record` for why a failure
+        // fails the cycle instead of falling back to the previous record.
+        self.refresh_record().await?;
+        // Issue #439: everything this cycle does runs inside its own approval
+        // scope, so a workflow run executing concurrently cannot see, take, or
+        // be taken by it.
+        //
+        // The claim replaces the `clear()` that used to open this function. It
+        // clears on the way in exactly as that did, and additionally on the way
+        // out via `Drop` — which is the half `clear()` never had. A cycle that
+        // returned early used to leave its entries for the *next* cycle to
+        // park; now the window is the claim's lifetime and nothing outlives it.
+        let claim = self.deps.approval_requests.claim(ApprovalScope::Cycle);
+        claim.scoped(self.run_cycle_scoped(req, host)).await
+    }
 
-        // Issue #172: start from an empty approval queue so nothing a prior
-        // cycle — or a workflow run sharing these deps — left behind is parked
-        // under this cycle. Every turn this cycle runs (the operator turn, its
-        // delegated desk turns, a dispatched card) pushes onto the same queue and
-        // is drained once at the end.
-        self.deps.approval_requests.clear();
+    /// The harness meters itself per turn in [`HarnessPool::run`], against the
+    /// live provider slug the turn resolved to — which is why `run_cycle` reports
+    /// zero `token_usage` and the runtime's cycle-level metering is a no-op here.
+    fn cognition(&self) -> Cognition {
+        Cognition {
+            path: crate::ports::brain::HARNESS_PATH,
+            provider: "per-turn",
+            metering: UsageMetering::PerTurn,
+        }
+    }
+}
+
+impl HarnessBrain {
+    /// The cycle body, running inside its [`ApprovalScope::Cycle`] claim.
+    ///
+    /// Split out only so the claim can wrap the whole of it: every turn this
+    /// cycle runs — the operator turn, its delegated desk turns, a dispatched
+    /// card, a re-dispatch after an approval — happens in here, and therefore
+    /// files its gated calls into this cycle's bucket.
+    async fn run_cycle_scoped(
+        &self,
+        req: CycleRequest,
+        host: &dyn CycleHost,
+    ) -> Result<CycleResult> {
+        // Idempotent — builds the roster on the first cycle, a no-op after.
+        self.pool.ensure(&self.record(), &self.deps).await?;
 
         let mut channel_responses = Vec::new();
         for event in &req.events {
@@ -2106,8 +2530,8 @@ impl Brain for HarnessBrain {
                         let outcome = self
                             .pool
                             .run_confined(
-                                &self.record.id,
-                                &self.record.manifest.company.name,
+                                &self.record().id,
+                                &self.record().manifest.company.name,
                                 text,
                                 &self.deps,
                                 chat.as_deref(),
@@ -2153,13 +2577,33 @@ impl Brain for HarnessBrain {
                                 .pending_publishes
                                 .claim(publish::PublishDestination::Conversation)
                         });
+                    // Issue #245: the chat half of the checkout lifecycle. An
+                    // operator conversation runs the same toolbelt a card does,
+                    // so it can clone a repository, and the guard's `Drop`
+                    // removes it when this turn ends.
+                    let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
+                    // Issue #796: sweep any task checkout orphaned by a
+                    // denied/expired approval, on this turn's claim like every
+                    // other.
+                    {
+                        let grants = self.deps.approval_requests.grants();
+                        self.deps
+                            .checkouts
+                            .sweep_orphans(|task| grants.any_for_task(task));
+                    }
+                    // Issue #735: a conversation is not a task card, so clear any
+                    // task a prior turn stamped — `repo_publish` requires a task
+                    // and refuses on a chat turn (task turns only, this tier).
+                    self.deps.checkouts.set_task(None);
                     // Drive the brain-agnostic delegation seam (issue #176): the
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
                     // re-attached behind `HarnessRunTurn`.
                     let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+                    // Bound for the runner's whole lifetime (issue #707): one turn, one record.
+                    let record = self.record();
                     let turn = self
-                        .delegation_runner(&run_turn)
+                        .delegation_runner(&run_turn, &record)
                         .handle_operator_message(&responder, text, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
@@ -2296,7 +2740,23 @@ impl Brain for HarnessBrain {
         // Issue #172: every approval-gated tool call this cycle's turns hit is
         // parked on the host's gate now, so it shows up on the operator's
         // Approvals page instead of only being narrated away in chat.
-        self.park_approval_requests(host).await?;
+        //
+        // Issue #561: and if the turn gated more calls than one turn may raise,
+        // the operator is told so here rather than discovering it as silence.
+        // Pushed as its own bubble instead of appended to the reply above,
+        // because the reply is the agent's answer and this is the system saying
+        // the agent was cut off — and because a turn whose only outcome was
+        // overflow has no reply to append to.
+        if let Some(notice) = self.park_approval_requests(host).await? {
+            channel_responses.push(OutboundMessage {
+                message_id: None,
+                task_id: None,
+                channel: "operator".to_string(),
+                text: notice,
+                steps: Vec::new(),
+                reply_to: None,
+            });
+        }
 
         // The runtime requires at least one channel response per cycle.
         if channel_responses.is_empty() {
@@ -2327,17 +2787,6 @@ impl Brain for HarnessBrain {
             ledger_deltas: Vec::new(),
             token_usage: TokenUsage::default(),
         })
-    }
-
-    /// The harness meters itself per turn in [`HarnessPool::run`], against the
-    /// live provider slug the turn resolved to — which is why `run_cycle` reports
-    /// zero `token_usage` and the runtime's cycle-level metering is a no-op here.
-    fn cognition(&self) -> Cognition {
-        Cognition {
-            path: crate::ports::brain::HARNESS_PATH,
-            provider: "per-turn",
-            metering: UsageMetering::PerTurn,
-        }
     }
 }
 
@@ -2447,6 +2896,8 @@ description = "Runs Acme."
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -2461,12 +2912,14 @@ description = "Runs Acme."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2476,6 +2929,8 @@ description = "Runs Acme."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2484,11 +2939,18 @@ description = "Runs Acme."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -2516,6 +2978,7 @@ description = "Runs Acme."
                     text: "status?".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -2602,6 +3065,8 @@ description = "Builds it."
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -2619,12 +3084,14 @@ description = "Builds it."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2634,6 +3101,8 @@ description = "Builds it."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2642,11 +3111,18 @@ description = "Builds it."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -2658,8 +3134,8 @@ description = "Builds it."
     /// the engineer — the shape `delegate_to_desk` writes into a card's
     /// `assignee` (issue #205).
     fn brain_with_desk_tasks(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
-        let (mut brain, tasks) = brain_with_tasks(dir);
-        brain.record.manifest.group_chats = toml::from_str::<CompanyManifest>(
+        let (brain, tasks) = brain_with_tasks(dir);
+        let group_chats = toml::from_str::<CompanyManifest>(
             r#"
 [company]
 name = "Acme"
@@ -2676,6 +3152,7 @@ members = ["engineer"]
         )
         .expect("valid manifest")
         .group_chats;
+        brain.mutate_record(|r| r.manifest.group_chats = group_chats);
         (brain, tasks)
     }
 
@@ -2727,12 +3204,14 @@ members = ["engineer"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(ops.clone()),
             artifacts: Some(artifacts),
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2742,6 +3221,8 @@ members = ["engineer"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2750,11 +3231,18 @@ members = ["engineer"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: with_workspace.then(|| ops.clone() as Arc<dyn crate::ports::WorkspaceStore>),
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -2835,7 +3323,7 @@ members = ["engineer"]
             title: "Launch spec".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         }
     }
 
@@ -3090,7 +3578,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "the spec body".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "the spec body".to_string(),
+                    ),
                 }],
                 Some("run-1"),
             )
@@ -3146,7 +3636,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "what maya produced".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "what maya produced".to_string(),
+                    ),
                 }],
                 None,
             )
@@ -3195,7 +3687,7 @@ members = ["engineer"]
             title: "Launch spec".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         brain
@@ -3266,7 +3758,7 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "body".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("body".to_string()),
                 }],
                 None,
             )
@@ -3316,6 +3808,9 @@ members = ["engineer"]
                 updated_at_millis: now_millis(),
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             Some("an operator's note, in the way"),
         )
@@ -3332,7 +3827,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "the deliverable".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "the deliverable".to_string(),
+                    ),
                 }],
                 None,
             )
@@ -3365,6 +3862,8 @@ members = ["engineer"]
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         }
     }
 
@@ -3525,7 +4024,7 @@ members = ["engineer"]
         // while proving nothing about the terminal column.
         brain
             .pool
-            .ensure(&brain.record, &brain.deps)
+            .ensure(&brain.record(), &brain.deps)
             .await
             .expect("roster");
 
@@ -3633,7 +4132,7 @@ members = ["engineer"]
             title: source.to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         // Run 1 publishes both files.
@@ -3743,7 +4242,7 @@ members = ["engineer"]
             title: "spec.md".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         brain
@@ -3805,7 +4304,7 @@ members = ["engineer"]
                     title: "spec.md".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Spec".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Spec".to_string()),
                 }],
                 None,
             )
@@ -3848,7 +4347,7 @@ members = ["engineer"]
                     title: "Q3 board memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -3905,7 +4404,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -3936,7 +4435,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -3978,7 +4477,7 @@ members = ["engineer"]
             title: source.to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: format!("# {source}"),
+            payload: crate::harness::publish::PublishPayload::Text(format!("# {source}")),
         };
 
         brain
@@ -4035,7 +4534,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
                 None,
             )
@@ -4462,12 +4961,15 @@ members = ["engineer"]
     #[tokio::test]
     async fn task_dispatch_routes_to_an_overlay_teammate() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut brain, tasks) = brain_with_tasks(dir.path());
-        brain.record.overlay_agents.push(OverlayAgent {
-            id: "nova".into(),
-            name: "Nova".into(),
-            role: "Growth".into(),
-            description: None,
+        let (brain, tasks) = brain_with_tasks(dir.path());
+        brain.mutate_record(|r| {
+            r.overlay_agents.push(OverlayAgent {
+                id: "nova".into(),
+                name: "Nova".into(),
+                role: "Growth".into(),
+                description: None,
+                tools: Vec::new(),
+            })
         });
         tasks
             .upsert(&CompanyId::new("acme"), &card("t1", "nova"))
@@ -4593,6 +5095,8 @@ members = ["engineer"]
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -4609,12 +5113,14 @@ members = ["engineer"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -4624,6 +5130,8 @@ members = ["engineer"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -4632,11 +5140,18 @@ members = ["engineer"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -4647,6 +5162,92 @@ members = ["engineer"]
     /// A brain over the desk-bearing record, wired to a real task store.
     fn brain_with_desk(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
         brain_over(dir, record_with_desk())
+    }
+
+    /// Issue #707, the retention half: a store with **no persisted record**
+    /// leaves the brain's record exactly as it was.
+    ///
+    /// `Ok(None)` is not a failure and must not be treated as one — an absent
+    /// record is what a company whose bundle has not been written yet looks
+    /// like, and clearing on it would leave that company with no roster and no
+    /// desks at all. Uses the real `FsCompanyStore` over a directory nothing was
+    /// saved to, which is precisely the shape that returns `Ok(None)`.
+    #[tokio::test]
+    async fn a_refresh_with_no_persisted_record_keeps_the_one_it_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let before = brain.record();
+
+        brain
+            .refresh_record()
+            .await
+            .expect("an absent record is not an error");
+
+        let after = brain.record();
+        assert_eq!(
+            after.manifest.company.name, before.manifest.company.name,
+            "the brain kept its record"
+        );
+        assert_eq!(
+            after.manifest.agents.len(),
+            before.manifest.agents.len(),
+            "an absent record must not empty the roster"
+        );
+        assert_eq!(
+            brain.desk_lead("eng_desk"),
+            Some("engineer".to_string()),
+            "nor cost the company its desks"
+        );
+    }
+
+    /// Issue #707, the loud half: a store that **cannot be read** fails the
+    /// refresh rather than falling back to the record already in hand.
+    ///
+    /// Falling back is the defect this whole change removes, and it would come
+    /// back invisibly — a turn that looked successful while routing on state the
+    /// operator had already replaced. So the error propagates and the cycle
+    /// fails. A corrupt `company.toml` is a real way to reach that arm, and
+    /// reaching it through the real store rather than a double is what keeps
+    /// this test honest about the failure it claims to cover.
+    #[tokio::test]
+    async fn a_refresh_that_cannot_read_the_store_fails_rather_than_going_stale() {
+        use crate::ports::store::CompanyStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let store = FsCompanyStore::new(dir.path());
+        store.save(&brain.record()).await.expect("seed the record");
+
+        // A bundle whose manifest no longer parses: the store reports a failure
+        // rather than an absence, which is the arm under test.
+        let toml_path =
+            crate::store::Bundle::new(dir.path().to_path_buf(), &brain.record().id).company_toml();
+        tokio::fs::write(&toml_path, b"this is not = valid toml [[[")
+            .await
+            .expect("corrupt the manifest");
+
+        let err = brain
+            .refresh_record()
+            .await
+            .expect_err("an unreadable record must fail the refresh, not be ignored");
+        assert!(
+            err.to_string().contains("company.toml"),
+            "the failure names what could not be read: {err}"
+        );
+
+        // And through `run_cycle`, which is the level that actually protects
+        // the promise. Asserting only on `refresh_record` would leave the call
+        // site free to become `let _ = self.refresh_record().await;` — the
+        // refresh would still run, the error would be dropped, the turn would
+        // report success while routing on the record it already held, and every
+        // other test here would stay green. That is issue #707 returning by a
+        // different door, so the propagation is pinned where it is relied on.
+        let cycle = brain.run_cycle(request(Vec::new()), &NoopHost).await;
+        assert!(
+            cycle.is_err(),
+            "a cycle must fail when the record cannot be read, rather than \
+             quietly routing on a stale one"
+        );
     }
 
     /// The default responder is the `orchestrator`-tier agent, even when it is
@@ -4684,6 +5285,104 @@ members = ["engineer"]
         let (brain, _tasks) = brain_with_desk(dir.path());
         assert_eq!(brain.responder_for(Some("engineer")), "engineer");
         assert_eq!(brain.responder_for(Some("chief")), "chief");
+    }
+
+    // ── Issue #884 D2: an unresolvable chat key is no longer silent ──
+
+    /// Captures everything logged on **this thread** while `body` runs.
+    ///
+    /// Thread-local (`with_default`) rather than a global default on purpose:
+    /// `workflow_scheduler`'s capture already claims the process-wide slot in
+    /// this same test binary and asserts it wins that race, so installing a
+    /// second global here would turn its test red for an unrelated reason.
+    fn logs_from(body: impl FnOnce()) -> String {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("log sink").extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Writer;
+            fn make_writer(&'a self) -> Self::Writer {
+                Writer(self.0.clone())
+            }
+        }
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Sink(sink.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = sink.lock().expect("log sink").clone();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// A key that resolves to no desk and no teammate still answers as the
+    /// orchestrator — the fallback is deliberate — but it now says so.
+    ///
+    /// This is the whole of D2: before it, "nobody addressed anybody" and
+    /// "somebody addressed a teammate that does not exist" produced the same
+    /// confident answer from an agent nobody asked, and the tenant log carried
+    /// nothing to tell them apart.
+    #[test]
+    fn responder_for_warns_before_falling_back_to_the_orchestrator() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let logs = logs_from(|| {
+            assert_eq!(
+                brain.responder_for(Some("dm:engineer")),
+                "chief",
+                "the fallback itself is unchanged"
+            );
+        });
+        assert!(
+            logs.contains("dm:engineer"),
+            "the unresolved key must be named so the fall-through is greppable: {logs}"
+        );
+        assert!(logs.contains("WARN"), "{logs}");
+
+        // …and a key that DOES resolve stays silent, or the line is noise
+        // rather than a signal.
+        let quiet = logs_from(|| {
+            assert_eq!(brain.responder_for(Some("engineer")), "engineer");
+            assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+        });
+        assert!(quiet.is_empty(), "a resolved key must not warn: {quiet}");
+    }
+
+    /// A human- or console-typed teammate key resolves case-insensitively to the
+    /// **canonical** roster id, so a capital letter no longer reads as "nobody"
+    /// and hands the turn to the orchestrator.
+    ///
+    /// Returning the canonical id rather than the key as typed is the load-bearing
+    /// half: the persona lookup downstream matches on the roster id, so echoing
+    /// `"Engineer"` back would move the miss one layer along instead of fixing it.
+    #[test]
+    fn responder_for_resolves_a_teammate_key_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        for typed in ["Engineer", "ENGINEER", "engineer"] {
+            assert_eq!(
+                brain.responder_for(Some(typed)),
+                "engineer",
+                "`{typed}` must reach the engineer under its canonical id"
+            );
+        }
+        // A key that resolves to nothing is still the orchestrator's — folding
+        // the case may only claim keys that reached nobody before.
+        assert_eq!(brain.responder_for(Some("engineeer")), "chief");
     }
 
     /// Desks still win. A desk id is resolved as a desk even if an agent shares
@@ -4745,6 +5444,8 @@ name = "Design"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -4794,6 +5495,7 @@ members = ["eng1", "eng2"]
                 name: "Cto".to_string(),
                 role: "CTO".to_string(),
                 description: None,
+                tools: Vec::new(),
             }],
             overlay_desk_members: vec![crate::ports::types::OverlayDeskMember {
                 desk_id: "eng".to_string(),
@@ -4806,6 +5508,8 @@ members = ["eng1", "eng2"]
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -4863,6 +5567,8 @@ members = ["eng1", "eng2"]
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -4960,6 +5666,7 @@ members = ["eng1", "eng2"]
                     text: "we should announce this".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -4974,7 +5681,7 @@ members = ["eng1", "eng2"]
             .tasks
             .as_ref()
             .unwrap()
-            .list(&brain.record.id)
+            .list(&brain.record().id)
             .await
             .unwrap();
         assert_eq!(cards.len(), 1);
@@ -5018,6 +5725,7 @@ members = ["eng1", "eng2"]
                     text: "two things".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -5033,7 +5741,7 @@ members = ["eng1", "eng2"]
             .tasks
             .as_ref()
             .unwrap()
-            .list(&brain.record.id)
+            .list(&brain.record().id)
             .await
             .unwrap();
         assert_eq!(cards.len(), 2, "both cards are opened either way");
@@ -5062,6 +5770,7 @@ members = ["eng1", "eng2"]
                     text: "status?".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -5299,7 +6008,7 @@ members = ["eng1", "eng2"]
         // The pool must have the roster before a member turn can run.
         brain
             .pool
-            .ensure(&brain.record, &brain.deps)
+            .ensure(&brain.record(), &brain.deps)
             .await
             .expect("roster");
 
@@ -5363,12 +6072,14 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir.path())),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: Some(events.clone()),
@@ -5378,6 +6089,8 @@ members = ["eng1", "eng2"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5386,11 +6099,18 @@ members = ["eng1", "eng2"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -5496,12 +6216,14 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir.path())),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: Some(log.clone()),
@@ -5511,6 +6233,8 @@ members = ["eng1", "eng2"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5519,11 +6243,18 @@ members = ["eng1", "eng2"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -5575,12 +6306,14 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -5590,6 +6323,8 @@ members = ["eng1", "eng2"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: requests,
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5598,11 +6333,18 @@ members = ["eng1", "eng2"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -5637,7 +6379,7 @@ members = ["eng1", "eng2"]
             None,
         )
         .with_requests(requests.clone());
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = crate::policy::test_support::composio_send_args();
         let request = ToolPolicyRequest::new(
             "composio_execute",
             args.clone(),
@@ -5700,6 +6442,99 @@ members = ["eng1", "eng2"]
             .await
             .expect("second drain");
         assert_eq!(host.parked().len(), 1, "parked once, not twice");
+    }
+
+    /// Issue #561: a turn that gates more calls than one turn may raise tells
+    /// the operator so, with the count.
+    ///
+    /// The cap itself is not the bug and is not touched here. The bug is that
+    /// exceeding it was **silent**: the operator saw eight cards and had no way
+    /// to learn that five more gated calls had happened, been refused, and been
+    /// dropped. Eight cards and no notice is indistinguishable from "eight is
+    /// all there was".
+    #[tokio::test]
+    async fn a_turn_that_overflows_the_cap_tells_the_operator_how_many_were_dropped() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+        use crate::ports::types::EffectGroup;
+
+        let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+        let over = 5;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        for i in 0..(cap + over) {
+            requests.push(ApprovalRequest {
+                tool: "composio_execute".to_string(),
+                reason: "supervised".to_string(),
+                effect: Effect {
+                    kind: "composio_execute".to_string(),
+                    group: EffectGroup::Send,
+                    amount_usd: None,
+                    established_thread: false,
+                    first_time_counterparty: false,
+                    // Distinct payloads, or `push` would dedupe them and the
+                    // queue would never reach the cap in the first place.
+                    payload: crate::policy::test_support::composio_unclassified_args_numbered(i),
+                    agent: None,
+                    run_id: None,
+                },
+            });
+        }
+
+        let host = ParkingHost::default();
+        let notice = brain
+            .park_approval_requests(&host)
+            .await
+            .expect("drain")
+            .expect("an overflowing turn has something to tell the operator");
+
+        assert_eq!(host.parked().len(), cap, "the cap still holds");
+        assert!(
+            notice.contains(&over.to_string()),
+            "the operator is told HOW MANY were dropped, not just that some were: {notice}"
+        );
+        assert!(
+            notice.contains(&cap.to_string()),
+            "…and what the limit was, so the number means something: {notice}"
+        );
+    }
+
+    /// The ordinary turn stays quiet. A notice on every cycle would train the
+    /// operator to scroll past the one that matters.
+    #[tokio::test]
+    async fn a_turn_within_the_cap_raises_no_notice() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+        use crate::ports::types::EffectGroup;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        requests.push(ApprovalRequest {
+            tool: "composio_execute".to_string(),
+            reason: "supervised".to_string(),
+            effect: Effect {
+                kind: "composio_execute".to_string(),
+                group: EffectGroup::Send,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: crate::policy::test_support::composio_send_args(),
+                agent: None,
+                run_id: None,
+            },
+        });
+
+        let host = ParkingHost::default();
+        assert!(
+            brain
+                .park_approval_requests(&host)
+                .await
+                .expect("drain")
+                .is_none(),
+            "one request, a cap of 8: nothing was dropped and nothing is said"
+        );
+        assert_eq!(host.parked().len(), 1, "and the request itself still parks");
     }
 
     /// A host that fails to park the *first* effect it is handed, then behaves.
@@ -5801,12 +6636,14 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: Some(events),
@@ -5816,6 +6653,8 @@ members = ["eng1", "eng2"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: requests,
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5824,11 +6663,18 @@ members = ["eng1", "eng2"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -5874,7 +6720,14 @@ members = ["eng1", "eng2"]
         let log: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
         let requests = crate::harness::policy::ApprovalRequestQueue::default();
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL", "to": "a@b.test" });
+        // Issue #470: a real catalogued send, with the action's own parameters
+        // under `arguments` where the tool's schema puts them — so the
+        // re-dispatch path this test covers carries a call the classifier can
+        // actually read.
+        let args = crate::policy::test_support::composio_args_with(
+            crate::policy::test_support::COMPOSIO_SEND_SLUG,
+            serde_json::json!({ "to": "a@b.test" }),
+        );
         requests
             .grants()
             .grant(crate::runtime::grants::GrantedCall {
@@ -5884,6 +6737,8 @@ members = ["eng1", "eng2"]
                 args: args.clone(),
                 at_millis: now_millis(),
                 origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
 
@@ -5940,6 +6795,133 @@ members = ["eng1", "eng2"]
             .all(|e| !matches!(e.event, CompanyEvent::AgentReply { .. }))
     }
 
+    /// Issue #796: a task's checkout survives a whole BATCH of re-issues, the way
+    /// a supervised write actually runs — the operator approves `repo_checkout`,
+    /// the edit, the commit and the publish up front, and each grant is re-issued
+    /// in its own turn. The checkout the first re-issue materializes must still be
+    /// there when the next grant is re-issued, and the one after that.
+    ///
+    /// This is the exact loop the first cut of the fix still had: retaining the
+    /// tree only on a turn that parked a NEW approval dropped it the moment a
+    /// batched re-issue parked nothing, so the next approved step found the tree
+    /// gone. `MockProvider` parks and consumes nothing, so both grants stay live —
+    /// the task is in flight — and the tree must be held across every re-issue.
+    #[tokio::test]
+    async fn a_task_checkout_survives_a_batch_of_re_issues() {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        // Two of the task's steps approved up front (a batch), both under t-1.
+        for (id, tool) in [("appr-1", "repo_checkout"), ("appr-2", "git_operations")] {
+            requests
+                .grants()
+                .grant(crate::runtime::grants::GrantedCall {
+                    approval_id: ApprovalId::new(id),
+                    agent: "ceo".into(),
+                    tool: tool.into(),
+                    args: serde_json::json!({}),
+                    at_millis: now_millis(),
+                    origin_thread: None,
+                    origin_parent: None,
+                    // The link that makes each re-issue reclaim the same tree.
+                    origin_task: Some("t-1".into()),
+                });
+        }
+        let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
+
+        // The checkout the task's first step materialized, held under its task.
+        let tree = dir.path().join("held-checkout");
+        std::fs::create_dir_all(&tree).unwrap();
+        brain.deps.checkouts.record(tree.clone());
+        brain.deps.checkouts.retain_for_task("t-1");
+
+        // Re-issue the first approved step. The tree must survive the turn — the
+        // task is not done, its other step is still granted.
+        brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+        assert!(
+            tree.is_dir(),
+            "the checkout was wiped between two batched re-issues — the loop is back"
+        );
+        assert_eq!(
+            brain.deps.checkouts.retained_tasks(),
+            vec!["t-1".to_string()],
+            "the task's checkout must stay held while the task is in flight"
+        );
+
+        // Re-issue the second approved step. Still held.
+        brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-2", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+        assert!(
+            tree.is_dir(),
+            "the checkout did not survive the second re-issue"
+        );
+        assert_eq!(
+            brain.deps.checkouts.retained_tasks(),
+            vec!["t-1".to_string()]
+        );
+    }
+
+    /// Issue #796: a checkout held for a task no live grant names — the
+    /// approval was denied or expired, so nothing will ever resume it — is swept
+    /// the next time any turn claims the janitor, rather than leaking to the boot
+    /// sweep. Here an unrelated approval drives that turn.
+    #[tokio::test]
+    async fn an_orphaned_task_checkout_is_swept_at_the_next_janitor_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let log: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
+        let requests = crate::harness::policy::ApprovalRequestQueue::default();
+        // A live grant with no task of its own — an ordinary chat approval — to
+        // drive one redispatch turn. It names no task, so it cannot keep the
+        // orphan alive.
+        requests
+            .grants()
+            .grant(crate::runtime::grants::GrantedCall {
+                approval_id: ApprovalId::new("appr-1"),
+                agent: "ceo".into(),
+                tool: "composio_execute".into(),
+                args: serde_json::json!({}),
+                at_millis: now_millis(),
+                origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
+            });
+        let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
+
+        // A tree held for a task whose approval is gone: no grant names it.
+        let tree = dir.path().join("orphaned-checkout");
+        std::fs::create_dir_all(&tree).unwrap();
+        brain.deps.checkouts.record(tree.clone());
+        brain.deps.checkouts.retain_for_task("t-gone");
+        assert!(tree.is_dir());
+
+        brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert!(
+            !tree.exists(),
+            "an orphaned task checkout was not swept at the janitor claim"
+        );
+        assert!(brain.deps.checkouts.retained_tasks().is_empty());
+    }
+
     // Issue #379's reply routing — a channel's continuation must resume in that
     // channel and not in its lead's private DM, and the mirror — used to be
     // pinned here, against a hand-built grant. It moved with the journaling
@@ -5979,6 +6961,8 @@ members = ["eng1", "eng2"]
                 at_millis: now_millis(),
                 expires_at_millis: now_millis() + 60 * 60 * 1000,
                 origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
                 scope: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
@@ -6034,6 +7018,8 @@ members = ["eng1", "eng2"]
                 args: serde_json::json!({}),
                 at_millis: now_millis(),
                 origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
 
@@ -6151,12 +7137,14 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: Some("stub-model".to_string()),
             tasks: Some(Arc::new(FsOps::new(dir))),
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -6166,6 +7154,8 @@ members = ["eng1", "eng2"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: requests,
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -6174,11 +7164,18 @@ members = ["eng1", "eng2"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -6199,6 +7196,8 @@ members = ["eng1", "eng2"]
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         }
     }
 
@@ -6210,6 +7209,8 @@ members = ["eng1", "eng2"]
             args: serde_json::json!({}),
             at_millis: now_millis(),
             origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
         }
     }
 
@@ -6456,6 +7457,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
             // Same handle as `tasks` (FsOps is both stores), so a steered run's
@@ -6464,6 +7466,7 @@ members = ["eng1", "eng2"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -6473,6 +7476,8 @@ members = ["eng1", "eng2"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -6481,11 +7486,18 @@ members = ["eng1", "eng2"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer,
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),
@@ -6640,6 +7652,54 @@ members = ["eng1", "eng2"]
     /// the last user message so a test can read the turn's reply. Sharing the
     /// queue handle with [`HarnessDeps::delegations`] is what lets the brain
     /// drain it after the turn.
+    /// Whether this request is a triage escalation rather than an agent turn
+    /// (issue #678).
+    ///
+    /// Keyed on the system prompt's opening sentence, which
+    /// `harness::triage::system_prompt` owns. Coupling a fixture to prose is
+    /// ordinarily a smell; here the alternative is worse, because the only
+    /// other thing distinguishing the two is "carries no tools", and a turn
+    /// whose agent happens to have an empty belt would be misread as a
+    /// classification. Pinned by `a_triage_request_is_recognised_as_one`.
+    fn is_triage_request(request: &ModelRequest) -> bool {
+        request
+            .messages
+            .first()
+            .map(|m| m.text().contains("You classify one message"))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn a_triage_request_is_recognised_as_one() {
+        let triage = ModelRequest {
+            messages: vec![
+                tinyagents::harness::message::Message::system(
+                    crate::harness::triage::system_prompt_for_test(),
+                ),
+                tinyagents::harness::message::Message::user("hello".to_string()),
+            ],
+            ..ModelRequest::default()
+        };
+        assert!(
+            is_triage_request(&triage),
+            "the fixture must recognise the real prompt, or it silently starts \
+             eating scripted turns again"
+        );
+        let turn = ModelRequest {
+            messages: vec![
+                tinyagents::harness::message::Message::system(
+                    "You are the CEO of Acme.".to_string(),
+                ),
+                tinyagents::harness::message::Message::user("ship it".to_string()),
+            ],
+            ..ModelRequest::default()
+        };
+        assert!(
+            !is_triage_request(&turn),
+            "an agent turn is not a classification"
+        );
+    }
+
     struct DelegatingProvider {
         queue: orchestrator::DelegationQueue,
         pushes: StdMutex<VecDeque<Vec<Delegation>>>,
@@ -6689,6 +7749,21 @@ members = ["eng1", "eng2"]
             _state: &(),
             request: ModelRequest,
         ) -> tinyagents::Result<ModelResponse> {
+            // Issue #678: a triage escalation is a classification, not a turn.
+            // It rides the same `HarnessModel` handle the roster runs on, so
+            // without this it would consume a scripted push and shift every
+            // turn's script by one — the delegation the test wrote for turn 1
+            // would be staged by a call that is not turn 1.
+            //
+            // Answering `chatter` rather than declining keeps these fixtures on
+            // the ungated path they were written for: only an `answer` verdict
+            // narrows the claim, so `chatter` leaves the gate exactly where the
+            // abstention left it. A test that wants the narrowing drives it
+            // through `DelegationRunner::with_triage` directly, where the
+            // verdict is scripted.
+            if is_triage_request(&request) {
+                return Ok(ModelResponse::assistant("chatter".to_string()));
+            }
             let invoke = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             if self.faults.fail_from.is_some_and(|from| invoke >= from) {
                 return Err(tinyagents::TinyAgentsError::Model(
@@ -6784,11 +7859,13 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks),
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -6799,6 +7876,8 @@ members = ["eng1", "eng2"]
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -6807,11 +7886,18 @@ members = ["eng1", "eng2"]
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer,
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_with_desk()),
@@ -6842,6 +7928,7 @@ members = ["eng1", "eng2"]
                     text: "why is the site down?".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -6907,6 +7994,7 @@ members = ["eng1", "eng2"]
                     text: "handle it".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -6946,6 +8034,7 @@ members = ["eng1", "eng2"]
                     text: "status?".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }]),
                 &NoopHost,
             )
@@ -7269,7 +8358,7 @@ members = ["eng1", "eng2"]
 
         let note = only_card(&provider.tasks).await.note.expect("note");
         assert!(
-            note.contains("hand-off to the \"ghost\" desk was not delivered"),
+            note.contains("hand-off to \"ghost\" was not delivered"),
             "the card must name the hand-off that did not happen: {note}"
         );
         assert!(
@@ -7309,11 +8398,11 @@ members = ["eng1", "eng2"]
         );
         let note = after.note.expect("note");
         assert!(
-            note.contains("hand-off to the \"writer\" desk was not delivered"),
+            note.contains("hand-off to \"writer\" was not delivered"),
             "the refused target must be named on the card: {note}"
         );
         assert!(
-            note.contains("not a desk this company can hand work to"),
+            note.contains("not somewhere this company can hand work to"),
             "the cause must be on the card: {note}"
         );
     }

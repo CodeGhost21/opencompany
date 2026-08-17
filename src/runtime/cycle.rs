@@ -32,10 +32,10 @@ use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
 use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
+use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
-    CycleRequest, Effect, EffectDisposition, EffectGroup, LedgerEntry, OutboundMessage,
+    CycleRequest, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry, OutboundMessage,
     PolicyDecision, TokenUsage, ToolCall, ToolResult, Verdict,
 };
 use crate::ports::{generate_id, now_millis};
@@ -45,7 +45,7 @@ use crate::runtime::delegation_tools::{
     unknown_desk_message,
 };
 use crate::runtime::grants::{GrantId, GrantScope, GrantedCall, StandingGrant};
-use crate::runtime::journal::{ExecutedEffect, TaskLink};
+use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 
@@ -61,6 +61,17 @@ const HISTORY_LIMIT: usize = 32;
 /// recognise on approval: a duplicated `"email.send"` literal over there would
 /// park cards that silently do nothing when approved.
 pub(crate) const EMAIL_SEND_KIND: &str = "email.send";
+
+/// The effect kind a `repo_publish` approval performs (issue #735) — the
+/// host-side push to the real remote.
+///
+/// `pub(crate)` and defined here, in the always-compiled runtime, rather than in
+/// the `openhuman`-gated `harness::repo` that builds it: `perform_effect` below
+/// matches on it in the default build, where `crate::harness` does not exist. The
+/// tool references it through `crate::runtime::cycle::REPO_PUBLISH_EFFECT`, the
+/// same shape `workflows::delivery` uses for [`EMAIL_SEND_KIND`], so the producer
+/// and this consumer key off one literal.
+pub(crate) const REPO_PUBLISH_EFFECT: &str = "repo.publish";
 
 /// The `error` the terminality backstop stamps on an attempt row whose cycle
 /// ended without settling it (issue #242) — a brain that ignored the dispatch,
@@ -96,6 +107,36 @@ pub(crate) const RUN_CYCLE_FAILED_ERROR: &str = "the dispatch cycle failed";
 /// than silently un-splitting the message.
 pub(crate) const OPEN_WORK_ANNOTATION: &str = "\n\n[Open work already handed to you";
 
+/// Where the builder-pass briefing begins on a `workflow`-deliverable operator
+/// message (issue #845, written by
+/// [`inject_workflow_builder_awareness`](CycleRunner::inject_workflow_builder_awareness)).
+///
+/// The second machine-appended part of an operator message, on exactly
+/// [`OPEN_WORK_ANNOTATION`]'s terms: in-memory only, never journaled, and
+/// stripped by [`operator_words`](crate::runtime::delegation::operator_words)
+/// before anything reasons about what the operator asked for.
+///
+/// # What it is for
+///
+/// A message sent with "Build me the workflow" opens a card the **builder pass**
+/// owns ([`crate::harness::workflow_build`]): the card does not dispatch to its
+/// assignee, and authoring the graph *is* its In-Progress work. The chat cycle
+/// still runs on the same message, in parallel — and the desk agent answering it
+/// holds no workflow-authoring tool, correctly refuses to pretend otherwise, and
+/// says so.
+///
+/// Both halves were behaving correctly and the operator was told the opposite of
+/// what was happening: on staging, "I can't build the workflow … `weekly-aeo-audit`
+/// does not exist and I cannot make it exist" was delivered while a proposal for
+/// exactly that workflow was landing In Review. This annotation is what tells the
+/// turn who owns the authoring, so it answers the substance instead of denying a
+/// capability that is being exercised on its own message.
+///
+/// It grants nothing. `create_workflow` stays orchestrator-only, the builder
+/// still only *proposes*, and a person still applies the proposal — this only
+/// stops the turn from contradicting that.
+pub(crate) const BUILDER_ANNOTATION: &str = "\n\n[This request is already being built";
+
 /// What settling an approval's verdict produced — the outcome of the fast half
 /// of a resolve, before any model is called (issue #383).
 ///
@@ -112,7 +153,12 @@ pub enum ResolveReceipt {
     /// The verdict is journaled and any approved effect settled — the grant is
     /// minted, or the native effect executed. The carried `ApprovalResolved` is
     /// the event the follow-up cycle must run so the brain learns the verdict.
-    Settled(CompanyEvent),
+    ///
+    /// Boxed: `CompanyEvent` is a wide enum (its largest variant is the
+    /// workflow-run outcome), and holding it inline made every
+    /// `AlreadyResolved` — the common answer — pay that width. Indirection here
+    /// costs one allocation on the settled path only.
+    Settled(Box<CompanyEvent>),
 }
 
 impl ResolveReceipt {
@@ -123,6 +169,30 @@ impl ResolveReceipt {
 }
 
 /// Drives cycles for one [`CompanyRuntime`].
+/// A short, stable label for what a cycle is running (issue #390).
+///
+/// Read off the driving events rather than passed in, so every entry point gets
+/// one without threading a string through. It exists so an operator looking at
+/// an open bracket can tell a stuck approval continuation — the case #390 is
+/// about — from a stuck chat turn, without joining the bracket to anything.
+///
+/// Deliberately coarse and deliberately not the event's payload: this lands in a
+/// durable record, and a label is not the place for message text or tool
+/// arguments.
+fn cycle_trigger(events: &[CompanyEvent]) -> String {
+    let Some(first) = events.first() else {
+        return "empty".to_string();
+    };
+    match first {
+        CompanyEvent::ApprovalResolved { .. } => "approval-continuation",
+        CompanyEvent::OperatorMessage { .. } => "operator-message",
+        CompanyEvent::TaskDispatched { .. } => "task-dispatch",
+        CompanyEvent::AgentReply { .. } => "agent-reply",
+        _ => "other",
+    }
+    .to_string()
+}
+
 pub struct CycleRunner<'a> {
     rt: &'a CompanyRuntime,
 }
@@ -134,12 +204,78 @@ impl<'a> CycleRunner<'a> {
     }
 
     /// Runs one cycle over `events`, holding the per-company serial lock.
+    ///
+    /// # The bracket opens before the lock (issue #390)
+    ///
+    /// `cycle_id` is minted **here**, not inside [`run_locked`](Self::run_locked)
+    /// where it used to be, and the journal's `started` record is written before
+    /// `serial.lock()` is awaited. The lock is held for a whole cycle, so a
+    /// continuation queued behind a busy company waits on it for an unbounded
+    /// time — and a host that dies in that wait is precisely the "I approved and
+    /// nothing happened" failure this bracket exists to make visible. Opening it
+    /// after the lock would report that case as though the cycle had never been
+    /// asked for.
+    ///
+    /// Moving the mint is safe because nothing between `run_locked`'s first
+    /// statement and the old mint site read it: the input-append loop, the
+    /// `begin_run` call and the history/context/roster loads are all keyed on
+    /// the company and the event, never on the cycle.
+    /// `a_cycles_id_is_minted_before_the_serial_lock` pins the placement, since
+    /// the failure mode here is a correctly-typed id written in the wrong place
+    /// rather than anything the compiler can see.
+    ///
+    /// Paths that owe no cycle open no bracket: `already_resolved_report` and
+    /// `still_waiting_report` return without reaching this function. That is
+    /// deliberate — a banked decision is *correctly* not running, and giving it
+    /// a bracket would leave an open cycle that never closes and never should.
     pub async fn run(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
-        let _guard = self.rt.serial.lock().await;
-        self.run_locked(events).await
+        let cycle_id = crate::ports::generate_id();
+        let trigger = cycle_trigger(&events);
+
+        // Best-effort, and it must stay that way: record-keeping does not get to
+        // refuse a cycle. A failed open simply means this cycle is unbracketed,
+        // which is the pre-#390 behaviour rather than a new failure.
+        if let Err(err) = self
+            .rt
+            .journal
+            .record_cycle_started(&cycle_id, &trigger)
+            .await
+        {
+            tracing::warn!(
+                company = %self.rt.id,
+                cycle = %cycle_id,
+                %err,
+                "could not journal a cycle start; this cycle runs unbracketed"
+            );
+        }
+
+        let guard = self.rt.serial.lock().await;
+        let outcome = self.run_locked(events, cycle_id.clone()).await;
+        // Closed while the lock is still held, so the bracket cannot outlive the
+        // critical section it describes.
+        let error = outcome.as_ref().err().map(|err| err.to_string());
+        if let Err(err) = self
+            .rt
+            .journal
+            .record_cycle_finished(&cycle_id, error)
+            .await
+        {
+            tracing::warn!(
+                company = %self.rt.id,
+                cycle = %cycle_id,
+                %err,
+                "could not journal a cycle finish; the boot sweep will settle it"
+            );
+        }
+        drop(guard);
+        outcome
     }
 
-    async fn run_locked(&self, mut events: Vec<CompanyEvent>) -> Result<CycleReport> {
+    async fn run_locked(
+        &self,
+        mut events: Vec<CompanyEvent>,
+        cycle_id: String,
+    ) -> Result<CycleReport> {
         let company = self.rt.id.clone();
 
         // 2. Persist input — durable before any thinking.
@@ -208,8 +344,17 @@ impl<'a> CycleRunner<'a> {
         if let Some(record) = &record {
             self.inject_handed_task_awareness(record, &mut events).await;
         }
+        // Issue #845: and when the operator asked for a workflow rather than a
+        // one-off, tell the turn that the builder pass owns authoring it — so it
+        // answers the substance instead of denying a capability that is being
+        // exercised on this very message. Same terms as the injection above:
+        // brain-agnostic, in-memory only, never journaled.
+        Self::inject_workflow_builder_awareness(&mut events);
 
-        let cycle_id = crate::ports::generate_id();
+        // Issue #390: `cycle_id` is now minted by `run` before the serial lock,
+        // so the journal's bracket can cover the wait on that lock. Nothing
+        // above this point ever read it — see the note on `run`.
+        //
         // Issue #364: the report carries the input seqs too, so the chat route
         // can tell the console the durable id of the message it just sent. The
         // brain needs the same list, and it is the append loop above — the one
@@ -239,8 +384,12 @@ impl<'a> CycleRunner<'a> {
             // `ApprovalResolved` ids in its own batch.
             cycle_task_id(&request.events, |id| self.rt.journal.approval_task(id)),
             // Issue #379: and which conversation, on the same terms — read off
-            // the same trigger events, from the same retained origins.
-            cycle_thread_id(&request.events, |id| self.rt.journal.approval_thread(id)),
+            // the same trigger events, from the same retained origins. Issue
+            // #435 widened this to the channel *and* the thread within it, in
+            // one pass, so the pair always describes a single message.
+            cycle_conversation(&request.events, |id| {
+                self.rt.journal.approval_conversation(id)
+            }),
         );
         let result = self.rt.brain.run_cycle(request, &host).await;
         // Issue #242: the terminality backstop. Whatever the brain did — settled
@@ -540,6 +689,39 @@ working on):\n{}\n]",
         }
     }
 
+    /// Folds the builder-pass briefing into any `workflow`-deliverable operator
+    /// message (issue #845). See [`BUILDER_ANNOTATION`] for why.
+    ///
+    /// Deliberately not `async` and touching no store: unlike the handed-work
+    /// briefing, everything this needs is already on the event. Mutates only the
+    /// in-memory events handed to the brain, never the durable event log.
+    ///
+    /// Applies to every `workflow` message, addressed or not. The refusal this
+    /// prevents came from a desk agent in a channel, but an unaddressed message
+    /// reaches the orchestrator — which *does* hold `create_workflow` — and
+    /// telling it that a builder pass already owns this card is what stops it
+    /// authoring a second graph beside the proposal.
+    fn inject_workflow_builder_awareness(events: &mut [CompanyEvent]) {
+        for event in events.iter_mut() {
+            let CompanyEvent::OperatorMessage {
+                text,
+                deliverable: Some(TaskDeliverable::Workflow),
+                ..
+            } = event
+            else {
+                continue;
+            };
+            text.push_str(&format!(
+                "{BUILDER_ANNOTATION}: the operator asked for a reusable workflow, not a \
+one-off, so a card for it has been opened and the workflow builder owns authoring the graph. \
+Do NOT try to create, save or schedule a workflow yourself, and do not report that you cannot \
+— the build is already under way and its proposal goes to the operator for review. Answer the \
+substance of what they asked, and say that the workflow itself is being drafted for their \
+approval.]"
+            ));
+        }
+    }
+
     /// Settles a parked approval's verdict — the **fast half** of resolving one.
     ///
     /// Records the outcome on the gate, journals it durably, and settles the
@@ -597,6 +779,10 @@ working on):\n{}\n]",
         if outcome == ResolveOutcome::NotParked {
             return Ok(ResolveReceipt::AlreadyResolved);
         }
+        // Issue #796: the approval has left the parked set — drop its pending
+        // mark. On approve the grant minted just below now names the task; on
+        // deny nothing does, so its held checkout becomes sweepable.
+        self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
         if let ResolveOutcome::Approved(effect) = outcome {
             self.settle_approved_effect(id, effect, by.clone(), scope)
@@ -605,11 +791,13 @@ working on):\n{}\n]",
         // The follow-up event, so the brain learns the verdict. Returning it
         // (rather than appending it here) keeps the event logged exactly once:
         // the cycle that runs it is the thing that appends it.
-        Ok(ResolveReceipt::Settled(CompanyEvent::ApprovalResolved {
-            approval_id: id.clone(),
-            verdict,
-            by,
-        }))
+        Ok(ResolveReceipt::Settled(Box::new(
+            CompanyEvent::ApprovalResolved {
+                approval_id: id.clone(),
+                verdict,
+                by,
+            },
+        )))
     }
 
     /// Applies an approved effect: **mint a grant** when it came from a harness
@@ -736,6 +924,11 @@ working on):\n{}\n]",
         by: Actor,
         expires_at_millis: u64,
     ) -> Result<()> {
+        let conversation = self
+            .rt
+            .journal
+            .approval_conversation(id)
+            .unwrap_or_default();
         let grant = StandingGrant {
             id: GrantId::generate(),
             agent,
@@ -748,8 +941,13 @@ working on):\n{}\n]",
             expires_at_millis,
             // Issue #379: where the operator asked, so the re-dispatched turn's
             // reply lands back in that conversation. Read off the retained
-            // origin, exactly as `mint_grant` does.
-            origin_thread: self.rt.journal.approval_thread(id).flatten(),
+            // origin, exactly as `mint_grant` does. Issue #435 added the thread
+            // within it; both come from one read so they cannot disagree.
+            origin_thread: conversation.thread,
+            origin_parent: conversation.parent,
+            // Issue #796: the task this call was parked from, carried so a
+            // standing grant can reclaim the task's checkout across parks.
+            origin_task: self.approval_work_key(id),
             // Issue #457: which slice of the tool the card was actually about.
             // Read off the **parked effect's own payload** — the arguments the
             // operator was shown — rather than re-derived from anything live, so
@@ -773,6 +971,11 @@ working on):\n{}\n]",
     /// Journals then arms a single-use grant for `(agent, effect.kind,
     /// effect.payload)`.
     async fn mint_grant(&self, id: &ApprovalId, agent: String, effect: Effect) -> Result<()> {
+        let conversation = self
+            .rt
+            .journal
+            .approval_conversation(id)
+            .unwrap_or_default();
         let grant = GrantedCall {
             approval_id: id.clone(),
             agent,
@@ -785,8 +988,13 @@ working on):\n{}\n]",
             // Issue #379: where the operator asked, carried onto the grant so
             // the re-dispatched turn's reply lands back in that conversation.
             // Read off the retained origin, not this call's caller — an approval
-            // is resolved from a surface that knows only an id.
-            origin_thread: self.rt.journal.approval_thread(id).flatten(),
+            // is resolved from a surface that knows only an id. Issue #435 added
+            // the thread within it; one read, so the pair cannot disagree.
+            origin_thread: conversation.thread,
+            origin_parent: conversation.parent,
+            // Issue #796: the task this call was parked from, so the
+            // re-dispatched turn can reclaim its held-across-park checkout.
+            origin_task: self.approval_work_key(id),
         };
         self.rt.journal.record_granted(&grant).await?;
         self.rt.grants.grant(grant);
@@ -796,6 +1004,34 @@ working on):\n{}\n]",
             "[approval] minted a single-use grant; the agent will re-issue the call"
         );
         Ok(())
+    }
+
+    /// The work unit a parked approval belongs to, for stamping a grant's
+    /// `origin_task` (issue #796).
+    ///
+    /// A task card names it directly. A DM/chat has no card, but its conversation
+    /// is just as much a unit of work — the agent checks out, edits, commits and
+    /// publishes across a batch of approvals raised in the same thread — so the
+    /// thread stands in, sanitised to a single safe branch segment. The checkout
+    /// retention and `repo_publish`'s `oc/<company>/<unit>` branch then key on one
+    /// value for both, and the whole task-scoped machinery covers a DM unchanged.
+    ///
+    /// `None` only when there is neither a card nor a usable thread.
+    fn approval_work_key(&self, id: &ApprovalId) -> Option<String> {
+        if let Some(task) = self
+            .rt
+            .journal
+            .approval_task(id)
+            .flatten()
+            .and_then(|task| task.task_id().map(str::to_string))
+        {
+            return Some(task);
+        }
+        self.rt
+            .journal
+            .approval_conversation(id)
+            .and_then(|c| c.thread)
+            .and_then(|thread| sanitize_work_segment(&thread))
     }
 
     /// Describes a grant the agent just redeemed, so an operator-approved tool
@@ -825,6 +1061,8 @@ working on):\n{}\n]",
         Some(ExecutedEffect {
             kind: effect.kind.clone(),
             amount_usd: effect.amount_usd,
+            // The card this call was on, for the retry confirmation (#351) — a
+            // real task only, never the #796 DM work key, which is not a card.
             task_id: self
                 .rt
                 .journal
@@ -923,11 +1161,13 @@ working on):\n{}\n]",
         // The follow-up event, so the brain learns the approval resolved (with
         // an edit). `CompanyEvent` is closed, so the verdict rides as `Approve`;
         // the edit itself lives in the journal audit trail.
-        Ok(ResolveReceipt::Settled(CompanyEvent::ApprovalResolved {
-            approval_id: id.clone(),
-            verdict: Verdict::Approve,
-            by,
-        }))
+        Ok(ResolveReceipt::Settled(Box::new(
+            CompanyEvent::ApprovalResolved {
+                approval_id: id.clone(),
+                verdict: Verdict::Approve,
+                by,
+            },
+        )))
     }
 
     /// Replays the journal to rebuild the executed-key set, the approval queue,
@@ -1120,7 +1360,200 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
     if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND {
         crate::runtime::workflow_resume::resume_from_effect(rt, effect).await?;
     }
+    // Issue #735: an approved `repo_publish`. `execute` already staged the agent's
+    // commits onto the mirror's `oc/<company>/<task>` ref (the reversible half);
+    // this is the irreversible half — the host-side push to the real remote, done
+    // only now that the operator has approved. At-most-once comes free from the
+    // `approval:<id>` key the caller holds; a denied or expired approval never
+    // reaches here, which is exactly what leaves the remote untouched.
+    if effect.kind == REPO_PUBLISH_EFFECT {
+        let repo = effect
+            .payload
+            .get("repo")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let branch = effect
+            .payload
+            .get("branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        // The exact commit the approval was bound to at stage time. Pushing this
+        // SHA — not whatever the mirror's branch ref points at now — is what stops
+        // a second publish on the same task from riding in on this approval.
+        let head = effect
+            .payload
+            .get("head")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        // The card this publish belongs to, so a host-side failure can be reported
+        // on it.
+        let task = effect
+            .payload
+            .get("task")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let agent = effect
+            .payload
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let message = effect
+            .payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let Some(repos) = rt.repos() else {
+            return Err(crate::error::OpenCompanyError::Unimplemented(
+                "a repository publish was approved but this host has no repository manager \
+                 configured to perform it",
+            ));
+        };
+        // The push is the irreversible half, and it fails the effect — but never
+        // silently (issue #815). A failed push leaves the effect recorded as
+        // executed (the at-most-once guard), so re-approving is a no-op; the
+        // operator has to KNOW it failed and re-run the task, or the publish
+        // vanishes with the change staged in the mirror and nothing on the remote.
+        if let Err(err) = repos.push_published(repo, branch, head).await {
+            // The diagnosis — which can name the remote URL and host paths — stays
+            // in the log; the durable, company-readable note carries a classified
+            // sentence instead (issue #815, the rule #614/#688 set).
+            tracing::warn!(branch, "[repo] could not publish the branch: {err}");
+            note_publish_failure_on_card(
+                rt,
+                task,
+                format!(
+                    "Could not publish `{branch}` to the remote. Nothing reached the remote, and \
+                     this approval will not retry on its own \u{2014} re-run the task to publish \
+                     again."
+                ),
+            )
+            .await;
+            return Err(err);
+        }
+
+        // Issue #736: open a pull request for the pushed branch, best-effort. The
+        // push has landed, so a PR failure must NOT fail the effect — the branch
+        // is on the remote regardless. It is reported instead: the operator is
+        // told, on the task itself, that the branch is up but the PR did not open.
+        let title = repo_publish_pr_title(message);
+        let body = repo_publish_pr_body(agent, task, message);
+        match repos.open_pull_request(repo, branch, &title, &body).await {
+            Ok(pr) => tracing::info!(
+                number = pr.number,
+                url = %pr.html_url,
+                branch,
+                "[repo] opened a pull request for the published branch"
+            ),
+            Err(err) => {
+                // Same division as the push failure: the raw error to the log,
+                // a classified sentence to the durable note (issue #815).
+                tracing::warn!(
+                    branch,
+                    "[repo] pushed the branch but could not open a pull request: {err}"
+                );
+                note_publish_failure_on_card(
+                    rt,
+                    task,
+                    format!(
+                        "Published `{branch}` to the remote, but the pull request could not be \
+                         opened. The branch is on the remote \u{2014} open a PR from it by hand, or \
+                         approve another publish to retry."
+                    ),
+                )
+                .await;
+            }
+        }
+    }
     Ok(())
+}
+
+/// Whether `task` names a real card in `cards` (issue #815).
+///
+/// The guard that keeps a DM's `dm-*` work key — which `repo_publish` stamps as
+/// the effect's `task`, and which no card owns — from filing a publish-failure
+/// note under a phantom card. The empty id, an unknown id, and a work key all
+/// resolve to nothing.
+fn task_names_a_card(cards: &[TaskRecord], task: &str) -> bool {
+    !task.is_empty() && cards.iter().any(|card| card.id == task)
+}
+
+/// Records a host-side `repo_publish` failure where the operator will see it,
+/// but **only when the work unit is a real card** (issue #815).
+///
+/// A DM's `repo_publish` stamps its `dm-*` work key as the effect's `task`, and
+/// no card owns that id — a [`TaskDiscussionPosted`](CompanyEvent::TaskDiscussionPosted)
+/// under it would file the note against a phantom card. When the id does not
+/// resolve to a card the board post is skipped: the failure is already in the
+/// operator log (the `tracing::warn` at the call site), which is where a `git`
+/// error that can name host paths and the remote URL belongs, rather than in a
+/// durable, company-readable record (the rule #614/#688 set). `text` is a fixed,
+/// classified sentence carrying none of the raw error.
+async fn note_publish_failure_on_card(rt: &CompanyRuntime, task: &str, text: String) {
+    if task.is_empty() {
+        return;
+    }
+    // Resolve to a live card; a `dm-*` work key or an unknown id resolves to
+    // nothing, and the note stays in the log rather than misfiling. A store error
+    // is treated the same way — better a logged-only note than one on a card that
+    // may not exist.
+    let is_card = match rt.tasks().list(&rt.id).await {
+        Ok(cards) => task_names_a_card(&cards, task),
+        Err(err) => {
+            tracing::warn!("[repo] could not resolve the task for a publish-failure note: {err}");
+            false
+        }
+    };
+    if !is_card {
+        return;
+    }
+    if let Err(err) = rt
+        .events
+        .append(
+            &rt.id,
+            CompanyEvent::TaskDiscussionPosted {
+                task_id: task.to_string(),
+                text,
+                by: None,
+            },
+        )
+        .await
+    {
+        tracing::warn!("[repo] could not record the publish failure on the task: {err}");
+    }
+}
+
+/// The title of the pull request a `repo_publish` opens (issue #736): the first
+/// line of the agent's message, bounded, or a plain fallback when it said
+/// nothing.
+fn repo_publish_pr_title(message: &str) -> String {
+    let first = message.trim().lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        "Published by an OpenCompany agent".to_string()
+    } else {
+        first.chars().take(72).collect()
+    }
+}
+
+/// The body of that pull request (issue #736): the agent's message, then task
+/// and agent linkage so an operator landing on the PR can get back to the card
+/// and the seat that produced it.
+fn repo_publish_pr_body(agent: &str, task: &str, message: &str) -> String {
+    let mut body = String::new();
+    let message = message.trim();
+    if !message.is_empty() {
+        body.push_str(message);
+        body.push_str("\n\n");
+    }
+    body.push_str("---\n");
+    body.push_str("Opened host-side by an OpenCompany agent");
+    if !agent.is_empty() {
+        body.push_str(&format!(" (`{agent}`)"));
+    }
+    if !task.is_empty() {
+        body.push_str(&format!(" for task `{task}`"));
+    }
+    body.push('.');
+    body
 }
 
 /// Sends an `email.send` effect via the company's own outbound-mail handle
@@ -1180,6 +1613,63 @@ async fn recipient_is_established(rt: &CompanyRuntime, to: &str) -> bool {
         .has_inbound_from(rt.id(), &key, to)
         .await
         .unwrap_or(false) // fail closed → parks for approval
+}
+
+/// Maps a conversation thread into a single safe branch segment (issue #796).
+///
+/// The write tier's branch is `oc/<company>/<unit>`, and for a DM the unit is
+/// its thread — which, unlike a card id, can hold anything. Keep the characters
+/// `RepoManager::validate_task_segment` accepts, fold the rest to `-`, and
+/// prefix `dm-` so the result cannot lead with `-`, cannot be empty, cannot
+/// collide with a card id, and reads as "a conversation's branch" in `git log`.
+/// `None` when nothing usable survives.
+fn sanitize_work_segment(thread: &str) -> Option<String> {
+    let cleaned: String = thread
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(['-', '.']);
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Bound the body well under `validate_task_segment`'s 128-char cap; the
+    // characters are all ASCII, so a byte take is a char take.
+    let body: String = cleaned.chars().take(100).collect();
+    // Injective, not just safe. Folding every disallowed character to `-` — which
+    // is itself a keep-character — and trimming/truncating are all lossy, so two
+    // distinct threads can reduce to one body: `coder/main` and `coder-main` both
+    // become `coder-main`. Since this value keys checkout retention and the
+    // `oc/<company>/<unit>` publish branch, a collision would let one thread
+    // reclaim another's tree or publish over its branch. When anything was lost,
+    // append a short stable digest of the *raw* thread so distinct threads keep
+    // distinct keys; a thread that was already a safe segment is unchanged, so
+    // its key stays readable.
+    if body == thread {
+        Some(format!("dm-{body}"))
+    } else {
+        Some(format!("dm-{body}-{}", short_thread_digest(thread)))
+    }
+}
+
+/// A short, build-stable digest of a raw thread id (64-bit FNV-1a), used to keep
+/// two threads that sanitise to the same body from sharing a work key.
+///
+/// A `std` `DefaultHasher` is deliberately not used: its output is not
+/// guaranteed stable across toolchain versions, and this digest names a durable
+/// branch and checkout key that must hash the same on every build.
+fn short_thread_digest(thread: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in thread.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// The board task a cycle is working, read off its own trigger events
@@ -1299,6 +1789,11 @@ fn cycle_task_id(
             // re-run can skip it. Like the run outcome it precedes, it starts no
             // cycle and rivals no card.
             | CompanyEvent::WorkflowReportDelivered { .. }
+            // Issue #617: a disclosure that a child's call was never offered for
+            // approval. It records something a run already did; it names no card
+            // and asks nothing of anyone, so it starts no cycle. Neutral for the
+            // same reason the run bracket above is.
+            | CompanyEvent::WorkflowChildCallNotOffered { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
             // A withdrawal (#358) is a record about a record: it starts no
@@ -1356,28 +1851,68 @@ fn cycle_task_id(
 /// of: names a thread, rivals a thread, or is a record of something that
 /// already happened. A new *inbound trigger* silently defaulting to "harmless"
 /// is exactly how a request leaks into the wrong conversation.
-fn cycle_thread_id(
+///
+/// # The thread within the channel (issue #435)
+///
+/// Both keys are resolved here, in one pass, so a cycle can never be stamped
+/// with one approval's channel and another's thread.
+///
+/// They are **not** resolved on the same terms, and that asymmetry is the whole
+/// point. The channel rule above is untouched: a batch whose messages name
+/// different channels is ambiguous and yields nothing, exactly as before. The
+/// thread key is strictly weaker — when the batch agrees on a channel but
+/// disagrees on the thread inside it, the channel survives and only the thread
+/// is dropped.
+///
+/// Resolving the pair as one unit would have been wrong: two messages in one
+/// channel, in two different threads, would have gone from "the channel" to
+/// "nothing" and moved an approval that lands correctly today off the
+/// conversation altogether. A finer key must never cost a coarser answer that
+/// was already right. Dropping to `None` here means "the channel is the
+/// answer", which is precisely the pre-#435 behaviour.
+fn cycle_conversation(
     events: &[CompanyEvent],
-    approval_thread: impl Fn(&ApprovalId) -> Option<Option<String>>,
-) -> Option<String> {
-    let mut found: Option<String> = None;
+    approval_conversation: impl Fn(&ApprovalId) -> Option<ApprovalConversation>,
+) -> ApprovalConversation {
+    // `(channel, thread-root-within-it)`. The channel is what rivals; the root
+    // rides along and is demoted to `None` on disagreement — see above.
+    let mut found: Option<(String, Option<EventSeq>)> = None;
     for event in events {
         let candidate = match event {
             // The one event that names a thread outright. An unaddressed message
             // (`chat: None`) went to the orchestrator with no conversation of its
             // own — a rival, not a neutral pass-through, for the same reason a
             // non-card turn rivals a card above.
-            // `?` rather than a match: an unaddressed message short-circuits the
-            // whole scan to `None`, which is the rival behaviour described above.
-            CompanyEvent::OperatorMessage { chat, .. } => Some(chat.as_ref()?.clone()),
+            // An unaddressed message short-circuits the whole scan, which is the
+            // rival behaviour described above. (A `let … else` rather than `?`
+            // only because this function no longer returns an `Option`; the
+            // control flow is unchanged.)
+            //
+            // Issue #435: `parent` is the thread root the message hangs off,
+            // read from the same event that names the channel — the two can
+            // therefore never come from different messages.
+            CompanyEvent::OperatorMessage { chat, parent, .. } => {
+                let Some(chat) = chat else {
+                    return ApprovalConversation::default();
+                };
+                Some((chat.clone(), *parent))
+            }
             CompanyEvent::ApprovalResolved { approval_id, .. } => {
-                match approval_thread(approval_id) {
+                match approval_conversation(approval_id) {
                     // Resolved an approval raised in a conversation: this cycle
-                    // continues that conversation's work.
-                    Some(Some(thread)) => Some(thread),
+                    // continues that conversation's work — and inherits the
+                    // thread inside it, so a *second* sign-off re-parks in the
+                    // thread the first was asked in rather than only its
+                    // channel (issue #435, extending #379's inheritance).
+                    Some(ApprovalConversation {
+                        thread: Some(thread),
+                        parent,
+                    }) => Some((thread, parent)),
                     // Known to have come from no conversation — a rival turn,
                     // so the batch is ambiguous.
-                    Some(None) => return None,
+                    Some(ApprovalConversation { thread: None, .. }) => {
+                        return ApprovalConversation::default();
+                    }
                     // No origin recorded at all: nothing is claimed either way,
                     // so it neither stamps nor blocks.
                     None => continue,
@@ -1391,7 +1926,7 @@ fn cycle_thread_id(
             | CompanyEvent::ScheduleFired { .. }
             | CompanyEvent::A2aTaskReceived { .. }
             | CompanyEvent::PaymentReceived { .. }
-            | CompanyEvent::FeedbackFiled { .. } => return None,
+            | CompanyEvent::FeedbackFiled { .. } => return ApprovalConversation::default(),
             // Records of something that already happened, not stimuli for new
             // work: they name no thread and compete with none.
             CompanyEvent::LifecycleChanged { .. }
@@ -1428,6 +1963,9 @@ fn cycle_thread_id(
             // Issue #529: a record of a report already dispatched — names no
             // thread and rivals none, exactly like the run events it sits among.
             | CompanyEvent::WorkflowReportDelivered { .. }
+            // Issue #617: likewise a record, not a message. It belongs to no
+            // conversation and rivals none.
+            | CompanyEvent::WorkflowChildCallNotOffered { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
             // A withdrawal (#358) is a record about a record: it starts no
@@ -1443,13 +1981,45 @@ fn cycle_thread_id(
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
-        match &found {
-            Some(existing) if existing != &candidate => return None,
+        match &mut found {
+            // Different channels: the batch is ambiguous and nothing is
+            // stamped. Unchanged from #379 — the channel is still the key that
+            // rivals.
+            Some((thread, _)) if *thread != candidate.0 => {
+                return ApprovalConversation::default();
+            }
+            // Issue #435: same channel, different thread inside it. The channel
+            // is still unambiguous and still correct, so it survives; only the
+            // finer key is dropped. Escalating this to a full rival would move
+            // an approval that lands correctly today off its conversation
+            // entirely — see the asymmetry note in the doc above.
+            Some((thread, parent)) if *parent != candidate.1 => {
+                // Say so, because from the outside this is indistinguishable
+                // from the bug #435 fixed: the operator sees a threaded request
+                // answered in the channel and has no way to tell "we dropped the
+                // thread on purpose, the batch named two" from "the thread was
+                // lost again". Debug rather than warn — the outcome is correct
+                // and is the pre-#435 behaviour, so it is an explanation on
+                // demand, not an incident.
+                tracing::debug!(
+                    channel = %thread,
+                    dropped_parent = ?*parent,
+                    rival_parent = ?candidate.1,
+                    "[approval] two threads in this batch, resuming in the channel; \
+                     the channel is unambiguous so only the thread root is dropped (#435)"
+                );
+                *parent = None;
+            }
             Some(_) => {}
             None => found = Some(candidate),
         }
     }
     found
+        .map(|(thread, parent)| ApprovalConversation {
+            thread: Some(thread),
+            parent,
+        })
+        .unwrap_or_default()
 }
 
 /// The host the brain calls back into mid-cycle. Bridges tool, context, and
@@ -1476,10 +2046,21 @@ struct CycleHostImpl<'a> {
     /// Approvals page.
     ///
     /// Computed once, from the cycle's own trigger events, by
-    /// [`cycle_thread_id`]. `None` for a cycle with no conversation behind it (a
-    /// dispatched card, a scheduler tick, a workflow delivery) and for an
+    /// [`cycle_conversation`]. `None` for a cycle with no conversation behind it
+    /// (a dispatched card, a scheduler tick, a workflow delivery) and for an
     /// ambiguous batch — both of which leave the approval where it is today.
     thread_id: Option<String>,
+    /// The thread *inside* [`thread_id`](Self::thread_id) this cycle is
+    /// answering (issue #435) — stamped onto every approval the cycle parks so
+    /// the continuation can be threaded back under the same root, instead of
+    /// landing flat in the channel and losing the conversation its own
+    /// conclusion belongs to.
+    ///
+    /// Computed in the same pass as `thread_id`, so the two always describe one
+    /// message. `None` whenever `thread_id` is, and additionally when the batch
+    /// agrees on a channel but not on a thread within it — which degrades to
+    /// exactly the pre-#435 behaviour of answering in the channel.
+    thread_parent: Option<EventSeq>,
 }
 
 impl<'a> CycleHostImpl<'a> {
@@ -1488,7 +2069,7 @@ impl<'a> CycleHostImpl<'a> {
         cycle_id: String,
         rt: &'a CompanyRuntime,
         task_id: Option<String>,
-        thread_id: Option<String>,
+        conversation: ApprovalConversation,
     ) -> Self {
         Self {
             company,
@@ -1498,7 +2079,8 @@ impl<'a> CycleHostImpl<'a> {
             executed: StdMutex::new(Vec::new()),
             parked: StdMutex::new(Vec::new()),
             task_id,
-            thread_id,
+            thread_id: conversation.thread,
+            thread_parent: conversation.parent,
         }
     }
 
@@ -1554,7 +2136,14 @@ impl<'a> CycleHostImpl<'a> {
                 &effect,
                 now_millis(),
                 TaskLink::from_task_id(self.task_id.as_deref()),
-                self.thread_id.clone(),
+                // Which channel, and — issue #435 — where inside it, so the
+                // continuation can be threaded back under the same root rather
+                // than landing flat in the channel. Built as one value so the
+                // pair cannot be written down describing two different places.
+                ApprovalConversation {
+                    thread: self.thread_id.clone(),
+                    parent: self.thread_parent,
+                },
                 // Issue #469: which turn is blocked on this. Recorded here
                 // because this is the one write path into the approval queue, so
                 // the count the continuation queue keeps below cannot describe a
@@ -1562,6 +2151,21 @@ impl<'a> CycleHostImpl<'a> {
                 Some(self.cycle_id.clone()),
             )
             .await?;
+        // Issue #796: a parked approval mints no grant until it resolves, so
+        // until then neither grant map names this work unit. Mark it pending on
+        // the shared grant set so an unrelated turn's `sweep_orphans` treats the
+        // checkout this parked step is holding as live rather than orphaned. The
+        // key is derived exactly as `approval_work_key` derives the grant's
+        // `origin_task` (the card, else the sanitised thread), so the pending
+        // mark and the grant it becomes name one unit; cleared when the approval
+        // is settled or expires.
+        if let Some(work) = self
+            .task_id
+            .clone()
+            .or_else(|| self.thread_id.as_deref().and_then(sanitize_work_segment))
+        {
+            self.rt.grants.mark_pending(&approval_id, work);
+        }
         // …and armed on the live counter in the same breath. A turn that parks
         // four calls is blocked on four decisions; the runtime holds its
         // continuation until the last of them lands and then runs it once.
@@ -1703,6 +2307,8 @@ impl<'a> CycleHostImpl<'a> {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -1797,6 +2403,8 @@ impl<'a> CycleHostImpl<'a> {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -1902,6 +2510,207 @@ impl CycleHost for CycleHostImpl<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Issue #845: a `workflow` message reaches the brain carrying the builder
+    /// briefing, and nothing else does.
+    ///
+    /// This is the fix for the mode actually observed on staging: the builder
+    /// pass had already produced a proposal for `weekly-aeo-audit` while the
+    /// desk agent answering the same message was telling the operator that it
+    /// "cannot make it exist". The turn was right about its own toolset and
+    /// wrong about the company, because nothing told it.
+    #[test]
+    fn only_a_workflow_message_gets_the_builder_briefing() {
+        let msg = |deliverable| CompanyEvent::OperatorMessage {
+            text: "set up a weekly AEO audit".to_string(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable,
+        };
+        let text_of = |event: &CompanyEvent| match event {
+            CompanyEvent::OperatorMessage { text, .. } => text.clone(),
+            _ => unreachable!("fixture is an operator message"),
+        };
+
+        let mut events = vec![
+            msg(Some(TaskDeliverable::Workflow)),
+            msg(Some(TaskDeliverable::Once)),
+            msg(None),
+            // A non-operator event must be left entirely alone.
+            CompanyEvent::ScheduleFired {
+                cron: "0 6 * * 5".to_string(),
+                prompt: "run the audit".to_string(),
+            },
+        ];
+        CycleRunner::inject_workflow_builder_awareness(&mut events);
+
+        let briefed = text_of(&events[0]);
+        assert!(briefed.contains(BUILDER_ANNOTATION), "{briefed}");
+        assert!(
+            briefed.starts_with("set up a weekly AEO audit"),
+            "the operator's own words come first, untouched: {briefed}"
+        );
+        // The whole point: the turn is told not to deny the capability.
+        assert!(
+            briefed.contains("do not report that you cannot"),
+            "{briefed}"
+        );
+
+        for (i, label) in [(1, "once"), (2, "no choice")] {
+            let text = text_of(&events[i]);
+            assert_eq!(
+                text, "set up a weekly AEO audit",
+                "a `{label}` message must reach the brain exactly as typed"
+            );
+        }
+        assert!(matches!(events[3], CompanyEvent::ScheduleFired { .. }));
+    }
+
+    /// Issue #845, the wiring: the briefing actually reaches the brain.
+    ///
+    /// [`only_a_workflow_message_gets_the_builder_briefing`] pins what the
+    /// injection *does* by calling it; this pins that `run_cycle` calls it. The
+    /// two are separate failures — a correct injection nothing invokes leaves
+    /// the bug exactly where it was — and only this one covers the wiring, so
+    /// deleting the call site has to fail a test.
+    ///
+    /// `EffectBrain` echoes the text it was handed, so the reply is a faithful
+    /// window onto what the brain actually saw.
+    #[tokio::test]
+    async fn the_builder_briefing_reaches_the_brain_through_run_cycle() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let effect = Effect {
+            kind: "noop".into(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest("full"))
+                .with_brain(Arc::new(EffectBrain { effect }))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        let ask = |deliverable| CompanyEvent::OperatorMessage {
+            text: "set up a weekly AEO audit".into(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable,
+        };
+
+        let workflow = rt
+            .run_cycle(vec![ask(Some(TaskDeliverable::Workflow))])
+            .await
+            .unwrap();
+        let seen = workflow
+            .responses
+            .iter()
+            .map(|r| r.text.clone())
+            .collect::<String>();
+        assert!(
+            seen.contains(BUILDER_ANNOTATION),
+            "the brain must be told the builder owns this: {seen}"
+        );
+
+        // …and a one-off is handed through byte-for-byte, so the annotation is
+        // not simply always on.
+        let once = rt
+            .run_cycle(vec![ask(Some(TaskDeliverable::Once))])
+            .await
+            .unwrap();
+        let seen_once = once
+            .responses
+            .iter()
+            .map(|r| r.text.clone())
+            .collect::<String>();
+        assert!(!seen_once.contains(BUILDER_ANNOTATION), "{seen_once}");
+        assert!(
+            seen_once.contains("set up a weekly AEO audit"),
+            "{seen_once}"
+        );
+    }
+
+    /// Issue #796: a DM's thread becomes a safe, `dm-`-prefixed branch segment
+    /// `RepoManager::validate_task_segment` accepts; an empty or all-garbage
+    /// thread yields nothing, so `repo_publish` refuses rather than build a
+    /// broken ref.
+    #[test]
+    fn sanitize_work_segment_makes_a_safe_branch_segment() {
+        // An already-safe thread is unchanged and keeps a readable key.
+        assert_eq!(sanitize_work_segment("coder"), Some("dm-coder".into()));
+        // Dots and underscores are already valid and survive.
+        assert_eq!(sanitize_work_segment("a_b.c"), Some("dm-a_b.c".into()));
+        // Nothing usable.
+        assert_eq!(sanitize_work_segment(""), None);
+        assert_eq!(sanitize_work_segment("///"), None);
+
+        // When folding/trimming loses information, the readable body is kept and
+        // a digest of the raw thread is appended so distinct threads never share
+        // a work key. Colons, slashes and spaces fold to '-'; leading/trailing
+        // separators are trimmed before the prefix.
+        let folded = sanitize_work_segment("dm:coder/main x").unwrap();
+        assert!(folded.starts_with("dm-dm-coder-main-x-"), "{folded}");
+        let trimmed = sanitize_work_segment("--weird--").unwrap();
+        assert!(trimmed.starts_with("dm-weird-"), "{trimmed}");
+
+        // The collision the digest closes: two threads that fold to the same body
+        // get distinct keys — and the digest is deterministic across calls.
+        assert_ne!(
+            sanitize_work_segment("coder/main"),
+            sanitize_work_segment("coder-main"),
+            "distinct threads must not share a work key"
+        );
+        assert_eq!(
+            sanitize_work_segment("coder/main"),
+            sanitize_work_segment("coder/main")
+        );
+    }
+
+    fn card_record(id: &str) -> TaskRecord {
+        TaskRecord {
+            id: id.to_string(),
+            title: "t".to_string(),
+            note: None,
+            column: crate::ports::tasks::COLUMN_IN_PROGRESS.to_string(),
+            priority: "medium".to_string(),
+            assignee: "ceo".to_string(),
+            updated_at_millis: 1,
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        }
+    }
+
+    /// A publish-failure note lands only on a real card — never on a DM's `dm-*`
+    /// work key, which no card owns (issue #815).
+    #[test]
+    fn a_publish_note_only_lands_on_a_real_card_not_a_dm_work_key() {
+        let cards = vec![card_record("019ff728-abcd"), card_record("another")];
+        // A real card id resolves.
+        assert!(task_names_a_card(&cards, "019ff728-abcd"));
+        // A DM work key — what `repo_publish` stamps for a DM — owns no card, so
+        // the failure note stays in the log rather than filing under a phantom
+        // card.
+        assert!(!task_names_a_card(&cards, "dm-coder-main"));
+        // An unknown id, the empty id, and an empty board all resolve to nothing.
+        assert!(!task_names_a_card(&cards, "ghost"));
+        assert!(!task_names_a_card(&cards, ""));
+        assert!(!task_names_a_card(&[], "019ff728-abcd"));
+    }
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
@@ -2074,6 +2883,7 @@ mod test {
             text: "hand it off".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -2300,6 +3110,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -2359,6 +3171,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -2495,6 +3309,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -2525,7 +3340,8 @@ mod test {
                 parent: None,
                 text: "hi".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }
         );
 
@@ -2603,6 +3419,7 @@ mod test {
                 text: "file it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -2663,6 +3480,7 @@ mod test {
                 text: "do it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -2727,6 +3545,7 @@ mod test {
                 text: "do it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -2770,7 +3589,12 @@ mod test {
     #[tokio::test]
     async fn approving_a_harness_tool_call_mints_a_grant_instead_of_executing() {
         let home_dir = tmp_home();
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL", "to": "a@b.test" });
+        // Issue #470: a catalogued send, keyed the way `composio_execute`'s
+        // schema keys it, with the action's parameters under `arguments`.
+        let args = crate::policy::test_support::composio_args_with(
+            crate::policy::test_support::COMPOSIO_SEND_SLUG,
+            serde_json::json!({ "to": "a@b.test" }),
+        );
         let (rt, id) = park_one(
             home_dir.path().to_path_buf(),
             harness_effect("finance", "composio_execute", args.clone()),
@@ -2987,6 +3811,7 @@ mod test {
                 text: "do it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3077,6 +3902,8 @@ mod test {
             args: serde_json::json!({ "to": "a@b.test" }),
             at_millis: 0,
             origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
         });
         // A fresh one, to prove the sweep is selective rather than a flush.
         rt.grants.grant(GrantedCall {
@@ -3086,6 +3913,8 @@ mod test {
             args: serde_json::json!({}),
             at_millis: now_millis(),
             origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
         });
 
         let expired = rt.sweep_expired_grants().await.unwrap();
@@ -3153,6 +3982,7 @@ mod test {
                 text: "file it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3214,7 +4044,7 @@ mod test {
             amount_usd: None,
             established_thread: false,
             first_time_counterparty: false,
-            payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            payload: crate::policy::test_support::composio_send_args(),
             agent: None,
             run_id: None,
         };
@@ -3232,6 +4062,7 @@ mod test {
                 text: "send that email".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3288,6 +4119,7 @@ mod test {
                     text: "file it".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }])
                 .await
                 .unwrap();
@@ -3348,6 +4180,7 @@ mod test {
                 text: "file it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3418,6 +4251,7 @@ mod test {
                 text: "file it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -3506,6 +4340,7 @@ mod test {
             text: "how are we doing".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -3706,6 +4541,95 @@ mod test {
         assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 
+    // --- The cycle bracket (issue #390) --------------------------------------
+
+    /// **The placement test.** The bracket opens *before* the serial lock, and
+    /// this is the only thing that says so.
+    ///
+    /// Condition of the fix rather than a nice-to-have: `cycle_id` used to be
+    /// minted inside `run_locked`, and moving it is the riskiest part of #390.
+    /// The failure mode is a correctly-typed id written in the wrong place —
+    /// invisible to the compiler and invisible to every other test, because a
+    /// bracket that opens after the lock still opens, still closes, and still
+    /// reads correctly once the cycle is over.
+    ///
+    /// So this holds the lock and asserts the cycle is *already* visible as open
+    /// while it is still queued behind it. Move the mint or the `started` write
+    /// back inside `run_locked` and this fails; nothing else does.
+    #[tokio::test]
+    async fn a_cycles_bracket_opens_before_the_serial_lock() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        assert!(rt.journal.open_cycles().is_empty(), "nothing has run yet");
+
+        // Hold the lock, so any cycle we start is stuck on the near side of it —
+        // the window a post-lock bracket cannot see.
+        let guard = rt.serial.lock().await;
+
+        let spawned = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.run_cycle(Vec::new()).await })
+        };
+
+        // Wait for the bracket, not for the cycle — the cycle cannot proceed.
+        let mut open = Vec::new();
+        for _ in 0..200 {
+            open = rt.journal.open_cycles();
+            if !open.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            open.len(),
+            1,
+            "a cycle blocked on the serial lock must already be bracketed; if this \
+             is empty the `started` write moved back inside the lock and #390's \
+             whole case — a continuation that dies waiting — is invisible again"
+        );
+        assert_eq!(open[0].trigger, "empty", "no events drove this one");
+
+        // …and it closes once the lock is released.
+        drop(guard);
+        spawned.await.unwrap().unwrap();
+        assert!(
+            rt.journal.open_cycles().is_empty(),
+            "the bracket closes when the cycle ends"
+        );
+    }
+
+    /// The trigger label distinguishes the case #390 is about from an ordinary
+    /// chat turn, which is the whole reason an operator can read the surface.
+    #[test]
+    fn the_trigger_label_names_what_drove_the_cycle() {
+        assert_eq!(cycle_trigger(&[]), "empty");
+        assert_eq!(
+            cycle_trigger(&[CompanyEvent::ApprovalResolved {
+                approval_id: ApprovalId::new("appr-1"),
+                verdict: Verdict::Approve,
+                by: operator(),
+            }]),
+            "approval-continuation"
+        );
+        assert_eq!(
+            cycle_trigger(&[CompanyEvent::OperatorMessage {
+                parent: None,
+                text: "hello".into(),
+                by: None,
+                chat: None,
+                deliverable: None,
+            }]),
+            "operator-message"
+        );
+    }
+
     #[tokio::test]
     async fn distinct_companies_run_concurrently() {
         let home_dir = tmp_home();
@@ -3726,13 +4650,15 @@ mod test {
                 parent: None,
                 text: "a".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }]),
             two.run_cycle(vec![CompanyEvent::OperatorMessage {
                 parent: None,
                 text: "b".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }]),
         );
         assert_eq!(ra.unwrap().responses.len(), 1);
@@ -3783,6 +4709,7 @@ mod test {
             text: "send it".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -3846,7 +4773,7 @@ mod test {
                 &effect,
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -3920,7 +4847,7 @@ mod test {
                 &effect,
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -3972,7 +4899,14 @@ mod test {
                 .unwrap();
             let id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
             rt.journal
-                .record_parked(&id, &effect, now_millis(), TaskLink::Unlinked, None, None)
+                .record_parked(
+                    &id,
+                    &effect,
+                    now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    None,
+                )
                 .await
                 .unwrap();
             id
@@ -4091,7 +5025,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-nomail".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-nomail".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .send_email(serde_json::json!({ "to": "x@ext.com", "subject": "s", "body": "b" }))
@@ -4114,7 +5054,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-bad".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-bad".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .send_email(serde_json::json!({ "subject": "s", "body": "b" }))
@@ -4137,7 +5083,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-park".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-park".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
@@ -4167,7 +5119,7 @@ mod test {
             "cyc-task".into(),
             &rt,
             Some("t-42".to_string()),
-            None,
+            ApprovalConversation::default(),
         );
 
         // A cold recipient parks — the same path a card's turn takes.
@@ -4215,7 +5167,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-chat".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-chat".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
             .await
@@ -4251,7 +5209,10 @@ mod test {
             "cyc-thread".into(),
             &rt,
             None,
-            Some("desk-finance".to_string()),
+            ApprovalConversation {
+                thread: Some("desk-finance".to_string()),
+                parent: None,
+            },
         );
 
         host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
@@ -4304,7 +5265,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-none".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-none".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
             .await
@@ -4331,6 +5298,123 @@ mod test {
                 .iter()
                 .any(|e| matches!(&e.event, CompanyEvent::ApprovalParked { thread: None, .. })),
             "the park is still announced, it simply names no channel: {logged:?}",
+        );
+    }
+
+    /// Issue #842: **every gated call one turn parks carries that turn's key**,
+    /// and a different turn's parks carry a different one.
+    ///
+    /// This is the whole of the batching mechanism, and it is deliberately not
+    /// a new one. #469 already records the parking cycle so a turn blocked on
+    /// four decisions is continued once rather than four times; the operator
+    /// was simply never shown that grouping, so a research turn that reached
+    /// three sites interrupted the conversation three times to ask about one
+    /// piece of work. Projecting the key it already had is what lets the
+    /// conversation ask once.
+    ///
+    /// The second host is the half that matters. A key every park shares would
+    /// consolidate correctly and also fold two unrelated turns into one card —
+    /// an operator approving a batch they never saw raised. Grouping is only
+    /// safe because the key separates turns, so both directions are asserted.
+    ///
+    /// What is *not* changed here, and is asserted to make the point: the parks
+    /// stay two records with two ids. Chat groups them for display; each is
+    /// still decided on its own and still mints its own host-scoped grant
+    /// (#739).
+    #[tokio::test]
+    async fn every_approval_one_turn_parks_carries_that_turns_batch_key() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let sender = Arc::new(RecordingMailSender::new());
+        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
+            .with_mail(CompanyMail {
+                sender: sender.clone(),
+                smtp: test_smtp("ceo@acme.test"),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // One turn, two gated calls — the shape the issue reports, where a
+        // research turn reaches several outside hosts before it yields.
+        let turn = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-research".into(),
+            &rt,
+            None,
+            ApprovalConversation {
+                thread: Some("desk-marketing".to_string()),
+                parent: None,
+            },
+        );
+        turn.park_effect(harness_effect(
+            "seo",
+            "web_fetch",
+            serde_json::json!({ "url": "https://espn.com/nba" }),
+        ))
+        .await
+        .unwrap();
+        turn.park_effect(harness_effect(
+            "seo",
+            "web_fetch",
+            serde_json::json!({ "url": "https://bbc.com/sport" }),
+        ))
+        .await
+        .unwrap();
+
+        // A later, unrelated turn in the same conversation.
+        let other = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-later".into(),
+            &rt,
+            None,
+            ApprovalConversation {
+                thread: Some("desk-marketing".to_string()),
+                parent: None,
+            },
+        );
+        other
+            .park_effect(harness_effect(
+                "seo",
+                "web_fetch",
+                serde_json::json!({ "url": "https://theguardian.com/uk" }),
+            ))
+            .await
+            .unwrap();
+
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 3, "one record per gated call, still");
+        let batches: Vec<Option<String>> = pending.iter().map(|p| p.batch.clone()).collect();
+        assert!(
+            batches.iter().all(Option::is_some),
+            "a park raised by a turn must name it: {batches:?}"
+        );
+
+        let by_url = |url: &str| {
+            pending
+                .iter()
+                .find(|p| p.payload.as_ref().is_some_and(|v| v["url"] == url))
+                .unwrap_or_else(|| panic!("no parked approval for {url}"))
+        };
+        let espn = by_url("https://espn.com/nba");
+        let bbc = by_url("https://bbc.com/sport");
+        let guardian = by_url("https://theguardian.com/uk");
+
+        assert_eq!(
+            espn.batch, bbc.batch,
+            "two calls one turn parked belong to one batch, so the operator is asked once"
+        );
+        assert_ne!(
+            espn.batch, guardian.batch,
+            "a different turn is a different question — consolidating across turns would ask \
+             an operator to approve work they never saw raised"
+        );
+        // Still three decisions underneath. The batch is presentation; the park
+        // is the unit of truth, and each keeps its own id to be resolved by.
+        assert_eq!(
+            std::collections::HashSet::from([&espn.id, &bbc.id, &guardian.id]).len(),
+            3,
+            "grouping must not merge the records it groups"
         );
     }
 
@@ -4367,6 +5451,7 @@ mod test {
             text: "hi".into(),
             by: None,
             chat: None,
+            deliverable: None,
         };
 
         // A dispatch names the card outright.
@@ -4465,6 +5550,7 @@ mod test {
                         column: "done".into(),
                         artifact_ids: Vec::new(),
                         output: String::new(),
+                        origin_chat_id: None,
                     },
                 ],
                 approval_task,
@@ -4554,10 +5640,16 @@ mod test {
         // a desk channel, `appr-dm` in a direct message, `appr-none` had no
         // conversation behind it (or is a pre-#379 line — the same answer, on
         // purpose), and anything else has no origin at all.
-        let approval_thread = |id: &ApprovalId| match id.as_ref() {
-            "appr-desk" => Some(Some("desk-finance".to_string())),
-            "appr-dm" => Some(Some("agent-cfo".to_string())),
-            "appr-none" => Some(None),
+        let conv = |thread: Option<&str>, parent: Option<u64>| ApprovalConversation {
+            thread: thread.map(str::to_string),
+            parent: parent.map(EventSeq::new),
+        };
+        let approval_conversation = move |id: &ApprovalId| match id.as_ref() {
+            "appr-desk" => Some(conv(Some("desk-finance"), None)),
+            "appr-dm" => Some(conv(Some("agent-cfo"), None)),
+            "appr-none" => Some(conv(None, None)),
+            // Issue #435: raised inside a thread of the desk channel.
+            "appr-desk-threaded" => Some(conv(Some("desk-finance"), Some(7))),
             _ => None,
         };
         let addressed = |chat: &str| CompanyEvent::OperatorMessage {
@@ -4565,12 +5657,14 @@ mod test {
             text: "pay the invoice".into(),
             by: None,
             chat: Some(chat.to_string()),
+            deliverable: None,
         };
         let unaddressed = || CompanyEvent::OperatorMessage {
             parent: None,
             text: "hi".into(),
             by: None,
             chat: None,
+            deliverable: None,
         };
         let resolved = |id: &str| CompanyEvent::ApprovalResolved {
             approval_id: ApprovalId::new(id),
@@ -4587,65 +5681,76 @@ mod test {
 
         // An addressed message names the thread outright.
         assert_eq!(
-            cycle_thread_id(&[addressed("desk-finance")], approval_thread),
+            cycle_conversation(&[addressed("desk-finance")], approval_conversation).thread,
             Some("desk-finance".into()),
         );
         // The whole point, stated as an assertion: the desk channel and a DM to
         // that desk's lead are different stamps, even though the same agent
         // answers both.
         assert_eq!(
-            cycle_thread_id(&[addressed("agent-cfo")], approval_thread),
+            cycle_conversation(&[addressed("agent-cfo")], approval_conversation).thread,
             Some("agent-cfo".into()),
         );
         // A follow-up cycle inherits the thread from the approval it resolves, so
         // a turn needing a second sign-off re-parks in the same channel.
         assert_eq!(
-            cycle_thread_id(&[resolved("appr-desk")], approval_thread),
+            cycle_conversation(&[resolved("appr-desk")], approval_conversation).thread,
             Some("desk-finance".into()),
         );
         assert_eq!(
-            cycle_thread_id(&[resolved("appr-dm")], approval_thread),
+            cycle_conversation(&[resolved("appr-dm")], approval_conversation).thread,
             Some("agent-cfo".into()),
         );
         // An approval with no origin at all claims nothing — and does not block.
         assert_eq!(
-            cycle_thread_id(
+            cycle_conversation(
                 &[resolved("appr-unknown"), addressed("desk-finance")],
-                approval_thread
-            ),
+                approval_conversation
+            )
+            .thread,
             Some("desk-finance".into()),
         );
         // An unaddressed message went to the orchestrator with no conversation of
         // its own. It is a rival, not a pass-through.
-        assert_eq!(cycle_thread_id(&[unaddressed()], approval_thread), None);
         assert_eq!(
-            cycle_thread_id(&[addressed("desk-finance"), unaddressed()], approval_thread),
+            cycle_conversation(&[unaddressed()], approval_conversation).thread,
+            None
+        );
+        assert_eq!(
+            cycle_conversation(
+                &[addressed("desk-finance"), unaddressed()],
+                approval_conversation
+            )
+            .thread,
             None,
             "an unaddressed turn batched with an addressed one must not borrow its channel",
         );
         // Two different threads in one batch: refuse rather than raise one
         // conversation's request inside the other.
         assert_eq!(
-            cycle_thread_id(
+            cycle_conversation(
                 &[addressed("desk-finance"), addressed("agent-cfo")],
-                approval_thread,
-            ),
+                approval_conversation,
+            )
+            .thread,
             None,
         );
         // The same thread twice is not ambiguous.
         assert_eq!(
-            cycle_thread_id(
+            cycle_conversation(
                 &[addressed("desk-finance"), resolved("appr-desk")],
-                approval_thread,
-            ),
+                approval_conversation,
+            )
+            .thread,
             Some("desk-finance".into()),
         );
         // A resolution known to have come from no conversation is a rival too.
         assert_eq!(
-            cycle_thread_id(
+            cycle_conversation(
                 &[addressed("desk-finance"), resolved("appr-none")],
-                approval_thread,
-            ),
+                approval_conversation,
+            )
+            .thread,
             None,
         );
         // Inbound triggers that are their own work disqualify the batch, exactly
@@ -4673,7 +5778,11 @@ mod test {
             },
         ] {
             assert_eq!(
-                cycle_thread_id(&[addressed("desk-finance"), rival.clone()], approval_thread),
+                cycle_conversation(
+                    &[addressed("desk-finance"), rival.clone()],
+                    approval_conversation
+                )
+                .thread,
                 None,
                 "{rival:?} is its own work and must not inherit the channel",
             );
@@ -4693,6 +5802,7 @@ mod test {
                 column: "done".into(),
                 artifact_ids: Vec::new(),
                 output: String::new(),
+                origin_chat_id: None,
             },
             CompanyEvent::AgentReply {
                 parent: None,
@@ -4712,22 +5822,170 @@ mod test {
             workflow_node_started(),
         ] {
             assert_eq!(
-                cycle_thread_id(
+                cycle_conversation(
                     &[addressed("desk-finance"), record.clone()],
-                    approval_thread
-                ),
+                    approval_conversation
+                )
+                .thread,
                 Some("desk-finance".into()),
                 "{record:?} is a record, not a trigger, and must not disqualify the batch",
             );
         }
         // And alone neither claims a conversation of its own.
         assert_eq!(
-            cycle_thread_id(&[workspace_changed()], approval_thread),
+            cycle_conversation(&[workspace_changed()], approval_conversation).thread,
             None,
         );
         assert_eq!(
-            cycle_thread_id(&[workflow_node_started()], approval_thread),
+            cycle_conversation(&[workflow_node_started()], approval_conversation).thread,
             None,
+        );
+    }
+
+    /// Issue #435: the thread *within* the channel, and the asymmetry between
+    /// the two keys.
+    ///
+    /// The channel rule is #379's and is asserted above. This pins the part
+    /// that is easy to get wrong in the obvious way: resolving `(channel,
+    /// thread)` as a single unit would make two messages in one channel but
+    /// two different threads ambiguous, dropping an approval that lands
+    /// correctly today off its conversation entirely. A finer key must never
+    /// cost a coarser answer that was already right.
+    #[test]
+    fn cycle_conversation_carries_the_thread_root_and_degrades_it_before_the_channel() {
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Verdict};
+
+        let conv = |thread: Option<&str>, parent: Option<u64>| ApprovalConversation {
+            thread: thread.map(str::to_string),
+            parent: parent.map(EventSeq::new),
+        };
+        let approval_conversation = move |id: &ApprovalId| match id.as_ref() {
+            // Raised inside thread 7 of the desk channel.
+            "appr-threaded" => Some(conv(Some("desk-finance"), Some(7))),
+            // Raised straight in the same channel, outside any thread.
+            "appr-flat" => Some(conv(Some("desk-finance"), None)),
+            _ => None,
+        };
+        let in_thread = |chat: &str, parent: Option<u64>| CompanyEvent::OperatorMessage {
+            parent: parent.map(EventSeq::new),
+            text: "pay the invoice".into(),
+            by: None,
+            chat: Some(chat.to_string()),
+            deliverable: None,
+        };
+        let resolved = |id: &str| CompanyEvent::ApprovalResolved {
+            approval_id: ApprovalId::new(id),
+            verdict: Verdict::Approve,
+            by: Actor {
+                kind: ActorKind::Operator,
+                id: "owner".into(),
+            },
+        };
+
+        // A message asked inside a thread names both keys.
+        assert_eq!(
+            cycle_conversation(&[in_thread("desk-finance", Some(7))], approval_conversation),
+            conv(Some("desk-finance"), Some(7)),
+        );
+        // A message asked straight in the channel names only the channel —
+        // the pre-#435 behaviour, which must not change.
+        assert_eq!(
+            cycle_conversation(&[in_thread("desk-finance", None)], approval_conversation),
+            conv(Some("desk-finance"), None),
+        );
+        // A follow-up cycle inherits the thread as well as the channel, so a
+        // second sign-off re-parks under the same root rather than flat.
+        assert_eq!(
+            cycle_conversation(&[resolved("appr-threaded")], approval_conversation),
+            conv(Some("desk-finance"), Some(7)),
+        );
+        assert_eq!(
+            cycle_conversation(&[resolved("appr-flat")], approval_conversation),
+            conv(Some("desk-finance"), None),
+        );
+        // The same thread twice is not ambiguous.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(7)),
+                    resolved("appr-threaded")
+                ],
+                approval_conversation,
+            ),
+            conv(Some("desk-finance"), Some(7)),
+        );
+
+        // THE ASYMMETRY. One channel, two threads: the channel survives and
+        // only the thread is dropped. Answering in the channel is exactly what
+        // this batch did before #435, so the fallback is the old behaviour
+        // rather than a new failure.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(7)),
+                    in_thread("desk-finance", Some(9)),
+                ],
+                approval_conversation,
+            ),
+            conv(Some("desk-finance"), None),
+            "a thread disagreement must cost the thread, never the channel",
+        );
+        // Threaded batched with flat is the same disagreement, both orders.
+        for batch in [
+            [
+                in_thread("desk-finance", Some(7)),
+                in_thread("desk-finance", None),
+            ],
+            [
+                in_thread("desk-finance", None),
+                in_thread("desk-finance", Some(7)),
+            ],
+        ] {
+            assert_eq!(
+                cycle_conversation(&batch, approval_conversation),
+                conv(Some("desk-finance"), None),
+            );
+        }
+        // Inheriting a thread that disagrees with the batch's own is the same
+        // rule, one hop further out.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(9)),
+                    resolved("appr-threaded"),
+                ],
+                approval_conversation,
+            ),
+            conv(Some("desk-finance"), None),
+        );
+
+        // A channel disagreement still costs everything — #379's rule, intact.
+        // The thread must not survive its own channel.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(7)),
+                    in_thread("agent-cfo", Some(7)),
+                ],
+                approval_conversation,
+            ),
+            ApprovalConversation::default(),
+            "a parent without a channel is a sequence number with nothing to \
+             resolve it against",
+        );
+        // And a rival trigger clears both keys, not just the channel.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(7)),
+                    CompanyEvent::TaskDispatched {
+                        task_id: "t-1".into(),
+                        run_id: None,
+                    },
+                ],
+                approval_conversation,
+            ),
+            ApprovalConversation::default(),
         );
     }
 
@@ -4761,7 +6019,13 @@ mod test {
             )
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-send".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-send".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .send_email(serde_json::json!({ "to": "known@ext.com", "subject": "s", "body": "b" }))
@@ -4825,7 +6089,13 @@ mod test {
         }
         file(501, "known@ext.com").await;
 
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-deep".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-deep".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
         let res = host
             .send_email(serde_json::json!({ "to": "known@ext.com", "subject": "s", "body": "b" }))
             .await
@@ -4911,7 +6181,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .spawn_task(serde_json::json!({ "title": "  Ship it ", "assignee": " eng " }))
@@ -4945,7 +6221,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         // Known desk (by name) → card assigned to the resolved desk id, lead noted.
         let ok = host
@@ -4981,7 +6263,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         // Reached through the CycleHost trait exactly as the hosted brain does.
         let res = host
@@ -5026,6 +6314,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -5037,6 +6327,7 @@ mod test {
             text: "what are you working on?".into(),
             by: None,
             chat: Some("Engineering".into()),
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -5048,6 +6339,7 @@ mod test {
             text: "status?".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -5096,6 +6388,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -5105,6 +6399,7 @@ mod test {
             text: "what's up?".into(),
             by: None,
             chat: Some("eng".into()),
+            deliverable: None,
         }])
         .await
         .unwrap();
@@ -5183,6 +6478,7 @@ mod test {
                 text: "do it".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();
@@ -5380,6 +6676,7 @@ mod test {
                     text: "do it".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 }])
                 .await
                 .unwrap();

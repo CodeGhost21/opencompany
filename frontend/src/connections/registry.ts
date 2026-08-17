@@ -17,13 +17,27 @@ import { useSyncExternalStore } from "react";
 
 import { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import { defaultTransport, isDesktopRuntime } from "@/api/transport";
+import {
+  defaultTransport,
+  isAddressableBaseUrl,
+  isDesktopRuntime,
+  mayCarryACredential,
+} from "@/api/transport";
 import type { Transport } from "@/api/transport";
 import { forgetConnection, registerConnection } from "@/api/transport/desktop";
-import { findProfile, forgetProfile, readProfiles, saveProfile } from "./profileStore";
+import {
+  EMBEDDED_LABEL,
+  type ConnectionProfile,
+  embeddedProfiles,
+  findProfile,
+  forgetProfile,
+  readProfiles,
+  saveProfile,
+} from "./profileStore";
 import {
   type Connection,
   type ConnectionId,
+  type ConnectionOrigin,
   type Credential,
   type InstanceIdentity,
   connectionConfig,
@@ -143,6 +157,15 @@ export interface AddConnection {
   credential?: Credential;
   /** Injected in tests, and by the desktop shell. */
   transport?: Transport;
+  /**
+   * What is already known about the host, before `/spec` is asked.
+   *
+   * Only the embedded host has any: this client starts it, so the core can
+   * hand over its identity without a round trip. A probe replaces this with
+   * the host's own fuller answer.
+   */
+  identity?: InstanceIdentity;
+  origin?: ConnectionOrigin;
 }
 
 /**
@@ -186,8 +209,9 @@ export function addConnection(input: AddConnection): ConnectionId {
     defaultCompany,
     credential: input.credential ?? { kind: "cookie" },
     status: "connecting",
-    identity: null,
+    identity: input.identity ?? null,
     companies: [],
+    origin: input.origin,
   };
   // The desktop routes this connection through its own core; the browser
   // build keeps `fetch`. `defaultTransport` decides, so neither the registry
@@ -200,15 +224,28 @@ export function addConnection(input: AddConnection): ConnectionId {
   client.onUnauthorized = () => patch(id, { status: "unauthenticated" });
   entries = [...entries, { connection, client, transport }];
   announceToDesktop(connection);
-  saveProfile({
-    id,
-    baseUrl,
-    label: connection.label,
-    defaultCompany,
-    credential: connection.credential,
-  });
+  saveProfile(profileOf(connection));
   emit();
   return id;
+}
+
+/**
+ * What of a connection outlives the session.
+ *
+ * One function rather than a literal at each call site, because every field
+ * omitted at one of them is a field silently dropped on the next write —
+ * `origin` in particular, whose whole job is to survive.
+ */
+function profileOf(connection: Connection): ConnectionProfile {
+  return {
+    id: connection.id,
+    baseUrl: connection.baseUrl,
+    label: connection.label,
+    defaultCompany: connection.defaultCompany,
+    credential: connection.credential,
+    instanceId: connection.identity?.instanceId,
+    origin: connection.origin,
+  };
 }
 
 /**
@@ -235,21 +272,28 @@ function adoptCredential(id: ConnectionId, credential: Credential): void {
   const existing = entries.find((e) => e.connection.id === id);
   if (!existing) return;
   if (sameCredential(existing.connection.credential, credential)) return;
+  reseat(id, { ...existing.connection, credential });
+}
 
-  const connection = { ...existing.connection, credential };
+/**
+ * Replaces a connection's record and the client built from it.
+ *
+ * The client reads `baseUrl` and the credential into its config at
+ * construction, so anything the config is derived from is replaced rather than
+ * mutated: a half-updated client that kept the old address for requests
+ * already configured would be worse than either state. The core is re-told for
+ * the same reason — it resolves proxied requests against its own copy.
+ */
+function reseat(id: ConnectionId, connection: Connection): void {
+  const existing = entries.find((e) => e.connection.id === id);
+  if (!existing) return;
   const client = new OpenCompanyClient(connectionConfig(connection), existing.transport);
   client.onUnauthorized = () => patch(id, { status: "unauthenticated" });
   entries = entries.map((e) =>
     e.connection.id === id ? { connection, client, transport: existing.transport } : e,
   );
   announceToDesktop(connection);
-  saveProfile({
-    id,
-    baseUrl: connection.baseUrl,
-    label: connection.label,
-    defaultCompany: connection.defaultCompany,
-    credential,
-  });
+  saveProfile(profileOf(connection));
   emit();
 }
 
@@ -259,19 +303,155 @@ function sameCredential(a: Credential, b: Credential): boolean {
   // comparison is what makes the bootstrap's live token count as a change.
   if (a.kind === "platform" && b.kind === "platform") return a.token === b.token;
   if (a.kind === "device" && b.kind === "device") return a.ref === b.ref;
+  // Signing in again mints a *new* session, so the values differ and the client
+  // has to be rebuilt around the new one. Comparing only the kind here would
+  // leave the console presenting the session it just replaced — which keeps
+  // working until the old one expires or is revoked, making it the kind of bug
+  // that surfaces an hour later and nowhere near its cause.
+  if (a.kind === "session" && b.kind === "session") return a.value === b.value;
   return true;
 }
 
 export function restoreConnections(transport?: Transport): ConnectionId[] {
-  return readProfiles().map((profile) =>
-    addConnection({
-      baseUrl: profile.baseUrl,
-      label: profile.label,
-      defaultCompany: profile.defaultCompany,
-      credential: profile.credential,
-      transport,
-    }),
-  );
+  return readProfiles()
+    .filter(keepIfReachable)
+    .map((profile) =>
+      addConnection({
+        baseUrl: profile.baseUrl,
+        label: profile.label,
+        defaultCompany: profile.defaultCompany,
+        credential: profile.credential,
+        identity: profile.instanceId ? { instanceId: profile.instanceId } : undefined,
+        origin: profile.origin,
+        transport,
+      }),
+    );
+}
+
+/**
+ * Drops a stored profile this runtime could never reach, and forgets it.
+ *
+ * There is exactly one such profile in practice: the same-origin entry a
+ * desktop build wrote before it stopped adding one (issue #613). Not adding it
+ * any more is not enough on its own — this store is what brings a connection
+ * back, so the dead row would be restored on every launch forever, and it sorts
+ * ahead of the embedded host because it was written first.
+ *
+ * Forgotten rather than merely skipped: a row the console refuses to restore is
+ * a row nothing will ever remove, and `oc.connections.v1` is a registry people
+ * read when a host misbehaves. It should say what the console holds.
+ */
+function keepIfReachable(profile: ConnectionProfile): boolean {
+  if (isAddressableBaseUrl(profile.baseUrl)) return true;
+  forgetProfile(profile.id);
+  return false;
+}
+
+/** Where the host running inside this application is, and who it is. */
+export interface EmbeddedHostInfo {
+  baseUrl: string;
+  /** Absent only on a shell predating `instance_id` on `oc_embedded`. */
+  instanceId?: string;
+  /** Injected in tests. */
+  transport?: Transport;
+}
+
+/**
+ * Registers the host running inside this application, of which there is one.
+ *
+ * Not `addConnection`, and the difference is the whole fix (#615). The embedded
+ * host binds an ephemeral port on purpose — a fixed one collides with a dev
+ * server — so its address is different on every launch, while `addConnection`
+ * recognises a host *by* its address. Each launch therefore looked like a first
+ * meeting: a new id, a new row, and last launch's row left behind pointing at a
+ * closed port. They are durable, so they accumulated, and they carry the same
+ * label as the live one — leaving an operator a sidebar of identical entries,
+ * all but one broken, with nothing to tell them apart.
+ *
+ * So this matches on identity instead, and enforces the invariant the type
+ * states: at most one embedded connection exists at a time.
+ *
+ * Reusing the remembered id rather than minting a fresh one is what carries the
+ * tour state, the last-read channel and the mail draft across a relaunch — all
+ * of them keyed by connection id (see `scopedKey`).
+ */
+export function adoptEmbeddedHost(host: EmbeddedHostInfo): ConnectionId {
+  const baseUrl = host.baseUrl.replace(/\/$/, "");
+  const identity = host.instanceId ? { instanceId: host.instanceId } : undefined;
+  const known = embeddedProfiles();
+  const mine = thisHost(known, host.instanceId);
+
+  // Whatever else claims to be the host inside this application is a previous
+  // launch's address, or a data root this application no longer serves. Either
+  // way nothing is listening there and nothing ever will be again, so these are
+  // dropped rather than left to fail their probe in the rail forever.
+  for (const stale of known) {
+    if (stale.id !== mine?.id) removeConnection(stale.id);
+  }
+
+  if (mine) {
+    const registered = entries.find((e) => e.connection.id === mine.id);
+    if (registered) {
+      // `restoreConnections` already put it back at last launch's address.
+      return reseatEmbedded(registered.connection, baseUrl, identity);
+    }
+    // Not registered this session. Write the new address down first, so the
+    // `addConnection` below finds this profile by it and reuses the id.
+    saveProfile({ ...mine, baseUrl, instanceId: host.instanceId ?? mine.instanceId });
+  }
+
+  return addConnection({
+    baseUrl,
+    label: mine?.label ?? EMBEDDED_LABEL,
+    identity,
+    origin: "embedded",
+    transport: host.transport,
+  });
+}
+
+/**
+ * Which remembered profile, if any, is the instance now running.
+ *
+ * Identity decides when both ends know it: a *different* id at this address is
+ * a different host — a second data root, say — and adopting its row would merge
+ * two hosts' local state, which is the failure `types.ts` exists to prevent.
+ *
+ * A profile with no id recorded is one an older version wrote, before the core
+ * reported one. There is nothing to compare, and this application had exactly
+ * one embedded host then too, so it is adopted rather than orphaned.
+ */
+function thisHost(
+  known: ConnectionProfile[],
+  instanceId: string | undefined,
+): ConnectionProfile | undefined {
+  const byIdentity =
+    instanceId === undefined
+      ? undefined
+      : known.find((p) => p.instanceId === instanceId);
+  return byIdentity ?? known.find((p) => p.instanceId === undefined);
+}
+
+/** Moves a registered embedded connection to the address it is now serving. */
+function reseatEmbedded(
+  connection: Connection,
+  baseUrl: string,
+  identity: InstanceIdentity | undefined,
+): ConnectionId {
+  if (connection.baseUrl === baseUrl && connection.origin === "embedded") {
+    // The same host at the same address: a second call in one session, which
+    // StrictMode guarantees. Re-seating would throw away a probe in flight.
+    return connection.id;
+  }
+  reseat(connection.id, {
+    ...connection,
+    baseUrl,
+    origin: "embedded",
+    identity: identity ?? connection.identity,
+    // Whatever the last probe concluded, it concluded about the old address.
+    status: "connecting",
+    error: undefined,
+  });
+  return connection.id;
 }
 
 /**
@@ -316,6 +496,22 @@ export function unpairConnection(id: ConnectionId): void {
   adoptCredential(id, { kind: "cookie" });
 }
 
+/**
+ * Records the session a cross-origin sign-in just returned.
+ *
+ * Called with the `session` from a {@link SignIn}, and it must be called or the
+ * sign-in is wasted: the host returns that token exactly once, keeps only its
+ * hash, and — because no cookie was set — the console has no other way to prove
+ * who it is. The symptom of forgetting is a login that appears to succeed and a
+ * console that is anonymous from the next request onward.
+ *
+ * Replaces the client, through `adoptCredential`, so every request after this
+ * carries the new session rather than the one it was constructed with.
+ */
+export function adoptSession(id: ConnectionId, session: string): void {
+  adoptCredential(id, { kind: "session", value: session });
+}
+
 export function removeConnection(id: ConnectionId): void {
   entries = entries.filter((e) => e.connection.id !== id);
   forgetProfile(id);
@@ -341,6 +537,16 @@ export function resetConnections(): void {
 export async function probe(id: ConnectionId): Promise<void> {
   const client = clientFor(id);
   if (!client || probing.has(id)) return;
+  const insecure = insecurelyCredentialed(getConnection(id));
+  if (insecure) {
+    // Refused here rather than left to fail at the core, because this is the
+    // one function that owns a row's status — and the core's refusal arrives
+    // as an IPC rejection that `client.ts` has already flattened into "cannot
+    // reach the company host". Saying it here is what makes the row name the
+    // reason instead of blaming a network that is working (issue #731).
+    patch(id, { status: "down", error: insecure });
+    return;
+  }
   probing.add(id);
   patch(id, { status: "connecting", error: undefined });
   try {
@@ -391,6 +597,55 @@ async function readIdentity(client: OpenCompanyClient): Promise<InstanceIdentity
   } catch {
     return null;
   }
+}
+
+/**
+ * Why this connection must not be contacted, or `null` when it may be.
+ *
+ * A credential over plain HTTP to a host that is not this machine, which the
+ * core refuses at registration (`may_carry_a_credential`). Answering the same
+ * question here is what turns that refusal into something a person can act on;
+ * see the note on `mayCarryACredential`.
+ *
+ * Desktop only **for the ambient credentials**. A browser's cookie is one the
+ * browser decides about, with `Secure` and the origin's own rules doing this
+ * job — narrowing the web build there would refuse the plain-HTTP deployments
+ * `opencompany serve` is built for, on the transport where the console is not
+ * the thing holding the secret.
+ *
+ * A `session` credential is the exception, and gated everywhere: a hub console
+ * holds that token itself and puts it on the wire itself, so "the browser is
+ * deciding" stops being true. The runtime it happens to run in changes nothing
+ * about what an unencrypted hop exposes.
+ *
+ * Read off the profile's credential *kind*, which is a claim about this machine
+ * rather than the secret itself: a `device` entry means the keychain holds a
+ * session the core will attach, and `platform` with a token means one arrived
+ * in the url. `cookie` and a token-less `platform` carry nothing, so a host
+ * added by hand and read anonymously stays permitted — the whole point of
+ * gating on the credential rather than on the scheme.
+ */
+function insecurelyCredentialed(connection: Connection | undefined): string | null {
+  if (!connection) return null;
+  // A same-origin connection is the browser's own origin, whose rules already
+  // decide this; there is no url to judge and nothing to protect it from that
+  // is not already inside the page.
+  if (connection.baseUrl === "") return null;
+  // A session is a secret **this page holds and sends**, in every runtime — so
+  // unlike the two below it is gated in the browser as well. The exposure is
+  // identical to the desktop's: a person's standing authority on a company,
+  // travelling in clear text past every device on the path.
+  const carriesInAnyRuntime = connection.credential.kind === "session";
+  const carriesOnDesktop =
+    isDesktopRuntime() &&
+    (connection.credential.kind === "device" ||
+      (connection.credential.kind === "platform" && Boolean(connection.credential.token)));
+  if (!carriesInAnyRuntime && !carriesOnDesktop) return null;
+  if (mayCarryACredential(connection.baseUrl)) return null;
+  // Names the credential generically: this covers a paired device session and a
+  // platform bearer from `?token=`, and the person reading it needs the reason
+  // rather than which of the two it was.
+  return `${connection.baseUrl} is not encrypted, so this connection's credential cannot be sent to it. Use https, or a host on this machine.`;
 }
 
 function statusFromError(err: unknown): Partial<Connection> {

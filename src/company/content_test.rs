@@ -7,8 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    CompanyManifest, Tools, grants_composio_explicit, grants_media_explicit,
-    grants_search_explicit, load_dir_skills, parse_workflow, walk_workspace,
+    CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_skills,
+    parse_workflow, walk_workspace,
 };
 use crate::runtime::builder::effective_grants;
 
@@ -90,32 +91,74 @@ fn every_company_skill_and_workspace_parses() {
     }
 }
 
-/// Templates whose shipped skills (`web-research`, `seo-audit`,
-/// `competitor-scan`) instruct agents to search the web and cite sources, so
-/// each must carry an explicit `search` grant (issue #312).
-const SEARCH_GRANTED_COMPANIES: [&str; 6] = [
+/// Templates that must carry an explicit `search` grant (issues #312, #878).
+///
+/// The reason is the work the roster is described as doing, not anything on
+/// disk under the company: the search-dependent skills (`web-research`,
+/// `seo-audit`, `competitor-scan`) live in the *repo-level* `skills/` registry,
+/// which is global and unscoped, so an operator can install any of them into
+/// any company at runtime. No company ships a copy in its own `skills/` dir.
+/// Whether a template belongs here is therefore a judgement about its charter —
+/// research, editorial, marketing, legal, product engineering — recorded here
+/// because it cannot be derived from content.
+const SEARCH_GRANTED_COMPANIES: [&str; 8] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_research_lab",
+    "agentic_software_company",
     "signals_opportunity_studio",
 ];
 
-/// Templates that must NEVER reach the metered search backend: `e2e_harness` is
-/// a deterministic fixture (a priced network call would make it non-hermetic and
-/// flaky), and `openhuman_demo` is a walkthrough nobody opted into spend for.
-const SEARCH_DENIED_COMPANIES: [&str; 2] = ["e2e_harness", "openhuman_demo"];
+/// Templates that must NEVER reach the metered search backend: `e2e_harness` and
+/// `e2e_setup` are deterministic fixtures (a priced network call would make them
+/// non-hermetic and flaky), and `openhuman_demo` is a walkthrough nobody opted
+/// into spend for.
+const SEARCH_DENIED_COMPANIES: [&str; 3] = ["e2e_harness", "e2e_setup", "openhuman_demo"];
+
+/// Templates that simply do not grant `search` today. Unlike
+/// [`SEARCH_DENIED_COMPANIES`] there is no rule keeping them off the priced
+/// path — nobody has decided their roster needs the web. Moving one into
+/// [`SEARCH_GRANTED_COMPANIES`] is an ordinary product call, not a violation.
+///
+/// This list exists so the posture is a *partition* rather than an allow-list.
+/// An allow-list asserts a decision someone remembered, so it cannot notice a
+/// company nobody remembered: `agentic_software_company` shipped with nine
+/// agents and no search grant, and the suite stayed green for it (issue #878).
+/// [`every_company_declares_a_search_posture`] asserts this list plus the other
+/// two covers `companies/` exactly, so a new template fails CI until whoever
+/// adds it writes the decision down here.
+const SEARCH_UNGRANTED_COMPANIES: [&str; 12] = [
+    "agentic_accounting_firm",
+    "agentic_customer_support",
+    "agentic_enterprise_sales",
+    "agentic_game_business",
+    "agentic_game_studio",
+    "agentic_influencer_business",
+    "agentic_pharma_startup",
+    "agentic_realestate_company",
+    "agentic_recruiting_company",
+    "agentic_venture_capital",
+    "agentic_venture_studio",
+    "startup_accelerator",
+];
 
 /// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
 /// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
-/// excluded: it overrides the default down to a research-only belt on purpose.
-const FULL_BELT_PLUS_SEARCH: [&str; 5] = [
+/// excluded: it overrides the default down to a research-only belt on purpose,
+/// and `agentic_research_lab` is excluded for the same reason — its belt is
+/// `["*", "search"]`, dropping `media` and `composio`, because a research lab
+/// has no use for image generation or third-party OAuth side effects and both
+/// are opt-in spend.
+const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
     "agentic_consultation_firm",
     "agentic_design_studio",
     "agentic_law_firm",
     "agentic_marketing_agency",
     "agentic_media_company",
+    "agentic_software_company",
 ];
 
 fn load_company(name: &str) -> CompanyManifest {
@@ -184,6 +227,115 @@ fn fixture_templates_never_grant_search() {
     }
 }
 
+/// Every shipped company must appear in exactly one of the three search-posture
+/// lists, and the three together must cover `companies/` exactly (issue #878).
+///
+/// The guard #312 left behind was allow-list shaped: it checked that the six
+/// companies someone listed do grant `search`, and said nothing about the
+/// fifteen it did not list. `agentic_software_company` therefore shipped nine
+/// agents whose `web_search` was never wired, with a green suite. An allow-list
+/// can only ever assert a decision somebody remembered.
+///
+/// A partition inverts that. Adding a template to `companies/` fails this test
+/// as unclassified until its author states the posture; deleting one fails it as
+/// stale. And the classification cannot be made true by editing the list alone:
+/// every `SEARCH_UNGRANTED_COMPANIES` entry is re-derived from its manifest
+/// through the real `effective_grants` narrowing, so a company that actually
+/// grants search cannot hide in the ungranted bucket.
+#[test]
+fn every_company_declares_a_search_posture() {
+    use std::collections::BTreeSet;
+
+    let buckets: [(&str, &[&str]); 3] = [
+        ("SEARCH_GRANTED_COMPANIES", &SEARCH_GRANTED_COMPANIES),
+        ("SEARCH_DENIED_COMPANIES", &SEARCH_DENIED_COMPANIES),
+        ("SEARCH_UNGRANTED_COMPANIES", &SEARCH_UNGRANTED_COMPANIES),
+    ];
+
+    // (a) Each list is duplicate-free, and no company sits in two of them —
+    // otherwise "exactly one posture" degrades to "at least one".
+    for (name, list) in buckets {
+        let unique: BTreeSet<&str> = list.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            list.len(),
+            "{name} lists a company twice: {list:?}"
+        );
+    }
+    for (index, (left_name, left)) in buckets.iter().enumerate() {
+        for (right_name, right) in &buckets[index + 1..] {
+            let left_set: BTreeSet<&str> = left.iter().copied().collect();
+            let overlap: Vec<&str> = right
+                .iter()
+                .copied()
+                .filter(|name| left_set.contains(name))
+                .collect();
+            assert!(
+                overlap.is_empty(),
+                "{left_name} and {right_name} both claim {overlap:?} — a \
+                 company has exactly one search posture"
+            );
+        }
+    }
+
+    // (b) The union is exactly what is on disk.
+    let declared: BTreeSet<&str> = buckets
+        .iter()
+        .flat_map(|(_, list)| list.iter().copied())
+        .collect();
+    let on_disk: BTreeSet<String> = subdirs(&repo_root().join("companies"))
+        .iter()
+        .map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_else(|| panic!("non-UTF-8 company dir {}", path.display()))
+                .to_string()
+        })
+        .collect();
+    assert!(!on_disk.is_empty(), "no companies found under companies/");
+
+    let unclassified: Vec<&str> = on_disk
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !declared.contains(name))
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "companies/{unclassified:?} declare no search posture. Every template \
+         must be listed in exactly one of SEARCH_GRANTED_COMPANIES (its roster \
+         needs the web), SEARCH_DENIED_COMPANIES (it must never reach the \
+         priced backend) or SEARCH_UNGRANTED_COMPANIES (no decision to grant \
+         it yet). Grants are not inherited from `*` — a company left out of the \
+         granted list has `web_search` wired for none of its agents (#878)."
+    );
+
+    let stale: Vec<&str> = declared
+        .iter()
+        .copied()
+        .filter(|name| !on_disk.contains(*name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "{stale:?} are listed in a search-posture const but no longer exist \
+         under companies/ — delete the entries"
+    );
+
+    // (c) The ungranted bucket is verified against the manifests, not taken on
+    // trust: a company that does grant search cannot be parked here.
+    for name in SEARCH_UNGRANTED_COMPANIES {
+        let manifest = load_company(name);
+        let grants = effective_grants(&manifest);
+        assert!(
+            !grants_search_explicit(&grants),
+            "{name}: sits in SEARCH_UNGRANTED_COMPANIES but its effective \
+             grants ({grants:?}) do include `search`. If the grant is \
+             intentional, move it to SEARCH_GRANTED_COMPANIES so \
+             `research_templates_grant_search_at_both_layers` checks every \
+             agent actually receives it."
+        );
+    }
+}
+
 /// The footgun this suite exists to catch: `[tools].allow` **replaces** the
 /// default (`["*", "media", "composio"]`), it never extends it. A reviewer
 /// "simplifying" a grant to `allow = ["search"]` would silently strip
@@ -234,6 +386,33 @@ fn granting_search_never_strips_the_inherited_default_belt() {
 }
 
 #[test]
+fn a_wildcard_never_confers_a_billing_namespace() {
+    // The point of these helpers: `*` is set for file and shell tools and must
+    // not quietly hand out invoicing or a wallet balance.
+    for grants in [
+        vec!["*".to_string()],
+        vec!["workspace".to_string(), "*".to_string()],
+        vec![],
+        vec!["chargebeeish".to_string(), "paypalish".to_string()],
+        vec!["mcp:chargebee".to_string()],
+    ] {
+        assert!(!grants_chargebee_explicit(&grants), "{grants:?}");
+        assert!(!grants_paypal_explicit(&grants), "{grants:?}");
+    }
+}
+
+#[test]
+fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
+    assert!(grants_chargebee_explicit(&["chargebee".to_string()]));
+    assert!(grants_chargebee_explicit(&["chargebee.read".to_string()]));
+    assert!(grants_paypal_explicit(&["paypal".to_string()]));
+    assert!(grants_paypal_explicit(&["paypal.wallet".to_string()]));
+    // Two namespaces, neither implying the other.
+    assert!(!grants_paypal_explicit(&["chargebee".to_string()]));
+    assert!(!grants_chargebee_explicit(&["paypal".to_string()]));
+}
+
+#[test]
 fn the_repo_skill_registry_parses() {
     let skills = load_dir_skills(&repo_root().join("skills"))
         .unwrap_or_else(|err| panic!("repo skills: {err}"));
@@ -257,10 +436,12 @@ fn the_repo_skill_registry_parses() {
 /// teammate — which is exactly how the marketing agency preset shipped pointing
 /// `research` at an unwired slug (halt) and `publish` at a nonexistent HTTP node.
 ///
-/// This translates each graph the way the engine will and asserts the two facts
-/// that decide whether a run halts: every `tool_call` slug resolves to a real
-/// toolbelt namespace ([`namespace_of`]), and every `agent` ref is on that
-/// company's roster.
+/// This translates each graph the way the engine will, **compiles** it onto the
+/// tinyflows engine (so a graph that parses but can't compile — an unbounded
+/// guarded cycle, say — is caught at load, not first run; issue #661), and
+/// asserts the two facts that decide whether a run halts: every `tool_call` slug
+/// resolves to a real toolbelt namespace ([`namespace_of`]), and every `agent`
+/// ref is on that company's roster.
 ///
 /// Gated on `openhuman` because `translate` and `namespace_of` live behind that
 /// feature; the `Rust (openhuman, tinycortex)` CI lane runs it.
@@ -284,7 +465,35 @@ fn every_bundled_workflow_is_runnable_against_its_roster() {
                 .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
             let workflow =
                 parse_workflow(&text).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+
+            // `parse_workflow` is lenient on the #661 author-time rules (issue
+            // #682) so pre-#661 tenant graphs still load. That leniency must NOT
+            // apply to what WE ship: a seed a human could no longer author from
+            // the console (a field-less condition, a branch not labeled yes/no, a
+            // slug-less tool_call, an http_request missing method/url) has to fail
+            // CI here. Run the STRICT pass over every shipped seed.
+            let raw = super::raw_workflow_from_toml(&text)
+                .unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+            let strict_problems = super::workflow_file::validate(&raw, true);
+            assert!(
+                strict_problems.is_empty(),
+                "{}: shipped seed fails strict author-time validation (issue #661/#682): {strict_problems:?}",
+                file.display()
+            );
+
             let graph = translate(&workflow);
+
+            // Beyond parse+translate, every seed must COMPILE onto the tinyflows
+            // engine (issue #661). Compile is the pass that rejects an unbounded
+            // guarded cycle (`IllegalCycle`) and other structural faults a bare
+            // parse misses — a seed that parses but cannot compile would fail at
+            // first run, not at load, so the whole company's workflows break.
+            tinyflows::compiler::compile(&graph).unwrap_or_else(|err| {
+                panic!(
+                    "{}: translated graph does not compile: {err}",
+                    file.display()
+                )
+            });
 
             for node in &graph.nodes {
                 match node.kind {

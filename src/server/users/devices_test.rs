@@ -50,6 +50,8 @@ async fn state_with(home: &std::path::Path, companies: &[&str]) -> AppState {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -187,7 +189,7 @@ async fn a_paired_device_can_authenticate_with_the_session_header() {
         format!("acme.{device_token}").parse().unwrap(),
     );
     let acme = CompanyId::new("acme");
-    match resolve_principal(&headers, &state, Some(&acme))
+    match resolve_principal(&headers, &state, Some(&acme), None)
         .await
         .expect("the device authenticates")
     {
@@ -359,7 +361,7 @@ async fn suspending_a_user_kills_their_paired_devices() {
         format!("acme.{device_token}").parse().unwrap(),
     );
     assert!(
-        resolve_principal(&headers, &state, Some(&acme))
+        resolve_principal(&headers, &state, Some(&acme), None)
             .await
             .is_ok(),
         "the device should work before suspension"
@@ -377,7 +379,7 @@ async fn suspending_a_user_kills_their_paired_devices() {
     runtime.users().upsert_user(&acme, &user).await.unwrap();
 
     assert!(
-        resolve_principal(&headers, &state, Some(&acme))
+        resolve_principal(&headers, &state, Some(&acme), None)
             .await
             .is_err(),
         "a suspended user's device must stop working at once"

@@ -170,6 +170,40 @@ pub struct ApprovalSummary {
     /// page and in no thread, exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
+    /// The **workflow run** waiting on this approval (issue #880), when one is.
+    ///
+    /// The other direction of #880's fix: [`WorkflowRun::approvals`](crate::ports::WorkflowRun)
+    /// lets a run say what it parked; this lets a card say which run parked it.
+    /// Without it the Approvals page shows fifteen `publish_artifact` cards
+    /// with nothing tying any of them to the three runs that opened them.
+    ///
+    /// # Why this is not simply `effect.run_id`
+    ///
+    /// [`Effect::run_id`](crate::ports::types::Effect::run_id) is **overloaded**.
+    /// It is documented as issue #242's *task-attempt* id — a
+    /// [`RunRecord`](crate::ports::runs::RunRecord), stamped at the dispatch
+    /// boundary — and the workflow path also writes a *workflow* run id into it
+    /// (`workflows::caps::park_gated_calls` and
+    /// `runtime::workflow_resume::gate_effect`, the latter saying so in its own
+    /// comment). Two different id spaces in one field, and
+    /// [`generate_id`](crate::ports::ids::generate_id) is only process-locally
+    /// unique, so the ids cannot be told apart by inspection.
+    ///
+    /// The discriminator is the *park site*, which is recorded: a task attempt
+    /// parks inside its dispatch cycle and is linked
+    /// [`TaskLink::Task`](crate::runtime::journal::TaskLink), while every
+    /// workflow park goes through
+    /// [`DeliveryParking::park_and_journal`](crate::workflows::DeliveryParking)
+    /// and is recorded explicitly [`Unlinked`](TaskLink::Unlinked) (#333). So
+    /// "a run id on an approval that belongs to no card" is a workflow run, by
+    /// construction rather than by guess — and a chat turn, which is also
+    /// unlinked, stamps no run id at all.
+    ///
+    /// Omitted when absent, the additive pattern the two fields above follow: an
+    /// old console ignores the key and a new one reads its absence as "no run
+    /// behind this card", which is the truth for every chat and scheduler park.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
     /// Whether the operator may grant this tool **broadly** — one standing
     /// permission covering any arguments until a deadline (issue #374).
     ///
@@ -194,6 +228,57 @@ pub struct ApprovalSummary {
     /// approve-once behaviour by construction.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub broadly_grantable: bool,
+    /// Whether [`payload`](Self::payload) and [`amount_usd`](Self::amount_usd)
+    /// were withheld from *this reader* because of their role (issue #618).
+    ///
+    /// Set at the edge by
+    /// [`approval_visibility`](crate::server::approval_visibility), never by
+    /// the projection — the runtime does not know who is asking, and this is
+    /// deliberately the only place that does.
+    ///
+    /// **The reason this flag exists rather than just blanking the fields:**
+    /// `payload: None` already means "the effect carries no arguments". Without
+    /// a separate signal, a withheld payment and a no-argument tool call are
+    /// the same bytes on the wire, and a console cannot tell "there is nothing
+    /// to show" from "you may not see it". The first renders as an ordinary
+    /// empty card; the second has to say *hidden by your role*, or a Member is
+    /// quietly misled about what they are looking at.
+    ///
+    /// Skipped when `false`, so an admin's response — and every response
+    /// produced before this field existed — serializes byte-identically to
+    /// before, and a console that reads no such field is unaffected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub contents_hidden: bool,
+    /// Which turn's gated calls this one belongs to (issue #842) — an opaque
+    /// grouping key shared by every approval a single agent turn parked.
+    ///
+    /// **Presentation, not a new unit of truth.** One research turn that
+    /// reaches three sites parks three approvals, and each stays exactly what
+    /// it was: its own record, its own decision, its own host-scoped grant on
+    /// approve (issue #739). This field only says that they were asked for
+    /// together, so the conversation can ask once — "three sites" with the
+    /// hosts listed — instead of interrupting three times. The Approvals page
+    /// deliberately keeps rendering one row per approval, matching how
+    /// `Standing permissions` lists one revocable row per grant.
+    ///
+    /// The value is the parking turn key issue #469 already journals, so the
+    /// batch a card consolidates is by construction the same batch the runtime
+    /// continues exactly once. Nothing else may be inferred from it: it is an
+    /// opaque id, not an ordering, a count, or an address.
+    ///
+    /// `None` — and omitted from the wire — for an approval raised outside a
+    /// cycle (a workflow node, a scheduler tick) and for every park journaled
+    /// before #469. A console groups those alone, which is the pre-#842
+    /// rendering, so an old host and a new one both produce a card an operator
+    /// can decide.
+    ///
+    /// Survives role redaction on purpose:
+    /// [`approval_visibility`](crate::server::approval_visibility) withholds
+    /// *contents*, and which requests arrived together is not contents. A
+    /// Member sees a batch of three withheld cards rather than three unrelated
+    /// ones, which is less information than an admin gets and still the truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<String>,
 }
 
 #[cfg(test)]

@@ -16,7 +16,9 @@ import {
   createTask,
   listTasks,
   patchTask,
+  type CreateTask,
   type Task,
+  type TaskDeliverable,
   type TaskPlan,
 } from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
@@ -32,9 +34,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import { ADD_TASK_COLUMN, PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import {
   extraOutputCount,
@@ -204,13 +214,18 @@ export function TasksView({
     }
   }, [client, company]);
 
+  // Issue #581: the fallback poll runs only while the tab is being looked at.
+  // Reading the whole board every four seconds is affordable for an operator
+  // watching it and pure waste for a background tab, and the poller's
+  // load-on-visible is what makes pausing safe — a tab coming back re-reads
+  // immediately rather than showing a stale board for up to an interval.
   useEffect(() => {
     mounted.current = true;
     void refresh();
-    const timer = setInterval(() => void refresh(), POLL_MS);
+    const dispose = startVisiblePolling(() => void refresh(), POLL_MS);
     return () => {
       mounted.current = false;
-      clearInterval(timer);
+      dispose();
     };
   }, [refresh]);
 
@@ -230,6 +245,16 @@ export function TasksView({
   const seenTick = useRef(taskEventTick);
   useEffect(() => {
     if (taskEventTick === undefined || taskEventTick === seenTick.current) return;
+    // Issue #581: the push half is gated too, or the poll gate above buys
+    // nothing on a busy company — a hidden tab would still re-read the whole
+    // board on every frame the stream delivers.
+    //
+    // The tick is deliberately NOT consumed on the way out. Marking it seen
+    // here would drop it: this effect does not re-run on a visibility change,
+    // so nothing would ever come back for it. Leaving it unseen means the
+    // board's staleness is settled by the poller's load-on-visible read
+    // instead, and the next frame after that still counts as a change.
+    if (document.visibilityState === "hidden") return;
     seenTick.current = taskEventTick;
     void refresh();
   }, [taskEventTick, refresh]);
@@ -603,12 +628,18 @@ function TaskItem({
       {task.assignee && (
         <div className="mt-3 flex items-center gap-2">
           <span
-            className="flex size-6 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground"
+            className="flex size-6 items-center justify-center rounded-full bg-muted text-3xs font-semibold text-muted-foreground"
             aria-hidden
           >
             {initials(task.assignee)}
           </span>
           <span className="truncate text-xs text-muted-foreground">{task.assignee}</span>
+        </div>
+      )}
+      {task.deliverable === "workflow" && (
+        <div className="mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-2xs text-muted-foreground">
+          <ListTree className="size-3 shrink-0" />
+          Workflow
         </div>
       )}
       {task.plan && <PlanBadgeRow plan={task.plan} />}
@@ -672,7 +703,7 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
   const { blocking, approval, unchecked } = tallyPrerequisites(plan);
   if (blocking > 0) {
     return (
-      <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-destructive">
+      <div className="mt-2 flex items-center gap-1.5 text-2xs font-medium text-destructive">
         <AlertTriangle className="size-3 shrink-0" />
         <span>
           Planned — needs {blocking} thing{blocking === 1 ? "" : "s"}
@@ -687,7 +718,7 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
   const unresolved = approval + unchecked;
   if (unresolved > 0) {
     return (
-      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+      <div className="mt-2 flex items-center gap-1.5 text-2xs text-status-blocked-text">
         <CircleHelp className="size-3 shrink-0" />
         <span>
           Planned — {unresolved} to be aware of
@@ -696,7 +727,7 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
     );
   }
   return (
-    <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+    <div className="mt-2 flex items-center gap-1.5 text-2xs text-muted-foreground">
       <ClipboardList className="size-3 shrink-0" />
       <span>
         Planned
@@ -779,6 +810,20 @@ export function derivePromptCard(prompt: string): { title: string; note?: string
 }
 
 /**
+ * The once-vs-workflow options, in review order (issue #580). Shared by the
+ * create dialog here and the edit dialog, so the two pickers can never offer a
+ * different vocabulary than the wire's {@link TaskDeliverable}.
+ */
+export const DELIVERABLE_OPTIONS: { value: TaskDeliverable; label: string; hint: string }[] = [
+  { value: "once", label: "Do it once", hint: "A one-off result." },
+  {
+    value: "workflow",
+    label: "Build me the workflow",
+    hint: "A reusable workflow you can open, edit and re-run.",
+  },
+];
+
+/**
  * New work enters the board through one prompt box (issue #301).
  *
  * Title/Note/Priority/Assignee used to be collected up front. They are not gone,
@@ -788,6 +833,12 @@ export function derivePromptCard(prompt: string): { title: string; note?: string
  * decides where the card lands — the same spend gate the transcript's "Add to
  * board" relies on, keeping the human drag into In progress the only thing that
  * spends an agent turn.
+ *
+ * The one field it does collect beyond the prompt is the deliverable (issue
+ * #580): once versus workflow is a decision about *what kind of thing* the card
+ * produces, not a default the host can pick, so the operator states it here. It
+ * still lands in To-do like any card — the builder pass fires only on the drag
+ * into In progress.
  */
 function CreateTaskDialog({
   open,
@@ -803,10 +854,14 @@ function CreateTaskDialog({
   company: string | null;
 }) {
   const [prompt, setPrompt] = useState("");
+  const [deliverable, setDeliverable] = useState<TaskDeliverable>("once");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (open) setPrompt("");
+    if (open) {
+      setPrompt("");
+      setDeliverable("once");
+    }
   }, [open]);
 
   if (!open) return null;
@@ -816,7 +871,12 @@ function CreateTaskDialog({
     if (!title) return;
     setBusy(true);
     try {
-      const created = await createTask(client, company, { title, note });
+      const body: CreateTask = { title, note };
+      // Only `"workflow"` reaches the wire; `"once"` is the host default and is
+      // sent as nothing, so a one-off card's body is byte-identical to a
+      // pre-#580 one.
+      if (deliverable === "workflow") body.deliverable = "workflow";
+      const created = await createTask(client, company, body);
       onCreated(created);
       toast.success("Task created.");
     } catch (e) {
@@ -850,6 +910,28 @@ function CreateTaskDialog({
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="Describe the work. The first line becomes the card's title."
           />
+        </div>
+
+        <div className="grid gap-1.5">
+          <Label htmlFor="new-deliverable">Deliverable</Label>
+          <Select
+            value={deliverable}
+            onValueChange={(v) => setDeliverable((v as TaskDeliverable) ?? "once")}
+          >
+            <SelectTrigger id="new-deliverable" data-testid="create-deliverable">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {DELIVERABLE_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-2xs text-muted-foreground">
+            {DELIVERABLE_OPTIONS.find((o) => o.value === deliverable)?.hint}
+          </p>
         </div>
 
         <DialogFooter>

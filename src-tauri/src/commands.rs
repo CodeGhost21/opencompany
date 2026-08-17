@@ -13,7 +13,9 @@
 use tauri::State;
 use tauri::ipc::Channel;
 
-use crate::proxy::{Connection, Credential, ProxyRequest, ProxyResponse, SharedProxy};
+use crate::proxy::{
+    Connection, Credential, ProxyRequest, ProxyResponse, SharedProxy, may_carry_a_credential,
+};
 
 /// What the console needs to construct a connection record.
 #[derive(Debug, serde::Serialize)]
@@ -21,6 +23,22 @@ use crate::proxy::{Connection, Credential, ProxyRequest, ProxyResponse, SharedPr
 pub struct EmbeddedInfo {
     pub base_url: String,
     pub data_dir: String,
+    /// Who is answering there, as opposed to where.
+    ///
+    /// Carried because `base_url` holds an ephemeral port and so cannot be an
+    /// identity: keyed on the address, the console reads every launch as a
+    /// first meeting and leaves the previous launch's row behind, dead (#615).
+    pub instance_id: String,
+    /// The address this host admits, for the sign-in form to offer (#632).
+    ///
+    /// A desktop install has no mail transport and one standing admin, so the
+    /// person in front of it cannot discover what to type and the host will
+    /// answer every other address with the same silent 202. Carrying it is what
+    /// turns the login form from a guessing game into a click.
+    ///
+    /// Not a credential: it names who may sign in, and the code that actually
+    /// does it is minted per attempt and returned only on a loopback host.
+    pub operator_email: String,
 }
 
 /// Registers (or re-registers) a host this client talks to.
@@ -57,8 +75,8 @@ pub async fn oc_connect(
                 credential,
             },
         )
-        .await;
-    Ok(())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -135,29 +153,38 @@ struct ClaimedDevice {
     expires_at_millis: u64,
 }
 
-/// Redeems a pairing code, keeping the session token out of the webview.
+/// Redeems a pairing code against a host, and returns what it answered.
 ///
-/// The whole flow lives in Rust for one reason: the token exists for exactly
-/// one HTTP response, and the console must not be on the path it takes. So this
-/// command performs the claim, writes the result to the keychain, re-registers
-/// the connection with the resolved credential, and returns only what a person
-/// needs to see — which company, which device, how long it lasts.
+/// Split out of [`oc_pair_device`] so it can be tested at all: a command takes
+/// `State<'_, SharedProxy>`, which needs a Tauri application to construct, and
+/// the module note above says why that matters — logic reachable only by
+/// starting a GUI is logic nothing checks. Everything here is the part with a
+/// rule in it, and the command below is the keychain write and the
+/// re-registration around it.
 ///
-/// Deliberately does its own request rather than going through
-/// `ProxyRegistry::request`: this runs *before* the connection has a credential
-/// worth attaching, and routing it through the proxy would mean a code path
-/// where the claim response body — the one place a raw token appears — passes
-/// through the same machinery that serialises bodies back to the webview.
-#[tauri::command]
-pub async fn oc_pair_device(
-    proxy: State<'_, SharedProxy>,
-    connection_id: String,
-    base_url: String,
-    code: String,
-    label: Option<String>,
-) -> Result<PairedDevice, String> {
+/// **The one exchange in which a session token is created rather than
+/// replayed.** The pairing code goes out in the request and the token comes
+/// back in the response body, so this is where an unencrypted wire costs the
+/// most — and it is not covered by `ProxyRegistry::upsert`, because it never
+/// goes through the registry (#731).
+async fn claim(base_url: &str, code: &str, label: Option<&str>) -> Result<ClaimedDevice, String> {
+    if !may_carry_a_credential(base_url) {
+        // The console shows this verbatim (`device-pairing.tsx`), so it is
+        // written for the person reading it rather than for a log.
+        return Err(format!(
+            "{base_url} is not encrypted, so pairing would send this device's session in the clear. Use https, or a host on this machine."
+        ));
+    }
     let base = base_url.trim_end_matches('/');
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        // As `ProxyRegistry`'s client does, and here for a sharper reason: the
+        // default policy follows up to ten redirects, and a 307 from an https
+        // base to an http one re-sends this request — pairing code and all —
+        // over the wire the check above just refused. A check on the first url
+        // is worth nothing if the client will walk to a second.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())?
         .post(format!("{base}/api/v1/devices/claim"))
         .json(&serde_json::json!({ "code": code, "label": label }))
         .send()
@@ -177,7 +204,37 @@ pub async fn oc_pair_device(
         return Err(message);
     }
 
-    let claimed: ClaimedDevice = response.json().await.map_err(|error| error.to_string())?;
+    response.json().await.map_err(|error| error.to_string())
+}
+
+/// Redeems a pairing code, keeping the session token out of the webview.
+///
+/// The whole flow lives in Rust for one reason: the token exists for exactly
+/// one HTTP response, and the console must not be on the path it takes. So this
+/// command performs the claim, writes the result to the keychain, re-registers
+/// the connection with the resolved credential, and returns only what a person
+/// needs to see — which company, which device, how long it lasts.
+///
+/// Deliberately does its own request rather than going through
+/// `ProxyRegistry::request`: this runs *before* the connection has a credential
+/// worth attaching, and routing it through the proxy would mean a code path
+/// where the claim response body — the one place a raw token appears — passes
+/// through the same machinery that serialises bodies back to the webview.
+///
+/// Which is also why the transport rule has to be repeated here. Doing its own
+/// request means doing its own checking: the registry never sees this url, so
+/// `upsert`'s refusal does not cover the one exchange where the token is not
+/// merely replayed but *handed over* — the code goes out in the request and the
+/// session comes back in the response, both in the clear on a plain-HTTP host.
+#[tauri::command]
+pub async fn oc_pair_device(
+    proxy: State<'_, SharedProxy>,
+    connection_id: String,
+    base_url: String,
+    code: String,
+    label: Option<String>,
+) -> Result<PairedDevice, String> {
+    let claimed = claim(&base_url, &code, label.as_deref()).await?;
     // `<company>.<token>` is the header carrier's form, and the only form
     // anything downstream needs.
     crate::keychain::remember_device(
@@ -200,6 +257,10 @@ pub async fn oc_pair_device(
             Some(session) => Credential::Device(session),
             None => Credential::None,
         };
+        // Infallible in practice: `base_url` was just read back out of the
+        // registry, so it is one `upsert` already accepted. Surfaced rather
+        // than swallowed anyway — a pairing that reported success while the
+        // credential never took effect is the worst of the three outcomes.
         proxy
             .upsert(
                 connection_id.clone(),
@@ -208,7 +269,8 @@ pub async fn oc_pair_device(
                     credential,
                 },
             )
-            .await;
+            .await
+            .map_err(|error| error.to_string())?;
     }
 
     Ok(PairedDevice {
@@ -230,6 +292,7 @@ pub async fn oc_forget_device(
 ) -> Result<(), String> {
     crate::keychain::forget_device(&connection_id).map_err(|error| error.to_string())?;
     if let Ok(base_url) = proxy.base_url(&connection_id).await {
+        // As in `oc_pair_device`: a url the registry already accepted.
         proxy
             .upsert(
                 connection_id,
@@ -238,7 +301,8 @@ pub async fn oc_forget_device(
                     credential: Credential::None,
                 },
             )
-            .await;
+            .await
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -249,11 +313,16 @@ pub fn oc_embedded(state: State<'_, crate::AppHandleState>) -> Option<EmbeddedIn
     state.embedded.as_ref().map(|host| EmbeddedInfo {
         base_url: host.base_url(),
         data_dir: state.data_dir.display().to_string(),
+        instance_id: host.instance_id().to_string(),
+        operator_email: host.operator_email().to_string(),
     })
 }
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
 
     /// The guarantee the console cannot make about itself.
@@ -278,5 +347,125 @@ mod test {
             "pairing must answer with these three fields and nothing else"
         );
         assert!(!wire.to_string().to_lowercase().contains("token"));
+    }
+
+    /// A one-shot host that answers every request with `head`, then closes.
+    ///
+    /// Returns its base url and a handle that says whether anything ever
+    /// connected — which is the assertion for a refusal that must happen
+    /// *before* the wire, not on the answer that comes back over it.
+    async fn host(head: &'static str) -> (String, Arc<AtomicBool>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let reached = Arc::new(AtomicBool::new(false));
+        let flag = reached.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                flag.store(true, Ordering::SeqCst);
+                use tokio::io::AsyncWriteExt as _;
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        (format!("http://{address}"), reached)
+    }
+
+    /// The claim is refused before a socket is opened, not after an answer.
+    ///
+    /// A token that travelled once has been read; there is no recovering from
+    /// it by rejecting the response. So this asserts on the connection, not on
+    /// the `Err` — the message alone would pass on a version that sent the
+    /// pairing code first and complained afterwards (#731).
+    #[tokio::test]
+    async fn pairing_over_an_unencrypted_remote_host_sends_nothing() {
+        // A real listener, addressed by a name that is not loopback. The
+        // resolver never runs, because the refusal comes first — which is the
+        // point.
+        let (_, reached) = host("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+        for base in [
+            "http://192.168.1.20:8080",
+            "http://acme.example.com",
+            "http://10.0.0.4:8080",
+        ] {
+            // `let else` rather than `expect_err`, which would need
+            // `ClaimedDevice: Debug` — and a `token` field behind a `{:?}` is
+            // the thing the type is shaped to prevent.
+            let Err(error) = claim(base, "code-123", None).await else {
+                panic!("{base} must not be paired with");
+            };
+            assert!(
+                error.contains("not encrypted"),
+                "{base} must be refused for the reason it is refused: {error}"
+            );
+        }
+        assert!(
+            !reached.load(Ordering::SeqCst),
+            "nothing may be sent to a host the rule refuses"
+        );
+    }
+
+    /// Loopback still pairs — the embedded host is reached no other way.
+    #[tokio::test]
+    async fn pairing_with_a_host_on_this_machine_still_works() {
+        let body = r#"{"token":"t","company":"acme","deviceId":"dev-1","expiresAtMillis":1}"#;
+        let head: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_boxed_str(),
+        );
+        let (base, reached) = host(head).await;
+
+        let claimed = claim(&base, "code-123", Some("a laptop"))
+            .await
+            .expect("a loopback host pairs");
+
+        assert!(reached.load(Ordering::SeqCst));
+        assert_eq!(claimed.company, "acme");
+        assert_eq!(claimed.device_id, "dev-1");
+    }
+
+    /// A redirect is not followed, so an https base cannot be walked to http.
+    ///
+    /// `reqwest`'s default policy follows up to ten, and a 307 re-sends the
+    /// body — so a host answering `307 → http://…` would put the pairing code
+    /// on exactly the wire the check above refuses, having passed it. Checking
+    /// the first url is worth nothing if the client will walk to a second.
+    #[tokio::test]
+    async fn a_redirect_away_from_the_checked_host_is_not_followed() {
+        let (base, _) = host(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: http://192.168.1.20:8080/api/v1/devices/claim\r\ncontent-length: 0\r\n\r\n",
+        )
+        .await;
+
+        let Err(error) = claim(&base, "code-123", None).await else {
+            panic!("a redirect is an answer, not a detour to follow");
+        };
+        // The host's status, passed through — which is what "not followed"
+        // looks like from here.
+        assert!(error.contains("307"), "{error}");
+    }
+
+    /// The console reads these keys by name, and a rename here is silent on
+    /// both sides: TypeScript has nothing to check a Rust struct against, and
+    /// every field is optional in the console precisely so an older shell
+    /// degrades instead of failing. A wrong key would therefore land as "the
+    /// sign-in form is blank again" (#632) rather than as an error.
+    #[test]
+    fn the_embedded_record_answers_in_the_keys_the_console_reads() {
+        let wire = serde_json::to_value(EmbeddedInfo {
+            base_url: "http://127.0.0.1:1234".into(),
+            data_dir: "/data".into(),
+            instance_id: "inst-1".into(),
+            operator_email: "operator@opencompany.local".into(),
+        })
+        .expect("serialise");
+
+        let object = wire.as_object().expect("an object");
+        assert_eq!(
+            object.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["baseUrl", "dataDir", "instanceId", "operatorEmail"],
+        );
     }
 }

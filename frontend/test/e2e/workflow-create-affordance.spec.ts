@@ -93,3 +93,35 @@ test("the empty state's call to action is reachable and distinctly named", async
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("New workflow", { exact: true })).toBeVisible();
 });
+
+test("the empty state gives a first-time author an on-ramp, not just a button (#813)", async ({
+  page,
+}) => {
+  // Same stubbed-empty list as above — the on-ramp only renders on the empty
+  // branch, and it is rendered output (prose), so it is pinned in the browser.
+  await page.route(
+    (url) => isWorkflowList(url),
+    async (route: Route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "[]",
+      });
+    },
+  );
+
+  await page.goto("/#/workflows");
+  await dismissTour(page);
+
+  // What a workflow is, in one line — the trigger → work → output shape.
+  await expect(
+    page.getByText(/A workflow runs a sequence of steps/),
+  ).toBeVisible();
+  // A concrete worked example (mirrors the copilot placeholder).
+  await expect(
+    page.getByText(/have the writer draft the weekly digest/),
+  ).toBeVisible();
+  // And it still points at the copilot as the easiest path.
+  await expect(page.getByText(/the copilot drafts/)).toBeVisible();
+});

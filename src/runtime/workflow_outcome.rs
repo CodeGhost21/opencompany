@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use crate::ports::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
-use crate::ports::workflow_runner::{DeliveryReport, WorkflowRun};
+use crate::ports::workflow_runner::{DeliveryReport, WorkflowRun, WorkflowRunBoardRow};
 use crate::runtime::workflow_resume::DeliveredReport;
 
 /// The error stamped on a run the host never got to finish (issue #371).
@@ -75,6 +75,75 @@ pub const INTERRUPTED_BY_RESTART: &str = concat!(
 /// in fact the most important thing here — today's `Err` arm on the scheduled
 /// path only warns to host stdout, so **the worst outcome is currently the
 /// quietest**.
+/// The six fields a settled run contributes to its journal row, split out of
+/// [`record_run_finished`] so the Ok/Err fold is one named thing rather than a
+/// six-wide tuple.
+///
+/// Which fields ride which arm is the whole content of this type — see
+/// [`Settled::from`].
+struct Settled {
+    deliveries: Vec<DeliveryReport>,
+    pending_approvals: Vec<String>,
+    error: Option<String>,
+    cancelled: bool,
+    notices: Vec<String>,
+    board: Vec<WorkflowRunBoardRow>,
+    blocked_nodes: Vec<crate::ports::WorkflowBlockedNode>,
+    approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+}
+
+impl From<Result<&WorkflowRun, &str>> for Settled {
+    /// # Why four of the six ride the `Ok` arm only
+    ///
+    /// Issue #383: `cancelled` does, and that is not an oversight. A run the
+    /// runner never returned from cannot have been *stopped by an operator* — the
+    /// stop signal resolves into an `Ok(cancelled)`, never into an `Err` — so the
+    /// error arm is unambiguously a failure or the boot sweep's synthetic one.
+    ///
+    /// Issue #638: `notices` does, for the same reason — a run that never
+    /// returned produced none, and an `Err` is already fully described by
+    /// `error`.
+    ///
+    /// Issue #661 (M5): `board` does too, and here the limitation is worth
+    /// stating rather than inheriting. A card is durable the moment the drain
+    /// writes it, so a run that opened two cards and then failed at a later node
+    /// leaves **both cards on the board** — but returns no `WorkflowRun`, so this
+    /// event lists neither. The work survives; the listing does not, and the board
+    /// itself is the record in that case. Same trade `notices` already makes.
+    fn from(outcome: Result<&WorkflowRun, &str>) -> Self {
+        match outcome {
+            Ok(run) => Self {
+                deliveries: run.deliveries.clone(),
+                pending_approvals: run.pending_approvals.clone(),
+                error: None,
+                cancelled: run.cancelled,
+                notices: run.notices.clone(),
+                board: run.board.clone(),
+                blocked_nodes: run.blocked_nodes.clone(),
+                approvals: run.approvals.clone(),
+            },
+            Err(err) => Self {
+                deliveries: Vec::new(),
+                pending_approvals: Vec::new(),
+                error: Some(err.to_string()),
+                cancelled: false,
+                notices: Vec::new(),
+                board: Vec::new(),
+                // Issues #881 / #880: the `Ok` arm only, same trade as `board`
+                // above and worth naming for the same reason. A run whose node
+                // blocked settles `Ok` by design — a blocked node is not a
+                // failed one — so this arm is genuinely a failure, and a
+                // failure returns no `WorkflowRun` to read rows off. Any
+                // approval such a run parked is still on the operator's
+                // Approvals page; what is lost is this event's *listing* of
+                // it, not the card.
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
+            },
+        }
+    }
+}
+
 pub async fn record_run_finished(
     events: &Arc<dyn EventLog>,
     company: &CompanyId,
@@ -83,25 +152,8 @@ pub async fn record_run_finished(
     run_id: &str,
     outcome: Result<&WorkflowRun, &str>,
 ) {
-    // Issue #383: `cancelled` rides the Ok arm only, and that is not an
-    // oversight. A run the runner never returned from cannot have been stopped
-    // by an operator — the stop signal resolves *into* an `Ok(cancelled)`, never
-    // into an `Err` — so the error arm is unambiguously a failure or the boot
-    // sweep's synthetic one.
-    let (deliveries, pending_approvals, error, cancelled): (
-        Vec<DeliveryReport>,
-        Vec<String>,
-        Option<String>,
-        bool,
-    ) = match outcome {
-        Ok(run) => (
-            run.deliveries.clone(),
-            run.pending_approvals.clone(),
-            None,
-            run.cancelled,
-        ),
-        Err(err) => (Vec::new(), Vec::new(), Some(err.to_string()), false),
-    };
+    // Which fields ride which arm, and why, is documented on `Settled::from`.
+    let settled = Settled::from(outcome);
 
     let event = CompanyEvent::WorkflowRunFinished {
         workflow_id: workflow_id.to_string(),
@@ -110,10 +162,14 @@ pub async fn record_run_finished(
         // wire shape is unchanged — it has always carried an optional `run_id` —
         // so a reader predating #371 still decodes every line it could before.
         run_id: Some(run_id.to_string()),
-        deliveries,
-        pending_approvals,
-        error,
-        cancelled,
+        deliveries: settled.deliveries,
+        pending_approvals: settled.pending_approvals,
+        error: settled.error,
+        cancelled: settled.cancelled,
+        notices: settled.notices,
+        board: settled.board,
+        blocked_nodes: settled.blocked_nodes,
+        approvals: settled.approvals,
     };
 
     if let Err(err) = events.append(company, event).await {
@@ -369,6 +425,65 @@ mod test {
             deliveries,
             cancelled: false,
             nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        }
+    }
+
+    /// Issue #638: a run's notices survive onto the journaled outcome, which is
+    /// the row the console's history panel reads.
+    ///
+    /// The point of the assertion is the **round trip**, not the assignment: the
+    /// event is written to a real JSONL log and read back, so a field that
+    /// serialized but did not deserialize — or one `skip_serializing_if` dropped
+    /// on the way out — fails here rather than in front of an operator.
+    #[tokio::test]
+    async fn a_runs_notices_reach_the_journaled_outcome() {
+        let (_dir, events) = log();
+        let company = CompanyId::new("acme");
+        let notice = "Heads up: 3 further gated tool calls were not raised for approval.";
+        let run = WorkflowRun {
+            notices: vec![notice.to_string()],
+            ..run_with(Vec::new(), Vec::new())
+        };
+
+        record_run_finished(&events, &company, "wf", false, "run-1", Ok(&run)).await;
+
+        let journaled = journaled(&events, &company).await;
+        let CompanyEvent::WorkflowRunFinished { notices, error, .. } = journaled
+            .iter()
+            .find(|e| matches!(e, CompanyEvent::WorkflowRunFinished { .. }))
+            .expect("the outcome was journaled")
+        else {
+            unreachable!("matched above")
+        };
+        assert_eq!(notices, &vec![notice.to_string()]);
+        assert!(
+            error.is_none(),
+            "a run that raised a notice did not fail — putting this in `error` \
+             would inflate the failure count and hide a real failure among them",
+        );
+    }
+
+    /// The other direction, and the one that keeps the field honest: a run with
+    /// nothing to say carries an empty list, and a *failed* run carries none at
+    /// all rather than inheriting whatever the Ok arm would have had.
+    #[tokio::test]
+    async fn an_ordinary_run_and_a_failed_run_carry_no_notices() {
+        let (_dir, events) = log();
+        let company = CompanyId::new("acme");
+
+        let ok = run_with(Vec::new(), Vec::new());
+        record_run_finished(&events, &company, "wf", false, "run-ok", Ok(&ok)).await;
+        record_run_finished(&events, &company, "wf", false, "run-bad", Err("boom")).await;
+
+        for event in journaled(&events, &company).await {
+            let CompanyEvent::WorkflowRunFinished { notices, .. } = event else {
+                continue;
+            };
+            assert!(notices.is_empty(), "nothing to say means an empty list");
         }
     }
 
@@ -678,6 +793,10 @@ mod test {
                     pending_approvals: Vec::new(),
                     error: None,
                     cancelled: false,
+                    notices: Vec::new(),
+                    board: Vec::new(),
+                    blocked_nodes: Vec::new(),
+                    approvals: Vec::new(),
                 },
             )
             .await

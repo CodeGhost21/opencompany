@@ -8,12 +8,14 @@ pub mod a2a;
 /// console shell.
 #[cfg(feature = "acp")]
 pub mod acp;
+pub(crate) mod approval_visibility;
 pub mod chat_history;
 pub mod cors;
 mod error;
 pub mod feedback;
 pub mod graphql;
 pub mod hooks;
+pub mod hooks_chargebee;
 pub mod hub_identity;
 // Console MCP OAuth callback (issue #90): the unauthenticated browser-redirect
 // landing route. Gated on `mcp` (it needs the OAuth token-exchange path).
@@ -24,6 +26,8 @@ pub mod ops;
 pub mod platform_auth;
 pub mod provision;
 mod routes;
+/// The first-run setup flow: one surface that configures an instance.
+pub mod setup;
 pub mod users;
 
 #[cfg(test)]

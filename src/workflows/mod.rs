@@ -2,9 +2,11 @@
 //!
 //! A company's workflow graphs live on disk as
 //! [`WorkflowFile`](crate::company::workflow_file::WorkflowFile)s — a data-only
-//! node/edge model with six node kinds (trigger / agent / tool_call /
-//! http_request / condition / output). This module runs one directly on the
-//! embedded [`tinyflows`] engine, with **agent** nodes routed to the company's
+//! node/edge model whose accepted node kinds are
+//! [`WORKFLOW_NODE_KINDS`](crate::company::workflow_file::WORKFLOW_NODE_KINDS)
+//! (the authoring contract; see `docs/spec/runtime/workflow-vocabulary.md`).
+//! This module runs one directly on the embedded [`tinyflows`] engine, with
+//! **agent** nodes routed to the company's
 //! [`HarnessPool`](crate::harness::HarnessPool) so a step inherits the roster's
 //! persona / model / memory / approval policy / metering (never a second pool).
 //!
@@ -13,12 +15,35 @@
 //! registry, or backend-proxied model — the shared architecture rule for this
 //! epic. The default build links none of it.
 
+/// Issue #782: end-to-end proof that an upstream node's output reaches a
+/// downstream agent node's turn (an `agent -> agent` pipeline passes data).
+#[cfg(test)]
+mod agent_upstream_input_test;
+/// Issues #881 / #880: end-to-end proof that a node whose deliverable was
+/// parked for approval reports `blocked`, stops its branch instead of handing
+/// its apology downstream, and that the run says what it parked.
+#[cfg(test)]
+mod blocked_node_test;
+/// Issue #661 (M5): end-to-end proof that a workflow node can open and re-own a
+/// board card, and that everything it may not do stays refused.
+#[cfg(test)]
+mod board_turn_test;
 pub mod caps;
 pub mod delivery;
+/// Issue #460: the company's `ApprovalPolicy` decides which `tool_call` nodes
+/// stop for an operator, before the run reaches them.
+pub mod gate;
+/// Issue #460: end-to-end proof that a `tool_call` node the company's policy
+/// stops does not execute, and leaves a decidable card.
+#[cfg(test)]
+mod gated_tool_call_test;
 /// Issue #395: end-to-end proof that a tool call gated inside a workflow agent
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
 mod gated_tool_turn_test;
+/// Issue #846: a continuation replays the outward calls its lineage already
+/// made, instead of making them a second time.
+pub mod replay;
 pub mod runner;
 pub mod translate;
 

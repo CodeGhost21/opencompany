@@ -33,6 +33,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
+import { WorkingIndicator } from "@/views/chat/WorkingIndicator";
 import type { Thread, ThreadContact } from "@/lib/threads";
 
 interface Props {
@@ -135,7 +136,7 @@ function ThreadList({
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="truncate text-sm font-medium">{t.contact.name}</span>
                   {last && (
-                    <span className="shrink-0 text-[11px] text-muted-foreground">
+                    <span className="shrink-0 text-2xs text-muted-foreground">
                       {formatTime(last.at)}
                     </span>
                   )}
@@ -422,7 +423,7 @@ function InflightStrip({
   return (
     <div className="border-t bg-muted/30">
       <div className="mx-auto w-full max-w-3xl px-4 py-2">
-        <p className="mb-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        <p className="mb-1.5 px-1 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
           In flight · {runs.length}
         </p>
         <div className="flex flex-col gap-1.5">
@@ -487,13 +488,13 @@ function InflightRow({
       <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
           <p className="truncate text-xs font-medium">{run.title}</p>
-          <p className="truncate text-[11px] text-muted-foreground">
+          <p className="truncate text-2xs text-muted-foreground">
             {run.kind === "delegation" ? "Delegation" : "Task"} · {run.agentId}
           </p>
         </div>
 
         {pending !== null ? (
-          <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+          <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-3xs font-medium text-muted-foreground">
             {PENDING_LABEL[pending] ?? "steering…"}
           </span>
         ) : (
@@ -669,7 +670,7 @@ function Bubble({ message, mine, last }: { message: ChatMessage; mine: boolean; 
     >
       <span
         className={cn(
-          "float-right ml-2 translate-y-1 select-none text-[10px]",
+          "float-right ml-2 translate-y-1 select-none text-3xs",
           mine ? "text-primary-foreground/70" : "text-muted-foreground",
         )}
       >
@@ -708,7 +709,7 @@ function CardChip({ taskId, mine }: { taskId: string; mine: boolean }) {
     <a
       href={`#/tasks/${encodeURIComponent(taskId)}`}
       className={cn(
-        "mt-1.5 flex w-fit clear-both items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition-opacity hover:opacity-80",
+        "mt-1.5 flex w-fit clear-both items-center gap-1 rounded-full px-2 py-0.5 text-2xs font-medium transition-opacity hover:opacity-80",
         mine
           ? "bg-primary-foreground/15 text-primary-foreground"
           : "bg-accent text-accent-foreground",
@@ -785,7 +786,7 @@ function StepTimeline({ steps }: { steps: TurnStep[] }) {
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         className={cn(
-          "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-accent/60",
+          "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-2xs font-medium transition-colors hover:bg-accent/60",
           hasError ? "text-destructive" : "text-muted-foreground",
         )}
       >
@@ -812,7 +813,7 @@ function StepRow({ step }: { step: TurnStep }) {
   return (
     <li
       className={cn(
-        "flex items-center gap-1.5 text-[11px] leading-relaxed",
+        "flex items-center gap-1.5 text-2xs leading-relaxed",
         error ? "text-destructive" : "text-muted-foreground",
       )}
     >
@@ -888,11 +889,13 @@ function TypingIndicator({ contact }: { contact: ThreadContact }) {
   return (
     <div className="mt-2 flex gap-2.5">
       <ContactAvatar contact={contact} className="mt-0.5 size-8" />
-      <div className="flex items-center gap-1 rounded-2xl rounded-bl-md border bg-card px-3.5 py-3">
-        <Dot />
-        <Dot className="[animation-delay:150ms]" />
-        <Dot className="[animation-delay:300ms]" />
-      </div>
+      {/* Same indicator the Chat tab uses (#787), so the two surfaces cannot
+          drift into one whimsical and one silent. The bubble shape here is
+          this surface's own — only the contents are shared. */}
+      <WorkingIndicator
+        srLabel="Replying…"
+        className="rounded-2xl rounded-bl-md border bg-card px-3.5 py-3"
+      />
     </div>
   );
 }
@@ -901,7 +904,7 @@ function DaySeparator({ at }: { at: number }) {
   return (
     <div className="my-3 flex items-center gap-3">
       <div className="h-px flex-1 bg-border" />
-      <span className="text-[11px] font-medium text-muted-foreground">{formatDay(at)}</span>
+      <span className="text-2xs font-medium text-muted-foreground">{formatDay(at)}</span>
       <div className="h-px flex-1 bg-border" />
     </div>
   );
@@ -919,10 +922,6 @@ function EmptyConversation({ contact }: { contact: ThreadContact }) {
       </div>
     </div>
   );
-}
-
-function Dot({ className }: { className?: string }) {
-  return <span className={cn("size-1.5 animate-bounce rounded-full bg-muted-foreground", className)} />;
 }
 
 /* ---- grouping + formatting ---- */
@@ -961,13 +960,18 @@ function senderOf(m: ChatMessage, contact: ThreadContact): Sender {
   return { key: `contact:${contact.name}`, name: contact.name, kind: contact.kind, tone: contact.tone };
 }
 
+/**
+ * Speaker tints — identity, not state. Keys are legacy slot names; see
+ * `TEAM_TONES` in `@/lib/team`, which this mirrors and which explains why
+ * the palette stays clear of the status hues.
+ */
 const TONES: Record<string, string> = {
-  sky: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
-  violet: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
-  amber: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-  emerald: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
-  rose: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
-  cyan: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
+  sky: "bg-tone-2/15 text-tone-2-text",
+  violet: "bg-tone-1/15 text-tone-1-text",
+  amber: "bg-tone-5/15 text-tone-5-text",
+  emerald: "bg-tone-3/15 text-tone-3-text",
+  rose: "bg-tone-4/15 text-tone-4-text",
+  cyan: "bg-tone-2/15 text-tone-2-text",
 };
 const TONE_KEYS = Object.keys(TONES);
 

@@ -58,11 +58,11 @@ export function StepTimeline({
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         className={cn(
-          "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium transition-colors hover:bg-accent/60",
+          "flex items-center gap-1 rounded-md px-1.5 py-0.5 text-2xs font-medium transition-colors hover:bg-accent/60",
           hasError
             ? "text-destructive"
             : parked > 0
-              ? "text-amber-600 dark:text-amber-400"
+              ? "text-status-blocked-text"
               : "text-muted-foreground",
         )}
       >
@@ -91,11 +91,11 @@ function StepRow({ step }: { step: TurnStep }) {
   return (
     <li
       className={cn(
-        "flex flex-col gap-0.5 text-[11px] leading-relaxed",
+        "flex flex-col gap-0.5 text-2xs leading-relaxed",
         error
           ? "text-destructive"
           : parked
-            ? "text-amber-600 dark:text-amber-400"
+            ? "text-status-blocked-text"
             : "text-muted-foreground",
       )}
     >
@@ -137,10 +137,10 @@ function StepChip({
   return (
     <span
       className={cn(
-        "flex shrink-0 items-center gap-1 rounded px-1 py-px text-[10px] font-medium",
+        "flex shrink-0 items-center gap-1 rounded px-1 py-px text-3xs font-medium",
         tone === "amber"
-          ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
-          : "bg-rose-500/15 text-rose-700 dark:text-rose-400",
+          ? "bg-status-blocked-soft text-status-blocked-text"
+          : "bg-status-failed-soft text-status-failed-text",
       )}
     >
       {children}
@@ -183,7 +183,7 @@ export function CardChip({ taskId }: { taskId: string }) {
   return (
     <a
       href={`#/tasks/${encodeURIComponent(taskId)}`}
-      className="mt-1.5 flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-[11px] font-medium text-accent-foreground transition-opacity hover:opacity-80"
+      className="mt-1.5 flex w-fit items-center gap-1 rounded-full bg-accent px-2 py-0.5 text-2xs font-medium text-accent-foreground transition-opacity hover:opacity-80"
     >
       <SquareKanban className="size-3 shrink-0" />
       Card opened

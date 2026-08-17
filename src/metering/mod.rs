@@ -57,6 +57,7 @@ pub mod planning;
 /// the roster it is building exists). See [`roster_build`].
 pub mod roster_build;
 pub mod search;
+pub mod triage;
 mod types;
 mod usage;
 /// Issue #580: the workflow-builder pass's usage sample and its
@@ -71,11 +72,14 @@ pub use inference::{
     INFERENCE_SPEND_KIND, MEDULLA_PROVIDER, UNATTRIBUTED_AGENT, inference_ledger_entry,
     inference_sample, record_inference_usage,
 };
-pub use oauth::{UNKNOWN_PROVIDER, oauth_call_sample, record_oauth_call};
+pub use oauth::{
+    MCP_PROVIDER_PREFIX, UNKNOWN_PROVIDER, mcp_provider, oauth_call_sample, record_oauth_call,
+};
 pub use planning::{planning_sample, record_planning_usage};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };
+pub use triage::{record_triage_usage, triage_sample};
 pub use types::{
     AgentTokens, CategorySpend, Direction, Finances, ProviderCalls, Transaction, Usage, UsagePoint,
     UsageRange, UsageTotals,
@@ -114,7 +118,13 @@ mod tests {
                 description: None,
                 tier: None,
                 tools: vec![],
+                delegates_to: vec![],
+                context: None,
                 budget_usd_daily: None,
+                prompt: None,
+                prompt_files: Vec::new(),
+                prompt_files_resolved: Vec::new(),
+                classes: Vec::new(),
             },
             Agent {
                 id: "creative".into(),
@@ -122,7 +132,13 @@ mod tests {
                 description: None,
                 tier: None,
                 tools: vec![],
+                delegates_to: vec![],
+                context: None,
                 budget_usd_daily: None,
+                prompt: None,
+                prompt_files: Vec::new(),
+                prompt_files_resolved: Vec::new(),
+                classes: Vec::new(),
             },
         ];
         let overlay = vec![OverlayAgent {
@@ -130,6 +146,7 @@ mod tests {
             name: "Creative studio (renamed)".into(),
             role: "Creative".into(),
             description: None,
+            tools: Vec::new(),
         }];
         let map = roster_display_names(&agents, &overlay);
         assert_eq!(map.get("strategy").unwrap(), "Strategy desk");

@@ -19,7 +19,33 @@ import { useLocalScope } from "@/connections/ConnectionContext";
 // react-joyride (and its floater/popper deps) is a fair chunk; only operators
 // who actually run the tour download it. Types above are `import type`, so they
 // erase and don't pull the module eagerly.
-const Joyride = lazy(() => import("react-joyride").then((m) => ({ default: m.Joyride })));
+//
+// Named so it can be *started* before it is needed — see `preloadTour`.
+const importJoyride = () => import("react-joyride");
+const Joyride = lazy(() => importJoyride().then((m) => ({ default: m.Joyride })));
+
+/**
+ * Start downloading the tour chunk before anything renders it.
+ *
+ * Lazy-loading it is right — most operators never run the tour — but it puts
+ * the download on the critical path of the click that starts one. "Replay tour"
+ * would show a toast saying the tour was starting and then nothing visible
+ * would happen until the chunk arrived, which on a cold cache or a slow
+ * connection is long enough to read as a button that does not work.
+ *
+ * So the fetch is moved to the moment someone shows intent — pointing at the
+ * button — instead of the moment they commit. By the time `session` flips and
+ * `Suspense` asks for the module, the dynamic import has usually already
+ * resolved and React renders it in the same frame.
+ *
+ * Safe to call as often as you like: `import()` caches its module promise, so
+ * every call after the first is a lookup rather than a request. Failures are
+ * swallowed because this is a prefetch and nothing depends on it — the real
+ * `lazy` boundary will report a genuinely broken chunk when it renders.
+ */
+export function preloadTour(): void {
+  void importJoyride().catch(() => {});
+}
 
 // react-joyride status values as string literals, so we don't statically import
 // the runtime `STATUS` enum (which would defeat the lazy load).

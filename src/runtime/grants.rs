@@ -102,7 +102,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::ports::generate_id;
-use crate::ports::types::{Actor, ApprovalId};
+use crate::ports::types::{Actor, ApprovalId, EventSeq};
 
 /// How long an unredeemed grant stays live: 15 minutes.
 ///
@@ -142,6 +142,44 @@ pub struct GrantedCall {
     /// was never right for a desk channel.
     #[serde(default)]
     pub origin_thread: Option<String>,
+    /// The thread *within* [`origin_thread`](Self::origin_thread) the approval
+    /// was raised in (issue #435) — the root the raising message hangs off,
+    /// copied off the approval's origin alongside the channel.
+    ///
+    /// Rides along on exactly the same terms as `origin_thread`, and for the
+    /// same reason: **not** part of the redemption match. The operator approved
+    /// a call, not a location, and a grant that failed to match because the
+    /// turn came back on a different thread would silently re-park — the
+    /// failure #379 called out, one axis finer. It is routing, and only
+    /// routing.
+    ///
+    /// That is safe by construction rather than by care: [`GrantSet::consume`]
+    /// matches field by field on `agent`, `tool` and `args`, so a field added
+    /// here cannot join the predicate by accident.
+    ///
+    /// `None` when the approval was raised straight in a channel rather than
+    /// inside a thread, and on a grant replayed from a line written before this
+    /// field existed. Both mean the continuation answers in the channel, which
+    /// is the pre-#435 behaviour.
+    #[serde(default)]
+    pub origin_parent: Option<EventSeq>,
+    /// The task the parked call belonged to, when it was raised from a task turn
+    /// (issue #796) — copied off the approval's `approval_task` join when the
+    /// grant is minted.
+    ///
+    /// **Routing only, never part of the redemption match**, on exactly the same
+    /// terms as [`origin_thread`](Self::origin_thread): the operator approved a
+    /// call, not a task, and [`GrantSet::consume`] matches on `(agent, tool,
+    /// args)` alone. It rides along so the re-dispatched turn can reclaim the
+    /// task's held-across-park checkout ([`CheckoutLedger`] in
+    /// `crate::harness::repo`) and so a denied or expired grant's tree can be
+    /// swept once no live grant names the task.
+    ///
+    /// `None` for an approval raised outside a task (a plain operator chat) and
+    /// on a grant replayed from a line written before this field existed — both
+    /// mean there is no task checkout to resume, which is the pre-#796 behaviour.
+    #[serde(default)]
+    pub origin_task: Option<String>,
 }
 
 /// The hard ceiling on a standing grant's life: 7 days.
@@ -253,6 +291,30 @@ pub struct StandingGrant {
     /// [`agent`](Self::agent), which is right for a DM.
     #[serde(default)]
     pub origin_thread: Option<String>,
+    /// The thread *within* [`origin_thread`](Self::origin_thread) the approval
+    /// was raised in (issue #435), carried on exactly the terms
+    /// [`GrantedCall::origin_parent`] documents.
+    ///
+    /// **Routing only, never part of the match** — the match here is `(agent,
+    /// tool, unexpired)`, and a standing grant deliberately admits any
+    /// arguments; adding a location to it would make a broad permission
+    /// silently narrow.
+    ///
+    /// `None` when the approval was raised straight in a channel, and on a
+    /// grant replayed from a line written before this field existed — both
+    /// answer in the channel, as before.
+    #[serde(default)]
+    pub origin_parent: Option<EventSeq>,
+    /// The task the parked call belonged to, when raised from a task turn
+    /// (issue #796), carried on exactly the terms
+    /// [`GrantedCall::origin_task`] documents: routing and cleanup only, never
+    /// part of the `(agent, tool, unexpired)` match. A standing grant can resume
+    /// a task's checkout across repeated parks, so it carries the same link.
+    ///
+    /// `None` for an approval raised outside a task, and on a grant replayed
+    /// from a line written before this field existed.
+    #[serde(default)]
+    pub origin_task: Option<String>,
     /// The slice of [`tool`](Self::tool) this grant is confined to, when the
     /// tool's name is not the whole of what it can do (issue #457).
     ///
@@ -272,6 +334,16 @@ pub struct StandingGrant {
     /// consented to a provider, so a *different* GitHub read has to keep
     /// passing. Slug-exact would re-park every new action and make the grant
     /// worth nothing.
+    ///
+    /// `Some(origin)` — a `scheme://host[:port]` URL origin — for `web_fetch`
+    /// since issues #673/#739, on the same terms and from the same function.
+    /// **This is a second kind of value in the same string**, and a reader that
+    /// assumes the toolkit kind is wrong about it: the console spelled
+    /// `https://docs.rs` out with the toolkit speller and rendered
+    /// `Https://docs.rs` for three releases (issue #785). Anything that
+    /// *displays* a scope has to tell the two apart; anything that *matches* one
+    /// must not care, because [`admits_scope`](Self::admits_scope) is exact
+    /// string equality over whichever kind was minted.
     ///
     /// `None` also on a grant replayed from a journal line written before this
     /// field existed, where it means "unscoped" and reproduces the old
@@ -298,6 +370,15 @@ impl StandingGrant {
     ///   direction. It falls through and parks instead, which is the same answer
     ///   this codebase gives an unrecognised action everywhere else: unknown is
     ///   a send.
+    ///
+    /// # Dormant, deliberately (issue #610)
+    ///
+    /// No current tier routes a Composio call through this: since #559 a
+    /// catalogue read is allowed by the tier before the grant checks, and under
+    /// `readonly` the #243 brake denies above them. The scope this spends is
+    /// still minted, and the reasoning for keeping both halves is recorded once,
+    /// at [`standing_scope_of`](crate::policy::consequence::standing_scope_of) —
+    /// read it before concluding this is unused.
     pub fn admits_scope(&self, scope: Option<&str>) -> bool {
         match self.scope.as_deref() {
             None => true,
@@ -335,9 +416,18 @@ struct GrantState {
     /// buffered instead and the cycle runner drains it after the cycle it
     /// belongs to. A crash between consuming and draining loses the
     /// `GrantConsumed` record, which on replay re-arms a grant whose tool
-    /// already ran — the same at-most-once trade the effect journal makes, and
-    /// in the safe direction: the operator is asked again rather than the tool
-    /// firing again unasked.
+    /// already ran: the `ApprovalGranted` that minted it survives, the
+    /// redemption does not, and [`GrantSet::consume`] will admit the identical
+    /// call a second time with **no** new approval card — until the grant's own
+    /// [`GRANT_TTL_MILLIS`] retires it.
+    ///
+    /// This is a duplication window, not the safe direction, and it is stated
+    /// that way because it used to be recorded here as the opposite. What issue
+    /// #392 could close from the journal's side it did: `GrantConsumed` is
+    /// host-durable, so a record that reached the append is on stable storage
+    /// before the append returns. This buffer is the half that remains — closing
+    /// it means recording the redemption where it happens, which needs a journal
+    /// handle at the `ToolPolicy::check` seam.
     consumed: Vec<ApprovalId>,
     /// Standing grants (issue #374), keyed by their own id.
     ///
@@ -347,6 +437,21 @@ struct GrantState {
     /// redemption semantics (remove vs leave). Fusing them would put a branch on
     /// every operation of both.
     standing: HashMap<GrantId, StandingGrant>,
+    /// Work units with an approval **parked but not yet resolved** (issue #796),
+    /// keyed by the approval id so each resolution clears exactly its own entry.
+    ///
+    /// A parked approval mints no grant until the operator decides it, so between
+    /// the park and the decision neither `live` nor `standing` names its task.
+    /// Without this map [`any_for_task`](GrantSet::any_for_task) would read
+    /// `false` in that window and an unrelated turn's
+    /// [`sweep_orphans`](crate::harness::repo::CheckoutLedger::sweep_orphans)
+    /// would delete the checkout the parked step is holding for its own resume —
+    /// the very deadlock #796 exists to prevent, reopened one turn upstream.
+    /// Filled when the effect parks, emptied when it resolves, is denied, or
+    /// expires. In-memory only, like the checkouts it guards: a restart boot-
+    /// sweeps every checkout, so there is nothing left for a rehydrated mark to
+    /// protect.
+    pending: HashMap<ApprovalId, String>,
 }
 
 impl GrantSet {
@@ -428,6 +533,57 @@ impl GrantSet {
     /// How many grants are live (tests / observability).
     pub fn live_count(&self) -> usize {
         self.inner.lock().expect("grant set poisoned").live.len()
+    }
+
+    /// Records that a work unit has an approval **parked and awaiting a
+    /// decision** (issue #796), so [`any_for_task`](Self::any_for_task) treats it
+    /// as live until the approval resolves.
+    ///
+    /// Keyed by the approval id, computed the same way the mint side derives a
+    /// grant's [`GrantedCall::origin_task`], so the pending mark and the grant it
+    /// eventually becomes name one unit. A task parking a second approval simply
+    /// adds a second entry naming the same task; each clears independently.
+    pub fn mark_pending(&self, approval_id: &ApprovalId, task: String) {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .pending
+            .insert(approval_id.clone(), task);
+    }
+
+    /// Drops the pending-approval mark for `approval_id` (issue #796) — whether
+    /// it was approved (a grant now names the task), denied, or expired (nothing
+    /// does, so its checkout is now sweepable). A no-op for an id that never
+    /// parked a task-scoped effect.
+    pub fn clear_pending(&self, approval_id: &ApprovalId) {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .pending
+            .remove(approval_id);
+    }
+
+    /// Whether a live grant, a standing grant, **or a still-parked approval**
+    /// names `task` as its origin (issue #796).
+    ///
+    /// The harness asks this to decide whether a task's checkout held across an
+    /// approval park is still awaiting a resume or has been orphaned by a denied
+    /// or expired approval, so
+    /// [`CheckoutLedger::sweep_orphans`](crate::harness::repo::CheckoutLedger::sweep_orphans)
+    /// can reclaim the disk. Three states keep it live: a live grant names it (an
+    /// approved step waiting to be re-issued), a standing grant names it, or an
+    /// approval it parked is **still pending** — that last case mints no grant
+    /// yet, so without `pending` the checkout would be swept in the window
+    /// between the park and the operator's decision. A spent grant is already
+    /// removed from every map, so this reads `false` the moment the resume is
+    /// under way — which is safe because the resuming turn has reclaimed the tree
+    /// onto its turn-scoped list by then.
+    pub fn any_for_task(&self, task: &str) -> bool {
+        let state = self.inner.lock().expect("grant set poisoned");
+        let names_task = |t: &Option<String>| t.as_deref() == Some(task);
+        state.live.values().any(|g| names_task(&g.origin_task))
+            || state.standing.values().any(|g| names_task(&g.origin_task))
+            || state.pending.values().any(|t| t == task)
     }
 
     // -----------------------------------------------------------------------
@@ -577,6 +733,65 @@ mod test {
             args,
             at_millis: 1_000,
             origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
+        }
+    }
+
+    /// Issue #435, guarding #379's decision: a grant's origin is **routing, not
+    /// identity**. Neither the channel nor the thread within it may join the
+    /// redemption match.
+    ///
+    /// The failure this prevents is silent and expensive. If location were part
+    /// of the match, a re-dispatched turn that came back anywhere other than
+    /// where it started would simply fail to find its grant and re-park — the
+    /// operator approves, the agent asks again, and nothing anywhere says why.
+    /// `origin_parent` makes that mistake newly reachable by adding a second,
+    /// finer location to get wrong, so it is pinned here rather than left to
+    /// the comment on the field.
+    #[test]
+    fn a_grants_origin_is_routing_and_never_part_of_the_match() {
+        let args = serde_json::json!({ "to": "a@b.test" });
+
+        // Minted inside a thread; redeemed by a turn that knows only the call.
+        // `consume` is not even given a location to compare against — that is
+        // the shape of the guarantee.
+        let set = GrantSet::default();
+        set.grant(GrantedCall {
+            origin_thread: Some("desk-finance".to_string()),
+            origin_parent: Some(EventSeq::new(7)),
+            origin_task: None,
+            ..call("a1", "finance", "composio_execute", args.clone())
+        });
+        let redeemed = set
+            .consume("finance", "composio_execute", &args)
+            .expect("a thread-rooted grant is redeemed by the matching call");
+        assert_eq!(
+            redeemed.origin_parent,
+            Some(EventSeq::new(7)),
+            "and the location rides along on the consumed grant, for routing",
+        );
+        assert_eq!(redeemed.origin_thread, Some("desk-finance".to_string()));
+
+        // Two grants differing *only* in origin are the same call as far as
+        // matching is concerned: the first still redeems, so nothing about the
+        // location narrowed it.
+        for origin in [
+            (None, None),
+            (Some("desk-finance".to_string()), None),
+            (Some("agent-cfo".to_string()), Some(EventSeq::new(9))),
+        ] {
+            let set = GrantSet::default();
+            set.grant(GrantedCall {
+                origin_thread: origin.0,
+                origin_parent: origin.1,
+                origin_task: None,
+                ..call("a1", "finance", "composio_execute", args.clone())
+            });
+            assert!(
+                set.consume("finance", "composio_execute", &args).is_some(),
+                "the operator approved a call, not a location",
+            );
         }
     }
 
@@ -641,6 +856,39 @@ mod test {
         assert_eq!(seen.tool, "web_fetch");
         assert_eq!(set.live_count(), 1, "peeking must not consume");
         assert!(set.peek(&ApprovalId::new("nope")).is_none());
+    }
+
+    /// Issue #796: the window between a park and the operator's decision. A
+    /// parked approval mints no grant, so `any_for_task` would read `false`
+    /// without the pending mark — and an unrelated turn's checkout sweep would
+    /// then delete the parked step's tree. The mark keeps the task live until the
+    /// approval settles, and two approvals on one task clear independently.
+    #[test]
+    fn a_still_parked_approval_keeps_its_task_alive() {
+        let set = GrantSet::default();
+        assert!(!set.any_for_task("t-1"), "nothing names the task yet");
+
+        // A parked approval: no grant, but the task is marked pending.
+        set.mark_pending(&ApprovalId::new("a1"), "t-1".to_string());
+        assert!(
+            set.any_for_task("t-1"),
+            "a pending approval must keep the task live"
+        );
+
+        // A second approval parks on the same task.
+        set.mark_pending(&ApprovalId::new("a2"), "t-1".to_string());
+        // Settling the first still leaves the second holding the task.
+        set.clear_pending(&ApprovalId::new("a1"));
+        assert!(
+            set.any_for_task("t-1"),
+            "the second pending approval still names the task"
+        );
+        // Settling the last (denied or expired, so no grant follows) drops it.
+        set.clear_pending(&ApprovalId::new("a2"));
+        assert!(
+            !set.any_for_task("t-1"),
+            "no pending approval and no grant leaves nothing to keep the task alive"
+        );
     }
 
     #[test]
@@ -726,6 +974,8 @@ mod test {
             at_millis: 1_000,
             expires_at_millis,
             origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
             scope: None,
         }
     }

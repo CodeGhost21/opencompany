@@ -19,9 +19,31 @@ console cannot be honoured by one surface and ignored by another. At most one
 `overlay_budgets` entry may exist per teammate — the console write path upserts
 through `CompanyRecord::upsert_budget_override`, and a bundle import carrying two
 entries for the same teammate is rejected rather than resolved by guesswork.
+And (issue #562) `overlay_policy`: the operator's `[policy]` override — the
+autonomy tier and always-ask list an admin sets from the console, read through
+`CompanyRecord::effective_policy`, which resolves it *ahead* of the manifest for
+the same single-reconciliation-point reason as `effective_budget`. Its two
+fields are independently optional, so `None` means "not overridden" while
+`Some(vec![])` is a deliberately emptied always-ask list. An unknown stored
+tier falls back to the manifest rather than to `supervised`, so version skew
+cannot loosen a `readonly` seed. It is an overlay
+rather than a manifest write **by necessity**: a rebuild re-persists
+`record.manifest` from the seed and merges only `[workflows].enabled`, because
+for `[tools]` / `[policy]` a record-wins merge would let a runtime grant outlive
+the operator revoking it in version control. It is cleared by either of two paths: the seed's
+`[policy]` **changing** across a rebuild (`carry_policy_override` — version
+control wins when it speaks, and stays quiet when it doesn't, so a redeploy that
+changed nothing does not silently revert the operator), or an explicit
+`DELETE …/policy`. Between seed edits it is durable, and attributed, so the
+console can show who moved the gate and when.
 And (issue #168) `overlay_workflows`: the
 workflow graph bodies authored at runtime through the console's create dialog or
-the orchestrator's `create_workflow` tool. These are persisted here rather than
+the orchestrator's `create_workflow` tool, and thereafter replaced or removed
+through the console's `PUT`/`DELETE …/workflows/{wid}` routes or the
+orchestrator's `update_workflow` / `delete_workflow` tools (issue #661).
+Both surfaces run the same company-layer core, so an agent edit snapshots the
+prior body to the #274 revision ring and an agent delete cascades that ring away
+exactly as an operator's does. These are persisted here rather than
 written into `companies/<name>/workflows/<id>.toml` because the company source
 tree is the version-controlled seed and, in hosted mode, a read-only crate mount
 (writing there failed every hosted tenant with `EROFS`). Every reader unions the
@@ -196,6 +218,10 @@ pub trait UserStore: Send + Sync {
     async fn find_invite_by_email(&self, company: &CompanyId, email: &str)
         -> Result<Option<InviteRecord>>;
     async fn upsert_invite(&self, company: &CompanyId, invite: &InviteRecord) -> Result<()>;
+    /// Stamps `notified_at_millis` on an invite that still exists, leaving
+    /// every other field alone. Returns whether one was updated.
+    async fn mark_invite_notified(&self, company: &CompanyId, id: &str, at_millis: u64)
+        -> Result<bool>;
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool>;
 }
 
@@ -232,6 +258,11 @@ Normative requirements beyond the usual per-company isolation:
 - Email lookup is **exact**. Stores never normalize on the caller's behalf, so
   a caller that skips `normalize_email` misses rather than silently matching an
   address it did not ask for.
+- `UserStore::mark_invite_notified` MUST NOT insert. It is called after an
+  invite mail is sent, from a record read before the send, so a revocation that
+  lands during delivery must leave it nothing to update — a backend that
+  upserted here would restore an address the admin had just removed from the
+  allowlist.
 - `LoginCodeStore::consume` MUST make its check-and-mark a **single atomic
   step**. It is the only place single-use is enforced; a read-then-write in a
   handler would be a check-time/use-time gap.

@@ -66,6 +66,26 @@ pub struct StoreWorkflowResolver {
     /// The id of the top-level workflow the current run started from — a child
     /// whose closure reaches back to it would loop the whole run.
     root_id: String,
+    /// What the company's policy would park, and where to record that it was
+    /// not asked (issue #617). `None` for a dry run, which executes nothing and
+    /// therefore has nothing to disclose.
+    audit: Option<ChildCallAudit>,
+}
+
+/// Everything the #617 audit line needs: the policy to ask, the run to name,
+/// and the log to write to.
+///
+/// Grouped so [`StoreWorkflowResolver::new`] does not grow three more
+/// parameters for one concern, and so the whole concern is `Option` — a dry run
+/// passes `None` and the resolver behaves exactly as it did before.
+pub struct ChildCallAudit {
+    /// The company `[policy]` block, verbatim — the same input the top-level
+    /// gate pass reads, so the two can never disagree about the same call.
+    pub policy: crate::company::Policy,
+    /// The run resolving this child, for the journal line.
+    pub run_id: String,
+    /// Where the line goes. Without it the disclosure is a log warning only.
+    pub events: Option<Arc<dyn crate::ports::EventLog>>,
 }
 
 impl StoreWorkflowResolver {
@@ -76,12 +96,82 @@ impl StoreWorkflowResolver {
         store: Arc<dyn CompanyStore>,
         company: CompanyId,
         root_id: String,
+        audit: Option<ChildCallAudit>,
     ) -> Self {
         Self {
             source_dir,
             store,
             company,
             root_id,
+            audit,
+        }
+    }
+
+    /// Issue #617: say, on the record, that this child's calls were never
+    /// offered for approval.
+    ///
+    /// # Why this discloses rather than gates
+    ///
+    /// The child is resolved and run *inside* the engine, so its nodes never
+    /// reach the gate pass #460 and #614 added. Gating them is not on the table:
+    /// tinyflows cannot resume a child across the sub-workflow boundary, and a
+    /// paused child halts the parent with an unresumable error — so marking the
+    /// node would turn a run that works into one that fails with **no card to
+    /// decide**, which is worse than the hole. Closing it properly is engine
+    /// work (#617).
+    ///
+    /// So the run proceeds and the omission is recorded. The value is exactly
+    /// the value #460 argued for: an operator auditing what the company was
+    /// asked to approve stops seeing a gap with nothing to explain it.
+    ///
+    /// Best-effort and never fails a resolve — a journal write must not be able
+    /// to stop a workflow that would otherwise run. The `warn!` lands either
+    /// way, so a build with no event log still says it out loud.
+    async fn disclose_ungated_calls(&self, child_id: &str, graph: &WorkflowGraph) {
+        let Some(audit) = self.audit.as_ref() else {
+            return;
+        };
+        let ungated = crate::workflows::gate::policy_gates(
+            graph,
+            &audit.policy,
+            &self.company,
+            child_id,
+            &audit.run_id,
+        )
+        .await;
+
+        for call in ungated {
+            tracing::warn!(
+                company = %self.company,
+                workflow = %self.root_id,
+                child_workflow = child_id,
+                run_id = %audit.run_id,
+                node = %call.node_id,
+                tool = %call.slug,
+                "workflow: this call was NOT offered for approval because it is inside a \
+                 sub_workflow; the engine cannot resume a child across that boundary (issue \
+                 #617), so it runs unparked"
+            );
+            let Some(events) = audit.events.as_ref() else {
+                continue;
+            };
+            let event = crate::ports::types::CompanyEvent::WorkflowChildCallNotOffered {
+                workflow_id: self.root_id.clone(),
+                child_workflow_id: child_id.to_string(),
+                run_id: audit.run_id.clone(),
+                node: call.node_id,
+                tool: call.slug,
+                reason: call.reason,
+            };
+            if let Err(err) = events.append(&self.company, event).await {
+                tracing::warn!(
+                    company = %self.company,
+                    child_workflow = child_id,
+                    %err,
+                    "workflow: could not journal an ungated sub_workflow call; the run is \
+                     unaffected but the audit line is lost"
+                );
+            }
         }
     }
 
@@ -212,7 +302,11 @@ impl WorkflowResolver for StoreWorkflowResolver {
         })??;
 
         // (e) Translate to a runnable tinyflows graph.
-        Ok(crate::workflows::translate::translate(&file))
+        let graph = crate::workflows::translate::translate(&file);
+        // (f) Issue #617: the child's calls never reach the gate pass, so say
+        // so on the record before handing the graph to the engine.
+        self.disclose_ungated_calls(workflow_id, &graph).await;
+        Ok(graph)
     }
 }
 
@@ -231,7 +325,9 @@ mod tests {
 
     use crate::company::CompanyManifest;
     use crate::error::Result as OcResult;
-    use crate::ports::types::{CompanyRecord, CompanySummary, LedgerEntry};
+    use crate::ports::types::{
+        CompanyEvent, CompanyRecord, CompanySummary, EventSeq, LedgerEntry, StoredEvent,
+    };
 
     /// An in-memory `CompanyStore` holding one record, so the resolver's overlay
     /// half can be seeded without a real backend.
@@ -269,6 +365,8 @@ mod tests {
             overlay_desks: Vec::new(),
             overlay_workflows: overlays,
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -282,6 +380,7 @@ mod tests {
             store_with(Vec::new()),
             CompanyId::new("acme"),
             root_id.to_string(),
+            None,
         )
     }
 
@@ -293,6 +392,7 @@ mod tests {
             store_with(overlays),
             CompanyId::new("acme"),
             root_id.to_string(),
+            None,
         )
     }
 
@@ -474,6 +574,7 @@ to = "sub"
             store_with(vec![overlay("child", parent_of("child", "other"))]),
             CompanyId::new("acme"),
             "root".to_string(),
+            None,
         );
         let graph = resolver.resolve("child").await.expect("resolves");
         assert_eq!(graph.id.as_deref(), Some("child"));
@@ -482,5 +583,156 @@ to = "sub"
             2,
             "the seed leaf must win over the overlay parent"
         );
+    }
+
+    // ---- Issue #617: disclosing a child's ungated calls -------------------
+
+    /// An [`EventLog`] that only remembers what it was handed.
+    struct RecordingEvents(std::sync::Mutex<Vec<CompanyEvent>>);
+
+    #[async_trait]
+    impl crate::ports::EventLog for RecordingEvents {
+        async fn append(&self, _id: &CompanyId, event: CompanyEvent) -> OcResult<EventSeq> {
+            self.0.lock().unwrap().push(event);
+            Ok(EventSeq::from(1))
+        }
+        async fn read_from(
+            &self,
+            _id: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> OcResult<Vec<StoredEvent>> {
+            Ok(Vec::new())
+        }
+        fn subscribe(&self, _id: &CompanyId) -> futures::stream::BoxStream<'static, StoredEvent> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    /// A child graph whose one working node is a `tool_call` the policy parks.
+    fn child_with_shell(id: &str) -> String {
+        format!(
+            r#"
+id = "{id}"
+name = "{id}"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "run"
+kind = "tool_call"
+name = "Run"
+[node.config]
+slug = "shell"
+[node.config.args]
+# An ACTING command. Since issue #875 `shell` is classified by what it was
+# handed, so a read would be a call the policy does not park — and the
+# disclosure this fixture exists to exercise only happens for one that would.
+command = "rm -rf ."
+[[edge]]
+from = "start"
+to = "run"
+"#
+        )
+    }
+
+    fn audited_resolver(
+        overlays: Vec<OverlayWorkflow>,
+        mode: &str,
+        events: Arc<RecordingEvents>,
+    ) -> StoreWorkflowResolver {
+        let policy: crate::company::Policy =
+            toml::from_str(&format!("mode = \"{mode}\"\nalways_approve = []\n"))
+                .expect("valid [policy]");
+        StoreWorkflowResolver::new(
+            None,
+            store_with(overlays),
+            CompanyId::new("acme"),
+            "root".to_string(),
+            Some(ChildCallAudit {
+                policy,
+                run_id: "run-1".to_string(),
+                events: Some(events),
+            }),
+        )
+    }
+
+    /// Issue #617. The child's `shell` call is one the policy would park at the
+    /// top level. It cannot be parked here — the engine cannot resume a child
+    /// across the boundary — so the resolver must **say so on the record**
+    /// rather than let the call disappear from the approvals story.
+    #[tokio::test]
+    async fn an_ungated_child_call_is_disclosed_to_the_journal() {
+        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
+        let resolver = audited_resolver(
+            vec![overlay("child", child_with_shell("child"))],
+            "supervised",
+            events.clone(),
+        );
+
+        let graph = resolver.resolve("child").await.expect("child resolves");
+
+        let seen = events.0.lock().unwrap();
+        let [
+            CompanyEvent::WorkflowChildCallNotOffered {
+                workflow_id,
+                child_workflow_id,
+                run_id,
+                node,
+                tool,
+                reason,
+            },
+        ] = seen.as_slice()
+        else {
+            panic!("expected exactly one disclosure: {seen:?}");
+        };
+        assert_eq!(workflow_id, "root", "the line names the run's own workflow");
+        assert_eq!(child_workflow_id, "child");
+        assert_eq!(run_id, "run-1");
+        assert_eq!(node, "run");
+        assert_eq!(tool, "shell");
+        assert!(reason.contains("shell"), "{reason}");
+
+        // And the child is NOT gated: marking it would pause a child the engine
+        // cannot resume, turning a working run into a dead one (issue #617).
+        let run = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "run")
+            .expect("the child's node survives");
+        assert!(
+            run.config.get("requires_approval").is_none(),
+            "disclosing must not gate the child: {:?}",
+            run.config
+        );
+    }
+
+    /// A company that would not park the call has nothing to disclose. Without
+    /// this, the test above is also satisfied by a resolver that logs on every
+    /// child regardless of policy.
+    #[tokio::test]
+    async fn a_child_the_policy_would_not_park_discloses_nothing() {
+        let events = Arc::new(RecordingEvents(std::sync::Mutex::new(Vec::new())));
+        let resolver = audited_resolver(
+            vec![overlay("child", child_with_shell("child"))],
+            "full",
+            events.clone(),
+        );
+
+        resolver.resolve("child").await.expect("child resolves");
+
+        assert!(
+            events.0.lock().unwrap().is_empty(),
+            "an ungated-by-policy call is not a disclosure"
+        );
+    }
+
+    /// A dry run executes nothing, so there is no omission to confess. The
+    /// audit is `None` there and the resolver behaves exactly as before.
+    #[tokio::test]
+    async fn a_resolver_without_an_audit_discloses_nothing() {
+        let resolver = overlay_resolver(vec![overlay("child", child_with_shell("child"))], "root");
+        resolver.resolve("child").await.expect("child resolves");
     }
 }

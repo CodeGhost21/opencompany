@@ -6,6 +6,7 @@ import {
   depthOf,
   MAX_DEPTH,
   reorderedIds,
+  reorderedIdsAfterDrop,
   summarize,
 } from "@/lib/org";
 import type { DeskDto, TeamMemberDto } from "@/api/types";
@@ -198,6 +199,25 @@ describe("reorderedIds", () => {
     const engineering = tree().desks[0];
     reorderedIds(engineering, 1, "up");
     expect(engineering.seats.map((s) => s.id)).toEqual(["grace", "ada"]);
+  });
+});
+
+describe("reorderedIdsAfterDrop", () => {
+  it("returns the full order when a drop changes the lead", () => {
+    expect(reorderedIdsAfterDrop(tree().desks[0], 1, 0)).toEqual(["ada", "grace"]);
+  });
+
+  it("rejects an invalid or no-op drop", () => {
+    const engineering = tree().desks[0];
+    expect(reorderedIdsAfterDrop(engineering, 0, 0)).toBeNull();
+    expect(reorderedIdsAfterDrop(engineering, -1, 0)).toBeNull();
+    expect(reorderedIdsAfterDrop(engineering, 0, 9)).toBeNull();
+  });
+
+  it("does not mutate the desk", () => {
+    const engineering = tree().desks[0];
+    reorderedIdsAfterDrop(engineering, 1, 0);
+    expect(engineering.seats.map((seat) => seat.id)).toEqual(["grace", "ada"]);
   });
 });
 

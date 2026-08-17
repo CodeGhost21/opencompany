@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   composeCopilotMessage,
   copilotThreadId,
+  loadCopilotHistory,
   questionOf,
   type CopilotContext,
 } from "@/api/workflow-copilot";
@@ -45,6 +46,20 @@ describe("copilotThreadId", () => {
   /** The exact string `company::copilot::workflow_of_thread` parses. */
   it("is the prefix the host confines on", () => {
     expect(copilotThreadId("weekly_report")).toBe("workflow-copilot:weekly_report");
+  });
+});
+
+describe("loadCopilotHistory", () => {
+  it("distinguishes an unavailable transcript from an empty one", async () => {
+    const result = await loadCopilotHistory(
+      {
+        getChatHistory: vi.fn().mockRejectedValue(new Error("network unavailable")),
+      } as never,
+      "acme",
+      "weekly_report",
+    );
+
+    expect(result).toMatchObject({ ok: false, error: { message: "network unavailable" } });
   });
 });
 
@@ -111,5 +126,101 @@ describe("composeCopilotMessage", () => {
   it("round-trips the operator's question back out of the composed message", () => {
     const question = "why did it fail?\n\n### The operator's question\nand then?";
     expect(questionOf(composeCopilotMessage(context, question))).toBe(question);
+  });
+
+  /**
+   * Issue #783. The proposals were ungrounded: the message never told the model
+   * which teammates or tools exist, so it guessed ones the host then rejected.
+   * The composed message now inlines the real roster ids and the real tool
+   * slugs, so a proposal can name what actually exists.
+   */
+  it("grounds the model in the real roster ids and tool slugs", () => {
+    const grounded: CopilotContext = {
+      ...context,
+      roster: [
+        { id: "analyst", role: "Analyst" },
+        { id: "editor", role: "Editor" },
+      ],
+      toolSlugs: ["web_search", "send_email"],
+      toolSlugsKnown: true,
+    };
+    const message = composeCopilotMessage(grounded, "add a research step");
+    expect(message).toContain("analyst");
+    expect(message).toContain("editor");
+    expect(message).toContain("web_search");
+    expect(message).toContain("send_email");
+  });
+
+  /**
+   * The kind-specific config schema is inlined too, so the model knows the keys
+   * live INSIDE `config` and which each kind needs — the fix for proposals that
+   * put `slug`/`repo` as top-level node fields the host's allowlist refused.
+   */
+  it("teaches the config schema and that kind-specific keys nest under config", () => {
+    const message = composeCopilotMessage(context, "call a tool");
+    // The shape rule and a worked example.
+    expect(message).toMatch(/inside a `?config`? object/i);
+    expect(message).toContain("config.slug (required)");
+    expect(message).toContain('"config": {"slug": "web_search"');
+    // The enumerated kinds and the id rule, stated by operation: an existing
+    // reference must be a listed id, while an addNode mints a new one.
+    for (const kind of ["tool_call", "agent", "http_request", "sub_workflow"]) {
+      expect(message).toContain(kind);
+    }
+    expect(message).toMatch(/use only an id listed under ## Graph/i);
+    expect(message).toMatch(/addNode mints a NEW id/i);
+  });
+
+  /**
+   * Honest absence, the same split `runsKnown` makes: a host that does not serve
+   * the tool list must not be told "no tools" — that would suppress a legitimate
+   * `tool_call`. It is told the tools could not be listed instead.
+   */
+  it("distinguishes an unlisted tool set from a genuinely empty one", () => {
+    const unlisted = composeCopilotMessage(
+      { ...context, toolSlugs: undefined, toolSlugsKnown: false },
+      "call a tool",
+    );
+    expect(unlisted).toMatch(/could not be listed/i);
+
+    const empty = composeCopilotMessage(
+      { ...context, toolSlugs: [], toolSlugsKnown: true },
+      "call a tool",
+    );
+    expect(empty).toMatch(/no tools are granted/i);
+  });
+
+  /**
+   * Issue #900. `describeRun`'s blocked arm is the copilot's half of the same
+   * fix `RunHistoryPanel` gets on the console side: a blocked run has no
+   * `error`, is not `cancelled`, is not `running` and routed no report, so
+   * without this arm it grounded the copilot with the bare "finished" reading
+   * — the same lie #881 removed from the history panel would otherwise still
+   * reach the model here.
+   */
+  it("grounds the copilot on a blocked run instead of reading it as finished", () => {
+    const blockedRun = {
+      seq: 1,
+      atMillis: 1_700_000_000_000,
+      workflowId: "weekly_report",
+      scheduled: false,
+      runId: "run-1",
+      deliveries: [],
+      pendingApprovals: ["collect"],
+      blockedNodes: [{ nodeId: "collect", tools: ["shell"], approvalIds: ["appr-1"] }],
+      approvals: [
+        { nodeId: "collect", tool: "shell", outcome: "parked" as const, approvalId: "appr-1" },
+      ],
+    };
+    const message = composeCopilotMessage(
+      { ...context, runs: [blockedRun] },
+      "why didn't this run send anything?",
+    );
+    expect(message).toContain("BLOCKED at collect");
+    expect(message).toContain("parked 1 approval(s)");
+    expect(message).toMatch(/does NOT continue this run/);
+    // The bare "finished" reading this arm exists to replace must not also
+    // appear for this run.
+    expect(message).not.toMatch(/collect.*finished/);
   });
 });

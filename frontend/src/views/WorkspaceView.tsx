@@ -7,12 +7,17 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderSync,
+  FolderX,
   Link2,
   Loader2,
   MoreHorizontal,
   PanelLeft,
+  Download,
   RefreshCw,
+  Search,
   Upload,
+  X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -21,14 +26,27 @@ import { toast } from "sonner";
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import {
+  blobCacheKey,
   createNode,
   deleteNode as deleteNodeApi,
+  fetchBlobUrl,
   fetchFile,
   fetchTree,
+  formatBytes,
+  isBinary,
+  mergeDuplicateFolders,
   originLabel,
+  residualReason,
   renameMoveNode,
+  searchWorkspace,
+  sweepEmptyAgentFolders,
+  uploadFile,
   writeFile,
   OPERATOR_ORIGIN,
+  type SearchHit,
+  type SearchResults as SearchResultsPage,
+  type RepairOutcome,
+  type SweptFolder,
   type WorkspaceFile,
   type WorkspaceOrigin,
 } from "@/api/workspace";
@@ -57,6 +75,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
+  applyRepair,
   childrenOf,
   clearLegacyLocal,
   ensureMdExt,
@@ -70,6 +89,7 @@ import {
   titleOf,
 } from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { SearchResults } from "@/views/workspace/SearchResults";
 
 /**
  * The latest workspace write off the SSE feed (issue #327), as the shell hands
@@ -111,6 +131,17 @@ interface Props {
 
 /** How long typing settles before the editor pushes a save to the host. */
 const AUTOSAVE_DELAY_MS = 800;
+
+/**
+ * How long the search box waits after the last keystroke before asking the host
+ * (issue #607).
+ *
+ * The host's search is an O(N) scan over every note in the company, so a request
+ * per keystroke would put the whole tree through it several times for one word.
+ * Long enough to collapse a typed word into one call, short enough that the
+ * results still feel like they belong to what is on screen.
+ */
+const SEARCH_DEBOUNCE_MS = 250;
 
 /** The folder created to hold notes rescued from the retired local scratchpad. */
 const IMPORT_FOLDER_NAME = "Imported from this browser";
@@ -320,12 +351,33 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // whatever note is open, and this text belongs to one that no longer is.
   const [rescued, setRescued] = useState<Rescued | null>(null);
 
+  // Search (issue #607). `searchInput` is what the operator is typing;
+  // `searchQuery` is the debounced value the results below actually answer.
+  // Keeping them apart is what lets the header say "no notes mention X" about
+  // the query that ran rather than about the half-word in the box.
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchPage, setSearchPage] = useState<SearchResultsPage | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [moving, setMoving] = useState<FsNode | null>(null);
   const [showExplorer, setShowExplorer] = useState(true);
   const [legacy, setLegacy] = useState<FsNode[]>([]);
   const [importing, setImporting] = useState(false);
+  // The empty-agent-folder tidy (issue #700), in its two stages: `preview` is
+  // what the host says *would* go, `done` is what actually went. Both name every
+  // folder — a count is not something an operator who disagrees can check.
+  const [sweep, setSweep] = useState<SweepState | null>(null);
+  const [sweeping, setSweeping] = useState(false);
+  // The duplicate-folder repair (issue #759), in the same two stages. `preview`
+  // is the plan; `done` is what the host actually did — which is not always the
+  // same list, and is never the whole story: the residuals it could not decide
+  // ride along on both.
+  const [repair, setRepair] = useState<RepairState | null>(null);
+  const [repairing, setRepairing] = useState(false);
   // The pending scratchpad partitioned by kind, once, for every surface that
   // describes or imports it: the banner's sentence, the import loops, and the
   // receipt. #500 partitioned inside `importLegacy` so the loops and the
@@ -339,6 +391,7 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // file that has since been closed) can never overwrite the current one.
   const treeGen = useRef(0);
   const fileGen = useRef(0);
+  const searchGen = useRef(0);
   // Whether the explorer's initial folder expansion has happened yet, so a later
   // refresh never re-opens folders the operator collapsed.
   const expandedSeeded = useRef(false);
@@ -386,6 +439,57 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     [client, company],
   );
 
+  /* ---- search (#607) ---- */
+
+  // Resolves when the results are installed. Separated from the effect below so
+  // the refocus and live-write handlers can re-run the *active* search — a hit
+  // list that outlived the notes it names is worse than a stale tree, because
+  // clicking one 404s.
+  const runSearch = useCallback(
+    async (query: string) => {
+      const mine = ++searchGen.current;
+      setSearching(true);
+      try {
+        const page = await searchWorkspace(client, company, query);
+        if (mine !== searchGen.current) return;
+        setSearchPage(page);
+        setSearchError(null);
+      } catch (e) {
+        if (mine !== searchGen.current) return;
+        // The previous page is dropped rather than left standing: results that
+        // do not answer the query on screen are a lie the operator cannot see.
+        setSearchPage(null);
+        setSearchError(message(e, "could not search this workspace"));
+      } finally {
+        if (mine === searchGen.current) setSearching(false);
+      }
+    },
+    [client, company],
+  );
+
+  // Debounce the box into `searchQuery`.
+  useEffect(() => {
+    const trimmed = searchInput.trim();
+    if (!trimmed) {
+      // Clearing the box restores the tree immediately — no debounce, and no
+      // request: the host refuses an empty query with a 400 because "" is not
+      // "everything", so the console must not send one.
+      searchGen.current++;
+      setSearchQuery("");
+      setSearchPage(null);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+    const timer = setTimeout(() => setSearchQuery(trimmed), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    if (!searchQuery) return;
+    void runSearch(searchQuery);
+  }, [searchQuery, runSearch]);
+
   // Mount / company change: reset every scoped piece of state, then load.
   useEffect(() => {
     expandedSeeded.current = false;
@@ -394,6 +498,13 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     setOpenFile(null);
     setDraft(null);
     setSaveState("idle");
+    // Another company's notes are another namespace; a hit list surviving the
+    // switch would offer nodes this company does not have.
+    searchGen.current++;
+    setSearchInput("");
+    setSearchQuery("");
+    setSearchPage(null);
+    setSearchError(null);
     // Another company's note is another namespace, and rescued text offering to
     // be saved into the wrong workspace is worse than no offer at all.
     setRescued(null);
@@ -511,7 +622,13 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // the tab is the moment an operator most expects to see current state.
   useEffect(() => {
     const refresh = () => {
-      if (document.visibilityState === "visible") void loadTree({ silent: true });
+      if (document.visibilityState !== "visible") return;
+      void loadTree({ silent: true });
+      // An active search is the *only* thing in the explorer pane while it
+      // runs, so refreshing the tree behind it and leaving the hits alone would
+      // refresh nothing the operator can see — and would leave them clicking
+      // rows for notes that may since have been deleted.
+      if (searchQuery) void runSearch(searchQuery);
     };
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
@@ -519,7 +636,7 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [loadTree]);
+  }, [loadTree, runSearch, searchQuery]);
 
   /* ---- live writes (#327) ---- */
 
@@ -547,6 +664,10 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     const frame = event;
     void (async () => {
       const tree = await loadTree({ silent: true });
+      // Same reasoning as the refocus handler: a live write can add, change or
+      // delete a note the hit list is naming, and the hit list is what is on
+      // screen.
+      if (searchQuery) void runSearch(searchQuery);
       const plan = planOpenNote({
         openId,
         event: frame,
@@ -715,7 +836,40 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
       for (const a of pathOf(nodes, id)) if (a.kind === "folder") next.add(a.id);
       return next;
     });
+    // A payload has no text body to fetch, and the host refuses the text read
+    // for one — asking anyway would put an error in `fileError` for a file that
+    // is perfectly fine (issue #553). `BinaryNodeView` fetches the bytes it
+    // needs itself.
+    const node = nodeById(nodes, id);
+    if (node && isBinary(node)) return;
     await loadFile(id);
+  }
+
+  /**
+   * Act on a search hit.
+   *
+   * A file goes through the ordinary `open` flow, so a hit behaves exactly like
+   * a tree click — including the binary case, which `open` already knows not to
+   * fetch a text body for. The search stays up: the operator is usually working
+   * a list of candidates, and clearing it on the first click would make them
+   * retype the query to reach the second.
+   *
+   * A folder cannot be "opened" — there is no pane for one — so it exits the
+   * search and reveals the folder in the tree, which is the only thing that
+   * could have been meant.
+   */
+  async function openHit(hit: SearchHit) {
+    if (hit.kind === "folder") {
+      setSearchInput("");
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        for (const a of pathOf(nodes, hit.id)) if (a.kind === "folder") next.add(a.id);
+        next.add(hit.id);
+        return next;
+      });
+      return;
+    }
+    await open(hit.id);
   }
 
   function toggle(id: string) {
@@ -831,6 +985,101 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     }
   }
 
+  /**
+   * Ask the host which `Agents/<id>/` folders are empty, and show them
+   * (issue #700).
+   *
+   * A preview, always — the deletion is a second call the operator makes from
+   * the dialog. Nothing about emptiness is decided here: the host counts
+   * children structurally, over every node in the tree, and this only renders
+   * the answer.
+   */
+  async function previewSweep() {
+    setSweeping(true);
+    try {
+      const folders = await sweepEmptyAgentFolders(client, company, true);
+      if (folders.length === 0) {
+        toast.success("No empty agent folders to tidy.");
+        return;
+      }
+      setSweep({ stage: "preview", folders });
+    } catch (e) {
+      toast.error(message(e, "could not check for empty agent folders"));
+    } finally {
+      setSweeping(false);
+    }
+  }
+
+  /**
+   * Remove them, then report what actually went.
+   *
+   * The result list is the host's, not the preview echoed back: a folder that
+   * gained a deliverable between the two calls is left standing and is absent
+   * here, so the receipt describes the tree rather than the operator's intent.
+   */
+  async function confirmSweep() {
+    setSweeping(true);
+    try {
+      const removed = await sweepEmptyAgentFolders(client, company, false);
+      const gone = new Set(removed.map((f) => f.id));
+      setNodes((all) => all.filter((n) => !gone.has(n.id)));
+      setSweep({ stage: "done", folders: removed });
+    } catch (e) {
+      toast.error(message(e, "could not tidy the empty agent folders"));
+      setSweep(null);
+    } finally {
+      setSweeping(false);
+    }
+  }
+
+  /**
+   * Ask the host what the duplicate folders in this tree would merge into
+   * (issue #759).
+   *
+   * A preview, always. The repair *moves* notes between folders rather than
+   * removing provably empty ones, so the operator sees every relocation before
+   * agreeing to any of them — and sees, up front, what the host will refuse to
+   * decide.
+   */
+  async function previewRepair() {
+    setRepairing(true);
+    try {
+      const outcome = await mergeDuplicateFolders(client, company, true);
+      if (outcome.folders.length === 0 && outcome.residuals.length === 0) {
+        toast.success("No duplicate folders to repair.");
+        return;
+      }
+      setRepair({ stage: "preview", outcome });
+    } catch (e) {
+      toast.error(message(e, "could not check for duplicate folders"));
+    } finally {
+      setRepairing(false);
+    }
+  }
+
+  /**
+   * Do it, then report what actually happened.
+   *
+   * The result is the host's, not the preview echoed back: a folder that gained
+   * a note between the two calls is left standing and says so, and a relocation
+   * the tree moved out from under turns into a residual. The local tree is
+   * replayed from that answer rather than refetched, so the open note keeps its
+   * unsaved draft.
+   */
+  async function confirmRepair() {
+    setRepairing(true);
+    try {
+      const outcome = await mergeDuplicateFolders(client, company, false);
+      setNodes((all) => applyRepair(all, outcome));
+      setRepair({ stage: "done", outcome });
+    } catch (e) {
+      toast.error(message(e, "could not repair the duplicate folders"));
+      setRepair(null);
+    } finally {
+      setRepairing(false);
+    }
+  }
+
   async function onWiki(target: string) {
     const existing = fileByTitle(nodes, target);
     if (existing) {
@@ -841,22 +1090,23 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     await createAndOpen(target, `# ${target}\n`);
   }
 
+  /**
+   * Upload files of any kind (issue #553).
+   *
+   * Every file now goes to the host's multipart route, including Markdown.
+   * Reading the bytes here to decide would mean re-implementing the host's
+   * text-versus-binary rule in a second place, where the two could disagree
+   * about the same file; the host reads the bytes and answers with the node it
+   * made, so there is one rule and the console just renders the result.
+   */
   async function onUpload(files: FileList | null) {
     if (!files?.length) return;
-    const reads = await Promise.all(
-      Array.from(files).map(async (f) => ({ name: f.name, text: await f.text().catch(() => "") })),
-    );
-    for (const r of reads) {
+    for (const file of Array.from(files)) {
       try {
-        const created = await createNode(client, company, {
-          name: ensureMdExt(r.name),
-          kind: "file",
-          parentId: null,
-          content: r.text,
-        });
+        const created = await uploadFile(client, company, file, null);
         setNodes((all) => [...all, created]);
       } catch (e) {
-        toast.error(`${r.name}: ${message(e, "upload failed")}`);
+        toast.error(`${file.name}: ${message(e, "upload failed")}`);
       }
     }
   }
@@ -893,10 +1143,41 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
           <IconBtn label="Upload" onClick={() => uploadRef.current?.click()}>
             <Upload className="size-4" />
           </IconBtn>
+          {/* Issue #700. A company provisioned before the tree went lazy carries
+              one empty folder per teammate, and nothing else will ever remove
+              them. Deliberately a button rather than something boot does: the
+              operator's click is the opt-in, and the dialog names every folder
+              before any of them goes. */}
+          <IconBtn
+            label="Tidy empty agent folders"
+            disabled={sweeping}
+            onClick={() => void previewSweep()}
+            data-testid="workspace-sweep"
+          >
+            <FolderX className="size-4" />
+          </IconBtn>
+          {/* Issue #759. Two publishes of one deliverable can race and leave two
+              folders with the same name, after which every publish beneath that
+              path is refused as ambiguous — for every agent, forever. Stopping
+              new races does nothing for a tree already in that state, and on a
+              hosted tenant this button is the only way out of it. Operator-
+              triggered for the same reason the tidy beside it is: nothing
+              rearranges somebody's tree unasked. */}
+          <IconBtn
+            label="Repair duplicate folders"
+            disabled={repairing}
+            onClick={() => void previewRepair()}
+            data-testid="workspace-repair"
+          >
+            <FolderSync className="size-4" />
+          </IconBtn>
           <input
             ref={uploadRef}
             type="file"
-            accept=".md,.markdown,.txt"
+            // Anything. The tree holds bytes now, and the host decides what
+            // each file becomes — an allow-list here would be a second,
+            // narrower rule that silently refuses files the store supports.
+            accept="*/*"
             multiple
             hidden
             onChange={(e) => {
@@ -905,8 +1186,50 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
             }}
           />
         </div>
+        {/* Search (issue #607). In the explorer header beside the refresh
+            button, because it answers the same question the tree below it does
+            — "which note do I want?" — and an operator who cannot find a note
+            by eye reaches here next. */}
+        <div className="relative border-b px-2 py-1.5">
+          <Search className="pointer-events-none absolute top-1/2 left-4 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              // Escape restores the tree, the shortcut every search box has.
+              if (e.key === "Escape") setSearchInput("");
+            }}
+            placeholder="Search notes…"
+            aria-label="Search workspace notes"
+            className="h-8 pr-7 pl-7 text-sm"
+            data-testid="workspace-search"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => setSearchInput("")}
+              aria-label="Clear search"
+              data-testid="workspace-search-clear"
+              className="absolute top-1/2 right-4 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
+        </div>
         <div className="flex-1 overflow-y-auto py-1" data-testid="workspace-tree">
-          {loading ? (
+          {/* An active search replaces the tree rather than sitting beside it —
+              showing both would leave the operator reading a tree that is not
+              what they just asked for. */}
+          {searchInput.trim() ? (
+            <SearchResults
+              query={searchQuery || searchInput.trim()}
+              hits={searchPage?.hits ?? []}
+              total={searchPage?.total ?? 0}
+              loading={searching || searchQuery !== searchInput.trim()}
+              error={searchError}
+              onOpen={(hit) => void openHit(hit)}
+            />
+          ) : loading ? (
             <div className="space-y-2 px-2 py-2">
               <Skeleton className="h-5 w-4/5" />
               <Skeleton className="h-5 w-3/5" />
@@ -1018,20 +1341,32 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
               <SaveStatus state={saveState} />
-              <Tabs
-                value={mode}
-                onValueChange={(v) => void changeMode(v as "read" | "edit")}
-                className="ml-auto"
-              >
-                <TabsList>
-                  <TabsTrigger value="read">Reading</TabsTrigger>
-                  <TabsTrigger value="edit">Edit</TabsTrigger>
-                </TabsList>
-              </Tabs>
+              {/* A payload has no prose to read or edit, so the mode switch is
+                  hidden rather than shown-and-broken (issue #553). The host
+                  refuses a text write to one, so an Edit tab here would be a
+                  control whose only outcome is an error toast. */}
+              {!isBinary(openNode) && (
+                <Tabs
+                  value={mode}
+                  onValueChange={(v) => void changeMode(v as "read" | "edit")}
+                  className="ml-auto"
+                >
+                  <TabsList>
+                    <TabsTrigger value="read">Reading</TabsTrigger>
+                    <TabsTrigger value="edit">Edit</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              )}
             </div>
             <div className="flex flex-1 overflow-hidden">
               <div className="flex-1 overflow-y-auto">
-                {fileError ? (
+                {isBinary(openNode) ? (
+                  // Checked before `fileError` and before the skeleton: a
+                  // payload is never fetched through the text route at all, so
+                  // neither of those states is reachable for one and both would
+                  // be wrong answers here.
+                  <BinaryNodeView client={client} company={company} node={openNode} />
+                ) : fileError ? (
                   <div className="p-6">
                     <Alert variant="destructive">
                       <AlertDescription>{fileError}</AlertDescription>
@@ -1107,6 +1442,18 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
           setMoving(null);
         }}
       />
+      <SweepDialog
+        state={sweep}
+        busy={sweeping}
+        onClose={() => setSweep(null)}
+        onConfirm={() => void confirmSweep()}
+      />
+      <RepairDialog
+        state={repair}
+        busy={repairing}
+        onClose={() => setRepair(null)}
+        onConfirm={() => void confirmRepair()}
+      />
     </div>
   );
 }
@@ -1158,7 +1505,7 @@ function Tree(props: TreeProps) {
 
 /** Badge styling per origin, mirroring `ORIGIN_STYLES` in `api/memory.ts`. */
 const ORIGIN_STYLES: Record<WorkspaceOrigin["kind"], string> = {
-  agent: "border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400",
+  agent: "border-tone-3/30 bg-tone-3/10 text-tone-3-text",
   seed: "border-border bg-muted text-muted-foreground",
   operator: "border-border bg-muted text-muted-foreground",
 };
@@ -1187,7 +1534,7 @@ function Authorship({
   return (
     <span className="flex shrink-0 items-center gap-1.5" data-testid="workspace-authorship">
       {created && (
-        <Badge variant="outline" className={cn("text-[10px]", ORIGIN_STYLES[createdBy.kind])}>
+        <Badge variant="outline" className={cn("text-3xs", ORIGIN_STYLES[createdBy.kind])}>
           {created}
         </Badge>
       )}
@@ -1225,7 +1572,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           {isFolder ? (
             <>
               {isOpen ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
-              {isOpen ? <FolderOpen className="size-4 shrink-0 text-sky-500" /> : <Folder className="size-4 shrink-0 text-sky-500" />}
+              {isOpen ? <FolderOpen className="size-4 shrink-0 text-tone-2" /> : <Folder className="size-4 shrink-0 text-tone-2" />}
             </>
           ) : (
             <FileText className="ml-3.5 size-4 shrink-0 text-muted-foreground" />
@@ -1238,7 +1585,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           {node.createdBy.kind === "agent" && (
             <Badge
               variant="outline"
-              className={cn("shrink-0 px-1 py-0 text-[10px]", ORIGIN_STYLES.agent)}
+              className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
               title={`Created by agent ${node.createdBy.id}`}
               data-testid="workspace-tree-agent-badge"
             >
@@ -1268,6 +1615,127 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
 }
 
 /* ---- note markdown with wiki links ---- */
+
+/**
+ * A binary workspace node: rendered if it is an image, described and offered
+ * for download if it is not (issue #553).
+ *
+ * # Why the bytes are fetched rather than linked
+ *
+ * The blob route needs the bearer token the API client holds, and an `<img
+ * src>` cannot carry an `Authorization` header — so a direct link would 401 for
+ * every operator. The bytes come through the authenticated client and become an
+ * object URL the element can point at.
+ *
+ * The URL is revoked on unmount and whenever the node changes. An object URL is
+ * a document-lifetime reference to the blob behind it, so a view that minted one
+ * per opened image without revoking would hold every image the operator had
+ * looked at, in memory, until the tab was closed.
+ *
+ * A non-image is deliberately **not** previewed. The console has no viewer for a
+ * PDF or a zip, and a browser plugin rendering one inside the app frame is not
+ * something this view can promise across browsers — so it shows what the file
+ * is, exactly, and hands over the download.
+ */
+function BinaryNodeView({
+  client,
+  company,
+  node,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  node: FsNode;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const isImage = (node.mime ?? "").startsWith("image/");
+  const blobKey = blobCacheKey(node);
+
+  useEffect(() => {
+    let revoked = false;
+    let current: string | null = null;
+    setUrl(null);
+    setError(null);
+    fetchBlobUrl(client, company, node.id)
+      .then((next) => {
+        // The effect may have been torn down (or the node switched) while the
+        // fetch was in flight; revoking immediately is what stops that race
+        // from leaking the blob it just created.
+        if (revoked) {
+          URL.revokeObjectURL(next);
+          return;
+        }
+        current = next;
+        setUrl(next);
+      })
+      .catch((e) => {
+        if (!revoked) setError(message(e, "could not load this file"));
+      });
+    return () => {
+      revoked = true;
+      if (current) URL.revokeObjectURL(current);
+    };
+    // `blobKey`, not `node.id`, is what makes a re-publish visible: it folds in
+    // the digest, so bytes replaced in place re-fetch (issue #669). The rule
+    // lives in `blobCacheKey` and is asserted there.
+  }, [client, company, node.id, blobKey]);
+
+  return (
+    <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-binary">
+      {error ? (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : isImage ? (
+        url ? (
+          <img
+            src={url}
+            alt={node.name}
+            data-testid="workspace-image"
+            className="max-h-[70vh] w-auto max-w-full rounded-md border bg-card object-contain"
+          />
+        ) : (
+          <Skeleton className="h-64 w-full" />
+        )
+      ) : null}
+      <div className="mt-4 rounded-md border bg-card/40 p-4" data-testid="workspace-binary-meta">
+        <p className="text-sm font-medium">{node.name}</p>
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <dt>Type</dt>
+          <dd className="font-mono">{node.mime}</dd>
+          <dt>Size</dt>
+          <dd>{formatBytes(node.size)}</dd>
+          {node.sha256 && (
+            <>
+              <dt>sha256</dt>
+              {/* Wrapped, not truncated: a digest an operator cannot read in
+                  full cannot be compared against anything, which is the only
+                  reason to show one. */}
+              <dd className="font-mono break-all">{node.sha256}</dd>
+            </>
+          )}
+        </dl>
+        <p className="mt-3 text-xs text-muted-foreground">
+          This file is stored as data, so it has no text to edit here.
+        </p>
+        {url && (
+          // A real anchor rather than a Button with an onClick: `download` on
+          // an <a> is what makes the browser save the file under the node's own
+          // name instead of navigating to a blob: URL.
+          <a
+            href={url}
+            download={node.name}
+            data-testid="workspace-download"
+            className="mt-3 inline-flex items-center rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-accent"
+          >
+            <Download className="mr-1 size-4" />
+            Download
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function NoteMarkdown({
   source,
@@ -1465,6 +1933,190 @@ function MoveDialog({
   );
 }
 
+/**
+ * The empty-agent-folder tidy, in its two stages (issue #700).
+ *
+ * `preview` asks; `done` reports. Both list the folders by name, which is the
+ * point of the dialog rather than a nicety: an operator who disagrees with the
+ * sweep can only say so if they can see what it means to take, and can only
+ * check it afterwards if they are told what it took. "17 empty folders" is a
+ * number nobody can verify.
+ */
+interface SweepState {
+  stage: "preview" | "done";
+  folders: SweptFolder[];
+}
+
+function SweepDialog({
+  state,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  state: SweepState | null;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const done = state?.stage === "done";
+  const count = state?.folders.length ?? 0;
+
+  return (
+    <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{done ? "Tidied" : "Tidy empty agent folders"}</DialogTitle>
+          <DialogDescription>
+            {done
+              ? count === 0
+                ? "Nothing was removed — every folder had gained something by the time the tidy ran."
+                : `Removed ${count} empty folder${count === 1 ? "" : "s"} from Agents/.`
+              : `${count} folder${count === 1 ? "" : "s"} under Agents/ hold nothing at all. Removing them cannot take anything with them — a folder holding any file, note or subfolder is left alone.`}
+          </DialogDescription>
+        </DialogHeader>
+        <ul
+          className="max-h-64 space-y-1 overflow-y-auto"
+          data-testid="workspace-sweep-folders"
+        >
+          {state?.folders.map((folder) => (
+            <li
+              key={folder.id}
+              className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm"
+            >
+              <Folder className="size-4 shrink-0 text-tone-2" />
+              <span className="truncate">{folder.name}</span>
+            </li>
+          ))}
+        </ul>
+        <DialogFooter>
+          {done ? (
+            <Button onClick={onClose}>Done</Button>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button variant="destructive" disabled={busy} onClick={onConfirm}>
+                {busy && <Loader2 className="mr-1 size-4 animate-spin" />}
+                Remove {count}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * The duplicate-folder repair, in its two stages (issue #759).
+ *
+ * Two lists, and the second one is not optional. The folds say what the repair
+ * *can* do; the residuals say what it will not, and a dialog that showed only
+ * the first would tell an operator their tree is fixed when two rival documents
+ * are still sitting on one path. Each residual carries its own instruction,
+ * because "fileInTheWay" is the host's word for the problem and not the
+ * operator's.
+ */
+interface RepairState {
+  stage: "preview" | "done";
+  outcome: RepairOutcome;
+}
+
+function RepairDialog({
+  state,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  state: RepairState | null;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const done = state?.stage === "done";
+  const folds = state?.outcome.folders ?? [];
+  const residuals = state?.outcome.residuals ?? [];
+  const relocations = folds.reduce((n, folder) => n + folder.moved.length, 0);
+
+  return (
+    <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{done ? "Repaired" : "Repair duplicate folders"}</DialogTitle>
+          <DialogDescription>
+            {done
+              ? folds.length === 0
+                ? "Nothing was merged — the tree changed before the repair ran."
+                : `Merged ${folds.length} duplicate folder${folds.length === 1 ? "" : "s"} and moved ${relocations} item${relocations === 1 ? "" : "s"}.`
+              : `${folds.length} folder${folds.length === 1 ? "" : "s"} share a name with another folder beside them, which is why publishing there fails. Their contents move into the copy that was there first. Nothing is renamed, nothing is overwritten, and no folder is removed until it is empty.`}
+          </DialogDescription>
+        </DialogHeader>
+
+        <ul className="max-h-64 space-y-1 overflow-y-auto" data-testid="workspace-repair-folders">
+          {folds.map((folder) => (
+            <li key={folder.id} className="rounded-lg px-2.5 py-1.5 text-sm">
+              <div className="flex items-center gap-2">
+                <Folder className="size-4 shrink-0 text-tone-2" />
+                <span className="truncate">{folder.name}</span>
+                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                  {folder.moved.length === 0
+                    ? done && folder.removed
+                      ? "removed"
+                      : "empty"
+                    : `${folder.moved.length} item${folder.moved.length === 1 ? "" : "s"}`}
+                </span>
+              </div>
+              {folder.moved.length > 0 && (
+                <div className="mt-0.5 truncate pl-6 text-xs text-muted-foreground">
+                  {folder.moved.map((child) => child.name).join(", ")}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        {residuals.length > 0 && (
+          <div className="space-y-1" data-testid="workspace-repair-residuals">
+            <p className="text-xs font-medium">
+              {done ? "Still needs you" : "These will be left for you"}
+            </p>
+            <ul className="max-h-40 space-y-1 overflow-y-auto">
+              {residuals.map((residual) => (
+                <li key={residual.id} className="rounded-lg px-2.5 py-1.5 text-sm">
+                  <div className="flex items-center gap-2">
+                    <FileText className="size-4 shrink-0 text-tone-2" />
+                    <span className="truncate">{residual.name}</span>
+                  </div>
+                  <p className="mt-0.5 pl-6 text-xs text-muted-foreground">
+                    {residualReason(residual.cause)}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <DialogFooter>
+          {done ? (
+            <Button onClick={onClose}>Done</Button>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button disabled={busy || folds.length === 0} onClick={onConfirm}>
+                {busy && <Loader2 className="mr-1 size-4 animate-spin" />}
+                Merge {folds.length}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function DestRow({ label, disabled, onClick }: { label: string; disabled?: boolean; onClick: () => void }) {
   return (
     <button
@@ -1472,7 +2124,7 @@ function DestRow({ label, disabled, onClick }: { label: string; disabled?: boole
       onClick={onClick}
       className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
     >
-      <Folder className="size-4 text-sky-500" />
+      <Folder className="size-4 text-tone-2" />
       <span className="truncate">{label}</span>
       {disabled && <span className="ml-auto text-xs text-muted-foreground">Here</span>}
     </button>

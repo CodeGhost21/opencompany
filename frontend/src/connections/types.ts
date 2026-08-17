@@ -50,7 +50,30 @@ export type Credential =
    * is a marker meaning "this host authenticates as the platform" — the live
    * token is re-derived from the URL on the next load.
    */
-  | { kind: "platform"; token?: string };
+  | { kind: "platform"; token?: string }
+  /**
+   * A personal session this client carries itself, in `x-opencompany-session`.
+   *
+   * The credential a **hub console** uses: one deployment of this app serving
+   * many hosts on *other* origins. A cookie cannot work there — the host sets
+   * it `SameSite=Lax`, so the browser withholds it from every cross-site
+   * request the console makes, and `SameSite=None` would only turn it into a
+   * third-party cookie Safari discards outright. The host mints this form on
+   * request instead; see `SESSION_CARRIER_HEADER` in its `users/cookie.rs`.
+   *
+   * `value` is the whole ready-made header value, `<company>.<token>`, exactly
+   * as the host returned it. Kept assembled rather than split because the
+   * company half may have been resolved through the single-company alias, where
+   * this client never learned an id to rebuild it from.
+   *
+   * **Unlike every other credential here, this one is a secret that lives in
+   * the page.** It is persisted, because the alternative is signing in again on
+   * every reload, and it is therefore readable by anything achieving script
+   * execution on the console's origin. That is a real reduction from the
+   * `HttpOnly` cookie a same-origin console gets, and it is the reason this
+   * kind is never chosen for a connection that could have used a cookie.
+   */
+  | { kind: "session"; value: string };
 
 /**
  * Where a connection stands right now.
@@ -81,6 +104,18 @@ export interface InstanceIdentity {
   storage?: string;
 }
 
+/**
+ * Where a connection came from, when that is not "someone typed an address".
+ *
+ * Only `embedded` so far: the host running inside this application. It is
+ * singular in a way no other connection is — there is exactly one per client,
+ * this client both starts it and knows its identity without asking, and its
+ * address is regenerated on every launch. That last property is why the
+ * marker has to be durable: recognising last launch's row as *this* host is
+ * what stops a dead one accumulating per run.
+ */
+export type ConnectionOrigin = "embedded";
+
 export interface Connection {
   id: ConnectionId;
   /**
@@ -103,12 +138,13 @@ export interface Connection {
   companies: string[];
   /** Why it is `down` or `unauthenticated`, for the connection's own row. */
   error?: string;
+  origin?: ConnectionOrigin;
 }
 
 /** The fields needed to construct a connection's client. */
 export function connectionConfig(
   connection: Connection,
-): Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken"> {
+): Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken" | "sessionHeader"> {
   return {
     baseUrl: connection.baseUrl,
     company: connection.defaultCompany,
@@ -116,6 +152,8 @@ export function connectionConfig(
       connection.credential.kind === "platform"
         ? (connection.credential.token ?? null)
         : null,
+    sessionHeader:
+      connection.credential.kind === "session" ? connection.credential.value : null,
   };
 }
 

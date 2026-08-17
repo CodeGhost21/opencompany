@@ -47,6 +47,8 @@ id = "gate"
 kind = "condition"
 name = "Security-sensitive?"
 summary = "Branch on whether a security review is needed."
+[node.config]
+field = "=item.security_sensitive"
 
 [[node]]
 id = "security"

@@ -92,6 +92,8 @@ async fn main() -> anyhow::Result<()> {
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
+        overlay_policy: None,
+        overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
     };
@@ -104,12 +106,17 @@ async fn main() -> anyhow::Result<()> {
         context: Arc::new(FsContextStore::new(dir.path())),
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),
-        workspace_root: dir.path().to_path_buf(),
+        workspace_root: dir.path().join("harness"),
+        // Issue #775: the shell audit sink hangs off the data root as
+        // `companies/<slug>/audit/<agent>/`, deliberately a sibling of the
+        // workspace tree rather than inside it.
+        audit_root: dir.path().to_path_buf(),
         model_override,
         tasks: None,
         skills: None,
         skills_source_dir: None,
         skills_registry: std::sync::Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
@@ -120,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
         pending_publishes: Default::default(),
         workflow_refs: Default::default(),
         run_outputs: Default::default(),
+        run_output_store: None,
+        workflow_revisions: None,
         approval_requests: opencompany::harness::policy::ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),
@@ -128,11 +137,18 @@ async fn main() -> anyhow::Result<()> {
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
         run_supervisor: opencompany::runtime::RunSupervisor::default(),
         delivery: None,
         search: None,
         workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: Default::default(),
     };
 
     let pool = HarnessPool::new();

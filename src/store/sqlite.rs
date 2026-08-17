@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tokio::sync::broadcast;
 
 use crate::Result;
@@ -169,6 +169,16 @@ CREATE TABLE IF NOT EXISTS workflow_revisions (
 );
 CREATE INDEX IF NOT EXISTS workflow_revisions_by_workflow
     ON workflow_revisions (company_id, workflow_id, created_ms);
+CREATE TABLE IF NOT EXISTS run_outputs (
+    company_id  TEXT NOT NULL,
+    run_id      TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    at_ms       INTEGER NOT NULL,
+    output_json TEXT NOT NULL,
+    PRIMARY KEY (company_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS run_outputs_by_recency
+    ON run_outputs (company_id, at_ms);
 CREATE TABLE IF NOT EXISTS usage_samples (
     company_id TEXT NOT NULL,
     seq        INTEGER NOT NULL,
@@ -181,6 +191,35 @@ CREATE TABLE IF NOT EXISTS skill_state (
     slug       TEXT NOT NULL,
     state_json TEXT NOT NULL,
     PRIMARY KEY (company_id, slug)
+);
+CREATE TABLE IF NOT EXISTS channel_read_state (
+    company_id   TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    channel_id   TEXT NOT NULL,
+    last_read_ms INTEGER NOT NULL,
+    PRIMARY KEY (company_id, user_id, channel_id)
+);
+CREATE TABLE IF NOT EXISTS notifications (
+    company_id   TEXT NOT NULL,
+    id           TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id   TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    created_ms   INTEGER NOT NULL,
+    PRIMARY KEY (company_id, id)
+);
+-- Backs the documented newest-first feed (`NotificationStore::list`):
+-- `WHERE company_id = ? ORDER BY created_ms DESC, id DESC`, so a company's feed
+-- reads straight off the index instead of sorting at read time.
+CREATE INDEX IF NOT EXISTS notifications_feed
+    ON notifications (company_id, created_ms DESC, id DESC);
+CREATE TABLE IF NOT EXISTS notification_reads (
+    company_id      TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    notification_id TEXT NOT NULL,
+    read_ms         INTEGER NOT NULL,
+    PRIMARY KEY (company_id, user_id, notification_id)
 );
 CREATE TABLE IF NOT EXISTS workspace_nodes (
     company_id TEXT NOT NULL,
@@ -246,6 +285,17 @@ CREATE TABLE IF NOT EXISTS schedule_fires (
 );
 CREATE INDEX IF NOT EXISTS schedule_fires_by_schedule
     ON schedule_fires (company_id, schedule_id, scheduled_for);
+CREATE TABLE IF NOT EXISTS journal (
+    company_id TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    line       TEXT NOT NULL,
+    PRIMARY KEY (company_id, seq)
+);
+CREATE TABLE IF NOT EXISTS journal_imports (
+    company_id TEXT PRIMARY KEY,
+    at_ms      INTEGER NOT NULL,
+    lines      INTEGER NOT NULL
+);
 "#;
 
 /// Maps a `rusqlite` failure onto the crate error type without a bare `?` on
@@ -285,6 +335,25 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &st
     }
     conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
         .map_err(sql_err)
+}
+
+/// Runs `write` with `synchronous=FULL`, so its commit is fsynced, and restores
+/// `NORMAL` afterwards no matter how `write` ended.
+///
+/// The restore is unconditional on purpose. Leaving `FULL` set would silently
+/// buy a flush for every later write on this connection — a permanent cost from
+/// a per-record decision — and restoring only on success would leave it set
+/// exactly when something has already gone wrong. A failure to restore is
+/// reported, but never masks the write's own error: the write's result is what
+/// the caller acts on.
+fn with_full_sync<T>(conn: &Connection, write: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    conn.pragma_update(None, "synchronous", "FULL")
+        .map_err(sql_err)?;
+    let written = write(conn);
+    let restored = conn.pragma_update(None, "synchronous", "NORMAL");
+    let value = written?;
+    restored.map_err(sql_err)?;
+    Ok(value)
 }
 
 /// Translates a `usize` limit into a SQLite `LIMIT` value. `usize::MAX` (the
@@ -330,6 +399,11 @@ impl SqliteStore {
             "stored_ms",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        // Issue #553: a workspace node may hold bytes. Nullable and with no
+        // default, so every existing prose note keeps `blob IS NULL` — which is
+        // exactly the "this node is not binary" test the reads use, and needs no
+        // backfill.
+        add_column_if_missing(&conn, "workspace_nodes", "blob", "BLOB")?;
         Ok(Self {
             conn: Arc::new(StdMutex::new(conn)),
             senders: Arc::new(StdMutex::new(HashMap::new())),
@@ -431,6 +505,8 @@ impl CompanyStore for SqliteStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_policy: overlay.policy,
+            overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
@@ -575,6 +651,70 @@ impl EventLog for SqliteStore {
                 event: serde_json::from_str(&event_json)?,
                 at_millis: at_ms as u64,
             });
+        }
+        Ok(out)
+    }
+
+    async fn read_before(
+        &self,
+        id: &CompanyId,
+        before: Option<EventSeq>,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn();
+        let (sql, cursor) = match before {
+            Some(cursor) => (
+                "SELECT seq, event_json, at_ms FROM events WHERE company_id = ?1 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+                Some(cursor.value() as i64),
+            ),
+            None => (
+                "SELECT seq, event_json, at_ms FROM events WHERE company_id = ?1 ORDER BY seq DESC LIMIT ?2",
+                None,
+            ),
+        };
+        let mut stmt = conn.prepare(sql).map_err(sql_err)?;
+        let mut out = Vec::new();
+        if let Some(cursor) = cursor {
+            let rows = stmt
+                .query_map(params![id.as_ref(), cursor, sql_limit(limit)], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(sql_err)?;
+            for row in rows {
+                let (seq, event_json, at_ms) = row.map_err(sql_err)?;
+                out.push(StoredEvent {
+                    seq: EventSeq::new(seq as u64),
+                    company: id.clone(),
+                    event: serde_json::from_str(&event_json)?,
+                    at_millis: at_ms as u64,
+                });
+            }
+        } else {
+            let rows = stmt
+                .query_map(params![id.as_ref(), sql_limit(limit)], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(sql_err)?;
+            for row in rows {
+                let (seq, event_json, at_ms) = row.map_err(sql_err)?;
+                out.push(StoredEvent {
+                    seq: EventSeq::new(seq as u64),
+                    company: id.clone(),
+                    event: serde_json::from_str(&event_json)?,
+                    at_millis: at_ms as u64,
+                });
+            }
         }
         Ok(out)
     }
@@ -1241,6 +1381,44 @@ impl crate::ports::users::UserStore for SqliteStore {
         Ok(())
     }
 
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool> {
+        let conn = self.conn();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT invite_json FROM user_invites WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let mut invite: InviteRecord = serde_json::from_str(&current)?;
+        invite.notified_at_millis = Some(at_millis);
+        // UPDATE, never INSERT, and matched against the row we just read: a
+        // revocation that lands between the two statements leaves nothing to
+        // match, so the stamp becomes a no-op instead of resurrecting the row.
+        let n = conn
+            .execute(
+                "UPDATE user_invites SET invite_json = ?3 \
+                 WHERE company_id = ?1 AND id = ?2 AND invite_json = ?4",
+                params![
+                    company.as_ref(),
+                    id,
+                    serde_json::to_string(&invite)?,
+                    current
+                ],
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
+    }
+
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let conn = self.conn();
         let n = conn
@@ -1757,6 +1935,69 @@ impl crate::ports::workflow_revisions::WorkflowRevisionStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRunOutputStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::run_output::WorkflowRunOutputStore for SqliteStore {
+    async fn put_run_output(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::run_output::WorkflowRunOutputRecord,
+    ) -> Result<()> {
+        use crate::ports::run_output::MAX_RUN_OUTPUTS_PER_COMPANY;
+        let json = serde_json::to_string(record)?;
+        let mut guard = self.conn();
+        // Upsert + prune in ONE transaction, so a reader never observes an
+        // over-cap set. `INSERT OR REPLACE` keeps the write last-write-wins per
+        // `(company, run_id)`; the prune keeps the newest `MAX` rows for the
+        // company (by `at_ms DESC, run_id DESC`, matching `sort_newest_first`).
+        let tx = guard.transaction().map_err(sql_err)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO run_outputs \
+             (company_id, run_id, workflow_id, at_ms, output_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                company.as_ref(),
+                record.run_id,
+                record.workflow_id,
+                record.at_millis as i64,
+                json,
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+            "DELETE FROM run_outputs \
+             WHERE company_id = ?1 AND run_id NOT IN (\
+                 SELECT run_id FROM run_outputs \
+                 WHERE company_id = ?1 \
+                 ORDER BY at_ms DESC, run_id DESC LIMIT ?2)",
+            params![company.as_ref(), MAX_RUN_OUTPUTS_PER_COMPANY as i64],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn get_run_output(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Option<crate::ports::run_output::WorkflowRunOutputRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT output_json FROM run_outputs WHERE company_id = ?1 AND run_id = ?2")
+            .map_err(sql_err)?;
+        let mut rows = stmt
+            .query_map(params![company.as_ref(), run_id], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        match rows.next() {
+            Some(row) => Ok(Some(serde_json::from_str(&row.map_err(sql_err)?)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -2035,6 +2276,152 @@ impl crate::ports::schedule_fires::ScheduleFireStore for SqliteStore {
             .map_err(sql_err)?;
         Ok(removed)
     }
+
+    async fn delete_schedule_fires(&self, company: &CompanyId, schedule_id: &str) -> Result<usize> {
+        let conn = self.conn();
+        // Every row for one schedule, whatever its minute — the delete-time
+        // purge (#708). A never-fired id matches nothing, so `changes()` is 0.
+        let removed = conn
+            .execute(
+                "DELETE FROM schedule_fires \
+                 WHERE company_id = ?1 AND schedule_id = ?2",
+                params![company.as_ref(), schedule_id],
+            )
+            .map_err(sql_err)?;
+        Ok(removed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JournalStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::journal::JournalStore for SqliteStore {
+    /// One row per record, ordered by a per-company sequence.
+    ///
+    /// Sequence and insert are one statement against the `(company_id, seq)`
+    /// primary key, so the allocation cannot be observed half-done and a
+    /// duplicate seq is a constraint violation rather than a silently
+    /// overwritten record — losing a row here would un-commit an at-most-once
+    /// key. Same `COALESCE(MAX(..)+1, 0)` shape the event and ledger tables use.
+    ///
+    /// Both durability levels are honoured (issue #392), because flattening them
+    /// here would silently weaken the contract for a company moved onto sqlite:
+    ///
+    /// * [`Durability::Process`](crate::ports::journal::Durability::Process) is
+    ///   the connection's standing `synchronous=NORMAL` under WAL (see
+    ///   [`apply_pragmas`](SqliteStore::apply_pragmas)) — the write is in the WAL
+    ///   and survives process death, and a power loss can still take the last
+    ///   commits. Exactly what the filesystem backend's unflushed append gives.
+    /// * [`Durability::Host`](crate::ports::journal::Durability::Host) raises the
+    ///   pragma to `FULL` for this one statement, which fsyncs the WAL on commit.
+    ///   The pragma is restored **whatever the insert did** — leaving `FULL` set
+    ///   would silently fsync every later write on this connection, and leaving
+    ///   it set only on the error path would be worse still.
+    ///
+    /// `synchronous` is settable at any time and takes effect at the next commit;
+    /// only `journal_mode` is transaction-bound. The whole sequence runs under the
+    /// connection mutex, so no other statement can commit between the raise and
+    /// the restore.
+    async fn append_journal(
+        &self,
+        company: &CompanyId,
+        line: &str,
+        durability: crate::ports::journal::Durability,
+    ) -> Result<()> {
+        use crate::ports::journal::Durability;
+
+        let conn = self.conn();
+        let insert = |conn: &Connection| {
+            conn.execute(
+                "INSERT INTO journal (company_id, seq, line) VALUES \
+                 (?1, COALESCE((SELECT MAX(seq) + 1 FROM journal WHERE company_id = ?1), 0), ?2)",
+                params![company.as_ref(), line],
+            )
+            .map(|_| ())
+            .map_err(sql_err)
+        };
+        match durability {
+            Durability::Process => insert(&conn),
+            Durability::Host => with_full_sync(&conn, insert),
+        }
+    }
+
+    async fn read_journal(&self, company: &CompanyId) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT line FROM journal WHERE company_id = ?1 ORDER BY seq ASC")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref()], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+        Ok(out)
+    }
+
+    async fn journal_imported(&self, company: &CompanyId) -> Result<bool> {
+        let conn = self.conn();
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM journal_imports WHERE company_id = ?1",
+                params![company.as_ref()],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(sql_err)?
+            .unwrap_or(false))
+    }
+
+    /// Clear, copy, receipt — in **one transaction**, so the gate and the rows
+    /// it guards can never disagree.
+    ///
+    /// An interrupted import therefore leaves no rows and no receipt, and the
+    /// next boot re-runs the whole copy. The alternative — a partial copy behind
+    /// a written receipt — is the failure this port exists to prevent: a journal
+    /// missing its tail is a set of at-most-once keys that quietly went missing.
+    async fn complete_import(&self, company: &CompanyId, lines: Vec<String>) -> Result<()> {
+        let mut guard = self.conn();
+        // Host-durable, and by the same reasoning `EffectExecuted` is: what is
+        // being copied *is* the at-most-once key set, and a migration a power
+        // loss can take back has not migrated anything. Raised and restored
+        // exactly as `with_full_sync` does it — inline because the transaction
+        // needs `&mut Connection` and that helper hands out `&Connection`.
+        guard
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(sql_err)?;
+        let result = (|| {
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_err)?;
+            tx.execute(
+                "DELETE FROM journal WHERE company_id = ?1",
+                params![company.as_ref()],
+            )
+            .map_err(sql_err)?;
+            for (seq, line) in lines.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO journal (company_id, seq, line) VALUES (?1, ?2, ?3)",
+                    params![company.as_ref(), seq as i64, line],
+                )
+                .map_err(sql_err)?;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO journal_imports (company_id, at_ms, lines) \
+                 VALUES (?1, ?2, ?3)",
+                params![company.as_ref(), now_millis() as i64, lines.len() as i64],
+            )
+            .map_err(sql_err)?;
+            tx.commit().map_err(sql_err)
+        })();
+        let restored = guard.pragma_update(None, "synchronous", "NORMAL");
+        result?;
+        restored.map_err(sql_err)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2151,6 +2538,219 @@ impl crate::ports::skills_state::SkillStateStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// ReadStateStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::read_state::ReadStateStore for SqliteStore {
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::read_state::ChannelRead>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel_id, last_read_ms FROM channel_read_state \
+                 WHERE company_id = ?1 AND user_id = ?2 ORDER BY channel_id",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), user], |r| {
+                Ok(crate::ports::read_state::ChannelRead {
+                    channel_id: r.get::<_, String>(0)?,
+                    last_read_at: r.get::<_, i64>(1)?,
+                })
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+        Ok(out)
+    }
+
+    async fn mark(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        channel_id: &str,
+        at: i64,
+    ) -> Result<crate::ports::read_state::ChannelRead> {
+        let conn = self.conn();
+        // `max(excluded, existing)` in the conflict arm is the monotonicity the
+        // port promises: a late request carrying an earlier instant must not
+        // move the marker back and resurrect messages already read.
+        conn.execute(
+            "INSERT INTO channel_read_state (company_id, user_id, channel_id, last_read_ms) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(company_id, user_id, channel_id) DO UPDATE SET \
+             last_read_ms = max(excluded.last_read_ms, channel_read_state.last_read_ms)",
+            params![company.as_ref(), user, channel_id, at],
+        )
+        .map_err(sql_err)?;
+        let settled: i64 = conn
+            .query_row(
+                "SELECT last_read_ms FROM channel_read_state \
+                 WHERE company_id = ?1 AND user_id = ?2 AND channel_id = ?3",
+                params![company.as_ref(), user, channel_id],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(crate::ports::read_state::ChannelRead {
+            channel_id: channel_id.to_string(),
+            last_read_at: settled,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NotificationStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::notifications::NotificationStore for SqliteStore {
+    async fn append(
+        &self,
+        company: &CompanyId,
+        notification: &crate::ports::notifications::Notification,
+    ) -> Result<()> {
+        let conn = self.conn();
+        // `INSERT OR IGNORE` makes append idempotent by id (first write wins): a
+        // retried or replayed append is a no-op on the primary key rather than an
+        // error, matching the fs and mongo backends.
+        conn.execute(
+            "INSERT OR IGNORE INTO notifications \
+                 (company_id, id, kind, subject_kind, subject_id, title, created_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                company.as_ref(),
+                notification.id.as_str(),
+                notification.kind.as_str(),
+                notification.subject.kind.as_str(),
+                notification.subject.id.as_str(),
+                notification.title.as_str(),
+                notification.created_at as i64,
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::notifications::NotificationView>> {
+        let conn = self.conn();
+        // Read state is projected per person with a LEFT JOIN: a notification
+        // with no marker of this user's comes back with a NULL `read_ms`.
+        let mut stmt = conn
+            .prepare(
+                "SELECT n.id, n.kind, n.subject_kind, n.subject_id, n.title, n.created_ms, \
+                        r.read_ms \
+                 FROM notifications n \
+                 LEFT JOIN notification_reads r \
+                     ON r.company_id = n.company_id \
+                    AND r.notification_id = n.id \
+                    AND r.user_id = ?2 \
+                 WHERE n.company_id = ?1 \
+                 ORDER BY n.created_ms DESC, n.id DESC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), user], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
+                ))
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, kind, subject_kind, subject_id, title, created_ms, read_ms) =
+                row.map_err(sql_err)?;
+            let subject_kind = crate::ports::notifications::SubjectKind::from_token(&subject_kind)
+                .ok_or_else(|| {
+                    crate::error::OpenCompanyError::Store(format!(
+                        "notification {id} has an unknown subject kind {subject_kind:?}"
+                    ))
+                })?;
+            out.push(crate::ports::notifications::NotificationView {
+                notification: crate::ports::notifications::Notification {
+                    id,
+                    kind,
+                    subject: crate::ports::notifications::Subject {
+                        kind: subject_kind,
+                        id: subject_id,
+                    },
+                    created_at: created_ms as u64,
+                    title,
+                },
+                read_at: read_ms.map(|v| v as u64),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn mark_read(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        ids: Option<&[String]>,
+    ) -> Result<u64> {
+        let conn = self.conn();
+        let now = crate::ports::now_millis() as i64;
+        // `INSERT OR IGNORE` is the latch: a PK conflict on an already-read row
+        // is skipped, so the original `read_ms` survives a re-mark. Only ids
+        // that name an existing notification in this company are inserted.
+        match ids {
+            Some(ids) => {
+                for id in ids {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO notification_reads \
+                             (company_id, user_id, notification_id, read_ms) \
+                         SELECT ?1, ?2, ?3, ?4 \
+                         WHERE EXISTS \
+                             (SELECT 1 FROM notifications WHERE company_id = ?1 AND id = ?3)",
+                        params![company.as_ref(), user, id.as_str(), now],
+                    )
+                    .map_err(sql_err)?;
+                }
+            }
+            None => {
+                conn.execute(
+                    "INSERT OR IGNORE INTO notification_reads \
+                         (company_id, user_id, notification_id, read_ms) \
+                     SELECT ?1, ?2, id, ?3 FROM notifications WHERE company_id = ?1",
+                    params![company.as_ref(), user, now],
+                )
+                .map_err(sql_err)?;
+            }
+        }
+        let unread: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM notifications n \
+                 WHERE n.company_id = ?1 \
+                   AND NOT EXISTS \
+                       (SELECT 1 FROM notification_reads r \
+                        WHERE r.company_id = n.company_id \
+                          AND r.notification_id = n.id \
+                          AND r.user_id = ?2)",
+                params![company.as_ref(), user],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(unread as u64)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
@@ -2205,7 +2805,19 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             .optional()
             .map_err(sql_err)?;
         match row {
-            Some((node_json, content)) => Ok(Some((serde_json::from_str(&node_json)?, content))),
+            Some((node_json, content)) => {
+                let node: crate::ports::workspace::WorkspaceNode =
+                    serde_json::from_str(&node_json)?;
+                // A binary node reads as an empty body, like a folder — the port
+                // contract that keeps every prose-shaped caller correct without
+                // teaching it that bytes exist.
+                let content = if node.is_binary() {
+                    String::new()
+                } else {
+                    content
+                };
+                Ok(Some((node, content)))
+            }
             None => Ok(None),
         }
     }
@@ -2236,6 +2848,11 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         if node.kind != NodeKind::File {
             return Err(OpenCompanyError::InvalidRequest(
                 "cannot write content to a folder".to_string(),
+            ));
+        }
+        if let Some(mime) = &node.mime {
+            return Err(OpenCompanyError::InvalidRequest(
+                crate::ports::workspace::binary_write_refusal(&node.name, mime),
             ));
         }
         node.updated_at_millis = now_millis();
@@ -2302,6 +2919,200 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         Ok(())
     }
 
+    /// Read-siblings then adopt-or-`INSERT`, inside an **immediate**
+    /// transaction (issue #759).
+    ///
+    /// The same device this backend's [`swap_files`] already uses, and for the
+    /// same reason: two `SqliteStore` instances can point at one database file,
+    /// so the write reservation has to be taken *before* the read or both
+    /// callers see the name free and both insert. Nothing else here would stop
+    /// them — plain [`create`] checks only that the node **id** is fresh and has
+    /// never had a sibling-name guard at all.
+    ///
+    /// [`swap_files`]: crate::ports::workspace::WorkspaceStore::swap_files
+    /// [`create`]: crate::ports::workspace::WorkspaceStore::create
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        use crate::ports::workspace::{FolderClaim, NodeKind, existing_folder_claim, new_folder};
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
+        if let Some(parent) = parent {
+            match nodes.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        // Adoption commits nothing: the transaction is dropped, which rolls back
+        // a reservation that never wrote.
+        if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+            return Ok(FolderClaim::Adopted(existing));
+        }
+        let node = new_folder(name, parent, origin);
+        tx.execute(
+            "INSERT INTO workspace_nodes (company_id, id, node_json, content, updated_ms) \
+             VALUES (?1, ?2, ?3, '', ?4)",
+            params![
+                company.as_ref(),
+                node.id,
+                serde_json::to_string(&node)?,
+                node.updated_at_millis as i64
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(FolderClaim::Created(node))
+    }
+
+    /// One `INSERT` carrying the node and its payload together.
+    ///
+    /// **sqlite cannot orphan a blob**, and that is a property of this statement
+    /// rather than of care taken around it: the bytes live in the same row as
+    /// the node, so there is no ordering between two writes to get wrong and no
+    /// crash window to sweep afterwards. The other two backends have to work for
+    /// what this gets for free.
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &crate::ports::workspace::WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
+        use crate::ports::workspace::NodeKind;
+        let node = crate::ports::workspace::stamped_binary(node, bytes)?;
+        let conn = self.conn();
+        let nodes = self.workspace_nodes(&conn, company)?;
+        if nodes.contains_key(&node.id) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "workspace node {} already exists",
+                node.id
+            )));
+        }
+        if let Some(parent) = &node.parent_id {
+            match nodes.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        conn.execute(
+            "INSERT INTO workspace_nodes (company_id, id, node_json, content, updated_ms, blob) \
+             VALUES (?1, ?2, ?3, '', ?4, ?5)",
+            params![
+                company.as_ref(),
+                node.id,
+                serde_json::to_string(&node)?,
+                node.updated_at_millis as i64,
+                bytes
+            ],
+        )
+        .map_err(sql_err)?;
+        // The stamped node, so the digest a caller records can only have come
+        // from the store (issue #668).
+        Ok(node)
+    }
+
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
+        let conn = self.conn();
+        let node_json: Option<String> = conn
+            .query_row(
+                "SELECT node_json FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(node_json) = node_json else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {id}"
+            )));
+        };
+        let mut node: crate::ports::workspace::WorkspaceNode = serde_json::from_str(&node_json)?;
+        crate::ports::workspace::rebind_binary(&mut node, bytes, mime, author)?;
+        conn.execute(
+            "UPDATE workspace_nodes SET node_json = ?1, blob = ?2, updated_ms = ?3 \
+             WHERE company_id = ?4 AND id = ?5",
+            params![
+                serde_json::to_string(&node)?,
+                bytes,
+                node.updated_at_millis as i64,
+                company.as_ref(),
+                id
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(node)
+    }
+
+    /// Buffers the row's blob once, under the connection mutex, and yields it as
+    /// a single chunk.
+    ///
+    /// The one backend that cannot genuinely stream: the payload is a `BLOB` in
+    /// a row behind a `StdMutex<Connection>`, and holding that lock across an
+    /// `await` while a client drains a slow download would stall every other
+    /// query in the process. So the bytes are resident for the length of the
+    /// read, bounded by the per-file cap the quota decorator enforces — stated
+    /// here rather than left to be discovered by whoever raises that cap.
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        let conn = self.conn();
+        let row: Option<(String, Option<Vec<u8>>)> = conn
+            .query_row(
+                "SELECT node_json, blob FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        drop(conn);
+        let Some((node_json, Some(blob))) = row else {
+            return Ok(None);
+        };
+        let node: crate::ports::workspace::WorkspaceNode = serde_json::from_str(&node_json)?;
+        if !node.is_binary() {
+            return Ok(None);
+        }
+        Ok(Some((node, crate::ports::workspace::one_chunk(blob))))
+    }
+
     async fn rename_move(
         &self,
         company: &CompanyId,
@@ -2350,6 +3161,89 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         )
         .map_err(sql_err)?;
         Ok(node)
+    }
+
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: Option<&str>,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<crate::ports::workspace::WorkspaceNode>> {
+        use crate::ports::workspace::NodeKind;
+
+        let mut conn = self.conn();
+        // Acquire the write reservation before reading either row. Two
+        // SqliteStore instances can point at the same database; an immediate
+        // transaction serializes their compare-and-swap decisions rather than
+        // letting both read the same expected node first.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
+        let Some(replacement) = nodes.get(replacement_id).cloned() else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {replacement_id}"
+            )));
+        };
+        if replacement.kind != NodeKind::File {
+            return Err(OpenCompanyError::InvalidRequest(
+                "only files can be promoted from a staging path".to_string(),
+            ));
+        }
+
+        // Both readings of `expected_id`, decided inside the immediate
+        // transaction opened above so two writers cannot both see the name free.
+        let still_current = match expected_id {
+            Some(id) => nodes.get(id).is_some_and(|node| {
+                node.kind == NodeKind::File
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            }),
+            // Issue #697: `None` asserts the name is unoccupied. Any node
+            // already at it loses this caller the compare-and-swap; the staged
+            // node itself is excluded, since it is what is being installed.
+            None => !nodes.values().any(|node| {
+                node.id != replacement.id
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            }),
+        };
+        if !still_current {
+            tx.execute(
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), replacement_id],
+            )
+            .map_err(sql_err)?;
+            tx.commit().map_err(sql_err)?;
+            return Ok(None);
+        }
+
+        let mut promoted = replacement;
+        promoted.name = name.to_string();
+        promoted.updated_at_millis = now_millis();
+        // Nothing to retire on a first publish: the name was free, which is
+        // exactly what the guard above established.
+        if let Some(id) = expected_id {
+            tx.execute(
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+            )
+            .map_err(sql_err)?;
+        }
+        tx.execute(
+            "UPDATE workspace_nodes SET node_json = ?1, updated_ms = ?2 \
+             WHERE company_id = ?3 AND id = ?4",
+            params![
+                serde_json::to_string(&promoted)?,
+                promoted.updated_at_millis as i64,
+                company.as_ref(),
+                replacement_id
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(Some(promoted))
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
@@ -2463,6 +3357,11 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_event_read_before() {
+        conformance::assert_event_read_before(store()).await;
+    }
+
+    #[tokio::test]
     async fn conformance_event_retention() {
         let s = store();
         conformance::assert_event_retention(s).await;
@@ -2508,6 +3407,11 @@ mod test {
     #[tokio::test]
     async fn conformance_workflow_revision_store() {
         conformance::assert_workflow_revision_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workflow_run_output_store() {
+        conformance::assert_workflow_run_output_store(store()).await;
     }
 
     #[tokio::test]
@@ -2596,6 +3500,66 @@ mod test {
         .expect("adding an existing column is a no-op, not an error");
     }
 
+    /// **Issue #392 through the port**: the host-durable append really does
+    /// commit under `synchronous=FULL`, and really does put it back.
+    ///
+    /// `assert_journal_store` cannot see this — a backend that ignored the
+    /// `Durability` argument entirely stores and orders every record identically
+    /// and passes the whole suite. So the raise and the restore are asserted
+    /// here, from inside and outside the closure.
+    ///
+    /// The restore matters as much as the raise. `synchronous` is connection
+    /// state, not statement state: leaving `FULL` set would silently buy an
+    /// fsync for every later write on this connection — a permanent cost from a
+    /// per-record decision — and restoring only on success would leave it set
+    /// exactly when something has already gone wrong.
+    #[test]
+    fn the_host_durable_write_runs_under_full_sync_and_restores_normal() {
+        /// `PRAGMA synchronous`: 1 = NORMAL, 2 = FULL.
+        fn synchronous(conn: &Connection) -> i64 {
+            conn.query_row("PRAGMA synchronous", [], |r| r.get(0))
+                .expect("read the pragma")
+        }
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        let conn = store.conn();
+        assert_eq!(synchronous(&conn), 1, "the standing setting is NORMAL");
+
+        let seen = with_full_sync(&conn, |c| Ok(synchronous(c))).expect("the write runs");
+        assert_eq!(
+            seen, 2,
+            "the write must commit under FULL, or the host-durable level is a no-op"
+        );
+        assert_eq!(
+            synchronous(&conn),
+            1,
+            "and the connection must be left as it was found"
+        );
+
+        // A failing write restores it too, and reports its own error rather than
+        // the restore's.
+        let err = with_full_sync(&conn, |_| {
+            Err::<(), _>(OpenCompanyError::Store("the write failed".into()))
+        })
+        .expect_err("the write's error reaches the caller");
+        assert!(err.to_string().contains("the write failed"));
+        assert_eq!(
+            synchronous(&conn),
+            1,
+            "a failed write must not strand the connection on FULL"
+        );
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_store() {
+        conformance::assert_journal_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_import() {
+        conformance::assert_journal_import(store()).await;
+    }
+
     #[tokio::test]
     async fn conformance_run_store() {
         conformance::assert_run_store(store()).await;
@@ -2652,8 +3616,131 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_read_state_store() {
+        conformance::assert_read_state_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_notification_store() {
+        conformance::assert_notification_store(store()).await;
+    }
+
+    #[tokio::test]
     async fn conformance_workspace_store() {
         conformance::assert_workspace_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_binary_store() {
+        conformance::assert_workspace_binary_store(store()).await;
+    }
+
+    /// Issue #759: the folder-claim primitive, including the eight-way
+    /// contention case an immediate transaction is what decides here.
+    #[tokio::test]
+    async fn conformance_workspace_folder_claims() {
+        conformance::assert_workspace_folder_claims(store()).await;
+    }
+
+    /// Issue #887's no-torn-read contract. This backend passed it before the
+    /// `fs` fix and passes it after — which is the point of stating it on the
+    /// port: the guarantee is owed by every backend a tenant can run, not by
+    /// whichever one happened to have it for free.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_never_tears() {
+        conformance::assert_workspace_read_never_tears(store()).await;
+    }
+
+    /// Issue #700's emptiness predicate, against the backend that can actually
+    /// hold the shape it has to survive.
+    ///
+    /// The sweep refuses a folder holding an unaddressable child — a name
+    /// carrying a path separator, which every path-shaped index drops and the
+    /// port's recursive `delete` would still take (issue #671). Its own module
+    /// tests pin that on a hand-built node list, because `FsOps` rejects such a
+    /// name at creation (`reject_unsafe_name`) and cannot produce one.
+    ///
+    /// This backend does not reject it, and hosted tenants run this backend — so
+    /// the shape is reachable data rather than a thought experiment, and that is
+    /// what this asserts: sqlite stores `q/r.md` under `Agents/ghost/`, and the
+    /// sweep leaves `ghost` alone. It lives here because
+    /// `cargo test --features sqlite --lib store::sqlite` is the only lane that
+    /// runs it.
+    #[tokio::test]
+    async fn workspace_sweep_keeps_a_folder_whose_only_child_has_no_renderable_path() {
+        use crate::company::workspace_sweep::sweep_empty_agent_folders;
+        use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+        let store = store();
+        let company = CompanyId::new("acme");
+        let node = |id: &str, name: &str, kind, parent: Option<&str>| WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            parent_id: parent.map(str::to_string),
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Seed,
+            updated_by: WorkspaceOrigin::Seed,
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+
+        WorkspaceStore::create(
+            store.as_ref(),
+            &company,
+            &node("root", "Agents", NodeKind::Folder, None),
+            None,
+        )
+        .await
+        .unwrap();
+        WorkspaceStore::create(
+            store.as_ref(),
+            &company,
+            &node("ghost", "ceo", NodeKind::Folder, Some("root")),
+            None,
+        )
+        .await
+        .unwrap();
+        WorkspaceStore::create(
+            store.as_ref(),
+            &company,
+            &node("empty", "cto", NodeKind::Folder, Some("root")),
+            None,
+        )
+        .await
+        .unwrap();
+        // The name `fs` would have refused. If this create ever starts failing,
+        // the premise of the whole guard has changed and this test should say so
+        // rather than the guard quietly becoming untested.
+        WorkspaceStore::create(
+            store.as_ref(),
+            &company,
+            &node("hidden", "q/r.md", NodeKind::File, Some("ghost")),
+            Some("# quarterly"),
+        )
+        .await
+        .expect("sqlite accepts a separator-carrying name — that is why the guard exists");
+
+        let removed = sweep_empty_agent_folders(store.as_ref(), &company, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            removed.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["empty"],
+            "only the genuinely empty folder may go"
+        );
+        let ids: Vec<String> = WorkspaceStore::tree(store.as_ref(), &company)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert!(
+            ids.contains(&"ghost".to_string()) && ids.contains(&"hidden".to_string()),
+            "the folder and its unaddressable child must both survive, got {ids:?}"
+        );
     }
 
     #[tokio::test]
@@ -2683,6 +3770,8 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
@@ -2696,6 +3785,7 @@ mod test {
                     text: "hi".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -2748,6 +3838,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -2759,7 +3850,8 @@ mod test {
                 parent: None,
                 text: "hi".into(),
                 by: None,
-                chat: None
+                chat: None,
+                deliverable: None,
             }
         );
     }
@@ -2846,6 +3938,7 @@ mod test {
                     text: "persist".into(),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -2862,6 +3955,7 @@ mod test {
                 text: "persist".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }
         );
     }

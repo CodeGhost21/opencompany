@@ -20,6 +20,19 @@ Supporting docs:
   - [ports-console.md](ports-console.md) — the WS3 console-surface stores
   - [ports-runs.md](ports-runs.md) — `RunStore`: one attempt at a task, its
     trace, and who writes it
+  - [journal.md](journal.md) — `JournalStore`: the runtime journal's durable
+    sink (at-most-once effect keys, parked approvals, grants, cycle brackets),
+    the per-backend shapes, and the one-time receipt-gated import off the old
+    `journal.jsonl` (issue #726)
+- [storage.md](storage.md) — how a backend is chosen at boot, the shipped
+  backends, and the conformance suite that pins them to identical answers
+  - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the
+    data root: the embedded runtime's root, the agent sandboxes, choosing the
+    root, and migrating a legacy doubled install
+  - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
+    why an ephemeral data root refuses to boot
+  - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
+    and two processes wanting the same directory
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
@@ -31,23 +44,82 @@ Supporting docs:
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge
 - [manifest.md](manifest.md) — `company.toml` schema
+- [agents.md](agents.md) — how a teammate is declared: the inline `[[agent]]`
+  form and the one-file-per-teammate `agents/<id>.toml` bundle form, custom
+  prompts, checked-in briefing documents versus routed workspace documents, and
+  the `classes` routing exclusions
+- [tools.md](tools.md) — the three-level tool grant
+  (`[tools].allow ∩ desk.tools ∩ agent.tools`), why an empty grant list means
+  "inherit" rather than "nothing", the four namespaces `*` never confers, the
+  unified tool catalog, and the seed-wins rule for console desk overrides
 - [lifecycle.md](lifecycle.md) — company state machine and durability
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
   call per card, the host-gathered evidence pack, the prerequisite verdict
   taxonomy, and the no-run/no-lock concurrency argument
+- [orchestration/](orchestration/README.md) — how a many-agent company
+  *converges*: per-role context routing, a budgeted shared brief, code-derived
+  ledgers, the demand ledger that replaces the board, the attempt loop, the join
+  primitive, and containerised code tools. Also the three entities this removes
+  — the kanban board as the work model, desks, and two of the three memory
+  backends
+  - [orchestration/memory.md](orchestration/memory.md) — `MemoryProvider`
+    replacing the bespoke `CortexClient` backend, with `MemoryStore`,
+    `ContextStore` and `FactStore` kept as typed facades over the one
+    provider rather than as three independent backends, and why the host
+    decorator is the only safe constructor
+  - [orchestration/context-routing.md](orchestration/context-routing.md) — what
+    each role is told, why the exclusions matter as much as the entries, and
+    why assembly order is a prompt-cache decision
+  - [orchestration/alignment.md](orchestration/alignment.md) — the budgeted
+    brief, and the ledgers that are derived rather than asserted
+  - [orchestration/demand-ledger.md](orchestration/demand-ledger.md) — work
+    stated by whoever is blocked, deduped, and closed by evidence that cites it
+    (normative)
+  - [orchestration/loop.md](orchestration/loop.md) — attempt → evaluate → route,
+    and the parity sweep that holds the Rust ladder and its jq translation
+    together
+  - [orchestration/delegation.md](orchestration/delegation.md) — awaiting
+    delegated work, directing a run in flight, and desks as workflows
+  - [orchestration/sandbox.md](orchestration/sandbox.md) — the container
+    posture, write-path placement a shell cannot bypass, and the code library
 - [workflow-build.md](workflow-build.md) — the plan → workflow bridge: a
   `workflow`-deliverable card builds a proposed graph that lands In Review for
   approval before it exists, then apply/reject; host-authority conversion and
   the one authoring path
+- [workflow-vocabulary.md](workflow-vocabulary.md) — the node-kind authoring
+  contract: the 12 kinds an author may write and what each lowers to, the
+  engine-only kinds (`code` / `memory` / `dedup` / `loop`) OpenCompany refuses
+  at parse and why, and the builder ⊂ parser ⊂ engine nesting
 - [rebuild.md](rebuild.md) — replacing a registered runtime in place (quiesce →
   hand over → swap), so a first-time inference config needs no restart
-- [api.md](api.md) — HTTP routes and auth
+- [api.md](api.md) — the map of the API surface: which planes exist and where
+  each is documented
+  - [api-write-plane.md](api-write-plane.md) — every write the console makes,
+    route by route
+  - [api-graphql.md](api-graphql.md) — the `/graphql` read plane
+- [credentials.md](credentials.md) — the company's own TinyHumans key: the one
+  seam a brokered surface resolves through (Composio today), why rotating it
+  reaches every surface wired to it, and which surfaces are deliberately outside
+  it
 - [config.md](config.md) — configuration and the one-key story
+- [setup.md](setup.md) — the first-run setup flow that writes it
+- [repos.md](repos.md) — bound repositories: the host-side mirror cache, how a
+  credential reaches git without entering argv, the environment or any file, the
+  alternates-not-hardlinks and refuse-not-evict departures, and the honest limit
+  of same-user confinement
+- [../security/agent-isolation.md](../security/agent-isolation.md) — the threat
+  model behind that limit: what confines an agent today, what does not, and what
+  a prompt-injected agent with `shell` can still do after every planned control
+  lands
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,
   sessions, invites, and chat attribution
-- [company-setup.md](company-setup.md) — first-run company setup: three
-  questions asked once, turned into a real roster and running workflows before
-  the operator touches the console (proposed; written for a general reader)
+- [auth-modes.md](auth-modes.md) — the configured sign-in mode: `email`,
+  `wallet`, or `none` (no sign-in, for the desktop app), and what each changes
+- [hub-console.md](hub-console.md) — one console deployment operating many hosts
+  on other origins: the carried session, CORS, and what it costs
+- [company-setup.md](company-setup.md) — first-run **company** setup: three
+  questions asked once, turned into a real roster of agents. Distinct from
+  [setup.md](setup.md), which configures the *instance*
 
 ## Responsibilities
 

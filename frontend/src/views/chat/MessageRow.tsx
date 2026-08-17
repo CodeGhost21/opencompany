@@ -59,15 +59,7 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
 
-  if (sender.kind === "system") {
-    return (
-      <div className="flex justify-center px-4 py-1">
-        <p className="rounded-full bg-muted px-3 py-1 text-center text-xs text-muted-foreground">
-          {message.text}
-        </p>
-      </div>
-    );
-  }
+  if (sender.kind === "system") return <SystemPill message={message} />;
 
   return (
     <article
@@ -80,7 +72,7 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
     >
       <div className="w-9 shrink-0">
         {continuation ? (
-          <span className="hidden pt-0.5 text-right text-[10px] leading-5 text-muted-foreground tabular-nums group-hover/message:block">
+          <span className="hidden pt-0.5 text-right text-3xs leading-5 text-muted-foreground tabular-nums group-hover/message:block">
             {formatTime(message.at)}
           </span>
         ) : (
@@ -128,11 +120,44 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
   );
 }
 
+/**
+ * A centred system line — an approval decision, or a dispatch marker (issue
+ * #377).
+ *
+ * The pill becomes a **link to the card** when the line names one. That is what
+ * makes a marker useful rather than merely informative: `finished → Paused`
+ * tells a reader the run stopped, and the next thing they want is the card
+ * itself. Without the link they would have to find it on the board by title.
+ *
+ * A system line with no card — every approval line — renders exactly as it
+ * always has, as plain text. There is no icon and no chip here on purpose: this
+ * is one short sentence, and dressing it up would give a status line more visual
+ * weight than the messages around it.
+ */
+function SystemPill({ message }: { message: ChatMessage }) {
+  const className =
+    "rounded-full bg-muted px-3 py-1 text-center text-xs text-muted-foreground";
+  return (
+    <div className="flex justify-center px-4 py-1">
+      {message.taskId ? (
+        <a
+          href={`#/tasks/${encodeURIComponent(message.taskId)}`}
+          className={cn(className, "transition-opacity hover:opacity-80 hover:underline")}
+        >
+          {message.text}
+        </a>
+      ) : (
+        <p className={className}>{message.text}</p>
+      )}
+    </div>
+  );
+}
+
 function AuthorLine({ sender, at }: { sender: Sender; at: number }) {
   return (
     <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 leading-5">
       <span className="truncate text-sm font-semibold tracking-tight">{sender.name}</span>
-      <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+      <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
         {formatTime(at)}
       </span>
     </div>
@@ -176,7 +201,7 @@ function Reactions({
           aria-label={`${chip.emoji} — ${chip.by.join(", ")}`}
         >
           <span aria-hidden>{chip.emoji}</span>
-          <span className="tabular-nums text-[11px] font-medium">{chip.count}</span>
+          <span className="tabular-nums text-2xs font-medium">{chip.count}</span>
         </button>
       ))}
     </div>
@@ -244,7 +269,8 @@ function ReplyFacepile({ replies }: { replies: ChatMessage[] }) {
           key={r.id}
           name={r.from === "you" ? "You" : (r.channel ?? "Company")}
           tone={r.channel}
-          className="size-4 rounded-[3px] text-[7px] ring-1 ring-background"
+          markOnly
+          className="size-4 rounded-[3px] ring-1 ring-background"
         />
       ))}
     </span>

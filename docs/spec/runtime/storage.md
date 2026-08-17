@@ -27,6 +27,13 @@ records as inspectable TOML/JSONL bundles and the WS3 console-surface stores
 under a sibling `ops/` layout (`src/store/fs_ops.rs`); sqlite and mongodb add
 one collection/table per store.
 
+A fifteenth, `JournalStore`, joined them in issue #726. The runtime journal was
+built on the filesystem unconditionally until then, so on a mongodb tenant the
+at-most-once effect set and the parked-approval queue lived on `/data` —
+ephemeral scratch, discarded on every container replacement. It is now selected
+from the same handles as every other store, with a one-time receipt-gated import
+off the old file: [journal.md](journal.md).
+
 Three of those fourteen — `UserStore`, `SessionStore`, `LoginCodeStore` — back
 [human user authentication](users.md). Sessions and login codes are credential
 material: they hold **hashes only**, and they must never be added to the
@@ -39,6 +46,41 @@ MongoDB settings:
 - `OPENCOMPANY_TENANT_ID` — tenant identity for **shared-single-DB** mode
   (default unset). See [Shared single database](#shared-single-database-mode).
 
+## Secrets at rest, and what that costs (issue #752)
+
+`fs` writes one **plaintext** file per secret under
+`<data-dir>/companies/<slug>/secrets/`; `sqlite` puts the same bytes in a
+database file on the same disk. Both are readable by the uid the server runs
+as — which is the uid an agent's `shell` tool runs as, in the same container.
+There is no boundary in between; see
+[../security/agent-isolation.md](../security/agent-isolation.md). `mongodb` is
+the only backend that keeps secrets out of the container, in the tenant
+database.
+
+**Repository credentials therefore require `OPENCOMPANY_STORAGE=mongodb`.**
+This is enforced, not advised, in three places:
+
+| Where | What happens |
+| --- | --- |
+| `POST …/repos` (bind) | `409 Conflict` with the refusal message; nothing is stored |
+| Company boot / rebuild | The company does not come up — `OpenCompanyError::Config` — when its **effective roster** grants `repo`, including an agent naming `repo` under a wildcard company allow-list |
+| Agent build | Repo tools are withheld (fail-closed, with a warning), which covers a teammate added through the console on a live runtime |
+
+The refusal names both remedies: set `OPENCOMPANY_STORAGE=mongodb` with
+`OPENCOMPANY_MONGODB_URI`, or drop the `repo` grant.
+
+**This is a breaking change for `fs` and `sqlite` deployments that have already
+bound a repository.** That is deliberate. Those are precisely the deployments
+carrying a plaintext repository token on a disk their agents can read, so a
+warning would leave the exposure in place and call it handled. Migration is one
+of the two remedies above; a bound credential on an fs host should also be
+**revoked at the forge**, since it has been readable for as long as it has been
+installed.
+
+Every *other* secret on an `fs` or `sqlite` host is still plaintext next to it.
+This gate closes one credential on one path; it does not make the filesystem
+safe.
+
 ## The root itself
 
 How the data root is resolved, why only one process may write it, and what
@@ -47,383 +89,11 @@ How the data root is resolved, why only one process may write it, and what
 
 ## Workspace layout (`src/store/layout.rs`)
 
-`OPENCOMPANY_DATA_DIR` (default `$HOME/.opencompany`; `/data` in a hosted tenant
-container) is the per-instance **workspace root** — everything one running
-instance owns. [`DataLayout`](../../../src/store/layout.rs) names the canonical
-subdirectories under it so stores, agents, and tools resolve well-known
-locations instead of ad-hoc paths:
-
-```text
-<OPENCOMPANY_DATA_DIR>/
-  companies/   ← per-company bundles (companies/<slug>/, owned by the fs store)
-  memory/      ← instance-shared memory artifacts
-  store/       ← instance-shared durable-store artifacts
-  files/       ← instance-shared files (exports, attachments)
-  logs/        ← instance logs
-  tmp/         ← ephemeral scratch, cleared on startup by default
-  harness/     ← agent + workflow sandboxes (see below; minted on demand)
-  openhuman/   ← the embedded OpenHuman runtime's own root (see below)
-```
-
-Per-company state (each bundle's own `memory/`/`context/`) lives under
-`companies/<slug>/`; the top-level `memory/`/`store/`/`files/` are the shared,
-instance-level locations. `serve` calls `DataLayout::ensure` at boot: it creates
-the shared subdirectories and — unless `[workspace].clear_tmp_on_startup` is
-`false` — empties `tmp/` so no stale scratch survives a restart. Because the hosting model runs **one container per tenant** with its
-own `OPENCOMPANY_DATA_DIR`, this root *is* the per-tenant workspace — no separate
-per-tenant path prefix is needed.
-
-### The embedded runtime's root (`<data-dir>/openhuman`, `src/app/journal.rs`)
-
-The vendored OpenHuman runtime resolves its own workspace, and its default is a
-subdirectory of the user's **home directory** — which in a tenant container is
-the read-only root filesystem. Its durable agent journal
-(`{workspace}/tinyagents_store/`) therefore failed to create its store root on
-every append, and the vendored append worker reported that to stderr once per
-event with no dedup or backoff, burying every other line in the container log
-(issue #446).
-
-`serve` closes that gap before any agent exists.
-[`app::journal::prepare`](../../../src/app/journal.rs) resolves the root, proves
-it is writable, and exports it as `OPENHUMAN_WORKSPACE` — the one seam the
-vendored config loader consults ahead of its home-directory default:
-
-```text
-<OPENCOMPANY_DATA_DIR>/openhuman/            ← exported as OPENHUMAN_WORKSPACE
-<OPENCOMPANY_DATA_DIR>/openhuman/workspace/tinyagents_store/   ← the journal
-```
-
-| Precedence | Source | Root |
-|---|---|---|
-| 1 | `OPENHUMAN_WORKSPACE` (non-blank) | its value verbatim — a self-hoster keeps an existing workspace |
-| 2 | `OPENCOMPANY_DATA_DIR` | `<data-dir>/openhuman`, exported so the vendored loader finds it |
-
-`serve` prints the resolved store path at startup (`agent journal: … (root …,
-from …)`) so this class of problem is one line to diagnose rather than a code
-trace. Only the path is printed; no other environment value is read or echoed.
-
-An unwritable root **aborts boot** — the same precedent as a
-selected-but-unavailable storage backend. A tenant that answers but records
-nothing produces confident, unrecoverable work and reports the loss only at
-`debug` level; a tenant that refuses to start is one loud, attributable line.
-Because the check runs after `DataLayout::ensure` has already created the shared
-subdirectories, it can only fail on a genuinely broken mount or an explicitly
-misconfigured `OPENHUMAN_WORKSPACE`, so it cannot turn a healthy tenant into one
-that will not wake.
-
-### Agent sandboxes (`<home>/harness`)
-
-The tree an agent's file tools actually act in hangs off the **home**, not off a
-bundle, and is deliberately **not** pre-created by `DataLayout::ensure` — the
-same rule `companies/` follows: whoever owns a subtree mints it on demand.
-
-```text
-<home>/harness/<company>/
-  <agent>/workspace/                      ← one agent's sandbox
-  <agent>/skill-catalog/                  ← its materialized skill bundles
-  _workflow/<workflow>/<run>/workspace/   ← one workflow run's sandbox
-```
-
-An agent's sandbox is named by `harness::build::agent_workspace` and created by
-`harness::build::ensure_agent_workspace`; a workflow run's is named and created
-by `workflows::caps`. It must exist **before** the agent acts, not merely by the
-time it finishes. OpenHuman's `validate_parent_path` resolves a relative write
-against the sandbox, then walks up to the deepest *existing* ancestor to
-canonicalize it; with the sandbox absent that walk climbs past it and lands
-outside, so the write is refused as `Resolved parent path escapes workspace` for
-a path that is plainly inside. The runtime writes its own bookkeeping there
-(session transcripts, the TinyAgents journal), creating the directory as a side
-effect — but only at the *end* of a turn, so it never helps the turn that needed
-it. An agent holding `shell` never saw this: its first command creates the
-directory before anything validates a path (issue #409).
-
-Hence two creation points, not one. `build_agent` mints the sandbox before any
-`SecurityPolicy` is constructed over it; the dispatch path re-ensures it every
-turn. The second is not redundant — a roster is built once, cached behind
-fingerprints and handed across an in-place rebuild, so a sandbox removed under a
-live host (a restored data dir, a boot that raced an unmounted volume) would
-otherwise stay missing for the life of the process.
-
-### Choosing the root (`src/store/paths.rs`)
-
-`OPENCOMPANY_DATA_DIR` is the **only** environment knob that places an instance.
-`opencompany serve` (and `export` / `import`) resolve the root every company
-bundle hangs off through `store::resolve_home`, in this order:
-
-| Precedence | Source | Resolves to |
-| --- | --- | --- |
-| 1 | `--home <DIR>` | `<DIR>` verbatim — an explicit flag is never overridden by the environment |
-| 2 | `OPENCOMPANY_DATA_DIR` | its value verbatim, so bundles land at `<root>/companies/<slug>` — exactly the layout above |
-| 3 | neither | `$HOME/.opencompany` (a relative `.opencompany` when `$HOME` is unset) |
-
-An empty `OPENCOMPANY_DATA_DIR` counts as unset — it would otherwise root the
-instance at the process working directory.
-
-All three branches resolve the home to the **workspace root**, so `Bundle`'s own
-`companies/` segment puts bundles at `<root>/companies/<slug>` in every case —
-exactly the layout above, and exactly `DataLayout::companies_dir()`.
-
-One consequence worth knowing:
-
-- **`--home` moves the bundles but not the workspace.** It places company
-  bundles only; `memory/`, `store/`, `files/`, `logs/` and `tmp/` always follow
-  `OPENCOMPANY_DATA_DIR`. So two hosts isolated by `--home` alone still share one
-  workspace. `serve` prints an operator-visible warning naming both roots
-  whenever they are not aligned. Prefer `OPENCOMPANY_DATA_DIR`, which moves the
-  whole instance. A hosted tenant sets both to the same value
-  (`docker/entrypoint.sh` passes `--home "$OPENCOMPANY_DATA_DIR"`), so it never
-  warns — nor does the local default, whose home and data root are now the same
-  path. Passing `--home ~/.opencompany/companies` by hand recreates the legacy
-  doubled shape below and does warn, correctly.
-
-#### Migrating a legacy doubled install (`src/store/migrate.rs`)
-
-The default home used to append a `companies` leaf of its own, so a default local
-install's bundles were nested one level too deep at
-`~/.opencompany/companies/companies/<slug>` while `DataLayout` materialized
-`~/.opencompany/{memory,store,files,logs,tmp}` beside the *first* `companies/`. A
-local sqlite database was orphaned the same way, at
-`~/.opencompany/companies/opencompany.db`, because `serve` hands the resolved
-home to `open_storage`. So were the two runtime trees that hang off the home
-rather than off a bundle: the harness agent workspaces (`<home>/harness`) and the
-MCP runtime registry (`<home>/mcp`, whose persisted installs and stored
-environment values are reconnected on boot).
-
-Dropping the leaf without moving that data would leave every existing local
-company invisible, so `serve`, `export`, and `import` all run
-`store::migrate::migrate_legacy_nest` against the resolved home before reading
-anything:
-
-- No `<home>/companies/companies` directory is a no-op. A hosted tenant takes
-  this branch on every boot: two `stat`s that find nothing.
-- A nest that is **bundle-shaped** — holding any of the top-level files
-  (`company.toml`, `meta.json`, `events.jsonl`, `ledger.jsonl`, `tasks.json`, …)
-  or subdirectories (`keys/`, `secrets/`, `memory/`, `context/`, …) that only a
-  company owns — is a real bundle slugged `companies` and is left exactly as it
-  is. A manifest is deliberately *not* the test: `Bundle::ensure_dirs` creates a
-  bundle with neither marker at ~20 call sites, and under
-  `OPENCOMPANY_STORAGE=sqlite|mongodb` the manifest never reaches the filesystem
-  at all while the keys, secrets and task board still do — so a marker test would
-  have dissolved exactly the installs that have no manifest to find.
-- Only entries that are **themselves bundle-shaped directories** are relocated,
-  the same test one level down. Anything else stays where it is, silently: the
-  legacy nest holds nothing but bundles, so an entry that does not look like one
-  is not something the migration knows where to put.
-- Any `opencompany.db` (with its `-wal`/`-shm` siblings, as a set) moves from
-  `<home>/companies/` to `<home>/`. Only **regular files** count as the database:
-  a company slugged `opencompany.db` owns the directory at that exact path, and
-  relocating it would delete the company.
-- `<home>/companies/{harness,mcp}` move up to `<home>/{harness,mcp}` under the
-  same shape guard — a company really can be slugged `harness`, and its canonical
-  bundle sits at exactly the path the legacy tree occupied.
-- An occupied destination is **skipped**, never merged: two copies of one company
-  hold two event logs and two signing keys, which cannot be interleaved. Both
-  copies stay put and a warning names both paths.
-- Files move by `link`+`unlink`, never by `rename`. A rename replaces a regular
-  file silently, and a "is the destination free?" check taken beforehand is stale
-  the instant it is read — a `serve` that has already migrated is writing a live
-  `-wal` at that path, and a rename over it drops every committed transaction the
-  log still holds. A hard link fails when the destination exists, so the check and
-  the move are one indivisible step. A crash between the link and the unlink
-  leaves one file reachable under both names, which the next run recognises by
-  device and inode and finishes rather than reporting as two databases.
-  Directories keep `rename`, which cannot replace a populated directory
-  (`ENOTEMPTY`) or a regular file (`ENOTDIR`) at all.
-- The nest directory is removed only once emptied, so a crash mid-migration
-  resumes on the next boot. Re-running a migrated install is silent.
-- The database set resumes the same way. It is detected from **any** surviving
-  member, not from `opencompany.db` alone, so a run that moved the database and
-  then died is finished by the next boot rather than being read as complete —
-  which would have paired a relocated database with a stranded write-ahead log
-  and lost whatever that log still held.
-- A source another process moved first is a success, not a failure. Running
-  `opencompany export` against a home a `serve` process is booting is ordinary
-  and both migrate; the loser of that race must not abort on a `NotFound` that
-  means "already done". Note that this is race *tolerance*, not a concurrency
-  guarantee: two processes sharing one home is unsupported for the same reason
-  the runtime journal is single-writer, and this migration does not change that.
-  What the no-replace moves above do guarantee is that losing such a race can
-  never cost data, whatever the interleaving.
-
-An install whose migration genuinely cannot complete — `EXDEV` because
-`companies/` is a mount point, a root-owned or read-only nest — still boots:
-`--home ~/.opencompany/companies` resolves every bundle exactly where it already
-sits and finds no nest beneath it to migrate. That shape warns about the split
-workspace, correctly, and is the supported way to run an install this migration
-cannot move.
-
-Moves are printed on stderr rather than logged through `warn!`, which the default
-`EnvFilter` drops unless `RUST_LOG` is set.
-
-`OPENCOMPANY_HOME` is **not** a synonym and is **not supported**. It was never
-wired to anything, so setting it used to be ignored silently. The resolver now
-reads it solely to reject it: `serve`, `export`, and `import` abort with an error
-naming `OPENCOMPANY_DATA_DIR` instead. The rejection is checked before `--home`,
-so passing the flag does not suppress it — a stale entrypoint that still exports
-the variable fails loudly rather than half-placing a store.
-
-#### Running two hosts side by side
-
-A data root has exactly one writer, enforced by an advisory lock — a second
-`serve` over the same root is refused at boot. Give each host its own root; see
-[`data-root.md`](data-root.md) for the recipe and the rules.
-
-The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle:
-
-```toml
-[workspace]
-clear_tmp_on_startup = true   # default; set false to preserve tmp/ across restarts
-storage_quota_gb = 5          # soft whole-workspace quota; omit or <= 0 = unlimited
-tmp_quota_gb = 1              # soft tmp/ quota; omit or <= 0 = unlimited
-```
-
-**Quotas are soft/advisory in the binary.** At boot `serve` measures the
-workspace (and `tmp/`) and emits an operator-visible `tracing::warn` when either
-exceeds its configured quota. **Hard enforcement** — blocking writes at the
-limit — is the container/StorageClass layer's job (an EFS access point cap or a
-k8s `ResourceQuota`), which is where the deploy manifests wire it; the binary
-surfaces the condition rather than intercepting every write.
-
-Large-file S3 offload remains a follow-up (needs an S3 client + credentials).
+Moved to [`workspace-layout.md`](workspace-layout.md) — this file was over the repository's 500-line limit. See that page for the full detail.
 
 ## Memory engine overlay (`OPENCOMPANY_MEMORY`)
 
-Memory is a separable concern. `OPENCOMPANY_STORAGE` picks the durable base for
-all fourteen ports; `OPENCOMPANY_MEMORY` optionally swaps **just** the two
-knowledge ports — `MemoryStore` + `ContextStore` — onto a dedicated memory
-engine layered on top of that base. The base still owns every other port
-(companies, events, secrets, tasks, …).
-
-| Value | Engine | Feature flag | Notes |
-|---|---|---|---|
-| `store` (default) | The base backend's own memory | — | fs substring recall, or sqlite/mongodb |
-| `tinycortex` | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; vector-first recall with lexical/recency fallback when no embeddings backend resolves |
-
-This is why TinyCortex is not a `StorageKind`: it implements only memory +
-context, so it cannot be a full backend — it overlays. `serve` and platform
-provisioning build the overlay once (`open_memory_overlay`,
-`src/store/select.rs`) and apply it to each company's `RuntimeBuilder` via
-`with_memory_overlay`, **after** `with_stores`, so the engine's ports win while
-the base keeps the rest. A selected-but-unavailable engine (feature disabled)
-aborts boot, same as the storage backend.
-
-### In-pod engine (`EngineCortex`)
-
-With the `tinycortex` feature and a data directory present, the overlay is
-`EngineCortex` (`src/store/tinycortex_engine.rs`): the OpenHuman `tinycortex`
-engine crate running **inside the pod** with durable local storage. Each company
-gets its own workspace at `<OPENCOMPANY_DATA_DIR>/memory/<company>/`, and the
-engine's canonical per-workspace SQLite database (opened + migrated through the
-crate's own shared connection) holds that company's traces, task results, and
-context chunks. The engine never makes a network call. When no data directory is
-present (tests, no-data-dir callers) the overlay falls back to the offline
-in-memory backend (`InMemoryCortex`), which is also the compiled fallback when a
-company workspace cannot be opened.
-
-**Vector-first recall, with a loud lexical/recency fallback (188c2).** This
-slice builds the engine's `MemoryConfig` directly with `embedding.strict =
-false`, so the crate's own summary-tree embedder stays inert regardless — but
-when a hosted embeddings backend resolves from the environment (see
-"Embeddings configuration" below), each stored chunk is separately embedded
-into a per-company [`VectorStore`], and `search_chunks` runs cosine recall
-**first**, topped up with the existing lexical token-overlap scorer (the same
-`[0, 1]`-scored, snippet-bearing contract the in-memory backend defines) up to
-the caller's limit — see the two-tier recall in
-`src/store/tinycortex_engine.rs`. When **no** embeddings backend resolves — or
-on any embedding/search outage — recall degrades to **pure lexical**
-(substring/recency token-overlap), **not** the vector/semantic recall the
-`tinycortex` name implies, so the overlay announces the degraded mode once,
-loudly, at open (`tracing::warn` in `src/store/select.rs`). Because the
-crate's retrieval primitives rank only by admission-score/recency in fully
-degraded mode (their keyword/graph scorers are defined but not yet wired), and
-its `ingest` path re-chunks documents under its own ids — which cannot
-round-trip OpenCompany's content-address / label-prefix / peek contract —
-chunk bodies and metadata are persisted through the engine's **KV tier** (on
-the same per-company workspace database) rather than the crate's
-ingest/retrieval primitives, with the vector index layered beside it. Wiring
-the crate's own retrieval-scorer `Embedder` / summary-tree seal path (the
-hard-768-dim path, plus a full-corpus reconcile beyond the bounded backfill) is
-deferred to #198 — this slice injects only the `VectorStore` store+search
-compute, which is dimension-agnostic and runs at the backend's native 1024.
-
-#### Embeddings configuration
-
-The hosted embeddings backend (`src/harness/embeddings.rs`, `openhuman`-gated
-harness build only) shares its credential + base URL with the chat inference
-client and layers two overrides on top:
-
-| Env var | Default | Notes |
-|---|---|---|
-| `OPENCOMPANY_EMBEDDINGS_MODEL` | `embedding-v1` | The managed embeddings model id. `embedding-v1` is 1024-dim and rejects the OpenAI `dimensions` request param. |
-| `OPENCOMPANY_EMBEDDINGS_DIM` | `1024` | The model's native dimensionality. Must parse as a positive integer; only meaningful alongside a model whose native dim differs from 1024. |
-
-Every returned vector is validated against the configured dimensionality; a
-wrong length is an error, never silently truncated.
-
-### Durability contract & the `/data`-is-scratch caveat
-
-`EngineCortex` is durable **only to the extent the data directory is durable**.
-On a host with a persistent `OPENCOMPANY_DATA_DIR` (a mounted volume, or the
-default `$HOME/.opencompany`), engine memory survives restarts. But under the
-hosted multi-tenant model with `OPENCOMPANY_STORAGE=mongodb`, the durable base is
-the database and the container's `/data` is treated as **ephemeral scratch** — so
-engine memory written to `<data_dir>/memory` would **not** survive a container
-restart. Because that failure mode is *silent* memory loss on restart, selecting
-`OPENCOMPANY_MEMORY=tinycortex` together with `OPENCOMPANY_STORAGE=mongodb` is by
-default a hard **refuse-to-open** error at boot (`src/store/select.rs`), not a
-warning: the overlay never opens a doomed engine.
-
-Storage-kind is only a *proxy* for "ephemeral `/data`", though — a mongodb
-deployment that HAS mounted a persistent volume at the data dir is perfectly
-safe to run the in-pod engine on. So the refusal is an explicit **durability
-contract**, not a hard storage-kind rejection. To run the in-pod engine you can:
-
-- mount a persistent volume at `OPENCOMPANY_DATA_DIR` and use
-  `OPENCOMPANY_STORAGE=fs` or `sqlite` (durable `/data`); or
-- keep memory on the base store (`OPENCOMPANY_MEMORY=store`); or
-- under `OPENCOMPANY_STORAGE=mongodb`, if you have mounted a genuinely durable
-  volume at `OPENCOMPANY_DATA_DIR`, set **`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1`**
-  to assert that durability and lift the refusal. Unset (or any non-truthy value)
-  keeps the safe default: refuse. Truthy values are `1`/`true`/`yes`/`on`.
-
-#### Config examples
-
-**(a) Supported persistent config** — durable base + in-pod engine. The data dir
-is a real mounted volume, so engine memory survives restarts and no override is
-needed:
-
-```sh
-OPENCOMPANY_STORAGE=sqlite            # durable /data (single SQLite file)
-OPENCOMPANY_MEMORY=tinycortex         # in-pod engine overlay
-OPENCOMPANY_DATA_DIR=/data            # a persistent volume mount
-# → boots; per-company workspaces persist under /data/memory/<workspace>/
-```
-
-**(b) MongoDB config — the boot-time refusal and how the opt-in changes it.**
-With mongodb as the durable base, `/data` is treated as ephemeral scratch, so the
-engine is refused by default:
-
-```sh
-OPENCOMPANY_STORAGE=mongodb           # durable base is the database; /data is scratch
-OPENCOMPANY_MEMORY=tinycortex
-OPENCOMPANY_DATA_DIR=/data
-OPENCOMPANY_MONGODB_URI=mongodb://…   # (tenant-scoped)
-# → REFUSES to boot: hard OpenCompanyError::Config. The operator-visible result is
-#   a boot abort naming the silent-memory-loss risk and the OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL
-#   opt-in — the engine never opens, so no memory is written to a doomed /data.
-```
-
-If — and only if — the operator has actually mounted a durable volume at
-`/data`, asserting it lifts the refusal:
-
-```sh
-OPENCOMPANY_STORAGE=mongodb
-OPENCOMPANY_MEMORY=tinycortex
-OPENCOMPANY_DATA_DIR=/data            # a genuinely persistent volume
-OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1  # operator asserts /data is durable
-OPENCOMPANY_MONGODB_URI=mongodb://…
-# → boots; engine memory persists under /data/memory/<workspace>/ as usual.
-```
+Moved to [`memory-engine.md`](memory-engine.md) — this file was over the repository's 500-line limit. See that page for the full detail.
 
 ## MongoDB backend (`src/store/mongodb.rs`)
 
@@ -435,10 +105,34 @@ from a `counters` collection via atomic `findOneAndUpdate {$inc}`.
 
 Collections (all uniquely indexed on `company_id` + their key):
 `companies`, `ledger`, `events`, `memory_traces`, `memory_tasks`,
-`context_chunks`, `secrets`, plus `counters` and `owners`; and the WS3
-console-surface collections `tasks`, `workspace`, `facts`, `usage`, `skills`,
-and `inboxes`. The `usage` collection is trimmed to the 90-day retention window
+`context_chunks`, `secrets`, `journal` and `journal_imports`, plus `counters`
+and `owners`; and the WS3 console-surface collections `tasks`, `workspace`,
+`facts`, `usage`, `skills`, and `inboxes`. The `usage` collection is trimmed to the 90-day retention window
 on each `record` (see [`UsageMeter`](ports-console.md#usagemeter)).
+
+**Path-uniqueness indexes on `workspace_nodes`.** This backend has neither a
+per-company lock nor a transaction it can require of its deployment, so "one node
+per path" cannot be a read followed by a write; it is the database's own
+invariant. Two **partial unique** indexes carry it: `(company_id,
+file_path_key)` for files (issue #697) and `(company_id, folder_path_key)` for
+the folders `adopt_or_create_folder` claims (issue #759). Both keys encode
+`{parent_id}\0{name}` — NUL, because no node name may contain one — and both are
+separate fields on purpose, so a folder and a note may still share a name exactly
+as they always could. This is a race fix, not a new tree rule.
+
+*Partial* is what makes them safe to add to a live tenant: a plain unique index
+is built over every existing document, so a company that already lost one of
+these races would fail index creation, and that failure happens during
+`ensure_indexes` — taking the tenant's startup down. Restricted to documents that
+*have* the field, each index covers everything written from now on and ignores
+history it cannot repair; legacy duplicates keep being refused one layer up.
+
+Only the primitives stamp the keys. Plain `create` does not stamp
+`folder_path_key`, so console-made folders are unguarded (and unaffected). A
+folder that `rename_move` touches **drops** its key: the claim exists to decide
+contention on the publish walk, and a key that travelled with a hand-moved folder
+would keep guarding the path it left — refusing that path forever, which is the
+outage the primitive exists to prevent.
 
 ### Multi-tenant isolation (two layers)
 
@@ -518,6 +212,12 @@ monotonic event sequence, export totality) it exercises each WS3 store —
 `assert_skill_state_store`, `assert_inbox_store`, `assert_usage_meter` — plus a
 dedicated `assert_usage_retention` that verifies samples older than the 90-day
 window are evicted on write. A new backend passes only when all of these hold.
+
+`assert_workspace_folder_claims` (issue #759) additionally drives eight
+concurrent callers at one `(parent, name)`: all must succeed, all must come away
+holding the same folder, and exactly one may report having created it. That case
+is the point of the function — a naive read-then-create passes every sequential
+assertion beside it and fails only there, which is the defect's exact shape.
 
 ## Testing
 

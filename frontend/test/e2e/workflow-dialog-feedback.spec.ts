@@ -273,3 +273,82 @@ test("a valid workflow still saves", async ({ page }) => {
   await dialog.getByRole("button", { name: "Create workflow" }).click();
   await expect(dialog).toBeHidden({ timeout: 30_000 });
 });
+
+test("a new scheduled workflow discloses that it starts paused (#813)", async ({
+  page,
+}) => {
+  // #813 defect 7: the #276 disarm rule creates a scheduled workflow paused,
+  // but the dialog showed a live "next run" preview and said nothing about it,
+  // so an author reasonably believed the cron was armed. This is rendered
+  // output gated on create-mode-and-a-real-schedule, so it is pinned here.
+  const dialog = await openCreateDialog(page);
+  const paused = dialog.getByText(/scheduled workflow is created paused/i);
+
+  // No schedule set yet — there is nothing to disclose.
+  await expect(paused).toHaveCount(0);
+
+  // Pick a preset schedule on the trigger row.
+  await dialog.getByLabel("Schedule").click();
+  await page.getByRole("option", { name: /^Daily/ }).click();
+
+  // Now the notice appears at author time, next to the schedule they just set.
+  await expect(paused).toBeVisible();
+});
+
+test("the collapsed destination shows a label, never the raw __none__ sentinel (#813)", async ({
+  page,
+}) => {
+  // #813 defect 8: base-ui renders the stored value in the collapsed control,
+  // which surfaced the bare "__none__" sentinel. The friendly label only
+  // exists once rendered, so this is a browser fact.
+  const dialog = await openCreateDialog(page);
+  await dialog.getByRole("button", { name: "Add node" }).click();
+  const kind = dialog.getByLabel("Node kind").nth(1);
+  await kind.click();
+  await page.getByRole("option", { name: /^Output(?! parser)/ }).click();
+
+  // No destination chosen yet: the control stores the "__none__" sentinel, and
+  // must still read as a human label collapsed.
+  const destination = dialog.getByLabel("Send report to");
+  await expect(destination).toContainText("Nowhere (run result only)");
+  await expect(destination).not.toContainText("__none__");
+});
+
+test("the channel destination is a picker of wired channels, not free text (#813)", async ({
+  page,
+}) => {
+  // #813 defect 4: typing a channel id that isn't wired only failed at delivery.
+  // The target is now a picker whose options are the company's wired channels
+  // (`operator` is always wired), so an unwired id can't be entered at all.
+  const dialog = await openCreateDialog(page);
+  await dialog.getByRole("button", { name: "Add node" }).click();
+  const kind = dialog.getByLabel("Node kind").nth(1);
+  await kind.click();
+  await page.getByRole("option", { name: /^Output(?! parser)/ }).click();
+  await dialog.getByLabel("Send report to").click();
+  await page.getByRole("option", { name: /^Channel/ }).click();
+
+  // The channel target is a combobox offering the wired `operator` channel.
+  await dialog.getByLabel("Channel id").click();
+  await expect(page.getByRole("option", { name: "operator" })).toBeVisible();
+});
+
+test("submitting with an empty id surfaces the validation message on-screen (#813)", async ({
+  page,
+}) => {
+  // #813 defect 6: the banner sat below the fold, so Create looked dead. On a
+  // failed submit it must be brought into view (and focused).
+  const dialog = await openCreateDialog(page);
+  await dialog.getByLabel("Id", { exact: true }).fill("");
+  await dialog.getByRole("button", { name: "Create workflow" }).click();
+
+  const banner = dialog.getByText("Give the workflow an id.");
+  await expect(banner).toBeVisible();
+  await expect(banner).toBeInViewport();
+
+  // ...and the banner takes focus, so a keyboard/screen-reader user is landed on
+  // the reason Create did nothing rather than left at the pressed button.
+  const bannerBox = dialog.getByTestId("create-error");
+  await expect(bannerBox).toBeFocused();
+  await expect(bannerBox).toContainText("Give the workflow an id.");
+});

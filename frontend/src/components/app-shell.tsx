@@ -33,6 +33,7 @@ import {
   SidebarMenuItem,
   SidebarProvider,
   SidebarRail,
+  SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import {
@@ -51,6 +52,7 @@ import { toast } from "sonner";
 
 import {
   type ChatMessage,
+  dispatchMarkerPlacement,
   fromHistory,
   hostMessageId,
   liveReplyIdentity,
@@ -58,6 +60,8 @@ import {
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, type Desk } from "@/lib/desks";
+import { mergeReadFloors, unreadCount } from "@/lib/unread";
+import { approvedLine } from "@/lib/approval-wording";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
@@ -232,8 +236,58 @@ export function AppShell({
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [view, sub, navigate] = useHashView<View>(VIEWS, "overview");
-  // Most call sites only ever change the top-level view.
-  const setView = useCallback((next: View, nextSub?: string) => navigate(next, nextSub), [navigate]);
+  // Track the latest non-default segment per view so returning to a tab with
+  // sub-pages restores operator context (for example `#/workflows/<id>`), instead
+  // of always dropping it to the parent view.
+  // Partial by construction: a view is only present here once it has been
+  // visited, and an unvisited view must read back as "nothing remembered"
+  // rather than as a key holding `undefined`.
+  const lastSubByViewRef = useRef<Partial<Record<View, string | null>>>({});
+  const rememberedScopeRef = useRef({
+    connection: scope.connection,
+    company: scope.company,
+  });
+  useEffect(() => {
+    const scopeChanged =
+      rememberedScopeRef.current.connection !== scope.connection ||
+      rememberedScopeRef.current.company !== scope.company;
+    rememberedScopeRef.current = {
+      connection: scope.connection,
+      company: scope.company,
+    };
+
+    // A selected workflow or thread belongs to this company. Clear it before
+    // recording the current route, so an in-place scope change cannot restore
+    // a selection from the company being left.
+    if (scopeChanged) {
+      lastSubByViewRef.current = {};
+      if (sub) navigate(view);
+      return;
+    }
+
+    lastSubByViewRef.current = {
+      ...lastSubByViewRef.current,
+      [view]: sub,
+    };
+  }, [scope.connection, scope.company, view, sub, navigate]);
+  // Most call sites only ever change the top-level view. Preserve the remembered
+  // sub-segment for the target view so tab switches do not discard deep tab state.
+  const setView = useCallback(
+    (next: View, nextSub?: string) => {
+      if (nextSub !== undefined) {
+        lastSubByViewRef.current[next] = nextSub;
+        navigate(next, nextSub);
+        return;
+      }
+      const remembered = lastSubByViewRef.current[next];
+      if (remembered) {
+        navigate(next, remembered);
+        return;
+      }
+      navigate(next);
+    },
+    [navigate],
+  );
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   /**
    * Whether the product tour should hold — first-run setup is on screen, or the
@@ -369,6 +423,21 @@ export function AppShell({
     () => new Map(),
   );
   const [decidedApprovals, setDecidedApprovals] = useState<Record<string, DecidedApproval>>({});
+  /**
+   * Decisions that did **not** land, per approval id (#842 review).
+   *
+   * A third map, and it earns its keep because of consolidation. Deciding three
+   * cards separately, a failure belongs to the one card just clicked and the
+   * toast is beside it. Deciding one card that covers three, a failure on the
+   * third leaves two effects authorised and one not — and an item that simply
+   * drops back to its pending look reads as "still working", not "this one did
+   * not take". The operator clicked once and got two thirds of what they asked
+   * for, with nothing on screen saying which third.
+   *
+   * Cleared when that item is decided again, so a retry starts from a clean
+   * state rather than showing the previous attempt's error under a live one.
+   */
+  const [failedApprovals, setFailedApprovals] = useState<Record<string, string>>({});
 
   const pending = feed.status.pending_approvals;
 
@@ -437,10 +506,30 @@ export function AppShell({
     setLastViewedChannel({});
     setUnreadSince(Date.now());
     activeChatChannelRef.current = null;
+
+    // Then replace that mount-time floor with the one the host remembers for
+    // this person (issue #755). Until this lands the browser floor stands, so
+    // the first paint is the old behaviour rather than a blank badge; when it
+    // lands, channels this person left unread come back unread.
+    //
+    // Merged into whatever the operator has viewed since, rather than
+    // assigned: this request is in flight while the console is usable, and a
+    // channel opened in that window must not have its fresh floor overwritten
+    // by an older stored one.
+    client
+      .readState(company)
+      .then(({ markers }) => {
+        if (cancelled || markers.length === 0) return;
+        setLastViewedChannel((viewed) => mergeReadFloors(viewed, markers));
+      })
+      .catch(() => {
+        /* host without `/chat/read-state`, or offline — the browser floor stands */
+      });
     // Another company's approval ids are another namespace, and a settled card
     // must not survive the switch as a ghost in the new company's channels.
     setDecidedApprovals({});
     setDecidingApprovals(new Map());
+    setFailedApprovals({});
 
     const hydrate = (threadId: string) => {
       client
@@ -554,7 +643,7 @@ export function AppShell({
     const counts: Record<string, number> = {};
     for (const [channelId, messages] of Object.entries(transcripts)) {
       const since = lastViewedChannel[channelId] ?? unreadSince;
-      const count = messages.filter((m) => m.from !== "you" && m.at > since).length;
+      const count = unreadCount(messages, since);
       if (count > 0) counts[channelId] = count;
     }
     return counts;
@@ -568,14 +657,23 @@ export function AppShell({
   const onChannelViewed = useCallback(
     (channelId: string) => {
       activeChatChannelRef.current = channelId;
-      setLastViewedChannel((v) => ({ ...v, [channelId]: Date.now() }));
+      const at = Date.now();
+      setLastViewedChannel((v) => ({ ...v, [channelId]: at }));
+      // The durable half (issue #755). Fire-and-forget on purpose: the local
+      // floor above has already cleared the badge, so a failed write costs a
+      // stale marker on the next load, not a wrong badge now. The host's write
+      // is monotonic, so the many calls this makes while a live channel grows
+      // are idempotent and cannot move the floor backwards.
+      void client.markChannelRead(channelId, at, company).catch(() => {
+        /* older host, or offline — the in-browser floor still holds this session */
+      });
       // The same fact, persisted, so re-entering Chat returns to the channel
       // the operator was reading instead of whichever sorts first (issue #412).
       // The ref above cannot do it: it dies with this mount, and a reload is
       // exactly one of the trips that has to survive.
       writeLastChannel(scope, channelId);
     },
-    [scope],
+    [scope, client, company],
   );
 
   const setThreadMessages = (
@@ -746,6 +844,60 @@ export function AppShell({
     [chatChannelByThread],
   );
 
+  /**
+   * Post the card-linked system marker for a settled dispatch into the channel
+   * the card was raised in (issue #377).
+   *
+   * The gap it closes: a card dispatched from a channel could park in `paused`
+   * or bounce back to `todo`, and the only thing the channel showed was the
+   * agent's relay prose — so a reader, live or arriving fresh, reasonably
+   * concluded the work had finished. The marker is the structural fact the
+   * prose could not carry: the run *stopped*, and here is where the card
+   * landed, with a link to it.
+   *
+   * Every rule about *where* the line goes — a frame with no `chatId` going
+   * nowhere, a thread matching no channel going nowhere rather than to whatever
+   * channel is open (#368's bug), and the `h<seq>` identity that lets the next
+   * reload recognise its own twin (#483/#498) — lives in
+   * `dispatchMarkerPlacement`, so each stays assertable. This callback is only
+   * the write.
+   *
+   * Written into **both** stores for the same reason `injectAgentReply` is: the
+   * parked Conversation reads `threads`, the Chat workspace reads
+   * `transcripts`, and a line written to one alone is invisible on the other
+   * until a reload.
+   */
+  const injectDispatchMarker = useCallback(
+    (event: CompanyStreamEvent) => {
+      if (event.type !== "desk_task_completed") return;
+      const placement = dispatchMarkerPlacement(event, chatChannelByThread);
+      if (!placement) return;
+      const { threadId, channelId, message } = placement;
+
+      setThreads((ts) =>
+        ts.map((t) => {
+          if (t.id !== threadId) return t;
+          // The same id guard hydration runs. A marker cannot arrive twice off
+          // one stream, but a reconnecting `EventSource` can replay a frame,
+          // and the id is what makes that harmless.
+          if (t.messages.some((m) => m.id === message.id)) return t;
+          return { ...t, messages: [...t.messages, message] };
+        }),
+      );
+
+      if (!channelId) return;
+      setTranscripts((t) => {
+        const existing = t[channelId] ?? [];
+        if (existing.some((m) => m.id === message.id)) return t;
+        return { ...t, [channelId]: [...existing, message] };
+      });
+    },
+    // Same reasoning as `injectAgentReply`: `useEvents` holds its callbacks in
+    // refs, so this identity churning as the map lands cannot re-open the
+    // stream.
+    [chatChannelByThread],
+  );
+
   // Mark/unmark a thread's in-flight POST. `onSendStart` also resets its live
   // timeline so a fresh turn starts clean; `onSendEnd` clears it because the
   // final reply now carries the authoritative folded steps.
@@ -829,6 +981,16 @@ export function AppShell({
     });
   }, []);
 
+  /** Drops a recorded failure — a retry is starting, or the item is gone. */
+  const clearFailure = useCallback((id: string) => {
+    setFailedApprovals((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, []);
+
   /**
    * Decide an approval from inside the conversation it was raised in (#379).
    *
@@ -858,15 +1020,18 @@ export function AppShell({
   ) => {
     if (decidingApprovals.has(approval.id)) return;
     markDeciding(approval.id, verdict);
+    // A retry starts clean: the previous attempt's error must not sit under a
+    // live one, or the operator cannot tell which attempt it belongs to.
+    clearFailure(approval.id);
     try {
-      await client.resolveApproval(approval.id, verdict, undefined, company, {
+      const answer = await client.resolveApproval(approval.id, verdict, undefined, company, {
         detach: true,
         scope,
       });
       setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
       toast.success(
         verdict === "approve"
-          ? "Approved — the agent is completing the action."
+          ? approvedLine(answer.stillAwaiting)
           : "Declined — recorded.",
       );
       // A decline ends the thread's story, and silence would read as a stall.
@@ -879,6 +1044,12 @@ export function AppShell({
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       toast.error(`Couldn't record your decision — ${msg}`);
       noteInChannel(approval.thread, `Couldn't record your decision — ${msg}`);
+      // On the card as well as in a toast, and keyed to the item that failed.
+      // A toast is the wrong and only home for this once one click covers
+      // several calls: it says a decision failed without saying *which*, and it
+      // is gone by the time the operator looks back at the card. The row that
+      // did not take has to say so itself.
+      setFailedApprovals((prev) => ({ ...prev, [approval.id]: msg }));
     } finally {
       markDeciding(approval.id, null);
       void feed.refresh();
@@ -893,6 +1064,10 @@ export function AppShell({
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
+    // Issue #377. Beside the board tick above, not instead of it: a settle both
+    // moves a card between columns and needs saying in the conversation the
+    // card came from.
+    onDispatchTerminal: injectDispatchMarker,
     // Issue #327. The payload is carried, not folded into a counter — see
     // `workspaceEvent` above. The view still re-reads the tree from the host
     // rather than patching it from the frame: the frame carries no node name
@@ -943,6 +1118,14 @@ export function AppShell({
             prev[event.approvalId] ? prev : { ...prev, [event.approvalId]: { verdict, approval } },
           );
         }
+        // A failed attempt here is superseded the moment the approval resolves
+        // anywhere (#842 review). The retry path clears its own failure, but a
+        // decision made on the Approvals page or in another tab arrives only as
+        // this frame — and a settled approval that still carried "not recorded"
+        // would be the card contradicting the queue, which is the drift the
+        // batching work exists to remove. Cleared unconditionally on the id,
+        // whether or not this console ever held a summary for it.
+        clearFailure(event.approvalId);
       }
       void feed.refresh();
     },
@@ -950,6 +1133,15 @@ export function AppShell({
 
   return (
     <SidebarProvider className="h-svh overflow-hidden">
+      {/* Mobile turns the sidebar into a sheet, so its own collapse control is
+          not mounted while it is closed. Keep the way back fixed to the
+          viewport and below the page controls rather than competing with a
+          view's toolbar. Desktop keeps the labelled collapse row in the
+          sidebar itself. */}
+      <SidebarTrigger
+        aria-label="Toggle sidebar"
+        className="fixed bottom-4 left-4 z-50 md:hidden"
+      />
       <AutoCollapse view={view} />
       <Sidebar collapsible="icon">
         <SidebarHeader>
@@ -1005,7 +1197,19 @@ export function AppShell({
           {view === "overview" && (
             <Overview client={client} company={company} />
           )}
-          {view === "company" && <OrgChartView client={client} company={company} />}
+          {view === "company" && (
+            <OrgChartView
+              client={client}
+              company={company}
+              // Issue #485: chat's member pane links in at a desk
+              // (`#/company/<deskId>`), which needs the hash's second segment
+              // to reach this view at all — it was dropped here, so the chart
+              // had no per-desk address to link to. `useHashView` hands the
+              // segment back unvalidated, so the chart resolves an unknown id
+              // itself rather than this shell guessing which desks exist.
+              focusDeskId={sub}
+            />
+          )}
           {view === "chat" && (
             <ChatView
               client={client}
@@ -1028,6 +1232,7 @@ export function AppShell({
               }
               decidingApprovals={decidingApprovals}
               decidedApprovals={decidedApprovals}
+              failedApprovals={failedApprovals}
             />
           )}
           {view === "conversation" && (

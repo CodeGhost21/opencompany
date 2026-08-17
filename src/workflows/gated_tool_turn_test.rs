@@ -74,26 +74,41 @@ to = "done"
 "#;
 
 /// What the scripted model does on each successive call.
+///
+/// `pub(super)` alongside [`deps`] and [`record`] so the sibling
+/// [`board_turn_test`](crate::workflows::board_turn_test) drives the same
+/// scripted-model harness rather than duplicating it (issue #661).
 #[derive(Clone, Debug)]
-enum Turn {
+pub(super) enum Turn {
     /// Emit a native tool call the policy will gate.
-    Call { tool: &'static str, args: Value },
+    Call {
+        /// The tool the model asks for.
+        tool: &'static str,
+        /// Its arguments, verbatim.
+        args: Value,
+    },
     /// Finish with plain assistant text.
     Say(&'static str),
 }
 
 /// A scripted OpenAI-compatible `/chat/completions` endpoint.
-struct Script {
+pub(super) struct Script {
     turns: Mutex<Vec<Turn>>,
     /// Every request body the model was sent, in order (issue #453). The tool
     /// results of a turn come back to the model inside the *next* request, so
-    /// this is where a test reads what a refused tool actually told it.
-    seen: Mutex<Vec<Value>>,
+    /// this is where a test reads what a refused tool actually told it — and,
+    /// since #881, what a node downstream of a blocked one was never sent.
+    pub(super) seen: Mutex<Vec<Value>>,
 }
 
 /// Serve the script on loopback and return its base URL, handing back the
 /// shared script so a test can read what the model was sent.
-async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
+///
+/// `pub(super)` since #881: proving a blocked node's branch did **not** continue
+/// means reading what the model was never asked, so the sibling
+/// [`blocked_node_test`](crate::workflows::blocked_node_test) needs the recorder
+/// rather than only the URL.
+pub(super) async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
     let script = Arc::new(Script {
         turns: Mutex::new(turns),
         seen: Mutex::new(Vec::new()),
@@ -143,7 +158,7 @@ async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
 }
 
 /// Serve the script on loopback and return its base URL.
-async fn spawn_script(turns: Vec<Turn>) -> String {
+pub(super) async fn spawn_script(turns: Vec<Turn>) -> String {
     spawn_script_recording(turns).await.0
 }
 
@@ -196,12 +211,14 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: None,
         workspace_root: dir.to_path_buf(),
+        audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
         tasks: None,
         artifacts: None,
         skills: None,
         skills_source_dir: None,
         skills_registry: std::sync::Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
@@ -211,6 +228,8 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
         workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
         run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+        run_output_store: None,
+        workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),
@@ -219,12 +238,17 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: Some(WorkflowDeliveryDeps {
             mail: None,
             inbox: Arc::new(FsInboxStore::new(dir)),
             users: Arc::new(FsOps::new(dir)),
+            bootstrap_admin: None,
             channels: Vec::new(),
             parking: Some(DeliveryParking {
                 approvals: gate,
@@ -233,6 +257,9 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
         workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
     };
     (deps, journal)
@@ -250,6 +277,8 @@ pub(super) fn record() -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
+        overlay_policy: None,
+        overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
@@ -284,7 +313,13 @@ async fn run_gated(dir: &std::path::Path) -> (Arc<RuntimeJournal>, HarnessDeps, 
         &ctx,
     )
     .await
-    .expect("the run completes — a gated tool refuses the call, it does not fail the node");
+    // Issue #881 changed what "completes" means here: the node now BLOCKS, so
+    // the run settles short of its output node. It still settles `Ok` — a node
+    // waiting on a person is not a failed one — which is what this `expect`
+    // pins. The parking claims below are unaffected: blocking the node must not
+    // cost the operator the card, and `blocked_node_test` asserts the same
+    // thing from the other side.
+    .expect("the run settles — a gated tool blocks the node, it does not fail the run");
     (journal, deps, run_id)
 }
 
@@ -323,10 +358,15 @@ async fn a_gated_tool_call_inside_a_workflow_node_parks_for_approval() {
 }
 
 /// The regression this issue is actually about. Parking is only half the fix:
-/// the shared queue is cleared at the top of **every** chat cycle, and before
-/// #395 a workflow's request sat on it waiting to be wiped by the next
-/// conversation. A card in the journal is independent of that queue, and this
-/// asserts it.
+/// the in-memory queue is emptied around **every** chat cycle, and before #395
+/// a workflow's request sat on it waiting to be wiped by the next conversation.
+/// A card in the journal is independent of that queue, and this asserts it.
+///
+/// Still worth pinning after issue #439, on narrower grounds. A workflow run's
+/// entries now live in their own scope, so a chat cycle can no longer reach
+/// them at all — but the property under test was never really about who could
+/// reach the queue. It is that the journal is the durable record and the queue
+/// is not, which is what makes the card survive *any* queue lifecycle.
 #[tokio::test]
 async fn the_parked_request_survives_a_later_chat_cycle() {
     let dir = tempfile::tempdir().unwrap();
@@ -336,7 +376,9 @@ async fn the_parked_request_survives_a_later_chat_cycle() {
         "precondition: the request parked"
     );
 
-    // Exactly what `HarnessBrain::run_cycle` does at the top of every cycle.
+    // Stands in for the cycle's own queue lifecycle — `clear()` outside a claim
+    // empties the unscoped bucket, and #439's `Cycle` claim clears on entry and
+    // on drop. Either way the journal must not care.
     deps.approval_requests.clear();
 
     assert!(
@@ -398,7 +440,8 @@ async fn a_workflow_node_is_refused_in_turn_instead_of_having_its_verdict_destro
     )
     .await
     .expect(
-        "the run completes — a refused board action refuses the call, it does not fail the node",
+        "the run completes — a refused board action refuses the call, it does not fail the node. \
+         It is NOT a #881 block either: a board refusal parks no approval, so the node stays ok",
     );
 
     // The model was told, in its own turn, that the card did NOT move.

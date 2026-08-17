@@ -2,7 +2,7 @@
 // never exposes runtime internals ("agent graph", "tier", "dispatch", "cycle",
 // "checkpoint", "A2A"). Everything a person sees goes through this layer.
 
-import type { ApprovalSummary, FeedbackCategory } from "../api/types";
+import type { ApprovalSummary, FeedbackCategory, StandingGrant } from "../api/types";
 
 /**
  * A company's lifecycle state, in plain language, with a status tone.
@@ -150,13 +150,104 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // does not exist. Two permissions both reading "Use one of its tools" would be
   // indistinguishable, so the tools that can actually hold one (the catch-all
   // `Other` group) need real words rather than the generic fallback.
+  // Billing (issues #788, #789). Only the two that park need words here; the
+  // read tools never reach an approval card.
+  chargebee_send_invoice: "Send an invoice to a customer",
+  chargebee_create_customer: "Add a customer to Chargebee",
   workspace_write: "Edit a note in its workspace",
   workspace_read: "Read a note in its workspace",
   workspace_list: "List its workspace notes",
+  // Every workspace mutation parks per call, so each of these reaches an
+  // operator on the approval card and again in the Standing permissions list.
+  // `workspace_create` has been missing since issue #551 and was showing as the
+  // generic "Use one of its tools"; the lifecycle pair (#671) would have
+  // arrived with the same gap. "its own folder" is load-bearing on the last
+  // two — the scope is the whole reason an operator can wave them through.
+  workspace_create: "Add a note to its workspace",
+  workspace_rename: "Rename a note in its own folder",
+  workspace_delete: "Delete a note from its own folder",
+  // Issue #245's pair. Both park per call, so each reaches an operator on the
+  // approval card and again in the Standing permissions list — and both names
+  // read like reads, which is exactly when a label has to say what is actually
+  // happening. "One of the company's repositories" is load-bearing: it tells
+  // the operator the reach is what they bound, not the whole of GitHub.
+  repo_checkout: "Check out one of the company's repositories",
+  repo_pr: "Fetch a pull request from one of the company's repositories",
   memory_store: "Save something to its memory",
   memory_recall: "Look something up in its memory",
   web_fetch: "Fetch a web page",
   query_company: "Look up something about the company",
+  // Issue #701 — the rest of the gated surface, found the way #671 was: by
+  // cross-checking every `Reach::Consequence` declaration in
+  // `src/policy/consequence.rs` against the keys of both tables here, rather
+  // than by anyone noticing a card. `every_consequence_tool_has_a_console_label`
+  // in that file is now what keeps the two in step.
+  //
+  // All of these park under their own raw tool name. That was the issue's open
+  // question and it is pinned as a test (`parked_kind_is_the_tool_name` in
+  // `src/harness/policy.rs`) rather than left to prose, because two of them
+  // invite the opposite guess: `publish_artifact` does NOT park as
+  // `external.publish` (a native workflow-gate class the tool never builds), and
+  // `run_workflow` does NOT park as `workflow.approve` (that is a workflow
+  // resuming mid-run, #395 — a different event from an agent asking to start
+  // one). A label filed under a kind nothing parks with is a label nobody sees.
+  //
+  // They belong here rather than in EFFECT_LABELS for the reason stated above:
+  // none is self-describing without the payload block underneath it — `curl`
+  // without its address says nothing — and EFFECT_LABELS' `satisfies` mirror
+  // would additionally demand a past-tense twin for a retry dialog these kinds
+  // never reach as native effects.
+  curl: "Download a file from the internet",
+  http_request: "Make a request to a web address",
+  // Three network tools, three sentences, and the differences are read off what
+  // the tools actually take rather than off their names. `curl` is not the
+  // arbitrary-method one its name suggests — it accepts a `url` and streams the
+  // body to a file in the workspace — while `http_request` carries any of GET,
+  // POST, PUT, DELETE, PATCH, HEAD, OPTIONS with headers and a body, and
+  // `web_fetch` above returns a page inline. Two labels an operator cannot tell
+  // apart are the #374 defect in a different costume.
+  git_operations: "Run a git command in its workspace",
+  read_workspace_state: "Check its workspace's git status",
+  // Both name git, which reads like a runtime internal and is not one here: it
+  // is what these tools literally run, the console already says so to an
+  // operator (`denial_reason` in `consequence.rs` explains a readonly refusal in
+  // exactly those words), and the alternative — "check its version control" over
+  // a payload block reading `git log` — is the vaguer of the two, not the
+  // plainer. `read_workspace_state` is gated *because* it shells out to git in a
+  // directory the agent can write git's own config into (#459); the operator is
+  // told what it does, and the reason it is gated stays the classifier's
+  // business.
+  mcp_call_tool: "Use a tool on a connected server",
+  // Distinct wording from `mcp_registry_tool_call`'s "Use a connected tool"
+  // below on purpose — the two are separate gates and an operator seeing both in
+  // the Standing permissions list has to be able to tell which is which.
+  publish_artifact: "Publish a file it produced",
+  // Not "…publicly", though the declaration's own comment calls publishing
+  // "externally visible": the tool's description is the narrower and more
+  // careful claim — an agent's sandbox is private, and publishing is the only
+  // thing that hands a finished file over. A card that says "publicly" over a
+  // hand-off to the operator is the misleading-label failure this issue refused
+  // to risk, so the label states what is true under either reading.
+  run_workflow: "Run one of its saved workflows",
+  // Issue #661 (M7). Only the delete of the three parks — `read_workflow` and
+  // `update_workflow` are `Reach::Nothing` — so only the delete needs words
+  // here, and "permanently" is the load-bearing one: an update keeps the prior
+  // version in the workflow's history, while this takes that history with it.
+  delete_workflow: "Permanently delete one of its saved workflows",
+  // The four tools an operator may grant standing on (#444). They are not in the
+  // catch-all `Other` group by accident — they are the low-consequence writes
+  // the standing-grant feature exists to apply to, which means they are the
+  // entries most likely to sit next to each other in the #374 Standing
+  // permissions list, where no payload block exists to tell them apart. Four
+  // rows all reading "Use one of its tools" is precisely the state that list was
+  // added to end.
+  file_write: "Write a file in its workspace",
+  edit: "Edit a file in its workspace",
+  // `apply_patch` is a batch of exact-string edits applied atomically across one
+  // or more files — "a patch" in the diff sense is what it is *not*, and the
+  // count is the whole difference between it and `edit` above.
+  apply_patch: "Edit several files in its workspace at once",
+  csv_export: "Save data as a spreadsheet file in its workspace",
   // `mcp_registry_tool_call` is deliberately absent: EFFECT_LABELS already
   // names it and is consulted first, so an entry here would be unreachable.
 };
@@ -179,11 +270,48 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
  * left alone so no other surface shifts under this change.
  */
 export function approvalAction(a: ApprovalSummary): string {
+  // Issue #846: a paused workflow gate is named by the CALL it is stopping, not
+  // by the mechanism that stopped it. "Continue a paused workflow" is true of
+  // every one of these cards and therefore tells an operator nothing — it is
+  // #372's "Glob" complaint, one surface over: the chat path was fixed by #375
+  // and this path was not, because its label came from `EFFECT_LABELS` (which
+  // keys on the effect kind, and the kind here is always `workflow.approve`)
+  // rather than from the tool.
+  //
+  // The tool is on the wire whenever the host could classify the node's call.
+  // When it could not — an authored gate on a step that calls nothing — the
+  // glossary entry below is still the honest answer, so this promotes and never
+  // hides.
+  const workflowTool = workflowGateTool(a);
+  if (workflowTool) return toolAction(workflowTool);
   return (
     labelFor(EFFECT_LABELS, a.kind) ??
     labelFor(TOOL_LABELS, a.kind) ??
     (a.agent ? "Use one of its tools" : "Do something that needs your sign-off")
   );
+}
+
+/** The effect kind a paused workflow gate parks as — mirrors
+ * `WORKFLOW_APPROVE_KIND` in `src/runtime/workflow_resume.rs`. */
+const WORKFLOW_APPROVE_KIND = "workflow.approve";
+
+/**
+ * The tool a paused workflow gate is stopping, when the host named one
+ * (issue #846) — `null` for every other kind, and for a gate whose node makes
+ * no classifiable call.
+ *
+ * Reads `payload.tool`, which the host writes for a policy-raised gate (#460)
+ * and, since #846, for an authored one too. Absence is meaningful and is
+ * preserved as such: an **older host** omits the key entirely, and this then
+ * returns `null` so the card renders exactly the pre-#846 line rather than an
+ * empty label.
+ */
+function workflowGateTool(a: ApprovalSummary): string | null {
+  if (a.kind !== WORKFLOW_APPROVE_KIND) return null;
+  const payload = a.payload;
+  if (payload == null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const tool = (payload as Record<string, unknown>).tool;
+  return typeof tool === "string" && tool !== "" ? tool : null;
 }
 
 /**
@@ -198,6 +326,79 @@ export function approvalAction(a: ApprovalSummary): string {
  */
 export function toolAction(kind: string): string {
   return labelFor(EFFECT_LABELS, kind) ?? labelFor(TOOL_LABELS, kind) ?? "Use one of its tools";
+}
+
+/**
+ * What one standing permission actually covers, in one line (#457).
+ *
+ * {@link toolAction} alone answers "which tool", which is the whole sentence for
+ * `file_write` and only half of it for `composio_execute`: that name carries
+ * every action of every connected provider, so a row reading "Act in one of its
+ * connected accounts" leaves an operator unable to tell a permission over their
+ * code host from one over their mailbox — and a permission you cannot read is
+ * one you cannot decide to revoke. When the host names a scope, the row names
+ * what it narrows to.
+ *
+ * Composed as a suffix rather than a second phrasing table: the tool's own words
+ * stay in {@link toolAction}, so there is nothing here to drift out of step
+ * with it.
+ *
+ * Lives here rather than in the view because it now has a branch worth naming
+ * ({@link scopeLabel}), and the branch is the whole of issue #785.
+ */
+export function grantHeadline(g: StandingGrant): string {
+  const action = toolAction(g.tool);
+  return g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+}
+
+/**
+ * A grant's scope as a person would read it (#785).
+ *
+ * `StandingGrant.scope` is one string carrying **two different kinds** of value,
+ * minted by two arms of the same host function (`standing_scope_of`):
+ *
+ * * a **Composio toolkit** identifier — `microsoft_teams` — which is a slug and
+ *   has to be spelled out before an operator can read it;
+ * * a **URL origin** — `https://docs.rs` — added for `web_fetch` by #673/#739,
+ *   which is already exactly what the operator approved and must survive
+ *   untouched.
+ *
+ * Issue #785 was the second kind going through the first kind's speller:
+ * `https://docs.rs` has no `_`, so it stayed one "word" and came out as
+ * `Https://docs.rs`. A scheme is not a proper noun, and an operator reading a
+ * row *in order to decide whether to revoke it* should not have to wonder
+ * whether the display is lying about the rest of the string too.
+ *
+ * The kinds are told apart here, on the value, rather than by a discriminator
+ * on the wire. `scope` is the enforcement key — the host matches a live call
+ * against it with exact string equality (`StandingGrant::admits_scope`) and it
+ * is replayed from the journal — so retyping it is a persisted-format change to
+ * a security-relevant comparison, not a label fix. What that suggestion is
+ * really worth is naming the two kinds at the type, which the doc comments on
+ * both sides now do. If a third kind ever arrives, this function is the one
+ * place that has to learn about it.
+ */
+function scopeLabel(scope: string): string {
+  return scope.includes("://") ? scope : toolkitLabel(scope);
+}
+
+/**
+ * A toolkit identifier as a person would write it: `microsoft_teams` →
+ * "Microsoft Teams".
+ *
+ * Mechanical on purpose. A lookup table of pretty provider names would render
+ * the ~30 toolkits it knew and the raw slug for everything else, and the ones it
+ * did not know would be exactly the ones added most recently.
+ *
+ * Toolkit slugs only — see {@link scopeLabel} for why a URL origin must never
+ * reach this.
+ */
+function toolkitLabel(scope: string): string {
+  return scope
+    .split("_")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 /** A one-line, human summary of what needs approval. */
@@ -237,7 +438,10 @@ export function payloadLines(a: ApprovalSummary): PayloadLine[] {
   if (typeof payload !== "object") return [{ label: "value", value: renderValue(payload) }];
   if (Array.isArray(payload)) return [{ label: "items", value: renderValue(payload) }];
 
-  const entries = Object.entries(payload as Record<string, unknown>);
+  const entries =
+    a.kind === WORKFLOW_APPROVE_KIND
+      ? workflowGateEntries(payload as Record<string, unknown>)
+      : Object.entries(payload as Record<string, unknown>);
   if (entries.length === 0) return [];
 
   // Preferred ordering for the kinds whose argument names we know. Unlisted
@@ -253,10 +457,84 @@ export function payloadLines(a: ApprovalSummary): PayloadLine[] {
     .map(([label, value]) => ({ label, value: renderValue(value) }));
 }
 
+/**
+ * The payload of a paused workflow gate, as the lines an operator needs
+ * (issue #846).
+ *
+ * A `workflow.approve` payload is not a tool call's arguments — it is the host's
+ * **resume record**, and every other card's rule ("show the payload, it is what
+ * you are consenting to") produces exactly the wrong thing here. What an
+ * operator saw was `input: {"items":[{"json":{}}],"port":null}`: the engine's
+ * seed payload, verbatim, as the sole description of a decision.
+ *
+ * So this promotes the call's own arguments to the top level, where every other
+ * card carries them, and drops the machinery. The dropped keys are dropped for
+ * stated reasons, not for tidiness:
+ *
+ * * `input` — the resume payload. It is engine seed data, it is the thing that
+ *   read as a description and was not one, and it also carries an `approvals`
+ *   list that accumulates down a lineage: an operator seeing
+ *   `{"approvals":["fetch_bbc","fetch_espn"]}` reads it as a card covering all
+ *   of them, which it is not. (Consolidating several gates into one card is
+ *   real and is issue #842 — not something to imply by accident here.)
+ * * `delivered`, `performed` — the #438/#846 ledgers. They say what will NOT
+ *   happen again, which is a property of the mechanism and is already stated in
+ *   prose by `note`.
+ * * `content` — rendered in full by its own block (`WorkflowContentReview`,
+ *   #596); repeating it as one clamped JSON line would be strictly worse.
+ * * `note` — prose, rendered as prose elsewhere on the card, not as a
+ *   `key: value` pair in a monospace block.
+ *
+ * Everything else survives, including any key a **newer host** adds that this
+ * console has never heard of. Dropping unknown keys would make an old console
+ * silently hide new information, which is the failure mode this whole file is
+ * written against; the denylist is closed and the allowlist is not.
+ */
+function workflowGateEntries(payload: Record<string, unknown>): [string, unknown][] {
+  const args = payload.args;
+  const argEntries: [string, unknown][] =
+    args != null && typeof args === "object" && !Array.isArray(args)
+      ? Object.entries(args as Record<string, unknown>)
+      : [];
+  const rest = Object.entries(payload).filter(([key]) => !WORKFLOW_GATE_HIDDEN.has(key));
+  // The call first, then where and what stopped it. An operator decides on the
+  // call; the node id is how they find it afterwards. This order survives
+  // `payloadLines`' sort because no `PAYLOAD_KEY_ORDER` entry exists for this
+  // kind — every rank is equal, and the sort is stable.
+  return [...argEntries, ...rest];
+}
+
+/** Payload keys of a `workflow.approve` card that are machinery, not the
+ * decision — see {@link workflowGateEntries} for why each one is here. */
+const WORKFLOW_GATE_HIDDEN: ReadonlySet<string> = new Set([
+  "input",
+  "delivered",
+  "performed",
+  "content",
+  "note",
+  // Unwrapped one level above, so keeping it would print the same arguments
+  // twice — once readably and once as a JSON blob.
+  "args",
+]);
+
 /** Which arguments lead the preview, per tool. Presentation only. */
 const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {
   shell: ["command", "cwd", "timeout"],
   glob: ["pattern", "path"],
+  // The #701 labels lean on this block harder than the two above do. "Download a
+  // file from the internet" is only half a question until the operator can see
+  // *which* address, and both network payloads carry headers and a body that
+  // will happily push the url off the first line. Same for the git operation,
+  // which is the entire difference between reading a log and committing.
+  //
+  // Key names are the tools' own, not guesses: `curl` takes `url`/`dest_path`
+  // and no method (it streams a download to disk), `http_request` takes
+  // `url`/`method`, and `git_operations` takes `operation` — an enum, not a
+  // command line. Nothing is hidden here; this promotes, and every unlisted
+  // argument still follows.
+  curl: ["url", "dest_path"],
+  http_request: ["url", "method"],
+  git_operations: ["operation"],
 };
 
 function renderValue(value: unknown): string {

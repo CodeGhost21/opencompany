@@ -13,8 +13,8 @@ a safe default; the defaults produce a working company with only
 
 Parsing lives in `src/company/manifest.rs` (`CompanyManifest::from_path`,
 serde + validation). Validation errors MUST be actionable in prosumer
-language ("`[policy].mode` must be one of readonly, supervised, full — you
-wrote `supervized`"), never serde traces.
+language ("`[policy].mode` must be one of readonly, supervised, auto, full —
+you wrote `supervized`"), never serde traces.
 
 ## Full schema
 
@@ -33,16 +33,32 @@ description = "Write ads, pages, and campaign copy."
 # NEW optional per-agent keys:
 tier = "reasoning"                 # cognition tier hint (see glossary)
 tools = ["docs.*", "email.send"]   # tool grant globs
+delegates_to = ["research"]        # desks this agent may hand work to ("*" = all)
 budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
+prompt = "Write for the reader."   # appended to the generated persona
+prompt_files = ["prompts/tone.md"] # checked-in briefing docs, under `agents/`
+context = ["BRIEF.md"]             # live workspace docs routed into the prompt
+classes = ["evidence"]             # routing exclusions: evidence | judge | directive
+# A roster may instead live one file per teammate under `agents/<id>.toml`, with
+# these same keys and the filename as the id. The two forms are exclusive —
+# declaring both is a validation error. See runtime/agents.md.
 
 # ── new tables (all optional) ──────────────────────────────────────────
 [users]
+# How humans sign in: email (default) | wallet | none. See
+# runtime/auth-modes.md. The mode decides which bootstrap list below is read —
+# `admins` in email mode, `wallets` in wallet mode, neither in none mode, which
+# has no sign-in at all and cannot add a second person.
+mode = "email"
 # Addresses that may sign in as admins without being invited first. This is
 # the bootstrap for invite-only access: someone has to send the first invite,
 # and there is no operator token to do it with. Listing an address does not
 # create an account — it makes the address eligible, and signing in mints the
 # admin. See runtime/users.md.
 admins = ["ada@example.com"]
+# The same grant, for `mode = "wallet"`: base58 Ed25519 wallet addresses that
+# may sign in as admins without an invite.
+wallets = ["7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"]
 
 [brain]
 mode = "hosted"                    # hosted (default) | sidecar
@@ -63,15 +79,27 @@ enabled = true                     # built-in chat; default true
 [channels.email]
 provider = "openhuman"             # delegate to an OpenHuman channel
 
+[[group_chat]]
+id = "creative"                    # a desk: who the human talks to
+name = "Creative studio"
+members = ["copywriter"]           # ids from the roster
+tools = ["docs.*"]                 # NEW: this desk's tool ceiling. Optional;
+                                   # empty narrows nothing. See runtime/tools.md
+
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
-allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
+allow = ["web.*", "docs.*", "search"]  # company-wide ceiling. Desks and agents
+                                   # narrow it: allow ∩ desk.tools ∩ agent.tools
                                    # `search` must be named — `*` never grants it
 search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
+max_delegation_depth = 2           # how deep one message's hand-off chain may run
+                                   # 1 = desks may not re-delegate at all; 1..=4
 
 [policy]                           # see company-brain/approvals.md
-mode = "supervised"                # readonly | supervised (default) | full
-always_approve = ["payment.send", "filing.submit", "external.publish"]
+mode = "supervised"                # readonly | supervised | auto | full
+                                   # parse default supervised; new companies get auto
+always_approve = ["publish_artifact"]   # default []; names a tool or an open
+                                   # effect kind — see approvals.md
 auto_approve_under_usd = 1.0
 
 [place]                            # see company-as-agent/
@@ -88,6 +116,10 @@ name = "starter"                   # free | starter | pro | unlimited (optional)
 period = "daily"                   # daily (default) | monthly
 token_budgets = { web = 500000 }   # override/extend the named tier per namespace
 
+[workflows]                        # saved workflow graphs (issue #401)
+enabled = ["digest"]               # ids of workflows/<id>.toml graphs to enable
+max_in_flight_runs = 8             # concurrent-run ceiling (default 8; must be >= 1)
+
 [[schedule]]
 cron = "0 9 * * MON"
 prompt = "Weekly review and operator digest"
@@ -97,10 +129,60 @@ prompt = "Weekly review and operator digest"
 
 - **`[company]`** becomes the seed of the [Charter](../company-brain/charter.md).
   `handle` is only used when `[place].discoverable = true`.
-- **`[[agent]]`** entries define the Roster. `tier` is a hint the brain may
-  use when delegating; it never selects a model (the backend maps tiers to
-  SKUs). `tools` and `budget_usd_daily` intersect with the company-wide
-  `[tools].allow` and `[budget]` — the most restrictive wins.
+- **`[[agent]]`** entries define the Roster — or, equivalently, one
+  `agents/<id>.toml` file per teammate under the company bundle, carrying the
+  same keys with the filename as the id. The two forms are **exclusive**:
+  declaring both is a validation error rather than a precedence rule, because
+  either precedence would silently discard teammates somebody wrote down. Full
+  schema, including `prompt` / `prompt_files` / `context` / `classes`, in
+  [runtime/agents.md](agents.md).
+
+  `tier` is a hint the brain may use when delegating; it never selects a model
+  (the backend maps tiers to SKUs). `tools` and `budget_usd_daily` intersect
+  with the company-wide `[tools].allow` and `[budget]` — the most restrictive
+  wins. Tool grants resolve through **three** levels,
+  `[tools].allow ∩ [[group_chat]].tools ∩ [[agent]].tools`, every one of them
+  narrow-only and an empty one a pass-through; see
+  [runtime/tools.md](tools.md), which also covers why an empty grant list means
+  "inherit" rather than "nothing".
+
+  **`delegates_to`** (issue #176) is the one per-agent key that is *not* a
+  narrowing of a company-wide list: it is an **opt-in**. Empty — the default,
+  and every manifest written before it existed — means the agent carries no
+  delegation tool at all, which is how a dispatched desk agent has always
+  behaved. Naming one or more desks wires exactly two tools onto it,
+  `spawn_task` and a `delegate_to_desk` narrowed to those desks, so a desk lead
+  can pull a specialist in for one slice instead of handing the whole request
+  back to the orchestrator.
+
+  It takes **desk** ids or names (`[[group_chat]]` entries), never teammate
+  ids — desks are the address space `delegate_to_desk` already resolves
+  against — and `"*"` means every desk the company has. An entry that names no
+  declared desk fails validation, because at runtime it would fail silently:
+  the member would carry the tool and every call would be refused.
+
+  It never confers the orchestrator's *authority* — `assign_task`,
+  `review_task`, `add_agent`, `query_company`, `run_workflow`,
+  `create_workflow`, and the #661 workflow-admin trio (`read_workflow`,
+  `update_workflow`, `delete_workflow`) stay orchestrator-only. A member gets what it needs to pass
+  a slice on and to leave the rest tracked, and nothing more.
+
+  Three runtime guards bound what it can do, all enforced at the tool boundary
+  in the member's own turn rather than by which tools were wired (belts are
+  cached per roster, so a tool cannot be withheld from one turn):
+
+  - **Depth** — `[tools].max_delegation_depth`, below.
+  - **Cycles** — a hand-off to a desk already on the current chain (A→B→A), or
+    to the desk the caller itself leads, is refused.
+  - **Allowlist** — a target outside `delegates_to` is refused, and the refusal
+    names the desks the member *can* reach so it can retry in the same turn.
+
+  Each refusal reaches both the model and the board: the run trail carries it
+  verbatim, and a refused hand-off is recorded on the dispatched card's note,
+  so the operator reads the fact rather than inferring it from an absence.
+
+  The per-turn fan-out cap (three delegations) applies **per level**, not per
+  message — each turn starts against an empty queue.
 
   **`budget_usd_daily`** (enforced since issue #304 — before that it was
   validated, stored and displayed, but nothing read it) caps one teammate's
@@ -187,11 +269,27 @@ prompt = "Weekly review and operator digest"
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
-- **`[policy]`** configures the default `ApprovalGate`. `mode` mirrors
-  OpenHuman's security tiers. `always_approve` lists effect kinds that park
-  for approval regardless of amount; `auto_approve_under_usd` lets small
-  spends through. Defaults are conservative: `supervised`, with all
-  money/publish/filing effects gated.
+- **`[policy]`** configures the default `ApprovalGate`. `mode` takes three of
+  its four names from OpenHuman's security tiers; `auto` is opencompany's own
+  and sits between `supervised` and `full` (the agent's sandbox writes and
+  outward reads run unattended, anything that leaves the company or spends on
+  submit still parks). `always_approve` lists effect kinds that park for
+  approval regardless of amount and wins over every tier including `full`;
+  `auto_approve_under_usd` lets small spends through. The parse default is
+  `supervised`, with all money/publish/filing effects gated — but a **new**
+  company is given `auto`, written into its manifest explicitly rather than
+  left to that default. See
+  [grants.md](../company-brain/grants.md#which-tier-a-new-company-gets)
+  for why those are two separate knobs, and why moving the parse default is the
+  one thing issue #605 declined to do. **A tool name is an
+  effect kind** — the harness projects one onto the other — so
+  `["publish_artifact"]` and `["payment.send"]` are the same syntax at
+  different segment counts (issue #684). Operator-authored effect kinds remain
+  open-ended because a hosted brain may emit a kind this repository has never
+  seen; the shared matcher runs before the checkpoint taxonomy. The default is
+  **empty**: `supervised` already parks every money / publish / filing effect
+  through that taxonomy, so the conservative default is the mode, not the
+  list.
 - **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across
@@ -253,22 +351,50 @@ prompt = "Weekly review and operator digest"
       does not get one.
     - **There is no `search` Cargo feature.** The tool rides the `openhuman`
       harness feature so CI's gated lane actually compiles and tests it.
+
+  **`max_delegation_depth`** (issue #176) bounds how deep one operator
+  message's hand-off chain may run, counted in hand-offs: the orchestrator
+  handing work to a desk lead is level 1, that lead handing a slice on is
+  level 2. Default `2`; valid `1..=4`, where `1` is the "recursion off" setting
+  and reproduces the pre-#176 behaviour exactly.
+
+  The depth in force is read from the **live company record** on every call, so
+  lowering it takes effect on the next turn without a rebuild. A hand-off past
+  the bound is refused in the model's own turn with the reason
+  `depth_capped` — while `spawn_task` still works at the bound, so a member that
+  has run out of chain leaves the remaining work tracked instead of doing it
+  silently.
+
+  The bound only ever matters to an agent some manifest opted in with
+  `delegates_to`; a company that names nobody is unaffected by any value here.
+  It is deliberately low: the fan-out cap applies per level, so each extra
+  level multiplies the turns one message can buy.
     The Usage view surfaces a `Web searches` KPI plus a search status row
     (active / paused at cap 0 / awaiting credential / not granted / not in this
     build).
-  - **`workspace`** (issues #237, #551) grants the company's shared note tree —
+  - **`workspace`** (issues #237, #551, #671) grants the company's shared note tree —
     the `Standards/` / `Playbooks/` / `Product/` documents seeded from
     `companies/<name>/workspace/**`, plus whatever the operator and the agents
     have written since. It is **split**, unlike every other namespace: *reads*
-    (`workspace_list`, `workspace_read`) follow the ordinary rule, so a
+    (`workspace_list`, `workspace_search`, `workspace_read`) follow the
+    ordinary rule, so a
     catch-all `*` confers them; *mutations* (`workspace_write`,
-    `workspace_create`) need an **explicit** `workspace` or `workspace.write`
+    `workspace_create`, `workspace_rename`, `workspace_delete`) need an
+    **explicit** `workspace` or `workspace.write`
     entry in `[tools].allow`, because they change a tree every other agent then
     treats as the company's source of truth. `workspace.read` is therefore a
-    genuinely read-only grant. Create and write ride the one flag on purpose:
+    genuinely read-only grant. All four ride the one flag on purpose:
     overwriting an existing standard is strictly more destructive than adding a
-    note beside it, so a grant permitting the first has already permitted the
-    second. `workspace_write` overwrites one **existing** note and requires an
+    note beside it, and strictly more destructive than removing or moving
+    something inside the agent's own folder, so a grant permitting the first has
+    already permitted the rest. Issue #671 deliberately added no fifth grant
+    name. `workspace_search` (issue #607) is a read and rides the read side of
+    that split — **not** the metered `search` namespace, despite the name.
+    `search` is the paid external-credential grant that carries `web_search`;
+    reading the company's own notes must not require a billed credential, and
+    search reads exactly what `workspace_read` already grants, so it costs the
+    operator no additional decision. `workspace_write` overwrites one
+    **existing** note and requires an
     `expected_updated_at` revision token taken from a prior read, so a note
     edited in the console since the agent read it is refused rather than
     clobbered. `workspace_create` adds one folder or note at a path that is
@@ -279,14 +405,28 @@ prompt = "Weekly review and operator digest"
     provisioned at boot. Since issue #552 this call is one of two paths that
     bring it into existence; publishing a deliverable
     (`artifact_mirror::materialize`) is the other, and both go through the same
-    `ensure_agent_folder` seam. Renaming and deleting stay operator-only.
+    `ensure_agent_folder` seam.
+
+    `workspace_rename` and `workspace_delete` (issue #671) are the tidying half.
+    Both act on **one node at a time** and both reach only
+    `Agents/<agent-id>/` — the agent's own folder, never the folder itself,
+    never a teammate's, never shared guidance. `workspace_delete` carries the
+    same required `expected_updated_at` token as `workspace_write` and refuses a
+    folder that still holds anything, so a subtree is removed as N deliberate,
+    individually-parked calls rather than one. `workspace_rename` carries no
+    token, because it destroys nothing: body, id and both authorship stamps
+    survive it. Read the confinement as a division of labour rather than as a
+    security boundary — the same grant already confers *unconfined* overwrite,
+    which reaches further than own-folder lifecycle does. Renaming or deleting
+    anything elsewhere in the tree stays operator-only.
 
     Agent writes are **unconfined**: an agent may create or edit anywhere in its
     company's tree. Confining creation while leaving overwrite free would
     protect nothing. What keeps the tree navigable instead is steering plus
     attribution — the persona brief names the agent's own reserved folder
     `Agents/<agent-id>/` (minted the first time that agent puts something in it;
-    boot only scaffolds the empty `Agents/` and `Desks/` roots) as the default
+    boot only scaffolds the empty `Agents/` root, and since issue #645 `Desks/`
+    is minted on first use rather than scaffolded) as the default
     home for what it produces and marks shared
     guidance as something to edit only on purpose, and every node records who
     created it and who last wrote it (issue #326), which the console shows. Both
@@ -310,6 +450,19 @@ prompt = "Weekly review and operator digest"
   separately, with the same dialect: its `trigger` node carries a `schedule`
   cron that the workflow scheduler fires (issue #169). A manifest schedule
   drives a company cycle; a trigger schedule drives one workflow run.
+- **`[workflows]`** enables saved graphs and bounds how many may run at once.
+  `enabled` lists the `workflows/<id>.toml` ids to turn on. `max_in_flight_runs`
+  (issue #401) is the company's concurrent-run ceiling — default **8**,
+  validated **>= 1** (a `0` would refuse every run and is rejected at load). It
+  applies to *every* entry point that starts a run (the manual run route, the
+  cron scheduler, an approved gate's continuation, and the orchestrator's
+  `run_workflow` tool), enforced at one choke point. The default sits above 1
+  deliberately: a running workflow's agent node can call `run_workflow` while
+  the parent run still holds a slot, so a ceiling of 1 would refuse legitimate
+  nesting. A run over the ceiling is **refused, never queued** — the run route
+  answers `429` (see `api.md`), a scheduled fire is skipped for that minute, and
+  the orchestrator tool tells the agent to wait. A slot frees the instant a run
+  settles.
 
 ## Layering and provenance
 

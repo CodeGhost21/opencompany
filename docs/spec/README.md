@@ -54,6 +54,8 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 - **Runtime engineering**: [runtime/](runtime/README.md) →
   [company-brain/](company-brain/README.md) →
   [integrations/](integrations/README.md)
+- **Security**: [security/agent-isolation.md](security/agent-isolation.md) —
+  read this before assuming any agent capability is contained
 - **Where this is going**: [roadmap.md](roadmap.md) →
   [feature audit](feature-audit/README.md) →
   [vision/](vision/README.md)
@@ -76,6 +78,8 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [company-brain/README.md](company-brain/README.md) | What the company brain is; the cycle |
 | [company-brain/charter.md](company-brain/charter.md) | The company constitution |
 | [company-brain/approvals.md](company-brain/approvals.md) | Checkpoints and the approval model |
+| [company-brain/grants.md](company-brain/grants.md) | Grants and the tool gate: single-use, standing, tiers, precedence |
+| [company-brain/per-call-judgement.md](company-brain/per-call-judgement.md) | Which calls warrant a human, per call (step 7 of the gate) |
 | [company-brain/memory.md](company-brain/memory.md) | Long-term memory and retention |
 | [runtime/README.md](runtime/README.md) | Kernel architecture and crate layout |
 | [runtime/ports.md](runtime/ports.md) | Port trait contracts (normative) — index, assembly, defaults |
@@ -88,10 +92,21 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
+| [runtime/orchestration/README.md](runtime/orchestration/README.md) | Making a many-agent company converge: the three collapses, the three principles, phasing |
+| [runtime/orchestration/memory.md](runtime/orchestration/memory.md) | One memory contract: `MemoryProvider` replaces three ports, and the host decorator that keeps tenants apart |
+| [runtime/orchestration/context-routing.md](runtime/orchestration/context-routing.md) | Which workspace documents reach which role's prompt, the load-bearing exclusions, and assembly order |
+| [runtime/orchestration/alignment.md](runtime/orchestration/alignment.md) | The budgeted brief, the derived ledgers, the assertion board |
+| [runtime/orchestration/demand-ledger.md](runtime/orchestration/demand-ledger.md) | The demand ledger as the work model (normative): dedup, closure by evidence, the column projection |
+| [runtime/orchestration/loop.md](runtime/orchestration/loop.md) | The attempt loop: the evaluation fan-out, judge vs verify, routing, and the mandatory parity sweep |
+| [runtime/orchestration/delegation.md](runtime/orchestration/delegation.md) | The join primitive, operator directives, and collapsing desks into workflows |
+| [runtime/orchestration/sandbox.md](runtime/orchestration/sandbox.md) | Containerised programming tools: posture, placement, the code library, checkpointing |
 | [runtime/api.md](runtime/api.md) | HTTP surface and auth model |
 | [runtime/config.md](runtime/config.md) | Configuration and the one-key story |
+| [runtime/repos.md](runtime/repos.md) | Bound repositories: mirror cache, credential handling, quota |
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
+| [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |
+| [security/agent-isolation.md](security/agent-isolation.md) | What confines an agent and what does not — enforced controls, the gaps, and the capability that survives every planned control |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |
 | [company-as-agent/identity.md](company-as-agent/identity.md) | Wallet, handle, Agent Card |
 | [company-as-agent/commerce.md](company-as-agent/commerce.md) | Selling, hiring, delegated signers, ledger |
@@ -105,10 +120,16 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [feedback-loop/privacy.md](feedback-loop/privacy.md) | Redaction rules (normative) |
 | [feedback-loop/triage.md](feedback-loop/triage.md) | Labels, triage, closing the loop |
 | [vision/README.md](vision/README.md) | The AVI north star (aspirational) |
+| [../brand/README.md](../brand/README.md) | Brand guideline: positioning, voice, colour, form |
+| [../design-system/README.md](../design-system/README.md) | Design system: tokens, type, components (normative for the console) |
 
 Module docs under [`docs/modules/`](../modules/) describe the code as it
 exists today; this spec describes the target design. When they disagree, the
 spec wins for new work.
+
+The brand and design-system docs are the exception to that split: they describe
+what the console ships *today*, because their source of truth is a stylesheet
+(`frontend/src/index.css`) and a page that renders it (`#/styleguide`).
 
 ## Conventions
 

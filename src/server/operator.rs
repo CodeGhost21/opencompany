@@ -35,7 +35,9 @@ use crate::ports::types::{
 };
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
-use crate::server::chat_history::{MessageView, ReactionView, Viewer, history_for_desk};
+use crate::server::chat_history::{
+    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, history_for_desk,
+};
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
 use crate::server::ops::language::{self, DEFAULT_DESK};
@@ -222,10 +224,10 @@ struct SetDeskOrder {
 /// (`ops::team::add_member`): load the record, mutate `overlay_desk_members`,
 /// and save. The manifest's `[[group_chat]]` blueprint is never rewritten.
 ///
-/// Validates that the desk exists in the manifest and that `agent_id` resolves
-/// to a roster teammate (a manifest agent or a team-overlay teammate); rejects
-/// with `404`/`400` otherwise. Adding a teammate already on the desk (manifest
-/// or overlay) is a `409`.
+/// Validates that the desk exists and that `agent_id` resolves to a roster
+/// teammate (a manifest agent or a team-overlay teammate); rejects with
+/// `404`/`400` otherwise. Adding a teammate already on the desk (manifest or
+/// overlay) is a `409`.
 async fn add_desk_member(
     scope: ScopedCompany,
     Path(DeskPath { desk_id }): Path<DeskPath>,
@@ -238,9 +240,12 @@ async fn add_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
-    // The desk must be one of the company's blueprint group chats.
-    if !record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
-        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+    // The desk must exist — either a manifest blueprint group chat or an
+    // operator-created overlay desk (#140). A manifest-only check meant a desk
+    // created in the console could be reordered and deleted but never staffed
+    // (#833); `desk_exists` is the same check `effective_desk_members` uses.
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
             "desk {desk_id}"
         ))));
     }
@@ -348,11 +353,13 @@ async fn remove_desk_member(
         .load(scope.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(scope.id().to_string()))?;
-    // First validate that the desk exists in the manifest — otherwise a caller
-    // supplying an unknown desk_id gets a desk-scoped 404 rather than a confusing
-    // member-scoped one (Greptile feedback).
-    if !record.manifest.group_chats.iter().any(|c| c.id == desk_id) {
-        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+    // First validate that the desk exists at all — otherwise a caller supplying
+    // an unknown desk_id gets a desk-scoped 404 rather than a confusing
+    // member-scoped one (Greptile feedback). Existence spans both blueprint and
+    // operator-created overlay desks (#140); a manifest-only check here stranded
+    // console-created desks with members that could never be removed (#833).
+    if !record.desk_exists(&desk_id) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
             "desk {desk_id}"
         ))));
     }
@@ -373,7 +380,7 @@ async fn remove_desk_member(
         .overlay_desk_members
         .retain(|m| !(m.desk_id == desk_id && m.agent_id == agent_id));
     if record.overlay_desk_members.len() == before {
-        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+        return Err(ApiError(OpenCompanyError::NotFound(format!(
             "desk member {agent_id}"
         ))));
     }
@@ -750,21 +757,38 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             }
             o
         }
-        // The dispatch terminal (#185). `output` is the agent's own reply text
-        // — the same string already written into the card's note — never raw
-        // tool output, so it is safe to project.
+        // The dispatch terminal (#185), narrowed and widened by #377.
+        //
+        // **Widened** with `chatId`: the conversation the card was raised from,
+        // which is what lets a console file the settle into the channel the
+        // work came from instead of guessing at one. Omitted rather than null
+        // when the card names none — mirroring `approval_parked` below, so "no
+        // conversation raised this" is a presence check on the console rather
+        // than a null check, and a board-created card is board-only on the wire
+        // too.
+        //
+        // **Narrowed** by dropping `output`. The run's prose already reaches
+        // the operator as the orchestrator's relay bubble (#151); what the
+        // channel was missing is the structural fact that the card *settled*
+        // and *where*, which is `column`. Carrying the prose here as well would
+        // put one run's words into the same channel twice, so it is dropped at
+        // the projection — the one place that can guarantee no later reader
+        // reintroduces the duplicate. Nothing in the console read it. `desk`
+        // stays for wire compatibility.
         CompanyEvent::DeskTaskCompleted {
             task_id,
             desk,
-            output,
             column,
+            origin_chat_id,
             ..
         } => {
             let mut o = envelope("desk_task_completed");
             o["taskId"] = json!(task_id);
             o["desk"] = json!(desk);
-            o["output"] = json!(output);
             o["column"] = json!(column);
+            if let Some(chat_id) = origin_chat_id {
+                o["chatId"] = json!(chat_id);
+            }
             o
         }
         // Issue #379: a request just parked, so a console watching the
@@ -905,6 +929,10 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             pending_approvals,
             error,
             cancelled,
+            notices,
+            board,
+            blocked_nodes,
+            approvals,
         } => {
             let mut o = envelope("workflow_run_finished");
             o["workflowId"] = json!(workflow_id);
@@ -925,6 +953,37 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // operator who just pressed Cancel would get "ran successfully".
             if *cancelled {
                 o["cancelled"] = json!(true);
+            }
+            // Issue #638: same presence-check discipline again. Omitted on the
+            // overwhelming majority of runs, which raise nothing — so a console
+            // that checks for the key gets "was there anything to tell me?"
+            // without having to compare against an empty list.
+            if !notices.is_empty() {
+                o["notices"] = json!(notices);
+            }
+            // Issue #661 (M5): the same presence-check discipline once more, and
+            // the same widens-nothing argument as `deliveries` above — in fact a
+            // weaker claim, because a board row is structural by construction (see
+            // `WorkflowRunBoardRow`) rather than by this arm choosing what to
+            // forward. It carries ids and the card's own title, which the board
+            // read already serves this same console under the same guard.
+            //
+            // Projected so a console watching a run live learns it opened a card at
+            // the moment it settles, rather than only on the next history read.
+            if !board.is_empty() {
+                o["board"] = json!(board);
+            }
+            // Issues #881 / #880: the same presence-check discipline again, and
+            // projected for the same reason `deliveries` is — a console
+            // watching a run live must not be told it finished cleanly while
+            // the history it reloads a moment later says it blocked. Both rows
+            // are structural by construction (node ids, tool names, approval
+            // ids), so this arm forwards no payload it has to choose to scrub.
+            if !blocked_nodes.is_empty() {
+                o["blockedNodes"] = json!(blocked_nodes);
+            }
+            if !approvals.is_empty() {
+                o["approvals"] = json!(approvals);
             }
             o
         }
@@ -1090,6 +1149,14 @@ struct ChatResponse {
     /// that would need it.
     #[serde(skip_serializing_if = "Option::is_none")]
     message_id: Option<String>,
+    /// The same count [`ResolveReceiptDto::still_awaiting`] carries, for the
+    /// non-detached resolve the Approvals page makes (issue #561).
+    ///
+    /// Only ever set by a resolve. Omitted everywhere else — a chat turn is not
+    /// blocked on anybody's sign-off — so no other caller has to learn it
+    /// exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    still_awaiting: Option<usize>,
 }
 
 /// Runs one operator-chat cycle, returning the report and, when a complaint
@@ -1131,35 +1198,99 @@ async fn run_chat(
     } else {
         None
     };
-    // Deterministic task card: an actionable operator request ("build the
-    // landing page", "can you set up the newsletter") opens a `todo` card so
-    // "do X" always leaves a visible work item on the dashboard — independent of
-    // whether the orchestrator model also calls `spawn_task` (it may open
-    // sub-tasks on top). Pure questions, greetings, and acknowledgements don't
-    // fire, so the board fills with work, not small talk. Best-effort: a card
-    // write failure must never sink the chat reply.
+    // Deterministic task card, opened only for a message the triage calls
+    // `Track`: an actionable operator request ("build the landing page", "can
+    // you set up the newsletter") opens a `todo` card so "do X" always leaves a
+    // visible work item on the dashboard — independent of whether the
+    // orchestrator model also calls `spawn_task` (it may open sub-tasks on top).
+    // Best-effort: a card write failure must never sink the chat reply.
+    //
+    // Issue #267 turned the boolean this used to read into a positive three-way
+    // classification. `Answer` (a question about state, a read request) and
+    // `Chatter` (greetings, acknowledgements, anything ambiguous) both open
+    // nothing here — but they are NOT the same answer, and the difference
+    // matters one layer down: `Answer` additionally takes the model's own
+    // board-writing tools away for the turn, in
+    // `DelegationRunner::handle_operator_message`, because a question was the
+    // other door dead cards came through. This site is Layer A of that pair: it
+    // is compiled into every build and fronts both cognition brains, whereas the
+    // gate is on the harness path only.
     //
     // NOT on a workflow copilot thread (issue #416). A copilot question is
     // phrased at the workflow — "add a node that emails the report", "why does
-    // this fail on Mondays" — and the intent detector reads the first of those
-    // as a request to the company, which would put a card on the board from a
+    // this fail on Mondays" — and the triage reads the first of those as a
+    // request to the company, which would put a card on the board from a
     // conversation the operator was having *about a graph*. The confinement in
     // the harness stops the turn from acting; this stops the route from acting
     // on its behalf, and it holds in every build because it is here rather than
     // behind the `openhuman` feature.
+    //
+    // Issue #845: an explicit `workflow` deliverable opens a card whatever the
+    // triage said. The operator reached for a control **named** "Build me the
+    // workflow" and pressed it — that is a positive statement of intent about
+    // this message, and it is better evidence than a lexical classifier's guess.
+    // Where the two disagreed, the classifier won and the choice was dropped on
+    // the floor: no card, so no builder pass, so nothing built, and no error
+    // either — the operator got a conversational reply to a request they had
+    // asked to be turned into a workflow.
+    //
+    // Deliberately narrow. It does not change what the card *is* (the title
+    // still comes from the triage, or from the message when the triage declined
+    // to name one), it does not touch `Track`'s existing behaviour, and it stays
+    // inside the `!confined` guard — a copilot thread still opens nothing,
+    // because a message *about* a graph is not a request to build one.
+    let workflow_requested =
+        !confined && message.deliverable == Some(crate::ports::tasks::TaskDeliverable::Workflow);
     if let Some(title) = (!confined)
-        .then(|| crate::company::task_intent::detect_task_intent(&message.text))
-        .flatten()
+        .then(|| crate::company::task_intent::triage_message(&message.text))
+        .and_then(|triage| match triage {
+            crate::company::task_intent::MessageTriage::Track(title) => Some(title),
+            crate::company::task_intent::MessageTriage::Answer
+            | crate::company::task_intent::MessageTriage::Chatter => None,
+        })
+        .or_else(|| {
+            workflow_requested.then(|| crate::company::task_intent::to_title(message.text.trim()))
+        })
+        .filter(|title| !title.trim().is_empty())
     {
         // Keep the full message as the note only when the title was shortened
         // from it, so a one-line ask doesn't duplicate itself.
         let note =
             (title.trim_end_matches('…') != message.text.trim()).then(|| message.text.clone());
+        // Issue #576: the prompt box opens the card **already in Planning**, so
+        // the spine epic #183 draws — prompt in, deliverable out — runs without
+        // a human dragging the first step. The card is created *directly* in
+        // `planning` rather than created in `todo` and then promoted, and that
+        // is the whole of the "fires exactly once" property:
+        // `task_enters_planning` compares the previous column to the next, and
+        // a card that does not exist yet has no previous column, so the single
+        // `upsert_task` below is one transition into Planning and therefore one
+        // pass. A create-then-promote would be two writes, two board events, and
+        // a window in which the card is visible — and actionable — in To-do.
+        //
+        // **Only for a person.** `by` is `Some` only when a signed-in user is
+        // behind this request; a machine credential resolves to `None`. An agent
+        // that could open a self-promoting card would trigger a planning pass,
+        // which can open further cards, which promote, which plan — a spend loop
+        // with no human in it. The issue's own "a typo costs a planning call" is
+        // about a *person's* mistake costing one call. Widening this later is
+        // safe; narrowing it after a spend loop is not. `Agent` and `System` are
+        // named explicitly rather than left to `None` so a future caller that
+        // passes an agent actor is refused by this branch rather than by luck.
+        let opened_by_a_person = matches!(
+            by.as_ref().map(|actor| actor.kind),
+            Some(crate::ports::types::ActorKind::User | crate::ports::types::ActorKind::Operator)
+        );
+        let column = if opened_by_a_person {
+            crate::ports::tasks::COLUMN_PLANNING
+        } else {
+            crate::ports::tasks::COLUMN_TODO
+        };
         let record = crate::ports::tasks::TaskRecord {
             id: crate::ports::generate_id(),
             title,
             note,
-            column: crate::ports::tasks::COLUMN_TODO.to_string(),
+            column: column.to_string(),
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: crate::ports::now_millis(),
@@ -1177,6 +1308,8 @@ async fn run_chat(
             // here infers the choice from the text (decision D2a).
             deliverable: message.deliverable.unwrap_or_default(),
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
@@ -1192,6 +1325,12 @@ async fn run_chat(
             // …and the message being replied to, so the thread is a fact about
             // the transcript rather than about one browser (issue #364).
             parent,
+            // Issue #845: and the once-vs-workflow choice, so the turn that
+            // answers this message knows whether the builder pass owns the
+            // authoring. Without it the turn ran blind and denied a capability
+            // that was being exercised on the very same message — see the field
+            // docs on `CompanyEvent::OperatorMessage`.
+            deliverable: message.deliverable,
         }])
         .await?;
     Ok((report, feedback_note))
@@ -1276,6 +1415,8 @@ async fn chat_and_emit(
         // sequence is the first the cycle journaled (issue #364).
         message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
         responses: report.responses,
+        // A chat turn is nobody's sign-off, so this stays absent here.
+        still_awaiting: None,
     }))
 }
 
@@ -1304,10 +1445,15 @@ async fn chat_actor(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Option<Actor>, Response> {
     use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 
-    let auth = resolve_principal(headers, state, Some(company))
+    // `peer` is threaded from every one of this function's callers, all the
+    // way from their own handler's `MaybePeer` extractor, so `local_owner`'s
+    // loopback-peer gate applies on this surface exactly as it does through
+    // `CompanyAuth` and the GraphQL handler.
+    let auth = resolve_principal(headers, state, Some(company), peer)
         .await
         .map_err(|_| unauthorized_response())?;
     if let Some(resp) = authorize_address(state, &auth, company) {
@@ -1338,10 +1484,11 @@ async fn operator_chat(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatResponse>, Response> {
     let company = CompanyId::new(&id);
-    let by = chat_actor(&headers, &state, &company).await?;
+    let by = chat_actor(&headers, &state, &company, peer).await?;
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
     chat_and_emit(&state, &company, runtime, message, by)
         .await
@@ -1352,11 +1499,12 @@ async fn operator_chat(
 async fn operator_chat_single(
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
 ) -> Result<Json<ChatResponse>, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    let by = chat_actor(&headers, &state, &id).await?;
+    let by = chat_actor(&headers, &state, &id, peer).await?;
     chat_and_emit(&state, &id, runtime, message, by)
         .await
         .map_err(IntoResponse::into_response)
@@ -1369,6 +1517,14 @@ struct ChatHistoryQuery {
     /// General/"main" line — the console's default thread (issue #65).
     #[serde(default)]
     desk: Option<String>,
+    /// Exclusive event cursor. Omitted reads the current tail; passing the
+    /// oldest id already held walks backward without rereading newer events.
+    #[serde(default)]
+    before: Option<u64>,
+    /// Maximum transcript messages to return. Capped server-side so a caller
+    /// cannot turn one history read back into an unbounded response.
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// One desk-history message, as the console renders it. Mirrors `ChatMessage`
@@ -1455,12 +1611,6 @@ impl From<MessageView> for ChatHistoryMessageDto {
     }
 }
 
-/// How many messages `GET .../chat/history` returns. Generous enough to
-/// hydrate a console thread on load (issue #65) while still bounding the
-/// response on a very long transcript; pagination is a GraphQL `Chat.history`
-/// concern, not this REST convenience route's.
-const CHAT_HISTORY_LIMIT: usize = 200;
-
 /// Resolves a `?desk=` selector to the `(id, name)` pair `history_for_desk`
 /// filters on.
 ///
@@ -1499,8 +1649,9 @@ async fn history_viewer(
     headers: &HeaderMap,
     state: &AppState,
     company: &CompanyId,
+    peer: Option<std::net::SocketAddr>,
 ) -> Result<Viewer, Response> {
-    let actor = chat_actor(headers, state, company).await?;
+    let actor = chat_actor(headers, state, company, peer).await?;
     Ok(match actor {
         Some(actor) if actor.kind == ActorKind::User => Viewer::User(actor.id),
         _ => Viewer::Operator,
@@ -1513,22 +1664,20 @@ async fn chat_history_response(
     company: &CompanyId,
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     query: ChatHistoryQuery,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
-    let viewer = history_viewer(headers, state, company).await?;
+    let viewer = history_viewer(headers, state, company, peer).await?;
     let (desk_id, desk_name) = resolve_desk(&runtime, query.desk.as_deref())
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    let (messages, _total) = history_for_desk(
-        &runtime,
-        &desk_id,
-        &desk_name,
-        &viewer,
-        None,
-        CHAT_HISTORY_LIMIT,
-    )
-    .await
-    .map_err(|e| ApiError(e).into_response())?;
+    let limit = query
+        .limit
+        .unwrap_or(CHAT_HISTORY_PAGE_LIMIT)
+        .min(CHAT_HISTORY_PAGE_LIMIT);
+    let messages = history_for_desk(&runtime, &desk_id, &desk_name, &viewer, query.before, limit)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
     Ok(Json(
         messages
             .into_iter()
@@ -1544,22 +1693,24 @@ async fn chat_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    chat_history_response(&state, &company, runtime, &headers, query).await
+    chat_history_response(&state, &company, runtime, &headers, peer, query).await
 }
 
 /// `GET /api/v1/company/chat/history` (single-company alias).
 async fn chat_history_single(
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Query(query): Query<ChatHistoryQuery>,
 ) -> Result<Json<Vec<ChatHistoryMessageDto>>, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    chat_history_response(&state, &id, runtime, &headers, query).await
+    chat_history_response(&state, &id, runtime, &headers, peer, query).await
 }
 
 /// Body for `POST {scope}/chat/messages/{seq}/reactions` (issue #364).
@@ -1618,10 +1769,11 @@ async fn react_to_message(
     company: &CompanyId,
     runtime: Arc<CompanyRuntime>,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
     seq: String,
     body: ReactionBody,
 ) -> Result<StatusCode, Response> {
-    let by = chat_actor(headers, state, company).await?;
+    let by = chat_actor(headers, state, company, peer).await?;
     let message_seq = parse_message_id(&seq).map_err(IntoResponse::into_response)?;
     validate_emoji(&body.emoji).map_err(IntoResponse::into_response)?;
     // The target must be a message. Without this the route would happily hang a
@@ -1669,11 +1821,12 @@ async fn react_to_message_scoped(
     State(state): State<AppState>,
     Path((id, seq)): Path<(String, String)>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
 ) -> Result<StatusCode, Response> {
     let company = CompanyId::new(&id);
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    react_to_message(&state, &company, runtime, &headers, seq, body).await
+    react_to_message(&state, &company, runtime, &headers, peer, seq, body).await
 }
 
 /// `POST /api/v1/company/chat/messages/{seq}/reactions` (single-company alias).
@@ -1681,11 +1834,12 @@ async fn react_to_message_single(
     State(state): State<AppState>,
     Path(seq): Path<String>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<ReactionBody>,
 ) -> Result<StatusCode, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
-    react_to_message(&state, &id, runtime, &headers, seq, body).await
+    react_to_message(&state, &id, runtime, &headers, peer, seq, body).await
 }
 
 /// `GET /api/v1/companies/{id}/approvals`.
@@ -1699,7 +1853,12 @@ async fn list_approvals(
         return Err(resp);
     }
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    Ok(Json(runtime.pending_approvals()))
+    // Membership got you the list; role decides whether you may read what is in
+    // it (issue #618).
+    Ok(Json(crate::server::approval_visibility::for_principal(
+        &auth,
+        runtime.pending_approvals(),
+    )))
 }
 
 /// `GET /api/v1/company/approvals` (single-company alias).
@@ -1713,7 +1872,13 @@ async fn list_approvals_single(
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
         return Err(resp);
     }
-    Ok(Json(runtime.pending_approvals()))
+    // Same contents rule as the `{id}` form (issue #618) — the two handlers are
+    // the same read behind two addressing forms, and a redaction applied to one
+    // of them would be a hole rather than a boundary.
+    Ok(Json(crate::server::approval_visibility::for_principal(
+        &auth,
+        runtime.pending_approvals(),
+    )))
 }
 
 /// The operator's resolution of a parked approval.
@@ -1951,6 +2116,15 @@ struct ResolveReceiptDto {
     /// resolve a no-op that mints no second grant, and saying so lets the console
     /// render it as the success it is.
     already_resolved: bool,
+    /// How many OTHER decisions the turn behind this approval is still blocked
+    /// on (issue #561).
+    ///
+    /// Since #469 a turn continues once, when the last decision it parked
+    /// lands. So on a turn that parked four calls, three of the operator's four
+    /// clicks release nothing — and the console said "the agent is completing
+    /// the action" for all four. This is what lets it say the true thing
+    /// instead. `0` means this decision released the turn.
+    still_awaiting: usize,
 }
 
 async fn run_resolve(
@@ -1987,6 +2161,11 @@ async fn run_resolve(
         }
     };
 
+    // Read once, here: the verdict is durable and the follow-up cycle — which is
+    // what decrements the turn's counter — has not run yet, so this still counts
+    // the approval just decided and `decisions_still_awaited` subtracts it.
+    let still_awaiting = runtime.decisions_still_awaited(&id);
+
     if body.detach {
         // Nothing here waits on the turn. The webhook fan-out still owes the
         // report, so it moves onto its own task rather than being dropped —
@@ -2007,6 +2186,7 @@ async fn run_resolve(
         return Ok(Json(ResolveReceiptDto {
             recorded: true,
             already_resolved: receipt.already_resolved(),
+            still_awaiting,
         })
         .into_response());
     }
@@ -2016,6 +2196,7 @@ async fn run_resolve(
     Ok(Json(ChatResponse {
         message_id: None,
         responses: report.responses,
+        still_awaiting: Some(still_awaiting),
     })
     .into_response())
 }
@@ -2135,6 +2316,8 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -2180,12 +2363,21 @@ mod test {
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 
-    /// An actionable operator chat opens exactly one `todo` task card on the
-    /// dashboard (deterministic, independent of the brain's own `spawn_task`),
-    /// and a greeting opens none. Runs on the default echo brain, so it proves
-    /// the handler-level wiring, not model behaviour.
+    /// An actionable operator chat opens exactly one task card on the dashboard
+    /// (deterministic, independent of the brain's own `spawn_task`), and a
+    /// greeting opens none. Runs on the default echo brain, so it proves the
+    /// handler-level wiring, not model behaviour.
+    ///
+    /// Issue #576: that card now lands in **Planning**, not To-do. The request
+    /// carries `fixed_cookie`, so a signed-in person is behind it — which is
+    /// what the promotion is conditional on.
+    ///
+    /// `tasks.len() == 1` is doing real work here beyond "a card was opened":
+    /// the card is created *directly* in `planning` by a single `upsert_task`,
+    /// so a second card, or a card that arrived via To-do and was promoted,
+    /// would both show up here.
     #[tokio::test]
-    async fn actionable_chat_opens_a_todo_task_card() {
+    async fn actionable_chat_opens_a_planning_task_card() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
@@ -2206,7 +2398,7 @@ mod test {
                 .unwrap()
         };
 
-        // Actionable → one To-do card, titled from the ask.
+        // Actionable → one Planning card, titled from the ask.
         let r = app
             .clone()
             .oneshot(chat("build the landing page"))
@@ -2215,7 +2407,11 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "an actionable ask opens one card");
-        assert_eq!(tasks[0].column, crate::ports::tasks::COLUMN_TODO);
+        assert_eq!(
+            tasks[0].column,
+            crate::ports::tasks::COLUMN_PLANNING,
+            "issue #576: the prompt box promotes its own card, with no drag"
+        );
         assert_eq!(tasks[0].priority, "medium");
         assert_eq!(tasks[0].title, "Build the landing page");
 
@@ -2224,6 +2420,167 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
+    }
+
+    /// Issue #845: an explicit "Build me the workflow" opens a card even when
+    /// the triage would have opened nothing.
+    ///
+    /// The composer's toggle was consulted *only* on the card-opening branch,
+    /// and that branch is gated on the triage. So a `workflow` request the
+    /// classifier read as a question or as chatter dropped the choice on the
+    /// floor: no card, therefore no builder pass, therefore nothing built — and
+    /// no error either, because a conversational reply came back as though the
+    /// message had been handled.
+    ///
+    /// Both halves are pinned here: the same text opens nothing as a `once`
+    /// message and opens a `workflow` card when the operator asked for one.
+    #[tokio::test]
+    async fn an_explicit_workflow_request_opens_a_card_the_triage_declined() {
+        use crate::ports::tasks::TaskDeliverable;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        // A question by construction — `is_question` fires on the wh-opener, so
+        // the triage answers `Answer` and the card branch declines.
+        let text = "what would a weekly AEO audit of the blog even look like?";
+        assert!(
+            matches!(
+                crate::company::task_intent::triage_message(text),
+                crate::company::task_intent::MessageTriage::Answer
+            ),
+            "fixture must be one the triage declines to card, or this proves nothing"
+        );
+
+        let chat = |deliverable: Option<&str>| {
+            let body = match deliverable {
+                Some(d) => format!(
+                    r#"{{"text":{},"deliverable":"{d}"}}"#,
+                    serde_json::json!(text)
+                ),
+                None => format!(r#"{{"text":{}}}"#, serde_json::json!(text)),
+            };
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/company/chat")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+
+        // `once` (and no choice at all): unchanged — the triage still decides.
+        let r = app.clone().oneshot(chat(None)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = app.clone().oneshot(chat(Some("once"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(
+            runtime.tasks().list(&id).await.unwrap().is_empty(),
+            "a `once` question must still open nothing"
+        );
+
+        // `workflow`: the operator's explicit choice outranks the classifier.
+        let r = app.oneshot(chat(Some("workflow"))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "the workflow choice must open its card");
+        assert_eq!(
+            tasks[0].deliverable,
+            TaskDeliverable::Workflow,
+            "and it must be the deliverable that routes it to the builder pass"
+        );
+        // Titled through `to_title`, exactly as a `Track` card would have been.
+        assert_eq!(
+            tasks[0].title,
+            crate::company::task_intent::to_title(text),
+            "a bypassed card must be titled byte-for-byte as a tracked one"
+        );
+    }
+
+    /// Issue #576: **who** asked decides whether the card self-promotes.
+    ///
+    /// The promotion buys a planning pass, which is a model call. A person
+    /// spending one on their own typo is the cost the issue accepts; an agent
+    /// doing it is a loop — a card that plans, whose pass opens further cards,
+    /// which promote, which plan, with no human anywhere in it. So the branch is
+    /// on the actor, and this pins both sides of it.
+    ///
+    /// Driven through `run_chat` directly rather than the route, because the
+    /// route's job is to *resolve* the actor and this test's job is to pin what
+    /// each resolved actor does. Going through HTTP would only ever exercise
+    /// whichever principal the test harness happens to authenticate as.
+    #[tokio::test]
+    async fn only_a_person_gets_a_self_promoting_card() {
+        use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO};
+        use crate::ports::types::{Actor, ActorKind};
+
+        let ask = "build the landing page";
+        let person = Actor {
+            kind: ActorKind::User,
+            id: "u-1".to_string(),
+        };
+
+        // Every actor that is not a person must leave the card where it has
+        // always landed. `None` is a machine credential — the platform, or any
+        // caller with no session behind it.
+        for (label, by, expected) in [
+            ("a signed-in user", Some(person.clone()), COLUMN_PLANNING),
+            (
+                "an operator",
+                Some(Actor {
+                    kind: ActorKind::Operator,
+                    id: "op".to_string(),
+                }),
+                COLUMN_PLANNING,
+            ),
+            (
+                "an agent",
+                Some(Actor {
+                    kind: ActorKind::Agent,
+                    id: "ceo".to_string(),
+                }),
+                COLUMN_TODO,
+            ),
+            (
+                "the runtime itself",
+                Some(Actor {
+                    kind: ActorKind::System,
+                    id: "system".to_string(),
+                }),
+                COLUMN_TODO,
+            ),
+            ("a machine credential", None, COLUMN_TODO),
+        ] {
+            let home_dir = home();
+            let state = state_with_company(home_dir.path(), "running").await;
+            let id = CompanyId::new("acme");
+            let runtime = state.registry().get(&id).unwrap();
+
+            run_chat(
+                runtime.clone(),
+                ChatMessage {
+                    text: ask.to_string(),
+                    chat: None,
+                    parent: None,
+                    deliverable: None,
+                },
+                by,
+                None,
+            )
+            .await
+            .expect("the chat cycle runs");
+
+            let tasks = runtime.tasks().list(&id).await.unwrap();
+            assert_eq!(tasks.len(), 1, "{label}: one ask opens one card");
+            assert_eq!(
+                tasks[0].column, expected,
+                "{label}: the card must land in `{expected}`"
+            );
+        }
     }
 
     /// End-to-end proof of the WS4 wire: with a [`HarnessBrain`] as the runtime's
@@ -2259,6 +2616,8 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -2276,12 +2635,14 @@ mod test {
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),
+            audit_root: home.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2291,6 +2652,8 @@ mod test {
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2299,10 +2662,17 @@ mod test {
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record);
 
@@ -2376,6 +2746,8 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -2515,6 +2887,153 @@ mod test {
             .await
             .unwrap();
         assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Creates an overlay desk through the same route `create_desk` serves and
+    /// returns its derived id, so the desk under test exists only in the overlay
+    /// — nothing about it is declared in the manifest.
+    async fn seed_overlay_desk(app: &axum::Router, cookie: &str, body: &str) -> String {
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/desks")
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let bytes = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["id"].as_str().unwrap().to_string()
+    }
+
+    async fn post_desk_member(
+        app: &axum::Router,
+        cookie: &str,
+        desk: &str,
+        body: &str,
+    ) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/company/desks/{desk}/members"))
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn delete_desk_member(
+        app: &axum::Router,
+        cookie: &str,
+        desk: &str,
+        agent: &str,
+    ) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/company/desks/{desk}/members/{agent}"))
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Reads the `error` string out of an api.md error envelope.
+    async fn error_message(response: Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        value["error"].as_str().unwrap().to_string()
+    }
+
+    /// Returns the effective member list of `desk` from `list_desks`.
+    async fn desk_members(app: &axum::Router, cookie: &str, desk: &str) -> Vec<String> {
+        let desks = get_desks(app, cookie).await;
+        desks
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == desk)
+            .unwrap_or_else(|| panic!("desk {desk} present in list"))["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A desk that exists only in the operator overlay can be staffed and
+    /// unstaffed like a manifest desk. Both membership handlers used to test the
+    /// manifest alone, so a console-created desk could be reordered and deleted
+    /// but never gain or lose a member (#833). Every other desk test seeds its
+    /// desk from the manifest, so only an overlay-created desk exercises this.
+    #[tokio::test]
+    async fn desk_member_writes_reach_an_overlay_created_desk() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let desk =
+            seed_overlay_desk(&app, &cookie, r#"{"name":"Growth desk","members":["ceo"]}"#).await;
+        assert_eq!(desk, "growth_desk");
+        assert_eq!(desk_members(&app, &cookie, &desk).await, ["ceo"]);
+
+        let added = post_desk_member(&app, &cookie, &desk, r#"{"agent_id":"eng"}"#).await;
+        assert_eq!(added.status(), StatusCode::NO_CONTENT);
+        assert_eq!(desk_members(&app, &cookie, &desk).await, ["ceo", "eng"]);
+
+        let removed = delete_desk_member(&app, &cookie, &desk, "eng").await;
+        assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+        assert_eq!(desk_members(&app, &cookie, &desk).await, ["ceo"]);
+    }
+
+    /// An unknown desk id is refused as a missing desk, not a missing company.
+    /// The refusal used to be raised as `CompanyNotFound("desk ghost")`, which
+    /// rendered as `company not found: desk ghost` — the wrong resource, and the
+    /// desk id stuffed into a company id slot (#833). The status stays `404`
+    /// because both variants map there.
+    #[tokio::test]
+    async fn unknown_desk_member_writes_refuse_as_a_missing_desk() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(&home, desk_manifest()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let added = post_desk_member(&app, &cookie, "ghost", r#"{"agent_id":"eng"}"#).await;
+        assert_eq!(added.status(), StatusCode::NOT_FOUND);
+        let message = error_message(added).await;
+        assert!(
+            !message.contains("company not found"),
+            "add refusal blames the company: {message:?}"
+        );
+        assert!(message.contains("ghost"), "add refusal drops the desk id");
+
+        let removed = delete_desk_member(&app, &cookie, "ghost", "eng").await;
+        assert_eq!(removed.status(), StatusCode::NOT_FOUND);
+        let message = error_message(removed).await;
+        assert!(
+            !message.contains("company not found"),
+            "remove refusal blames the company: {message:?}"
+        );
+        assert!(
+            message.contains("ghost"),
+            "remove refusal drops the desk id"
+        );
     }
 
     /// Creating a desk persists it as an overlay and surfaces it in `list_desks`
@@ -3185,6 +3704,126 @@ mod test {
         assert_eq!(value.as_array().unwrap().len(), 0);
     }
 
+    /// Issue #862: REST history carries the same cursor/window contract as the
+    /// paginated GraphQL surface. A copilot replay can therefore ask for the
+    /// tail it needs without the route reading past its cursor.
+    #[tokio::test]
+    async fn chat_history_route_honors_before_and_limit() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let mut seqs = Vec::new();
+        for text in ["oldest", "kept", "newest"] {
+            seqs.push(
+                runtime
+                    .events()
+                    .append(
+                        runtime.id(),
+                        CompanyEvent::AgentReply {
+                            parent: None,
+                            task_id: None,
+                            chat_id: "workflow-copilot:weekly_report".to_string(),
+                            agent_id: "ceo".to_string(),
+                            text: text.to_string(),
+                            steps: Vec::new(),
+                        },
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let uri = format!(
+            "/api/v1/company/chat/history?desk=workflow-copilot:weekly_report&before={}&limit=1",
+            seqs[2].value()
+        );
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value[0]["text"], "kept");
+        assert_eq!(value.as_array().unwrap().len(), 1);
+    }
+
+    /// A history cursor pages messages, not the current reaction state. A
+    /// toggle can be journaled after the cursor for a message still selected by
+    /// that cursor, and must therefore remain visible on the paged result.
+    #[tokio::test]
+    async fn chat_history_cursor_keeps_later_reactions_on_displayed_messages() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let message = runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::AgentReply {
+                    parent: None,
+                    task_id: None,
+                    chat_id: "General".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "kept".to_string(),
+                    steps: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let cursor = runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::FeedbackFiled {
+                    note: "cursor marker".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::ReactionToggled {
+                    message_seq: message,
+                    emoji: "👍".to_string(),
+                    on: true,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/company/chat/history?before={}&limit=1",
+                        cursor.value()
+                    ))
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value[0]["id"], message.value().to_string());
+        assert_eq!(value[0]["reactions"][0]["emoji"], "👍");
+    }
+
     /* ---- issue #364: durable ids, threads, reactions, channel isolation ---- */
 
     /// Posts a chat message and returns the decoded `ChatResponse` body.
@@ -3711,6 +4350,12 @@ mod test {
     /// makes approving it mint a single-use grant rather than execute it
     /// (issue #243) — which is the whole reason a lost continuation hurts: the
     /// grant is spent on a turn that never happens.
+    ///
+    /// The payload names an action the vendored catalogue tags `Write`, so
+    /// `consequence_of` classifies it as a send on its merits. Until issue #470
+    /// it named the slug under `tool_slug`, a key neither the tool nor the
+    /// classifier reads — so it was a call with no action at all, and it
+    /// reached the per-call verdict through the unknown-slug fallback instead.
     fn gated_tool_call() -> crate::ports::types::Effect {
         crate::ports::types::Effect {
             kind: "composio_execute".into(),
@@ -3718,7 +4363,7 @@ mod test {
             amount_usd: None,
             established_thread: false,
             first_time_counterparty: false,
-            payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            payload: crate::policy::test_support::composio_send_args(),
             agent: Some("ceo".into()),
             run_id: None,
         }
@@ -3726,11 +4371,11 @@ mod test {
 
     /// A tool call an operator MAY grant a standing permission for (issue
     /// #431), which `gated_tool_call` deliberately is not: its Composio payload
-    /// names no action slug, so `consequence_of` cannot classify it as a read
-    /// and it stays a per-call decision. `file_write` is declared grantable in
-    /// `src/policy/consequence.rs` and carries an agent, so it satisfies both
-    /// halves of `check_broadly_grantable` — it mutates, but only the agent's
-    /// own sandboxed workspace.
+    /// names an action the catalogue tags `Write`, so `consequence_of` reads it
+    /// as a send and it stays a per-call decision. `file_write` is declared
+    /// grantable in `src/policy/consequence.rs` and carries an agent, so it
+    /// satisfies both halves of `check_broadly_grantable` — it mutates, but
+    /// only the agent's own sandboxed workspace.
     fn grantable_tool_call() -> crate::ports::types::Effect {
         crate::ports::types::Effect {
             kind: "file_write".into(),
@@ -3742,6 +4387,202 @@ mod test {
             agent: Some("ceo".into()),
             run_id: None,
         }
+    }
+
+    /// Issue #618: membership gets you the approval, role gets you its
+    /// contents.
+    ///
+    /// Issue #561: the receipt says whether this decision actually released the
+    /// turn.
+    ///
+    /// A turn that parked two calls is blocked on two decisions (issue #469
+    /// continues it once, on the last one). The console used to tell the
+    /// operator "the agent is completing the action" on the first click, which
+    /// is false — nothing runs until the second. This is the count it now words
+    /// that sentence from: one still owed after the first decision, none after
+    /// the second.
+    #[tokio::test]
+    async fn a_receipt_says_how_many_decisions_the_turn_is_still_blocked_on() {
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        let effect = |memo: &str| crate::ports::types::Effect {
+            kind: "payment.send".into(),
+            group: crate::ports::types::EffectGroup::Spend,
+            amount_usd: Some(10.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "to": "board@example.test", "memo": memo }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+
+        // One turn, two parked calls — the shape an operator meets whenever an
+        // agent gates more than once in a turn.
+        for (id, memo) in [("appr-561-a", "first"), ("appr-561-b", "second")] {
+            runtime
+                .journal
+                .record_parked(
+                    &crate::ports::types::ApprovalId::new(id),
+                    &effect(memo),
+                    1_000,
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    Some("cycle-561".to_string()),
+                )
+                .await
+                .unwrap();
+            runtime.continuations.arm("cycle-561");
+        }
+
+        let app = router(state);
+        let resolve = |app: axum::Router, id: &'static str| async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/company/approvals/{id}"))
+                        .header("content-type", "application/json")
+                        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                        .body(Body::from(
+                            serde_json::json!({ "verdict": "approve", "detach": true }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+
+        let first = resolve(app.clone(), "appr-561-a").await;
+        assert_eq!(
+            first["stillAwaiting"], 1,
+            "the first decision releases nothing — the turn is still blocked on the second: {first}"
+        );
+
+        // The count is read per decision, at the moment the verdict lands. What
+        // happens to the sibling afterwards is issue #848's business — a turn's
+        // gated calls may be consolidated and settle together — and this test
+        // deliberately asserts only the half the operator's confirmation is
+        // worded from: this click did not release the turn.
+        //
+        // The other half — the last decision reporting nothing outstanding —
+        // is pinned on the queue itself in
+        // `runtime::continuation::test::outstanding_counts_the_decision_being_made`,
+        // where it is deterministic rather than racing a spawned follow-up.
+    }
+
+    /// **The two-account part is the point.** The harness signs every request
+    /// in as an admin, so a redaction verified only as an admin passes
+    /// identically against no redaction at all — the test would prove nothing
+    /// while looking like coverage. This seeds a second, Member-role account
+    /// and drives the same route with both.
+    #[tokio::test]
+    async fn a_member_sees_the_approval_but_not_its_payload_or_amount() {
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        let effect = crate::ports::types::Effect {
+            kind: "payment.send".into(),
+            group: crate::ports::types::EffectGroup::Spend,
+            amount_usd: Some(2400.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "to": "board@example.test", "memo": "Q3 retainer" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+        runtime
+            .journal
+            .record_parked(
+                &crate::ports::types::ApprovalId::new("appr-618"),
+                &effect,
+                1_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+
+        async fn approvals_as(app: &axum::Router, cookie: String) -> serde_json::Value {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/company/approvals")
+                        .header("cookie", cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        // The admin decides the sign-off, so the admin sees what it will do.
+        let as_admin = approvals_as(&app, crate::server::test_support::fixed_cookie("acme")).await;
+        let admin_row = &as_admin.as_array().unwrap()[0];
+        assert_eq!(admin_row["amount_usd"].as_f64(), Some(2400.0));
+        assert_eq!(admin_row["payload"]["to"], "board@example.test");
+        assert!(
+            admin_row.get("contents_hidden").is_none(),
+            "an admin is not told anything was hidden: {admin_row}"
+        );
+
+        let as_member =
+            approvals_as(&app, crate::server::test_support::member_cookie("acme")).await;
+        let member_row = &as_member.as_array().unwrap()[0];
+
+        // Still visible: everything that makes stalled work legible. This half
+        // is what #468 depends on — a member must keep seeing that work is
+        // waiting and what kind of call it is.
+        assert_eq!(member_row["id"], "appr-618");
+        assert_eq!(member_row["kind"], "payment.send");
+        assert_eq!(member_row["agent"], "ceo");
+        assert_eq!(member_row["at_millis"].as_u64(), Some(1_000));
+
+        // Withheld: the recipient and the money.
+        assert!(
+            member_row.get("payload").is_none(),
+            "the recipient must not reach a member: {member_row}"
+        );
+        // `null`, not absent: unlike `payload`, `amount_usd` carries no
+        // `skip_serializing_if`, so it stays on the wire as an explicit null.
+        // Both read as "no value" to the console (`a.amount_usd != null`
+        // covers either), and changing the wire shape as a side effect of a
+        // redaction would be a worse trade than asserting the shape that is
+        // actually there.
+        assert!(
+            member_row["amount_usd"].is_null(),
+            "nor the amount: {member_row}"
+        );
+        assert_eq!(
+            member_row["contents_hidden"], true,
+            "and the console must be able to say so rather than render an empty card: {member_row}"
+        );
+
+        // Belt and braces: the recipient string must appear nowhere in the
+        // member's response, however the shape changes later.
+        let raw = serde_json::to_string(&as_member).unwrap();
+        assert!(
+            !raw.contains("board@example.test") && !raw.contains("Q3 retainer"),
+            "payload content leaked to a member: {raw}"
+        );
     }
 
     /// The dotted kind the stalled brain parks once its follow-up turn gets
@@ -4064,7 +4905,7 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
         );
 
         // The answer really did precede the work: the turn is only now under
@@ -4242,7 +5083,7 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": true })
+            serde_json::json!({ "recorded": true, "alreadyResolved": true, "stillAwaiting": 0 })
         );
         assert_eq!(
             c.runtime.grants.live_count(),
@@ -4275,7 +5116,7 @@ mod test {
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             value,
-            serde_json::json!({ "recorded": true, "alreadyResolved": false })
+            serde_json::json!({ "recorded": true, "alreadyResolved": false, "stillAwaiting": 0 })
         );
         assert!(await_continuation(&c.runtime).await);
         assert_eq!(c.runtime.grants.live_count(), 1);
@@ -4558,23 +5399,72 @@ mod test {
         assert!(uncorrelated.get("taskId").is_none());
     }
 
-    /// #185: the dispatch terminal projects all four fields. `column` is the one
-    /// that matters most — it is how a console tells a clean finish from a
-    /// cancelled or failed run without parsing `output`.
+    /// #185/#377: the dispatch terminal projects the structural fields, plus
+    /// the conversation the card was raised from. `column` is the one that
+    /// matters most — it is how a console tells a clean finish from a cancelled
+    /// or failed run — and `chatId` is what says which channel it belongs in.
     #[test]
     fn projects_desk_task_completed_with_every_field() {
         let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
             task_id: "t-1".into(),
-            desk: "ceo".into(),
+            desk: "engineer".into(),
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".into()),
         }))
         .expect("desk_task_completed is an attention signal");
         assert_eq!(v["type"], serde_json::json!("desk_task_completed"));
         assert_eq!(v["taskId"], serde_json::json!("t-1"));
-        assert_eq!(v["desk"], serde_json::json!("ceo"));
-        assert_eq!(v["output"], serde_json::json!("shipped"));
+        assert_eq!(v["desk"], serde_json::json!("engineer"));
+        assert_eq!(v["column"], serde_json::json!("in_review"));
+        assert_eq!(v["chatId"], serde_json::json!("engineering"));
+        // The envelope's own keys still ride along — the console mints the
+        // marker's identity from `seq` (issue #483's mechanism), so losing it
+        // here would silently disable the reload dedupe.
+        assert!(v.get("seq").is_some(), "{v}");
+        assert!(v.get("atMillis").is_some(), "{v}");
+    }
+
+    /// Issue #377: the run's prose is **not** on this frame.
+    ///
+    /// The relay bubble (#151) already carries the agent's words into the same
+    /// channel this marker lands in. Projecting `output` here as well would put
+    /// one run's text into one conversation twice, and dropping it at the
+    /// projection is what stops any later reader from reintroducing that.
+    #[test]
+    fn desk_task_completed_does_not_project_the_runs_prose() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "engineer".into(),
+            output: "the whole reply, verbatim".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".into()),
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert!(v.get("output").is_none(), "{v}");
+        assert!(
+            !v.to_string().contains("the whole reply"),
+            "the prose must not reach the wire under any key: {v}"
+        );
+    }
+
+    /// Issue #377: a card nobody raised from a conversation omits `chatId`
+    /// rather than sending null — so "board-created" is a presence check on the
+    /// console, the same shape `approval_parked` uses for a page-only approval.
+    #[test]
+    fn desk_task_completed_omits_the_chat_id_for_a_board_created_card() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "engineer".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: None,
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert!(v.get("chatId").is_none(), "{v}");
         assert_eq!(v["column"], serde_json::json!("in_review"));
     }
 
@@ -4818,6 +5708,10 @@ mod test {
             pending_approvals: vec!["review".into()],
             error: None,
             cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }))
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["type"], "workflow_run_finished");
@@ -4860,10 +5754,75 @@ mod test {
             pending_approvals: Vec::new(),
             error: Some("no inference source for agent node `worker`".into()),
             cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }))
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["error"], "no inference source for agent node `worker`");
         assert_eq!(v["deliveries"].as_array().unwrap().len(), 0);
+    }
+
+    /// Issues #881 / #880: the blocked arm reaches the console live.
+    ///
+    /// Without it a console watching a run settle would be told it finished
+    /// cleanly — no error, not cancelled, nothing delivered — and then the
+    /// history it reloads a moment later would say the run blocked. The two
+    /// surfaces read the same journal event, so they must project the same
+    /// facts.
+    #[test]
+    fn projects_workflow_run_finished_with_its_blocked_nodes_and_parked_approvals() {
+        let v = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: Some("run-b".into()),
+            deliveries: Vec::new(),
+            pending_approvals: vec!["spec".into()],
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "spec".into(),
+                tools: vec!["publish_artifact".into()],
+                approval_ids: vec!["appr-1".into()],
+                unparkable: 0,
+            }],
+            approvals: vec![crate::ports::WorkflowRunApprovalRow {
+                node_id: Some("spec".into()),
+                tool: Some("publish_artifact".into()),
+                outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                approval_id: Some("appr-1".into()),
+            }],
+        }))
+        .expect("workflow_run_finished is an attention signal");
+        assert_eq!(v["blockedNodes"][0]["nodeId"], "spec");
+        assert_eq!(v["blockedNodes"][0]["tools"][0], "publish_artifact");
+        assert_eq!(v["approvals"][0]["outcome"], "parked");
+        assert!(
+            v.get("error").is_none(),
+            "a run waiting on a person did not fail: {v}"
+        );
+
+        // The presence-check discipline: a run that blocked on nobody sends
+        // neither key, so an existing frame is byte-unchanged.
+        let clean = super::project_event(&stored(CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: None,
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        }))
+        .expect("projects");
+        assert!(clean.get("blockedNodes").is_none(), "{clean}");
+        assert!(clean.get("approvals").is_none(), "{clean}");
     }
 
     /// Issue #371: the live per-node trail. Both arms project, both carry the
@@ -4971,6 +5930,10 @@ mod test {
             pending_approvals: Vec::new(),
             error: None,
             cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }))
         .expect("projected");
         assert_eq!(with_id["runId"], "run-9");
@@ -4983,6 +5946,10 @@ mod test {
             pending_approvals: Vec::new(),
             error: None,
             cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }))
         .expect("projected");
         assert!(legacy.get("runId").is_none(), "{legacy}");
@@ -5004,6 +5971,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
             CompanyEvent::WebhookReceived {
                 channel: "email".into(),
@@ -5263,6 +6231,8 @@ mod test {
                 at_millis: 1_000,
                 expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
                 origin_thread: None,
+                origin_parent: None,
+                origin_task: None,
                 scope: None,
             });
 
@@ -5366,9 +6336,16 @@ mod test {
             for event in &req.events {
                 match event {
                     CompanyEvent::OperatorMessage { .. } => {
+                        // Deliberately uncatalogued slugs (issue #470): this
+                        // brain exists to park a *number* of distinct calls and
+                        // is indifferent to how any of them classify. They
+                        // still land under the real action key, so each reaches
+                        // the catalogue lookup and misses it, rather than
+                        // carrying no action for the classifier to find.
                         for i in 0..self.parks {
                             let mut effect = gated_tool_call();
-                            effect.payload = serde_json::json!({ "tool_slug": format!("T{i}") });
+                            effect.payload =
+                                crate::policy::test_support::composio_unclassified_args_numbered(i);
                             host.park_effect(effect).await?;
                         }
                     }

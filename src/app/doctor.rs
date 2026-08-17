@@ -131,6 +131,11 @@ pub fn report(cfg: &RuntimeConfig, prov: &ConfigProvenance) -> DoctorReport {
         layer: match source {
             crate::company::CredentialSource::Attested => prov.layer("tinyhumans_token_file"),
             crate::company::CredentialSource::Static => prov.layer("tinyhumans_credential"),
+            // The doctor reports the *instance's* tier, resolved from process
+            // config. A company key is per-company state in a secret store, so
+            // it can never win here — and if it somehow did, no config layer
+            // named it, which is exactly what `None` says.
+            crate::company::CredentialSource::Company => None,
             crate::company::CredentialSource::None => None,
         }
         .unwrap_or(ConfigLayer::Default)

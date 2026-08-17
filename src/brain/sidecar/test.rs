@@ -111,6 +111,7 @@ fn operator_request() -> CycleRequest {
             text: "hi".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }],
         event_seqs: Vec::new(),
         compressed_history: Vec::new(),
@@ -465,10 +466,6 @@ fn manifest(policy_mode: &str) -> CompanyManifest {
     toml::from_str(&toml_src).expect("valid manifest")
 }
 
-fn runtime_cid() -> String {
-    wire::cycle_id("opencompany:acme", "acme", 0)
-}
-
 fn sidecar_brain_for(
     transport: Arc<MockSidecarTransport>,
     inference: Arc<MockInferenceClient>,
@@ -491,13 +488,14 @@ async fn e2e_inference_then_gated_send_dm_drives_a_channel_response() {
     let home_dir = tmp_home();
     let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockSidecarTransport::new());
-    transport.script_cycle(
-        runtime_cid(),
-        vec![
-            inference_frame(0, "how are we doing?"),
-            effect_frame("send_dm", 0, json!({ "to": "operator", "body": "on it" })),
-        ],
-    );
+    // Scripted for whichever cycle the runtime opens, not a hand-computed id.
+    // Pinning the id here coupled this test to the event seq the runtime
+    // assigns; when that moved, the brain drained an empty cycle and every
+    // assertion below failed against a plausible zero (issue #800).
+    transport.script_any_cycle(vec![
+        inference_frame(0, "how are we doing?"),
+        effect_frame("send_dm", 0, json!({ "to": "operator", "body": "on it" })),
+    ]);
     let inference = Arc::new(
         MockInferenceClient::new()
             .with_text("plan ready")
@@ -516,9 +514,19 @@ async fn e2e_inference_then_gated_send_dm_drives_a_channel_response() {
             text: "how are we doing".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
+
+    // The runtime's cycle was actually found. Asserted before the effect
+    // assertions because an unmatched cycle makes every one of them fail with
+    // a zero that looks like a broken effect rather than a missed plan.
+    assert!(
+        transport.unmatched_cycles().is_empty(),
+        "the brain opened a cycle nothing scripted: {:?}",
+        transport.unmatched_cycles()
+    );
 
     // The inference callback fired through the real runtime.
     assert_eq!(inference.requests().len(), 1);
@@ -544,10 +552,8 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
     let home_dir = tmp_home();
     let home = home_dir.path().to_path_buf();
     let transport = Arc::new(MockSidecarTransport::new());
-    transport.script_cycle(
-        runtime_cid(),
-        vec![effect_frame("filing.submit", 0, Value::Null)],
-    );
+    // Whichever cycle the runtime opens — see the sibling test (issue #800).
+    transport.script_any_cycle(vec![effect_frame("filing.submit", 0, Value::Null)]);
     let inference = Arc::new(MockInferenceClient::new());
 
     let rt = Arc::new(
@@ -564,9 +570,16 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
             text: "file it".into(),
             by: None,
             chat: None,
+            deliverable: None,
         }])
         .await
         .unwrap();
+
+    assert!(
+        transport.unmatched_cycles().is_empty(),
+        "the brain opened a cycle nothing scripted: {:?}",
+        transport.unmatched_cycles()
+    );
 
     // The Sign-group effect parked under supervised policy: an approval is
     // queued and no channel response emitted.
@@ -592,4 +605,44 @@ async fn e2e_supervised_effect_parks_through_the_real_gate() {
     .await
     .unwrap();
     assert!(rt.pending_approvals().is_empty());
+}
+
+/// The trap that hid #800 for as long as the sidecar lane went unrun.
+///
+/// An unscripted cycle drains empty, which is a legitimate case — but it is
+/// indistinguishable from a fixture whose cycle id disagrees with the
+/// runtime's. Every downstream assertion then fails as "expected 1, saw 0" and
+/// points at the effect rather than at the miss. The mock records the id so a
+/// test can tell the two apart, and this pins that it does.
+#[tokio::test]
+async fn an_unscripted_cycle_is_recorded_as_a_miss() {
+    let transport = MockSidecarTransport::new();
+
+    // Nothing scripted at all: the miss is recorded.
+    let mut frames = transport.cycle_frames("cyc:nobody:scripted:this:7");
+    while frames.next().await.is_some() {}
+    assert_eq!(
+        transport.unmatched_cycles(),
+        vec!["cyc:nobody:scripted:this:7"]
+    );
+
+    // A scripted fallback answers the next cycle, and is NOT a miss.
+    let transport = MockSidecarTransport::new();
+    transport.script_any_cycle(vec![effect_frame("noop", 0, Value::Null)]);
+    let mut frames = transport.cycle_frames("cyc:whatever:the:runtime:1");
+    while frames.next().await.is_some() {}
+    assert!(transport.unmatched_cycles().is_empty());
+
+    // It is one-shot: the cycle after it drains empty, and is still not a miss,
+    // because a plan *was* scripted — a replay would re-emit the effect into a
+    // later cycle (the approval-resolution one), which is its own defect.
+    let mut frames = transport.cycle_frames("cyc:whatever:the:runtime:2");
+    let mut count = 0usize;
+    while let Some(frame) = frames.next().await {
+        if !matches!(frame.unwrap(), SidecarFrame::CycleComplete) {
+            count += 1;
+        }
+    }
+    assert_eq!(count, 0, "the fallback replayed into a later cycle");
+    assert!(transport.unmatched_cycles().is_empty());
 }

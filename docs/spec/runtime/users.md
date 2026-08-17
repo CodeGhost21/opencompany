@@ -10,12 +10,21 @@ This is distinct from, and weaker than, the machine credentials in
 
 ## The shape
 
+Everything below describes the default `email` mode. A company may instead sign
+people in with a **wallet**, or have **no sign-in at all** — see
+[Sign-in modes](auth-modes.md), which covers the choice, where it is configured,
+and what changes under each. The roster, sessions, invites, and revocation on
+this page are shared by `email` and `wallet`; only the proof of identity
+differs between them. `none` mode has none of this — no invite flow, no session,
+no roster beyond its single implicit local owner.
+
 | Concern | Answer |
 |---|---|
 | Sign in | Magic link (256-bit token, 15-minute TTL, single use), **or** an optional password |
 | Session | Opaque 256-bit token in an `HttpOnly; SameSite=Lax; Path=/` cookie, 14-day absolute TTL |
 | Access | **Invite-only.** An uninvited address cannot log in |
 | Bootstrap | The manifest's `[users] admins` list |
+| Mode | `[users] mode` — `email` (default), `wallet`, or `none`. See [Sign-in modes](auth-modes.md) |
 | Roles | `admin` (may invite and administer) / `member` |
 
 An `admin` is also what the write plane means by authority over the company: the
@@ -152,20 +161,31 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 
 | Route | Purpose |
 |---|---|
+| `GET …/auth/config` | The sign-in mode this company uses, so the console knows which screen to draw |
 | `POST …/auth/request` | Mail a magic link. Always `{"sent": true}` |
 | `POST …/auth/verify` | Redeem a link → session cookie |
 | `POST …/auth/login` | Email + password → session cookie |
+| `GET …/auth/hub` | The ecosystem sign-in buttons this host can offer. `{"providers": []}` when it can offer none |
+| `POST …/auth/hub` | A platform token from the hub → session cookie |
 | `POST …/auth/password` | Set/replace your own password (needs a session) |
+| `POST …/auth/wallet/challenge` | Mint a nonce for a wallet to sign (`wallet` mode) |
+| `POST …/auth/wallet/verify` | Answer a challenge → session cookie (`wallet` mode) |
 | `GET …/auth/me` | Who this session belongs to |
 | `POST …/auth/logout` | Revoke this session |
 | `GET …/users` | The roster (admin) |
-| `GET/POST …/users/invites` | List/send invites (admin) |
+| `GET …/users/invites` | List outstanding invites (admin) |
+| `POST …/users/invites` | Invite an address, and mail them (admin). Answers `delivery: "sent" \| "no_transport" \| "failed" \| "no_mailbox"` alongside the invite — `no_mailbox` for a `wallet`-mode invite, which has no address to mail |
 | `DELETE …/users/invites/{id}` | Revoke an invite (admin) |
 | `PATCH …/users/{id}` | Role, status, display name (admin) |
 | `POST …/users/{id}/password` | Set a temporary password (admin) |
 | `DELETE …/users/{id}/sessions` | Sign a user out everywhere (admin) |
 
 ### Every login failure is identical
+
+A route a company's mode does not serve refuses with `409 auth_mode` rather
+than a 404, and names the mode — see
+[One mode, one door](auth-modes.md#one-mode-one-door) for why that does not
+breach the rule below.
 
 `auth/request` always returns `{"sent": true}`. `auth/verify` and `auth/login`
 always fail with one `401 invalid_login` — for unknown address, uninvited
@@ -179,6 +199,42 @@ the org chart, and every answer is a phishing target. It is also why
 — response *time* would otherwise answer what the body refuses to.
 
 Clients must not undo this. The console renders one vague message.
+
+## Ecosystem sign-in
+
+A host wired to the TinyHumans hub can also offer Google, GitHub and X. The
+browser goes to the hub's OAuth start pointed back at this console; the hub
+returns a platform token in the URL; `POST …/auth/hub` asks the hub whose it is
+and then applies **this company's own roster** — the same
+`eligibility` → `upsert_from_eligibility` → `mint_session` path a magic link
+takes. The hub says who they are; it never says whether they may in, and the
+session minted is an ordinary human session, never the hosting layer's machine
+credential.
+
+`GET …/auth/hub` answers `{"providers": []}` — not a 404 — whenever this host
+cannot complete the flow, so the console has one code path and falls through to
+the magic-link form. Two things produce an empty list:
+
+- **No hub.** A self-hosted host has no exchange, so it could not check a token
+  that came back. Three buttons that send someone through Google to be turned
+  away on return are worse than none.
+- **A redirect target the hub will refuse.** The return URL is
+  `{OPENCOMPANY_PUBLIC_URL}/?company={company_id}`, and the hub's redirect gate
+  currently accepts RFC 8252 **loopback** origins only. A local console on
+  `http://127.0.0.1:<port>` passes; every hosted `https://<slug>.<domain>`
+  origin is answered `400` before the provider handshake begins.
+
+The second is issue #512 and is a hosted-only gap: sign-in there is by magic
+link until `tinyhumansai/backend#1243` teaches that gate to accept provisioned
+tenant origins. Nothing here needs to change when it does — the origin comes
+from `OPENCOMPANY_PUBLIC_URL` — beyond deleting `hub_accepts_redirect_uri` and
+its one call site.
+
+Note the shape the gate has to accept: **not** a bare origin. The `?company=`
+rides along, and in shared-single-DB mode the id is namespaced `<tenant>--<id>`,
+so it varies per tenant and over time. Only the origin component is stable, and
+a gate matching the whole string against a registry of origins would reproduce
+this failure exactly.
 
 ## Passwords
 
@@ -225,9 +281,42 @@ all, and a cross-site `fetch` that sets a custom one is preflighted, which CORS
 answers for allow-listed origins only. The header is the stricter carrier — it
 is never attached ambiently the way a cookie is.
 
-**Nothing issues one to a browser.** A session token reaches a browser only as
-`Set-Cookie`, where `HttpOnly` keeps it away from JavaScript. Device pairing is
-the intended issuer for clients that need the header form.
+**A browser gets the cookie unless it asks otherwise, and it only asks when the
+cookie cannot work.** The default is unchanged and is what every same-origin
+console still gets: the token reaches the browser only as `Set-Cookie`, where
+`HttpOnly` keeps it away from JavaScript. Device pairing remains the issuer for
+native clients.
+
+The exception is the [hub console](hub-console.md), which is cross-origin with
+every host it operates and therefore receives no cookie at all.
+
+### Asking for the header carrier
+
+A client that cannot receive a cookie sends `x-opencompany-session-carrier:
+header` on a sign-in request. The response then carries the ready-made header
+value as `session` in its JSON body and sets **no** cookie:
+
+```http
+POST /api/v1/companies/acme/auth/verify
+x-opencompany-session-carrier: header
+
+200 OK
+{ "id": "…", "email": "ada@example.com", …, "session": "acme.<token>" }
+```
+
+One session, one carrier — deliberately. Issuing both would leave the cookie
+half as a third-party cookie that some browsers keep and others discard, so
+whether logging out actually ended the session would vary by browser.
+
+Every browser login path routes through one `mint_session`, so all four —
+magic link, password, hub sign-in and wallet — support this identically.
+
+Opting in this way is safe for the same reason the header carrier itself is: a
+cross-site HTML form cannot set a request header, and a cross-site `fetch` that
+sets one is preflighted, which CORS answers for allow-listed origins only. A
+hostile page therefore cannot make someone's browser request the readable
+carrier on its behalf. Anything other than `header` — absent, empty, or a value
+nobody defined — degrades to the cookie rather than to no session.
 
 ## Device pairing
 
@@ -306,6 +395,39 @@ Login mail uses the host-level provider (`OPENCOMPANY_MAIL_*`, see
 the company's. With no transport configured, `auth/request` returns the code in
 a `dev_code` field and logs a warning, so local development works; a host that
 can send mail never echoes it.
+
+**Invite mail** goes out over that same host-level provider, gated on the same
+"is a transport wired" predicate. Not the company's own `__smtp` secret, and
+deliberately: an invite mailed from a host whose platform mail is unwired
+invites someone into a dead flow, because the sign-in link they then ask for
+cannot be sent. One transport, one truthful answer.
+
+An invite mail is a **notification, not a credential**. It names the company,
+the inviter (display name or the email's local part, never the full address,
+per [Chat attribution](#chat-attribution)), and the sign-in URL — no code, no
+token, not even the invite id. The recipient still goes through
+`auth/request` like anyone else, so the roster stays the only gate. That is
+what makes it safe to send to an address a human typed and may have typed
+wrongly.
+
+`POST …/users/invites` **reports delivery** rather than assuming it. Unlike
+`auth/request`, this route is admin-authenticated and the caller supplied the
+address, so there is no enumeration oracle to protect and nothing the response
+could disclose that the caller did not already know. The mail is sent strictly
+*after* the invite record is written — a refusal (already a member, already
+invited) must mail nobody — and a failed send never rolls the grant back, since
+a mail outage should not become a silent refusal to add people. A sent invite
+stamps `notifiedAtMillis` on the record, which the console reads to say whether
+the person was actually told; absent means nobody was, and the operator owes
+them a message. That stamp is an **update, never an insert**: an admin who
+spots a mistyped address and revokes the invite while its mail is still in
+flight wins, and the stamp quietly does nothing rather than putting the revoked
+address back on the roster. Issue #584: the route previously wrote the record
+and mailed nobody while the console reported unconditional success.
+
+Sending is bounded (30s) in the SMTP adapter, so a relay that accepts a
+connection and then stalls reports a failed delivery instead of holding the
+admin's request open.
 
 ## Abuse and exposure
 

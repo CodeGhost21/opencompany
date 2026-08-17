@@ -43,9 +43,9 @@ use crate::AppState;
 use crate::company::dns::DomainStatus;
 use crate::error::OpenCompanyError;
 use crate::ports::inbox::InboxMeta;
+use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{Actor, ActorKind, BudgetOverride, CompanyRecord, OverlayAgent};
-use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::language;
 use crate::server::ops::{DOMAIN_KEY, ScopedCompany, scoped};
@@ -79,6 +79,52 @@ struct TeamMemberDto {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    /// The declared cognition-tier hint (`[[agent]].tier`) **verbatim**, absent
+    /// when this teammate declares none — from the same constructor as
+    /// `GET …/team/{agent_id}` (issue #643).
+    ///
+    /// Carried on the list for the reason `tools` and `desks` are: the overview
+    /// graph is built from the roster read, so a field the list omitted was a
+    /// field the graph had to invent. It invented this one as a literal
+    /// `worker` on every node, and a company declaring `tier = "orchestrator"`
+    /// read back as a worker on its own graph.
+    ///
+    /// Absent is a real answer — "this teammate declares no tier" — and is why
+    /// the key is skipped rather than defaulted. A default here is precisely
+    /// the bug: it is indistinguishable from a declaration on the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tier: Option<String>,
+    /// Whether this teammate is the company's orchestrator, resolved by the
+    /// roster rule (tagged tier first, else the first declared agent) — the
+    /// same field, from the same helper, as the detail read (issue #643).
+    ///
+    /// **Not** derivable from `tier`, which is why it is sent rather than left
+    /// to the client: a company that tags nobody still has an orchestrator (no
+    /// tier, `true` here), and a second agent tagged with the orchestrator tier
+    /// is not one (tier present, `false` here). Always sent, so a client never
+    /// has to guess — unlike `tier`, "no orchestrator" is not a state a company
+    /// with a roster can be in.
+    is_orchestrator: bool,
+    /// This teammate's tool grants, in the **same shape and from the same
+    /// constructor** as `GET …/team/{agent_id}` (issue #601).
+    ///
+    /// Carried on the list because the overview knowledge graph draws one ring
+    /// per teammate's tools and had no way to learn them: the detail read
+    /// answered per agent, so drawing a whole roster meant N+1 fetches on page
+    /// load, and the graph invented a tool shelf instead — dealing each
+    /// teammate a slice of `[tools].allow` while the detail card beside it
+    /// rendered the real grant. One list read now answers for the roster.
+    ///
+    /// `companyAllow` repeats on every row, which is the payload cost of
+    /// mirroring the detail shape exactly rather than inventing a leaner
+    /// parallel one. It is worth paying: an **empty `requested` means the
+    /// company's standard grant**, not "no tools", and a row that dropped the
+    /// ceiling would leave a client no way to say which it was looking at.
+    tools: super::team_agent::AgentToolsDto,
+    /// The desks this teammate sits on, resolved through the same helper the
+    /// detail read uses (issue #601). Desks are the company's real grouping —
+    /// the overview graph draws its department pillars from these.
+    desks: Vec<super::team_agent::AgentDeskDto>,
     /// Whether this teammate has an enabled inbox, so the Team page's toggle
     /// renders the host's real state instead of a client-side guess.
     inbox_enabled: bool,
@@ -129,6 +175,13 @@ struct AddMember {
     /// member exactly as before, so adding the field takes no permission away.
     #[serde(default)]
     budget_usd_daily: Option<f64>,
+    /// An optional per-teammate tool grant (issue #661 / L5): tool-namespace
+    /// globs INTERSECTED with the company's `[tools].allow` at roster-build time
+    /// — narrow-only, never a widen. Omitted or empty gives the standard
+    /// company-wide grant, so adding the field takes no permission away: it can
+    /// only restrict the new teammate below what the company already allows.
+    #[serde(default)]
+    tools: Vec<String>,
 }
 
 /// The set-budget body.
@@ -273,6 +326,15 @@ fn member_row(
         name,
         role,
         description,
+        // All four through `team_agent`'s helpers, never recomputed here: the
+        // roster list and the detail read must not be able to disagree about
+        // the same teammate (issues #264, #601, #643). A second copy of the
+        // orchestrator rule in particular would be a copy of a rule that has
+        // two arms, and the arm it dropped would be invisible on screen.
+        tier: super::team_agent::declared_tier(record, agent_id),
+        is_orchestrator: super::team_agent::is_orchestrator(record, agent_id),
+        tools: super::team_agent::agent_tools(record, agent_id),
+        desks: super::team_agent::desks_for(record, agent_id),
         inbox_enabled,
         budget_usd_daily: cap,
         // Paired with the cap: no cap, no spend row.
@@ -334,6 +396,7 @@ async fn add_member(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(body): Json<AddMember>,
 ) -> Result<Json<TeamMemberDto>, Response> {
     // Setting a cap is admin-only, so an add that carries one is too — but an
@@ -345,7 +408,7 @@ async fn add_member(
             if let Some(refusal) = validate_cap(cap) {
                 return Err(refusal);
             }
-            Some(require_admin(&headers, &state, &company.runtime).await?)
+            Some(require_admin(&headers, &state, &company.runtime, peer).await?)
         }
         None => None,
     };
@@ -355,12 +418,29 @@ async fn add_member(
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;
 
+    // Issue #661 / L5: trim + drop blank globs, mirroring the orchestrator
+    // `add_agent` parse. Empty stays empty → the standard company-wide grant.
+    let tools: Vec<String> = body
+        .tools
+        .into_iter()
+        .map(|glob| glob.trim().to_string())
+        .filter(|glob| !glob.is_empty())
+        .collect();
     let mut record = load_record(&company).await?;
     let agent = OverlayAgent {
-        id: generate_id(),
+        // A readable id derived from the name, unique against the roster this
+        // record already holds (issue #686). Minted here rather than pushed and
+        // renamed later: the id names the teammate's `Agents/<id>/` folder and
+        // stamps every artifact it authors, so it has to be right on the first
+        // save. The surrounding write lock is what makes the uniqueness check
+        // and the save below one atomic step.
+        id: record.mint_agent_id(&body.name),
         name: body.name,
         role: body.role,
         description: body.description,
+        // Issue #661 / L5: the teammate's own grant, intersected with the
+        // company allow-list by the shared reads/roster build. Empty = standard.
+        tools,
     };
     record.overlay_agents.push(agent.clone());
     let attribution = author.map(|admin| BudgetOverride {
@@ -385,11 +465,24 @@ async fn add_member(
         .save(&record)
         .await
         .map_err(|e| ApiError(e).into_response())?;
+    // A brand-new overlay teammate has no `[[agent]]` row at all, so it declares
+    // no tier, holds the company's standard grant, and sits on no desk until
+    // somebody adds it to one. Resolved through the shared helpers rather than
+    // written out here, so this response cannot drift from the two reads
+    // (issues #601, #643).
+    let tier = super::team_agent::declared_tier(&record, &agent.id);
+    let is_orchestrator = super::team_agent::is_orchestrator(&record, &agent.id);
+    let tools = super::team_agent::agent_tools(&record, &agent.id);
+    let desks = super::team_agent::desks_for(&record, &agent.id);
     Ok(Json(TeamMemberDto {
         id: agent.id,
         name: Some(agent.name),
         role: agent.role,
         description: agent.description,
+        tier,
+        is_orchestrator,
+        tools,
+        desks,
         // A brand-new teammate has no inbox until the toggle writes one.
         inbox_enabled: false,
         budget_usd_daily: body.budget_usd_daily,
@@ -430,10 +523,14 @@ async fn remove_member(
             "teammate {agent_id}"
         ))));
     }
-    // Drop the teammate's budget override with it (issue #343). Overlay ids are
-    // generated, so a future teammate will not collide with this one — but a
-    // record that accumulated dead override rows would grow without bound and
-    // make the roster read scan entries for teammates that no longer exist.
+    // Drop the teammate's budget override with it (issue #343). Since #686 the
+    // id is a slug of the display name rather than a generated one, so removing
+    // a teammate *frees its id*: re-adding the same name mints the same slug and
+    // the new teammate adopts the old one's `Agents/<slug>/` folder. Clearing
+    // the override here is therefore load-bearing, not just hygiene — a row left
+    // behind would silently cap whoever next takes the seat. See
+    // `CompanyRecord::mint_agent_id` for why the reuse is the intended remedy
+    // for a typo'd name rather than a hazard to design around.
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
     company.runtime.store().save(&record).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -447,10 +544,11 @@ async fn set_budget(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<SetBudget>,
 ) -> Result<Json<TeamMemberDto>, Response> {
-    let admin = require_admin(&headers, &state, &company.runtime).await?;
+    let admin = require_admin(&headers, &state, &company.runtime, peer).await?;
     // `Some(_)` is guaranteed by `SetBudget`'s missing-key rejection; the inner
     // option is the cap-or-uncap the operator asked for.
     let cap = body.budget_usd_daily.flatten();
@@ -500,9 +598,10 @@ async fn clear_budget(
     company: ScopedCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Path(AgentPath { agent_id }): Path<AgentPath>,
 ) -> Result<Json<TeamMemberDto>, Response> {
-    require_admin(&headers, &state, &company.runtime).await?;
+    require_admin(&headers, &state, &company.runtime, peer).await?;
 
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;
@@ -732,6 +831,8 @@ mod tests {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -1245,6 +1346,176 @@ mod tests {
         );
     }
 
+    /// Issue #686 — a console-added teammate gets a readable snake_case id
+    /// derived from its name, so its workspace folder reads
+    /// `Agents/dana_designer/` rather than `Agents/019fad5ada20-…/`.
+    ///
+    /// A second teammate with the same name suffixes rather than being refused:
+    /// duplicate display names were always accepted here, and taking that away
+    /// would be a capability regression dressed as a bug fix.
+    #[tokio::test]
+    async fn a_console_added_teammate_gets_a_readable_id() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let add = async |name: &str| {
+            let (status, created) = send(
+                &state,
+                "POST",
+                "/api/v1/company/team",
+                Some(json!({"name": name, "role": "Designer"})),
+                Some(&admin_cookie()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{created}");
+            created["id"].as_str().unwrap().to_string()
+        };
+
+        assert_eq!(add("Dana Designer").await, "dana_designer");
+        assert_eq!(add("Dana Designer").await, "dana_designer_2");
+        // A name colliding with a manifest agent's id steps past it — an
+        // unsuffixed `writer` would be dropped by `build_roster` and the
+        // teammate would save without ever materialising.
+        assert_eq!(add("Writer").await, "writer_2");
+        // A name with no legal stem in it takes the shared fallback.
+        assert_eq!(add("24/7").await, "teammate");
+    }
+
+    /// The slug is a seat name, not a chain of custody: removing a teammate
+    /// frees its id, and re-adding the same name takes it back — which is what
+    /// makes remove-plus-re-add the remedy for a typo'd name, since the new
+    /// teammate adopts the old `Agents/<slug>/` folder.
+    ///
+    /// Pinned rather than left implicit because it is the one consequence of
+    /// name-derived ids that a generated id did not have.
+    #[tokio::test]
+    async fn removing_a_teammate_frees_its_slug_for_reuse() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (_, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Dana Designer", "role": "Designer"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(created["id"], "dana_designer");
+
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/team/dana_designer",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, again) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Dana Designer", "role": "Designer"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(
+            again["id"], "dana_designer",
+            "the freed slug comes back rather than suffixing past a ghost: {again}"
+        );
+    }
+
+    /// The id is minted once. `PATCH …/team/{id}` renames the teammate and
+    /// leaves the id alone — a name-keyed id would orphan the teammate's
+    /// workspace folder, its budget row and its desk memberships on every
+    /// correction (the trap name-keyed DM ids sprang in issue #364).
+    #[tokio::test]
+    async fn renaming_a_teammate_does_not_remint_its_id() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (_, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Dana Designer", "role": "Designer"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(created["id"], "dana_designer");
+
+        let (status, edited) = send(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/dana_designer",
+            Some(json!({"name": "Dana Diaz"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{edited}");
+        assert_eq!(edited["name"], "Dana Diaz");
+        assert_eq!(
+            edited["id"], "dana_designer",
+            "the id records what the teammate was called at creation: {edited}"
+        );
+
+        // And the per-teammate routes still answer on the original slug.
+        let (status, _) = put_budget(&state, "dana_designer", json!({"budgetUsdDaily": 3.0})).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = team_row(&state, "dana_designer").await;
+        assert_eq!(row["budgetUsdDaily"], 3.0, "{row}");
+        assert_eq!(row["name"], "Dana Diaz", "{row}");
+    }
+
+    /// Every teammate route keyed on `{agent_id}` keeps working when that id is
+    /// a slug — the inbox toggle alongside the budget pair, since the slug now
+    /// travels in a URL path where a generated id used to.
+    #[tokio::test]
+    async fn slug_ids_work_across_the_per_teammate_routes() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (_, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Ana Maria (Growth)", "role": "Growth"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(id, "ana_maria_growth");
+
+        let (status, _) = send(
+            &state,
+            "PUT",
+            &format!("/api/v1/company/team/{id}/inbox"),
+            Some(json!({"enabled": true})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(team_row(&state, &id).await["inboxEnabled"], true);
+
+        let (status, _) = put_budget(&state, &id, json!({"budgetUsdDaily": 1.5})).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            &format!("/api/v1/company/team/{id}/budget"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            team_row(&state, &id).await.get("budgetUsdDaily").is_none(),
+            "the reset came back through the slug-keyed route"
+        );
+    }
+
     /// Issue #304 — the cap was never on the wire at all, so the issue's "and
     /// displayed in the console" was stale against main. A capped teammate now
     /// carries both its cap and its spend since UTC midnight, summed from the
@@ -1383,6 +1654,158 @@ mod tests {
         assert!(
             writer.get("budgetUsdDaily").is_none() && writer.get("spentTodayUsd").is_none(),
             "{writer}"
+        );
+    }
+
+    // --- Declared tier on the roster list (issue #643) -----------------------
+
+    /// A roster whose three teammates each answer the tier question
+    /// differently: `ceo` is tagged as the orchestrator, `writer` declares a
+    /// *non*-orchestrator tier, and `intern` declares nothing at all.
+    const TIERED_ROSTER: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief Executive\"\ntier = \"orchestrator\"\n\
+         [[agent]]\nid = \"writer\"\nrole = \"Writer\"\ntier = \"reasoning\"\n\
+         [[agent]]\nid = \"intern\"\nrole = \"Intern\"\n";
+
+    /// One agent from `GET …/team/{id}` — the detail read, for cross-checking
+    /// that the list has not grown a second opinion.
+    async fn agent_detail_row(state: &AppState, agent: &str) -> Value {
+        let (status, body) = send(
+            state,
+            "GET",
+            &format!("/api/v1/company/team/{agent}"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    /// Issue #643 — the declared tier reaches the roster list verbatim.
+    ///
+    /// The list carried no tier at all, so the overview graph (built from this
+    /// read) stamped a literal `worker` on every node: a company declaring
+    /// `tier = "orchestrator"` read back as a worker on its own graph.
+    ///
+    /// The **undeclared** teammate is the half that keeps the fix honest. Its
+    /// row must omit the key entirely — not `"worker"`, not `null` — because
+    /// absence is the only wire shape that says "this company declares no tier
+    /// here" rather than asserting one on its behalf.
+    #[tokio::test]
+    async fn the_roster_list_carries_each_declared_tier_verbatim() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), TIERED_ROSTER).await;
+
+        let ceo = team_row(&state, "ceo").await;
+        assert_eq!(ceo["tier"], "orchestrator", "{ceo}");
+        assert_eq!(ceo["isOrchestrator"], true, "{ceo}");
+
+        // A declared tier that is not the orchestrator tier: carried verbatim,
+        // and it does not make the teammate the orchestrator.
+        let writer = team_row(&state, "writer").await;
+        assert_eq!(writer["tier"], "reasoning", "{writer}");
+        assert_eq!(
+            writer["isOrchestrator"], false,
+            "a declared tier is a hint, not the roster rule: {writer}"
+        );
+
+        // The negative control: undeclared means no key.
+        let intern = team_row(&state, "intern").await;
+        assert!(
+            intern.get("tier").is_none(),
+            "an undeclared tier omits the key — a defaulted \"worker\" here is \
+             indistinguishable from a declaration and is the whole of #643: {intern}"
+        );
+        assert_eq!(intern["isOrchestrator"], false, "{intern}");
+
+        // No row anywhere invents the literal the graph used to print.
+        let (_, all) = get_team(&state).await;
+        for row in all.as_array().unwrap() {
+            assert_ne!(row["tier"], "worker", "nobody declared \"worker\": {row}");
+        }
+
+        // And the list agrees with the detail read, which is the property the
+        // shared helpers exist to make unrepresentable rather than merely true.
+        for id in ["ceo", "writer", "intern"] {
+            let (list, detail) = (
+                team_row(&state, id).await,
+                agent_detail_row(&state, id).await,
+            );
+            assert_eq!(
+                list.get("tier"),
+                detail.get("tier"),
+                "{id}: {list} {detail}"
+            );
+            assert_eq!(
+                list["isOrchestrator"], detail["isOrchestrator"],
+                "{id}: {list} {detail}"
+            );
+        }
+    }
+
+    /// A company that tags nobody still has an orchestrator: the first declared
+    /// agent, by the same roster rule the harness resolves with.
+    ///
+    /// This is the case a console that re-derived the marker from the tier
+    /// string would get wrong — and get wrong invisibly, since an untagged CEO
+    /// draws as an ordinary worker rather than as an error.
+    #[tokio::test]
+    async fn an_untagged_roster_still_names_an_orchestrator_on_the_list() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let analyst = team_row(&state, "analyst").await;
+        assert_eq!(
+            analyst["isOrchestrator"], true,
+            "the first declared agent is the orchestrator when nobody is tagged: {analyst}"
+        );
+        assert!(
+            analyst.get("tier").is_none(),
+            "…and it says so without inventing a tier for them: {analyst}"
+        );
+
+        // The negative control: exactly one, and it is the first.
+        let writer = team_row(&state, "writer").await;
+        assert_eq!(writer["isOrchestrator"], false, "{writer}");
+    }
+
+    /// An overlay teammate has no manifest row, so it declares no tier and the
+    /// roster rule never picks it — even on a company whose manifest roster is
+    /// empty, where "the first declared agent" names nobody at all.
+    #[tokio::test]
+    async fn an_overlay_teammate_declares_no_tier_and_is_not_the_orchestrator() {
+        let home_dir = home();
+        let state = state_with_manifest(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Nova", "role": "Researcher"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert!(
+            created.get("tier").is_none() && created["isOrchestrator"] == false,
+            "the create response answers both the same way the reads do: {created}"
+        );
+
+        let id = created["id"].as_str().unwrap().to_string();
+        let row = team_row(&state, &id).await;
+        assert!(
+            row.get("tier").is_none(),
+            "an overlay teammate has no `[[agent]]` row to declare a tier: {row}"
+        );
+        assert_eq!(
+            row["isOrchestrator"], false,
+            "an empty manifest roster names nobody, so it does not fall through \
+             to the overlay half: {row}"
         );
     }
 }

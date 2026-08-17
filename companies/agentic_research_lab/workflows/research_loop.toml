@@ -1,0 +1,135 @@
+# Workflow graph: research_loop
+#
+# Referenced by `[workflows].enabled = ["research_loop"]` in ../company.toml.
+#
+# One pass of the lab's investigation: establish what is already known, gather
+# what is not, extract what the sources actually establish, compute, then argue
+# with the result before anyone sees it.
+#
+# This graph is the *static* half of the design in
+# `docs/spec/runtime/orchestration/loop.md`. The dynamic half — retrying a pass
+# that came back wrong, and routing on a verdict — needs the attempt loop, which
+# does not exist yet. What is expressible today is one pass with an explicit
+# critique gate, and that is what this file is.
+#
+# Two structural choices worth reading before editing:
+#
+#   * `gather` runs before `read`, and the two are separate agents on purpose.
+#     The librarian fetches and never reads; the scholar reads and never
+#     fetches. Splitting them lets each prompt be strict about one thing, and it
+#     stops the failure where a role that knows what the lab wants to be true
+#     goes looking for exactly that.
+#
+#   * `survey` runs first, every time. Establishing what the workspace already
+#     holds before gathering anything is what stops a lab re-downloading what it
+#     read last week. The sibling runtime made this a run-once stage for the
+#     same reason.
+
+id = "research_loop"
+name = "Research loop"
+description = "Survey what is known, gather what is not, extract claims, compute, and critique before reporting."
+
+[[node]]
+id = "question"
+kind = "trigger"
+name = "Question arrives"
+summary = "An operator question or a stated demand opens an investigation."
+
+[[node]]
+id = "survey"
+kind = "agent"
+name = "Survey what is known"
+summary = "Read the workspace and state what the lab already establishes, before anything is fetched."
+agent = "curator"
+
+[[node]]
+id = "gather"
+kind = "agent"
+name = "Gather sources"
+summary = "Find and download primary material. Fetches only; does not read."
+agent = "librarian"
+
+[[node]]
+id = "read"
+kind = "agent"
+name = "Extract claims"
+summary = "Read each source and record what it actually establishes, as claims with their conditions."
+agent = "scholar"
+
+[[node]]
+id = "compute"
+kind = "agent"
+name = "Compute and check"
+summary = "Run the numbers the claims rest on, rather than estimating them."
+agent = "analyst"
+
+[[node]]
+id = "gate"
+kind = "condition"
+name = "Did the pass establish anything?"
+summary = "Branch on whether this pass produced defensible claims or stalled."
+[node.config]
+field = "=item.established"
+
+[[node]]
+id = "rethink"
+kind = "agent"
+name = "Propose another angle"
+summary = "The current line stalled; propose a different one rather than repeating it."
+agent = "inventor"
+
+[[node]]
+id = "critique"
+kind = "agent"
+name = "Attack the result"
+summary = "Argue against the lab's own conclusions before the operator sees them."
+agent = "critic"
+
+[[node]]
+id = "report"
+kind = "output"
+name = "Report with evidence"
+summary = "Report what can be defended, with the claims and sources attached."
+
+[[edge]]
+from = "question"
+to = "survey"
+
+[[edge]]
+from = "survey"
+to = "gather"
+
+[[edge]]
+from = "gather"
+to = "read"
+
+[[edge]]
+from = "read"
+to = "compute"
+
+[[edge]]
+from = "compute"
+to = "gate"
+
+# A stalled pass goes to the inventor, not back to the librarian. Fetching more
+# of the same material is the expensive way to stay stuck.
+[[edge]]
+from = "gate"
+to = "rethink"
+label = "no"
+
+[[edge]]
+from = "gate"
+to = "critique"
+label = "yes"
+
+# The inventor's angle rejoins at the critique rather than short-circuiting to
+# the report: a new idea is a claim about what to try, and it is held to the
+# same scrutiny as a finding.
+[[edge]]
+from = "rethink"
+to = "critique"
+
+[[edge]]
+from = "critique"
+to = "report"

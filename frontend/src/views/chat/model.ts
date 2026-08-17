@@ -242,6 +242,35 @@ export function channelTitle(channel: Channel): string {
   return channel.kind === "dm" ? channel.name : `#${channel.name}`;
 }
 
+/**
+ * Whether this chat target's composer offers "Do it once" / "Build me the
+ * workflow" (issues #580, #845).
+ *
+ * True for every real chat target — a channel line and a DM can each open a
+ * board card, and the card is what routes a `workflow` request to the builder
+ * pass. It is deliberately a total function over [`ChannelKind`] rather than an
+ * inline `kind === "channel"`, so adding a kind is a decision someone makes here
+ * instead of a control that silently fails to appear.
+ *
+ * Not every composer asks: the thread and copilot composers pass nothing and
+ * keep their plain `(text)` `onSend`. A thread reply continues a message that
+ * already made this choice, and a copilot line is about one graph rather than a
+ * request to the company.
+ *
+ * #580 shipped the control on channels only. Nothing downstream was ever scoped
+ * to channels — the chat route reads `deliverable` off the payload whatever
+ * thread it came from — so the asymmetry lived entirely in the caller, and a DM
+ * asking for a workflow had no way to say so. It went as a `once` card, was
+ * dispatched to a desk agent holding no authoring tool, and came back a refusal.
+ */
+export function offersDeliverableChoice(kind: ChannelKind): boolean {
+  switch (kind) {
+    case "channel":
+    case "dm":
+      return true;
+  }
+}
+
 /* ---- senders ---- */
 
 export type SenderKind = "you" | "company" | "agent" | "system";
@@ -387,16 +416,35 @@ export type TimelineItem =
       kind: "approval";
       key: string;
       at: number;
-      approval: ApprovalSummary;
       /**
-       * The verdict this console has witnessed for the card, if any.
+       * Every gated call the same turn parked, oldest first (#842).
+       *
+       * Usually one. A research turn that reaches three sites parks three, and
+       * the conversation asks about them **once** — one card listing three
+       * hosts — rather than interrupting the operator three times for one piece
+       * of work. Each entry stays its own approval underneath: its own id, its
+       * own decision, its own host-scoped grant on approve.
+       *
+       * Never empty. {@link buildTimelineItems} only mints an item when it has
+       * an approval to put in it, so a renderer can read `approvals[0]` for the
+       * facts the whole batch shares (the asker, the thread, the tool).
+       */
+      approvals: ApprovalSummary[];
+      /**
+       * The verdicts this console has witnessed, keyed by approval id (#842).
        *
        * A decided approval leaves `feed.approvals` on the next refresh, so
        * without this the card would simply vanish mid-glance — an abrupt
        * unmount that reads as the request having been lost. Holding the
        * witnessed verdict lets it settle into a terminal state instead.
+       *
+       * Per item rather than per card, because a batch settles **item by
+       * item**: the Approvals page decides one row at a time, and a card that
+       * kept claiming three things were pending after one was approved there
+       * would be the two surfaces drifting. A batch is fully settled only when
+       * every id in {@link approvals} has an entry here.
        */
-      decided: Verdict | null;
+      decided: Record<string, Verdict>;
     };
 
 /**
@@ -408,6 +456,20 @@ export type TimelineItem =
  *
  * A `decided` card is kept even once the feed has dropped it, so the operator
  * sees their own decision land rather than the card disappearing.
+ *
+ * ## One card per turn (#842)
+ *
+ * Approvals sharing a `batch` — the host's key for the turn that parked them —
+ * collapse into a single item. The conversation is interrupted once for one
+ * piece of work, which is the whole of the issue; the grouping is presentation
+ * only, and every approval inside the item is still decided on its own id.
+ *
+ * Approvals with **no** batch are never grouped, not even with each other. An
+ * absent key means "the host did not say which turn this came from" — a
+ * workflow node, a scheduler tick, an older host — and folding those together
+ * would invent a batch out of two facts that are only alike in being unknown,
+ * which is how an operator ends up approving something they were never shown.
+ * Each gets its own card, exactly as before this existed.
  */
 export function buildTimelineItems(
   entries: TimelineEntry[],
@@ -420,15 +482,42 @@ export function buildTimelineItems(
     at: entry.message.at,
     entry,
   }));
+
+  // Insertion-ordered, so a batch lands where its **first** approval did rather
+  // than wherever the last one happened to arrive. The caller hands us the
+  // pending feed followed by the settled ones, so an item decided on the
+  // Approvals page rejoins the card it was raised in instead of opening a
+  // second one below it.
+  const batches = new Map<string, ApprovalSummary[]>();
   for (const approval of approvals) {
+    // The id is the fallback key, which is what makes "ungrouped" the safe
+    // default: an id is unique, so a batchless approval can only ever group
+    // with itself.
+    const key = approval.batch ?? `solo:${approval.id}`;
+    const bucket = batches.get(key);
+    if (bucket) bucket.push(approval);
+    else batches.set(key, [approval]);
+  }
+
+  for (const [key, batch] of batches) {
+    batch.sort((a, b) => a.at_millis - b.at_millis || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const verdicts: Record<string, Verdict> = {};
+    for (const approval of batch) {
+      const verdict = decided[approval.id]?.verdict;
+      if (verdict) verdicts[approval.id] = verdict;
+    }
     items.push({
       kind: "approval",
-      key: `approval:${approval.id}`,
-      at: approval.at_millis,
-      approval,
-      decided: decided[approval.id]?.verdict ?? null,
+      key: `approval:${key}`,
+      // The turn asked once, at the moment its first call was gated. Placing
+      // the card at the earliest of the batch is what keeps it beside the
+      // message that provoked it.
+      at: batch[0].at_millis,
+      approvals: batch,
+      decided: verdicts,
     });
   }
+
   // Stable within a millisecond: a card raised by the very turn whose reply
   // shares its timestamp should sit after that reply, not shuffle between
   // renders. `sort` is stable in every engine this ships to, so equal `at`

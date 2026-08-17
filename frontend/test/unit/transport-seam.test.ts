@@ -7,7 +7,14 @@ import type {
   TransportRequest,
   TransportResponse,
 } from "@/api/transport";
-import { BrowserTransport, ProxyTransport, defaultTransport, isDesktopRuntime } from "@/api/transport";
+import {
+  BrowserTransport,
+  ProxyTransport,
+  defaultTransport,
+  isAddressableBaseUrl,
+  isDesktopRuntime,
+  mayCarryACredential,
+} from "@/api/transport";
 import { ApiError } from "@/api/types";
 
 /**
@@ -83,6 +90,7 @@ function clientOn(
       baseUrl: config.baseUrl ?? "",
       company: config.company ?? null,
       operatorToken: config.operatorToken ?? null,
+      sessionHeader: null,
     },
     transport,
   );
@@ -236,7 +244,7 @@ describe("picking a transport", () => {
   it("stays on the browser transport when only the internals global is present", () => {
     // The two globals answer different questions. `__TAURI_INTERNALS__` is
     // injected by the runtime unconditionally; `__TAURI__` exists only under
-    // `app.withGlobalTauri`, and it is the one `ProxyTransport.bridge()` calls.
+    // `app.withGlobalTauri`, and it is the one `tauriCore()` reads.
     // Probing the former selected a proxy transport whose every request then
     // threw "the desktop bridge is unavailable" — a desktop that could not
     // complete a single call.
@@ -248,11 +256,118 @@ describe("picking a transport", () => {
   it("uses the proxy transport when the bridge it calls is really there", () => {
     (globalThis as { window?: unknown }).window = {
       __TAURI_INTERNALS__: {},
-      __TAURI__: { invoke: () => Promise.resolve(), Channel: class {} },
+      __TAURI__: { core: { invoke: () => Promise.resolve(), Channel: class {} } },
     };
     expect(isDesktopRuntime()).toBe(true);
     expect(defaultTransport("conn-1")).toBeInstanceOf(ProxyTransport);
     // No connection id: the bootstrap probe, which has no host to address yet.
     expect(defaultTransport()).toBeInstanceOf(BrowserTransport);
+  });
+
+  /**
+   * Which base urls each transport can actually address.
+   *
+   * The same decision as the one above, and deliberately in the same place: the
+   * empty base url means "same origin", which `BrowserTransport` resolves
+   * against a document origin that serves a host and `ProxyTransport` hands to
+   * Rust, where it joins to a *relative* url `reqwest` refuses. One string,
+   * addressable in one runtime and not the other (issue #613).
+   */
+  it("lets a browser address anything, including its own origin", () => {
+    // The web build's whole discovery mechanism. Nothing here may narrow.
+    (globalThis as { window?: unknown }).window = {};
+    for (const base of ["", "https://acme.test", "/api", "localhost:8080"]) {
+      expect(isAddressableBaseUrl(base)).toBe(true);
+    }
+  });
+
+  it("holds the desktop to an absolute http(s) host", () => {
+    (globalThis as { window?: unknown }).window = {
+      __TAURI__: { core: { invoke: () => Promise.resolve(), Channel: class {} } },
+    };
+
+    expect(isAddressableBaseUrl("http://127.0.0.1:65364")).toBe(true);
+    expect(isAddressableBaseUrl("https://acme.example.com")).toBe(true);
+
+    // Every one of these joins to a relative url in Rust and dies at `send()`
+    // with the same opaque "could not be reached". The empty string is the one
+    // #613 reported; it is not the only one, and `localhost:8080` is what a
+    // person actually types into "Add a host".
+    for (const relative of ["", "/", "/api/v1", "localhost:8080", "acme.example.com"]) {
+      expect(isAddressableBaseUrl(relative)).toBe(false);
+    }
+
+    // Parseable is not addressable: `URL` accepts both of these, and a company
+    // host is neither.
+    expect(isAddressableBaseUrl("tauri://localhost")).toBe(false);
+    expect(isAddressableBaseUrl("file:///Users/someone/console")).toBe(false);
+  });
+
+  /**
+   * Which hosts may be sent a secret, as opposed to merely reached.
+   *
+   * The console's copy of `may_carry_a_credential` in
+   * `src-tauri/src/proxy/mod.rs`; the Rust one enforces, this one explains. The
+   * two must agree, or the console offers a connection the core will refuse —
+   * which is the shape of the confusion #613 was about, and #731 asked not to
+   * repeat.
+   */
+  it("lets a secret travel over https, or to this machine, and nowhere else", () => {
+    expect(mayCarryACredential("https://acme.example.com")).toBe(true);
+    // Loopback: how the embedded host is reached, on a port that changes every
+    // launch and so can never have a certificate.
+    expect(mayCarryACredential("http://127.0.0.1:65364")).toBe(true);
+    expect(mayCarryACredential("http://127.0.0.2:8080")).toBe(true);
+    expect(mayCarryACredential("http://[::1]:8080")).toBe(true);
+    expect(mayCarryACredential("http://localhost:8080")).toBe(true);
+    expect(mayCarryACredential("http://sub.localhost:8080")).toBe(true);
+
+    // The hosts this exists for. A LAN is precisely where someone else is on
+    // the path, so the private ranges are the target rather than an exception.
+    expect(mayCarryACredential("http://192.168.1.20:8080")).toBe(false);
+    expect(mayCarryACredential("http://10.0.0.4:8080")).toBe(false);
+    expect(mayCarryACredential("http://acme.example.com")).toBe(false);
+    // A name is not an address: either of these is a host someone else's DNS
+    // answers for, and neither is this machine.
+    expect(mayCarryACredential("http://localhost.acme.example.com")).toBe(false);
+    expect(mayCarryACredential("http://127.0.0.1.acme.example.com")).toBe(false);
+    // Not a url, and so not a host to trust with anything.
+    expect(mayCarryACredential("")).toBe(false);
+    expect(mayCarryACredential("acme.example.com")).toBe(false);
+  });
+
+  /**
+   * A shorthand spelling of loopback is still loopback, and nothing else is.
+   *
+   * `URL` normalises `127.1` and `0177.0.0.1` to `127.0.0.1` before this sees
+   * them — asserted because that is the parser's property rather than this
+   * module's, and losing it would silently widen the rule to whatever the
+   * shorthand happens to parse as.
+   */
+  it("reads a host as an address rather than as a string", () => {
+    expect(mayCarryACredential("http://127.1:8080")).toBe(true);
+    expect(mayCarryACredential("http://0177.0.0.1:8080")).toBe(true);
+    expect(mayCarryACredential("http://[::ffff:127.0.0.1]:8080")).toBe(true);
+    // Digits and dots are not an address. `URL` keeps this one as a name, and
+    // a name that is not `localhost` resolves wherever DNS says.
+    expect(mayCarryACredential("http://127.0.0.1.example.com")).toBe(false);
+  });
+
+  /**
+   * The rule does not depend on the runtime, unlike its sibling above.
+   *
+   * `isAddressableBaseUrl` widens in a browser because a browser genuinely can
+   * address its own origin. Nothing equivalent is true here: an unencrypted
+   * wire is unencrypted on either transport. The web build simply does not
+   * consult this — its credential is a cookie, and `Secure` is the browser's
+   * own version of this decision (see `insecurelyCredentialed`).
+   */
+  it("answers the same in a browser as in the desktop", () => {
+    (globalThis as { window?: unknown }).window = {};
+    expect(mayCarryACredential("http://192.168.1.20:8080")).toBe(false);
+    (globalThis as { window?: unknown }).window = {
+      __TAURI__: { core: { invoke: () => Promise.resolve(), Channel: class {} } },
+    };
+    expect(mayCarryACredential("http://192.168.1.20:8080")).toBe(false);
   });
 });

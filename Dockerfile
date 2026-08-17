@@ -23,8 +23,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # The whole workspace is copied (examples/*/Cargo.toml load the workspace;
-# vendor/tinyagents backs the [patch.crates-io] entry). vendor/openhuman,
-# target/, and node_modules are trimmed via .dockerignore.
+# vendor/openhuman/vendor/tinyagents backs the [patch.crates-io] entry).
+# vendor/openhuman, target/, and node_modules are trimmed via .dockerignore.
 COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

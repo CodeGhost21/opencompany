@@ -18,22 +18,27 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::task::JoinHandle;
 
 use crate::Result;
+use crate::app::config::AuthMode;
 use crate::error::OpenCompanyError;
 use crate::feedback::service::{FeedbackFiler, FeedbackResponse};
 use crate::feedback::store::FeedbackStore;
 use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
-use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, Verdict};
+use crate::ports::types::{
+    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Verdict,
+};
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
-    EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore,
-    SessionStore, SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter, UserStore,
-    WorkflowRevisionStore, WorkspaceStore,
+    EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, NotificationStore,
+    ReadStateStore, RunStore, SecretStore, SessionStore, SkillStateStore, TaskRecord, TaskStore,
+    ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore, WorkspaceStore,
 };
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
 use crate::ports::ScheduleFireStore;
+// Separate line (#596) for the same reason.
+use crate::ports::WorkflowRunOutputStore;
 
 /// The board column a task must enter to be dispatched to its assignee. Read
 /// from the task port (#205) so this edge and the write boundary that validates
@@ -131,10 +136,16 @@ pub struct OpsStores {
     pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     /// Durable cross-replica scheduler fire claims (#241).
     pub schedule_fires: Arc<dyn ScheduleFireStore>,
+    /// Durable, console-facing per-node run output snapshots (#596).
+    pub workflow_run_outputs: Arc<dyn WorkflowRunOutputStore>,
     /// The usage meter (written by the WS4 cost hook, read by WS5).
     pub usage: Arc<dyn UsageMeter>,
     /// Operator deltas over the company's skills.
     pub skills: Arc<dyn SkillStateStore>,
+    /// Per-person, per-channel read markers (#755).
+    pub read_state: Arc<dyn ReadStateStore>,
+    /// Durable notifications with per-person read state (#749).
+    pub notifications: Arc<dyn NotificationStore>,
     /// The company's human collaborators and their outstanding invites.
     pub users: Arc<dyn UserStore>,
     /// Live browser sessions for those users.
@@ -172,6 +183,12 @@ pub struct CompanyRuntime {
     /// Per-company secrets, read by the feedback scrubber (and webhook HMAC
     /// verification, later).
     pub(crate) secrets: Arc<dyn SecretStore>,
+    /// Install-wide default MCP servers (issue #527), already normalized by
+    /// `company::mcp::normalize_default_servers` at the config boundary. Lives
+    /// beside `secrets` because every reader needs both: the pair is what
+    /// `company::mcp::resolve_effective` takes. Empty for an install that
+    /// configures no defaults, which is the common case.
+    pub(crate) default_mcp_servers: Vec<crate::company::McpServer>,
     /// Per-teammate email (inbound + outbound), backing the inbox surface.
     pub(crate) inbox: Arc<dyn InboxStore>,
     /// The company's own outbound-mail handle (sender + SMTP credentials),
@@ -189,6 +206,10 @@ pub struct CompanyRuntime {
     /// `skills/` and `workflows/` content. `None` in platform-provisioned mode
     /// (no source dir), where those resolvers degrade to manifest-derived/empty.
     pub(crate) source_dir: Option<PathBuf>,
+    /// How humans sign in to this company, resolved once at build from the
+    /// host-wide override and the manifest's `[users].mode`. Cached because it
+    /// is read on the request path — see [`Self::auth_mode`].
+    pub(crate) auth_mode: AuthMode,
     /// Issue #29: the workflow runner, when wired. Executes a company's workflow
     /// graphs on the embedded `tinyflows` engine (agent nodes on the harness
     /// pool). The port trait is default-compiled, so this field is always
@@ -217,6 +238,18 @@ pub struct CompanyRuntime {
     /// which is what makes a wedged cron fire and an agent-initiated run as
     /// stoppable from the console as a Run-button one.
     pub(crate) run_supervisor: crate::runtime::RunSupervisor,
+    /// Issue #245: the company's bound repositories and their host-side mirror
+    /// cache, when the runtime was built over a filesystem home.
+    ///
+    /// `None` is a real state, not an omission: the manager is rooted at
+    /// `companies/<slug>/repos/`, so a runtime assembled from injected ports
+    /// with no home (a test harness, an embedding) has no cache to manage and
+    /// the ops routes answer "not wired" rather than inventing a location.
+    ///
+    /// Compiled in every build. Nothing here is agent-facing — there is no
+    /// grant and no tool in this tier — so it needs no feature gate, and the
+    /// forge HTTP client it can optionally hold is the only part that does.
+    pub(crate) repos: Option<Arc<crate::runtime::RepoManager>>,
     /// Issue #243: the live single-use grants minted when an operator approves a
     /// tool call an agent was blocked from making.
     ///
@@ -290,6 +323,8 @@ pub struct CompanyRuntime {
     /// and the boot reaper settles any run left mid-build.
     #[cfg(feature = "openhuman")]
     pub(crate) builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>>,
+    #[cfg(feature = "openhuman")]
+    pub(crate) workflow_harness_deps: Option<crate::harness::HarnessDeps>,
     /// The company's first-run setup polish pass, attached the same way as the
     /// planner and the workflow builder. `None` is not a degraded state here:
     /// the setup route then returns the curated template unpolished, which is a
@@ -329,6 +364,10 @@ impl CompanyRuntime {
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
         Self {
+            // Install-wide, not per-company, so it is set by the builder from
+            // resolved config (`set_default_mcp_servers`) rather than taken as a
+            // 19th positional argument here.
+            default_mcp_servers: Vec::new(),
             id,
             brain,
             store,
@@ -348,9 +387,11 @@ impl CompanyRuntime {
             feedback,
             filer,
             source_dir: None,
+            auth_mode: AuthMode::default(),
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
+            repos: None,
             grants,
             continuations: ContinuationQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
@@ -362,6 +403,8 @@ impl CompanyRuntime {
             planner: None,
             #[cfg(feature = "openhuman")]
             builder: None,
+            #[cfg(feature = "openhuman")]
+            workflow_harness_deps: None,
             #[cfg(feature = "openhuman")]
             roster_builder: None,
             #[cfg(feature = "mcp")]
@@ -380,6 +423,37 @@ impl CompanyRuntime {
     /// `None` in platform-provisioned mode.
     pub fn source_dir(&self) -> Option<&Path> {
         self.source_dir.as_deref()
+    }
+
+    /// Records how humans sign in to this company, resolved once by the
+    /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the host override
+    /// and the manifest's `[users].mode`.
+    pub(crate) fn set_auth_mode(&mut self, mode: AuthMode) {
+        self.auth_mode = mode;
+    }
+
+    /// How humans sign in to this company.
+    ///
+    /// Read on the request path — by the login routes, by the user-administration
+    /// routes, and by principal resolution — so it is a cached field rather than
+    /// a manifest read. It cannot change without a rebuild, which is what makes
+    /// caching it honest.
+    pub fn auth_mode(&self) -> AuthMode {
+        self.auth_mode
+    }
+
+    /// Issue #245: attach the repository manager after construction, wired by
+    /// the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the same
+    /// filesystem home the company's bundle hangs off.
+    pub fn set_repos(&mut self, repos: Arc<crate::runtime::RepoManager>) {
+        self.repos = Some(repos);
+    }
+
+    /// The company's bound repositories, if a mirror cache is wired. `None` on
+    /// a runtime built without a filesystem home, where the ops routes report
+    /// the surface as not wired.
+    pub fn repos(&self) -> Option<&Arc<crate::runtime::RepoManager>> {
+        self.repos.as_ref()
     }
 
     /// Issue #29: attach the workflow runner after construction. Wired by the
@@ -438,6 +512,30 @@ impl CompanyRuntime {
     #[cfg(feature = "openhuman")]
     pub fn builder(&self) -> Option<&Arc<crate::harness::workflow_build::WorkflowBuilder>> {
         self.builder.as_ref()
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub async fn wired_workflow_namespaces(
+        &self,
+        company: &crate::ports::CompanyRecord,
+    ) -> Option<std::collections::BTreeSet<&'static str>> {
+        let deps = self.workflow_harness_deps.as_ref()?;
+        let mut resolved = deps.clone();
+        if let Some(plan) = &resolved.plan {
+            resolved.capabilities = crate::harness::capability_budget::resolve_filter(
+                plan,
+                resolved.meter.as_deref(),
+                &company.id,
+                crate::ports::now_millis(),
+            )
+            .await;
+        }
+        Some(crate::workflows::caps::wired_workflow_namespaces(&resolved))
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub fn set_workflow_harness_deps(&mut self, deps: crate::harness::HarnessDeps) {
+        self.workflow_harness_deps = Some(deps);
     }
 
     /// Attaches the company's first-run setup pass after construction, mirroring
@@ -503,6 +601,18 @@ impl CompanyRuntime {
     }
 
     /// This company's secret store (SMTP creds, OAuth tokens, domain config).
+    /// Sets the install-wide default MCP servers (issue #527). Called by
+    /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from resolved config.
+    pub fn set_default_mcp_servers(&mut self, servers: Vec<crate::company::McpServer>) {
+        self.default_mcp_servers = servers;
+    }
+
+    /// The install-wide default MCP servers (issue #527), for passing to
+    /// [`company::mcp::resolve_effective`](crate::company::mcp::resolve_effective).
+    pub fn default_mcp_servers(&self) -> &[crate::company::McpServer] {
+        &self.default_mcp_servers
+    }
+
     pub fn secrets(&self) -> &Arc<dyn SecretStore> {
         &self.secrets
     }
@@ -526,6 +636,19 @@ impl CompanyRuntime {
     /// This company's durable record store.
     pub fn store(&self) -> &Arc<dyn CompanyStore> {
         &self.store
+    }
+
+    /// The ids of the chat channels actually wired for this running company —
+    /// exactly what an `output` node's `channel` destination may target
+    /// (issue #813). `operator` is always present; the rest are the enabled
+    /// OpenHuman-provider manifest channels. The console reads this to offer a
+    /// picker of real targets instead of a free-text box that only fails at
+    /// delivery time with `ChannelNotWired`.
+    pub fn wired_channel_ids(&self) -> Vec<String> {
+        self.channels
+            .iter()
+            .map(|channel| channel.channel_id().to_string())
+            .collect()
     }
 
     /// The workflow ids declared in this company's manifest
@@ -862,6 +985,13 @@ impl CompanyRuntime {
         &self.ops.schedule_fires
     }
 
+    /// This company's durable per-node run output snapshots (#596): one record
+    /// per settled run, read by the console run inspector to show what each node
+    /// produced on any past run.
+    pub fn workflow_run_outputs(&self) -> &Arc<dyn WorkflowRunOutputStore> {
+        &self.ops.workflow_run_outputs
+    }
+
     /// This company's usage meter (written by the cost hook, read by WS5).
     pub fn usage(&self) -> &Arc<dyn UsageMeter> {
         &self.ops.usage
@@ -881,6 +1011,16 @@ impl CompanyRuntime {
     /// This company's skill-state deltas.
     pub fn skills(&self) -> &Arc<dyn SkillStateStore> {
         &self.ops.skills
+    }
+
+    /// Where each person has read to, per channel (#755).
+    pub fn read_state(&self) -> &Arc<dyn ReadStateStore> {
+        &self.ops.read_state
+    }
+
+    /// Durable notifications with per-person read state (#749).
+    pub fn notifications(&self) -> &Arc<dyn NotificationStore> {
+        &self.ops.notifications
     }
 
     /// This company's human collaborators and their invites.
@@ -1053,6 +1193,33 @@ impl CompanyRuntime {
         Ok((receipt.clone(), self.spawn_follow_up(receipt)))
     }
 
+    /// How many **other** decisions the turn behind `id` is still blocked on
+    /// (issue #561).
+    ///
+    /// The console asks so it can say what is actually about to happen. Since
+    /// issue #469 a turn continues once, when the last decision it parked
+    /// lands — so approving one of four tells the operator's agent nothing yet,
+    /// and a confirmation reading "the agent is completing the action" is false
+    /// for three of those four clicks. It was measured false for minutes at a
+    /// time on staging, which is worse than silence: the operator waits for work
+    /// that no decision has released.
+    ///
+    /// `0` means this decision releases the turn (or the turn was never gated,
+    /// which continues on its own the same way).
+    ///
+    /// A **snapshot**, deliberately: the count is read after the verdict is
+    /// durable and before the follow-up cycle decrements it, so this approval is
+    /// still included and is subtracted here. A concurrent resolve on the same
+    /// turn can land between the read and the render, which makes the number
+    /// advisory — it is confirmation copy, not a control, and the continuation
+    /// itself is decided under the queue's own lock where no such race exists.
+    pub fn decisions_still_awaited(&self, id: &ApprovalId) -> usize {
+        let Some(turn) = self.journal.approval_cycle(id).flatten() else {
+            return 0;
+        };
+        self.continuations.outstanding(&turn).saturating_sub(1)
+    }
+
     /// Resolves a parked approval to an operator-amended effect
     /// (approve-with-edit): the operator's `amended_payload` is overlaid onto
     /// the parked effect, which is then executed. Runs a follow-up cycle so the
@@ -1114,7 +1281,7 @@ impl CompanyRuntime {
                 ResolveReceipt::AlreadyResolved => {
                     return Ok(CycleRunner::new(&rt).already_resolved_report());
                 }
-                ResolveReceipt::Settled(event) => event,
+                ResolveReceipt::Settled(event) => *event,
             };
             rt.continue_turn(event).await
         })
@@ -1233,16 +1400,95 @@ impl CompanyRuntime {
     /// must not sink an answer the operator can already read on the response
     /// body. It costs the bubble its durable id, which the console reads as "not
     /// saved" and refuses to thread or react on — the honest degradation.
+    ///
+    /// **And the thread within that channel** (issue #435). A channel was the
+    /// finest conversation that existed when the above was written; threads are
+    /// persisted now, so answering into the channel alone drops a threaded
+    /// conversation's own conclusion out of it. The continuation is parented to
+    /// the same root the question hung off — the sibling rule the chat route
+    /// already follows for an ordinary answer (issue #364) — so it renders in
+    /// the thread rather than flat in the channel.
+    ///
+    /// A parent that no longer resolves **degrades to the channel** rather than
+    /// being dropped: see [`resolvable_parent`](Self::resolvable_parent) for
+    /// why that guard is load-bearing rather than defensive.
+    /// A recorded thread root, but only if it still resolves to a message in
+    /// `chat_id` (issue #435). `None` otherwise, which answers in the channel.
+    ///
+    /// **Why this is not defensive coding.** The console folds a transcript
+    /// exactly one level deep and *drops* a reply whose parent it cannot find
+    /// in the channel — it does not fall back to rendering it flat. So a stale
+    /// parent here does not produce a slightly-misplaced bubble; it produces a
+    /// continuation that renders nowhere at all. That is strictly worse than
+    /// the bug this issue fixes, because today's answer at least reaches the
+    /// channel. The issue names the requirement directly: a remembered parent
+    /// that no longer resolves degrades to the channel rather than being
+    /// dropped.
+    ///
+    /// Two ways it fails to resolve, and both must degrade:
+    ///
+    /// * **Gone.** [`read_from`](crate::ports::events::EventLog::read_from)
+    ///   returns events with sequence `>= seq`, so a pruned root comes back as
+    ///   whatever followed it. Comparing the returned sequence to the one asked
+    ///   for is what tells "found it" from "found its successor" — without that
+    ///   check a pruned root silently reparents the answer onto an unrelated
+    ///   message.
+    /// * **Elsewhere.** A root that resolves but lives in another channel is
+    ///   just as unrenderable, and the mismatch means the recorded pair was
+    ///   already inconsistent. Both are the same fact to the reader.
+    ///
+    /// One event read, only when a parent was recorded — a threaded approval,
+    /// not the common case. A read failure degrades to the channel too: the
+    /// answer must not be sunk by a lookup.
+    async fn resolvable_parent(&self, parent: Option<EventSeq>, chat_id: &str) -> Option<EventSeq> {
+        let parent = parent?;
+        let stored = self.events.read_from(&self.id, parent, 1).await.ok()?;
+        let stored = stored.into_iter().next()?;
+        // `>= seq`, so an exact match is the only proof the root itself is
+        // still there rather than its successor.
+        if stored.seq != parent {
+            return None;
+        }
+        let channel = match &stored.event {
+            CompanyEvent::OperatorMessage { chat, .. } => chat.clone(),
+            CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.clone()),
+            // Only a chat message can root a thread; anything else at that
+            // sequence means the recorded parent was never a valid root.
+            _ => return None,
+        };
+        // Compared through the same rule the console renders by
+        // ([`same_conversation`](crate::server::chat_history::same_conversation)),
+        // never as raw strings. The General desk has four spellings — `None`
+        // from an unaddressed chat post, `""` from older events, the console's
+        // `"main"`, and `"General"` itself — and a raw compare rejects the pair
+        // it is *most* likely to be handed: an unaddressed message is journaled
+        // with `chat: None` and rendered under General, so a reply to it arrives
+        // here as `None` vs `"General"`. That mismatch dropped the parent and
+        // resumed in the channel — issue #435's own symptom, surviving inside
+        // its fix.
+        crate::server::chat_history::same_conversation(channel.as_deref(), Some(chat_id))
+            .then_some(parent)
+    }
+
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
-        let thread = self.journal.approval_thread(approval_id).flatten();
+        let conversation = self
+            .journal
+            .approval_conversation(approval_id)
+            .unwrap_or_default();
+        let thread = conversation.thread;
         for response in &mut report.responses {
             let chat_id = thread.clone().unwrap_or_else(|| response.channel.clone());
+            // Checked against the channel actually being answered into, not
+            // against the recorded thread: when `thread` is absent the reply
+            // goes to the responding agent's own channel, and a root belonging
+            // to some other channel must not follow it there.
+            let parent = self.resolvable_parent(conversation.parent, &chat_id).await;
             match self
                 .events
                 .append(
                     &self.id,
                     CompanyEvent::AgentReply {
-                        parent: None,
+                        parent,
                         chat_id,
                         agent_id: response.channel.clone(),
                         text: response.text.clone(),
@@ -1276,17 +1522,25 @@ impl CompanyRuntime {
     /// The wording says what is true and what to do: the decision stuck, the
     /// work did not, and re-approving is safe.
     async fn announce_continuation_failure(&self, approval_id: &ApprovalId) {
-        let thread = self
+        let conversation = self
             .journal
-            .approval_thread(approval_id)
-            .flatten()
+            .approval_conversation(approval_id)
+            .unwrap_or_default();
+        let thread = conversation
+            .thread
             .unwrap_or_else(|| crate::runtime::channel::OPERATOR_CHANNEL.to_string());
+        // Issue #435: the bad news belongs in the same place the good news
+        // would have gone. A failure notice left flat in the channel while the
+        // question sits in a thread is the same lost-conclusion bug wearing a
+        // different hat — and this is the message the operator is most likely
+        // to be waiting on.
+        let parent = self.resolvable_parent(conversation.parent, &thread).await;
         if let Err(err) = self
             .events
             .append(
                 &self.id,
                 CompanyEvent::AgentReply {
-                    parent: None,
+                    parent,
                     chat_id: thread,
                     agent_id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
                     text: "Your approval was recorded, but the agent could not pick the work \
@@ -1369,6 +1623,10 @@ impl CompanyRuntime {
         let expired = self.approval_gate.sweep_expired(now);
         for id in &expired {
             self.journal.record_expired(id, now).await?;
+            // Issue #796: the parked approval is gone, so its work unit is no
+            // longer awaiting a resume — drop the pending mark so the checkout it
+            // was holding across the park becomes sweepable.
+            self.grants.clear_pending(id);
             // Issue #469: releasing the turn this approval was blocking, and
             // running its continuation when this expiry was the last thing it
             // waited on. Spawned rather than awaited: the continuation is a full
@@ -1618,6 +1876,9 @@ impl CompanyRuntime {
             .pending()
             .into_iter()
             .map(|p| ApprovalSummary {
+                // Read before the field moves below (issue #880): the answer
+                // needs the task link *and* the effect together.
+                workflow_run_id: workflow_run_of(&p),
                 id: p.id,
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
@@ -1634,6 +1895,18 @@ impl CompanyRuntime {
                 // which matters for `composio_execute`, where the same tool is
                 // grantable reading a repository and not grantable sending mail.
                 broadly_grantable: p.effect.agent.is_some() && p.effect.may_be_granted_standing(),
+                // Always false here. Whether a *reader* may see the contents is
+                // a property of who is asking, and this projection is
+                // deliberately principal-free (issue #618) — the redaction
+                // happens at the edge, in `server::approval_visibility`, so
+                // per-role logic stays out of the domain layer.
+                contents_hidden: false,
+                // Issue #842: which turn asked for it, so the conversation can
+                // ask about a turn's gated calls once. Projected, never
+                // derived — grouping by "same agent, same thread, close
+                // together" would guess at a fact the journal already records,
+                // and would guess wrong exactly when two turns overlap.
+                batch: p.batch,
             })
             .collect()
     }
@@ -1885,6 +2158,28 @@ impl CompanyRuntime {
     }
 }
 
+/// The **workflow** run waiting on a parked approval, if any (issue #880).
+///
+/// `Effect::run_id` holds two different id spaces — issue #242's task-attempt id
+/// and, on the workflow path, a workflow run id — and `generate_id` is only
+/// process-locally unique, so the value alone cannot say which it is. The park
+/// *site* can, and it is recorded: a task attempt parks inside its dispatch
+/// cycle and is linked to that card, while every workflow park goes through
+/// `park_and_journal` and is recorded explicitly `Unlinked` (#333). A chat turn
+/// is unlinked too but stamps no run id at all, so requiring both is exact.
+///
+/// Deliberately conservative in the ambiguous direction: an approval with no
+/// recorded link (`None`, i.e. a pre-#333 journal line) reports nothing rather
+/// than guessing, which is the same fallback rule #333 set for the task link.
+fn workflow_run_of(parked: &crate::runtime::journal::PendingApproval) -> Option<String> {
+    matches!(
+        parked.task,
+        Some(crate::runtime::journal::TaskLink::Unlinked)
+    )
+    .then(|| parked.effect.run_id.clone())
+    .flatten()
+}
+
 impl std::fmt::Debug for CompanyRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompanyRuntime")
@@ -1898,6 +2193,241 @@ impl std::fmt::Debug for CompanyRuntime {
 #[cfg(test)]
 mod tests {
     use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
+
+    /// Issue #880: which parked approvals name a workflow run, and which must
+    /// not.
+    ///
+    /// The discrimination is the whole content of the change, because
+    /// `Effect::run_id` carries two id spaces — issue #242's task attempt and
+    /// the workflow run — and `generate_id` is only process-locally unique, so
+    /// the value cannot be inspected to tell them apart. Getting this wrong in
+    /// the permissive direction would print a task-attempt id on an approvals
+    /// card as though it were a workflow run.
+    #[test]
+    fn only_an_unlinked_park_with_a_run_id_names_a_workflow_run() {
+        use crate::ports::types::{ApprovalId, Effect, EffectGroup};
+        use crate::runtime::journal::{PendingApproval, TaskLink};
+
+        let parked = |task: Option<TaskLink>, run_id: Option<&str>| PendingApproval {
+            id: ApprovalId::new("appr-1"),
+            effect: Effect {
+                kind: "publish_artifact".to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::json!({}),
+                agent: Some("ceo".to_string()),
+                run_id: run_id.map(str::to_string),
+            },
+            at_millis: 1,
+            task,
+            thread: None,
+            batch: None,
+        };
+
+        // A workflow park: `park_and_journal` records it explicitly unlinked
+        // (#333) and the run stamps its id.
+        assert_eq!(
+            super::workflow_run_of(&parked(Some(TaskLink::Unlinked), Some("run-1"))),
+            Some("run-1".to_string())
+        );
+        // A board task's attempt: same field, different id space. Must NOT be
+        // reported as a workflow run.
+        assert_eq!(
+            super::workflow_run_of(&parked(
+                Some(TaskLink::Task {
+                    id: "card-1".to_string()
+                }),
+                Some("attempt-1")
+            )),
+            None
+        );
+        // A chat turn: unlinked, but nothing stamped a run onto it.
+        assert_eq!(
+            super::workflow_run_of(&parked(Some(TaskLink::Unlinked), None)),
+            None
+        );
+        // A pre-#333 line records no link at all, so the park site is unknown.
+        // Conservative rather than guessing — the same fallback rule #333 set.
+        assert_eq!(super::workflow_run_of(&parked(None, Some("run-1"))), None);
+    }
+
+    #[cfg(feature = "openhuman")]
+    use std::sync::{Arc, Mutex};
+
+    #[cfg(feature = "openhuman")]
+    use async_trait::async_trait;
+
+    #[cfg(feature = "openhuman")]
+    #[derive(Default)]
+    struct RecordingMeter {
+        queried_companies: Mutex<Vec<crate::ports::types::CompanyId>>,
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[async_trait]
+    impl crate::ports::UsageMeter for RecordingMeter {
+        async fn record(
+            &self,
+            _company: &crate::ports::types::CompanyId,
+            _sample: &crate::ports::UsageSample,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn query(
+            &self,
+            company: &crate::ports::types::CompanyId,
+            _since_millis: u64,
+        ) -> crate::Result<Vec<crate::ports::UsageSample>> {
+            self.queried_companies.lock().unwrap().push(company.clone());
+            Ok(Vec::new())
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    async fn runtime_and_record() -> (
+        super::CompanyRuntime,
+        crate::ports::CompanyRecord,
+        tempfile::TempDir,
+    ) {
+        let home = tempfile::tempdir().expect("tempdir");
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let runtime = crate::runtime::RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(crate::ports::types::CompanyId::new("acme"))
+            .build()
+            .await
+            .expect("runtime");
+        let record = runtime
+            .store()
+            .load(runtime.id())
+            .await
+            .expect("load")
+            .expect("record");
+        (runtime, record, home)
+    }
+
+    #[cfg(feature = "openhuman")]
+    fn wiring_deps(
+        runtime: &super::CompanyRuntime,
+        meter: Option<Arc<dyn crate::ports::UsageMeter>>,
+        capabilities: crate::harness::toolbelt::CapabilityFilter,
+        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
+    ) -> crate::harness::HarnessDeps {
+        crate::harness::HarnessDeps {
+            provider: Arc::new(crate::harness::provider::MockProvider::default()),
+            provider_slug: "mock".to_string(),
+            context: runtime.context.clone(),
+            store: runtime.store.clone(),
+            meter,
+            workspace_root: std::env::temp_dir(),
+            audit_root: std::env::temp_dir(),
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: Arc::from([]),
+            mcp_servers: Vec::new(),
+            default_mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: crate::harness::orchestrator::DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities,
+            workflow_source_dir: None,
+            plan,
+            media: None,
+            composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            search: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
+        }
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_is_absent_without_harness_deps() {
+        let (runtime, record, _home) = runtime_and_record().await;
+        assert_eq!(runtime.wired_workflow_namespaces(&record).await, None);
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_keeps_the_static_capability_filter_without_a_plan() {
+        let (mut runtime, record, _home) = runtime_and_record().await;
+        runtime.set_workflow_harness_deps(wiring_deps(
+            &runtime,
+            None,
+            crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(
+                ["web"].into_iter().collect(),
+            ),
+            None,
+        ));
+        let namespaces = runtime
+            .wired_workflow_namespaces(&record)
+            .await
+            .expect("wiring");
+        assert!(!namespaces.contains("web"));
+        assert!(namespaces.contains("shell"));
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_resolves_the_plan_against_its_company_meter() {
+        let (mut runtime, record, _home) = runtime_and_record().await;
+        let meter = Arc::new(RecordingMeter::default());
+        runtime.set_workflow_harness_deps(wiring_deps(
+            &runtime,
+            Some(meter.clone()),
+            crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            Some(crate::harness::capability_budget::CapabilityPlan {
+                period: crate::harness::capability_budget::BudgetPeriod::Daily,
+                budgets: [("shell".to_string(), u64::MAX)].into_iter().collect(),
+                total_budget: None,
+            }),
+        ));
+        let namespaces = runtime
+            .wired_workflow_namespaces(&record)
+            .await
+            .expect("wiring");
+        assert!(namespaces.contains("shell"));
+        assert!(!namespaces.contains("web"));
+        assert!(!namespaces.contains("code"));
+        assert_eq!(*meter.queried_companies.lock().unwrap(), vec![record.id]);
+    }
 
     /// Issue #86: the kill switch's boot decision, including the direction it
     /// fails in.
@@ -1945,6 +2475,58 @@ mod tests {
         for column in ["todo", "in_progress", "paused", "in_review", "done"] {
             assert!(!task_enters_planning(Some("todo"), column), "{column}");
         }
+    }
+
+    /// Issue #576: a prompt-box card buys **exactly one** planning pass across
+    /// its whole life — not zero, not two.
+    ///
+    /// The assertions above pin the edge one transition at a time. This walks
+    /// the sequence a self-promoting card actually goes through and *counts*,
+    /// because the two ways to get this wrong are both invisible to a
+    /// single-transition test:
+    ///
+    /// * **Zero** — the card is created directly in `planning` rather than
+    ///   moved there, so if entry required a previous column there would be no
+    ///   transition to observe and the pass would never fire. The card would sit
+    ///   in Planning forever, which is the one column that must never hold a
+    ///   card at rest.
+    /// * **Two** — the pass writes its plan back onto the card *while the card
+    ///   is still in Planning* (`harness::planning`, via `upsert_task`). If
+    ///   resting in the column counted as entering it, that write-back would
+    ///   start a second pass, which would write back, and bill a model call each
+    ///   time.
+    ///
+    /// A test that merely asserted "it planned" would pass in the second case.
+    #[test]
+    fn a_prompt_box_card_buys_exactly_one_planning_pass() {
+        // The life of a card opened from the prompt box: created directly in
+        // Planning, its plan written back while it rests there, then settled
+        // onward by the pass itself.
+        let life = [
+            (None, "planning"),                // the prompt box opens it
+            (Some("planning"), "planning"),    // the pass writes the plan back
+            (Some("planning"), "in_progress"), // the success settle
+        ];
+        let fires = life
+            .iter()
+            .filter(|(prev, next)| task_enters_planning(*prev, next))
+            .count();
+        assert_eq!(
+            fires, 1,
+            "a prompt-box card must buy exactly one planning pass: {life:?}"
+        );
+
+        // And the failure exit, which returns the card to To-do, must not buy a
+        // second one on the way out either.
+        let returned = [(None, "planning"), (Some("planning"), "todo")];
+        assert_eq!(
+            returned
+                .iter()
+                .filter(|(prev, next)| task_enters_planning(*prev, next))
+                .count(),
+            1,
+            "a pass that returned the card must still have cost exactly one"
+        );
     }
 
     /// The two edges are mutually exclusive by construction: one write names
@@ -2074,6 +2656,8 @@ mod tests {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
 
         let first = runtime.open_run(&card).await.expect("an attempt is minted");
@@ -2164,6 +2748,8 @@ mod tests {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
 
         // Positive control: on a live runtime the cycle runs, so the row is
@@ -2216,5 +2802,273 @@ mod tests {
             "it never started, so it has no start time"
         );
         assert!(abandoned.finished_at_millis.is_some());
+    }
+
+    /// Issue #435: the guard that decides whether a remembered thread root is
+    /// still usable, and the direction it fails in.
+    ///
+    /// Every arm here degrades to `None`, which means "answer in the channel".
+    /// That is the issue's stated requirement and it is not merely tidy: the
+    /// console drops a reply whose parent it cannot resolve in the channel
+    /// rather than rendering it flat, so a stale root would make the
+    /// continuation invisible — strictly worse than the bug being fixed, since
+    /// today's answer at least reaches the channel.
+    /// A runtime with a live event log, for the thread-root tests. Returns the
+    /// tempdir too: dropping it deletes the log the runtime is reading.
+    async fn runtime_with_events() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
+        let home_dir = tempfile::Builder::new()
+            .prefix("opencompany-parent-")
+            .tempdir()
+            .expect("tempdir");
+        let manifest: crate::company::types::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let rt = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .expect("runtime");
+        (rt, home_dir)
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_thread_root_degrades_to_the_channel() {
+        use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq};
+
+        let (rt, _home_dir) = runtime_with_events().await;
+
+        // A real root in `desk-finance`, and a second message elsewhere.
+        let root = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::OperatorMessage {
+                    text: "pay the invoice".into(),
+                    by: None,
+                    chat: Some("desk-finance".into()),
+                    parent: None,
+                    deliverable: None,
+                },
+            )
+            .await
+            .expect("append");
+        let elsewhere = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::OperatorMessage {
+                    text: "unrelated".into(),
+                    by: None,
+                    chat: Some("desk-ops".into()),
+                    parent: None,
+                    deliverable: None,
+                },
+            )
+            .await
+            .expect("append");
+
+        // The good case: a root that exists, in the channel being answered.
+        assert_eq!(
+            rt.resolvable_parent(Some(root), "desk-finance").await,
+            Some(root),
+        );
+
+        // No root recorded at all — the overwhelmingly common case, and the
+        // pre-#435 behaviour.
+        assert_eq!(rt.resolvable_parent(None, "desk-finance").await, None);
+
+        // A root that resolves but lives in another channel. Renderable
+        // nowhere, and proof the recorded pair was already inconsistent.
+        assert_eq!(
+            rt.resolvable_parent(Some(elsewhere), "desk-finance").await,
+            None,
+            "a root in another channel must not follow the answer across",
+        );
+
+        // A root that is simply GONE, with a live message after it.
+        //
+        // This is the case the exact-sequence check exists for, and it has to
+        // be built deliberately. `read_from` returns events with sequence >=
+        // the one asked for, so a vanished root comes back as its *successor*.
+        // Asking past the end of the log proves nothing — that read is empty
+        // and every implementation returns `None`. A genuine gap is what
+        // separates "found it" from "found the next one", and the only thing
+        // that makes gaps is pruning, which the events module documents as
+        // leaving them by design.
+        //
+        // So: a prunable frame, then a real message in the channel, then a
+        // pass that removes the first. Without the sequence check the message
+        // answers for the hole underneath it — and it is in the right channel,
+        // so the channel check waves it through.
+        let doomed = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::WorkspaceChanged {
+                    node_id: "n-1".into(),
+                    change: "updated".into(),
+                },
+            )
+            .await
+            .expect("append");
+        let after_the_hole = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::OperatorMessage {
+                    text: "and another thing".into(),
+                    by: None,
+                    chat: Some("desk-finance".into()),
+                    parent: None,
+                    deliverable: None,
+                },
+            )
+            .await
+            .expect("append");
+        rt.events
+            .prune(
+                &rt.id,
+                &crate::ports::events::RetentionPolicy {
+                    max_entries_per_kind: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("prune");
+        // The hole is real, and the next event is a same-channel message.
+        let successor = rt
+            .events
+            .read_from(&rt.id, doomed, 1)
+            .await
+            .expect("read")
+            .into_iter()
+            .next()
+            .expect("the message after the hole answers the read");
+        assert_eq!(
+            successor.seq, after_the_hole,
+            "the pruned sequence must genuinely be absent, answered by its successor",
+        );
+        assert_eq!(
+            rt.resolvable_parent(Some(doomed), "desk-finance").await,
+            None,
+            "a vanished root must not be answered by the message that follows it",
+        );
+
+        // And past the end of the log, where the read is simply empty.
+        let beyond = EventSeq::new(after_the_hole.value() + 500);
+        assert_eq!(
+            rt.resolvable_parent(Some(beyond), "desk-finance").await,
+            None
+        );
+
+        // A sequence that resolves to something that is not a chat message at
+        // all cannot root a thread either.
+        let not_a_message = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::LifecycleChanged {
+                    from: "idle".into(),
+                    to: "running".into(),
+                    by: Actor {
+                        kind: ActorKind::Operator,
+                        id: "owner".into(),
+                    },
+                },
+            )
+            .await
+            .expect("append");
+        assert_eq!(
+            rt.resolvable_parent(Some(not_a_message), "desk-finance")
+                .await,
+            None,
+        );
+    }
+
+    /// The General desk answers to four spellings, and a thread rooted in any
+    /// of them keeps its parent (issue #435).
+    ///
+    /// This is the case the fix was *most* likely to be handed and originally
+    /// dropped: the chat route journals an unaddressed message as
+    /// `chat: None` while the console renders it under `General` and replies to
+    /// it there, so the comparison arrived as `None` vs `"General"`. A raw
+    /// string compare rejected it, the parent was discarded, and the
+    /// continuation resumed in the channel — #435's own symptom surviving
+    /// inside #435's fix, on the default path rather than an exotic one.
+    #[tokio::test]
+    async fn a_root_in_any_spelling_of_the_general_desk_still_resolves() {
+        use crate::ports::types::CompanyEvent;
+
+        let (rt, _home_dir) = runtime_with_events().await;
+
+        // Three roots, one desk: the unaddressed post, the console's own
+        // thread id, and the desk named outright.
+        let mut roots = Vec::new();
+        for chat in [None, Some("main"), Some("General")] {
+            roots.push(
+                rt.events
+                    .append(
+                        &rt.id,
+                        CompanyEvent::OperatorMessage {
+                            text: "ship it".into(),
+                            by: None,
+                            chat: chat.map(str::to_string),
+                            parent: None,
+                            deliverable: None,
+                        },
+                    )
+                    .await
+                    .expect("append"),
+            );
+        }
+
+        // Every root resolves against every spelling of the channel it is
+        // answered into — including the pair that used to fail.
+        for root in &roots {
+            for channel in ["General", "main", "general"] {
+                assert_eq!(
+                    rt.resolvable_parent(Some(*root), channel).await,
+                    Some(*root),
+                    "root {root} must resolve when answered into `{channel}`",
+                );
+            }
+        }
+
+        // …and the folding stops there. A real desk is still compared
+        // verbatim, so this widening cannot pull an unrelated thread in.
+        let elsewhere = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::OperatorMessage {
+                    text: "unrelated".into(),
+                    by: None,
+                    chat: Some("desk-ops".into()),
+                    parent: None,
+                    deliverable: None,
+                },
+            )
+            .await
+            .expect("append");
+        assert_eq!(
+            rt.resolvable_parent(Some(elsewhere), "General").await,
+            None,
+            "a named desk is not the General desk",
+        );
+        assert_eq!(
+            rt.resolvable_parent(Some(roots[0]), "desk-ops").await,
+            None,
+            "and the General desk is not a named one",
+        );
     }
 }

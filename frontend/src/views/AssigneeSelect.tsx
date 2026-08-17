@@ -204,7 +204,7 @@ export function AssigneeSelect({
           {option?.offRoster && (
             <>
               <AlertCircle
-                className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+                className="size-3.5 shrink-0 text-status-blocked-text"
                 aria-hidden
               />
               <span className="sr-only">not on roster:</span>
@@ -292,7 +292,7 @@ function OptionRow({ label, hint, warn }: { label: string; hint?: string; warn?:
     <>
       {warn && (
         <AlertCircle
-          className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+          className="size-3.5 shrink-0 text-status-blocked-text"
           aria-hidden
         />
       )}

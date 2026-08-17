@@ -30,6 +30,7 @@ import { toast } from "sonner";
 import {
   cancelWorkflowRun,
   deleteWorkflow,
+  fixWorkflowFromRun,
   getWorkflow,
   isDetached,
   isDryRun,
@@ -37,10 +38,13 @@ import {
   listWorkflows,
   runWorkflow,
   setWorkflowEnabled,
+  type PrefilledDraft,
   type WorkflowGraph,
   type WorkflowRunOutcome,
+  type WorkflowRunOutputRecord,
   type WorkflowRunResult,
   type WorkflowSummary,
+  workflowRunOutput,
 } from "@/api/workflows";
 import type { CompanyStreamEvent } from "@/hooks/use-events";
 import type { OpenCompanyClient } from "@/api/client";
@@ -89,6 +93,7 @@ import { CopilotPanel } from "@/views/workflows/CopilotPanel";
 import { classifyRunError } from "@/views/workflows/run-error";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
+import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
 const NODE_TYPES = { oc: WorkflowNode };
 
@@ -208,6 +213,10 @@ export function WorkflowsView({
   const { resolvedTheme } = useTheme();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The current selection, readable inside async callbacks whose closure captured
+  // a stale `selectedId` (issue #840 PR-3: guards the copilot-fix race).
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = selectedId;
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingGraph, setLoadingGraph] = useState(false);
@@ -223,6 +232,14 @@ export function WorkflowsView({
   // state from `createOpen` rather than a mode flag, so the create path keeps
   // working exactly as it did and neither can be half-open.
   const [editOpen, setEditOpen] = useState(false);
+  // Issue #840 (PR-3): a copilot-corrected graph to open the edit dialog on. When
+  // set, the edit dialog hydrates from this correction (keeping `graph`'s version
+  // token) instead of from the saved graph, so Save writes a new version.
+  const [prefilledDraft, setPrefilledDraft] = useState<PrefilledDraft | null>(null);
+  // The failed run whose copilot fix is in flight, so its history row spins.
+  const [fixingRunSeq, setFixingRunSeq] = useState<number | null>(null);
+  // A run the copilot judged un-fixable, shown inline under that run's row.
+  const [fixReason, setFixReason] = useState<{ seq: number; reason: string } | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   // Issue #228: what past runs did, read back from the host's journal. This is
   // the half that survives a reload — before it, a manual run's delivery rows
@@ -272,6 +289,17 @@ export function WorkflowsView({
   // This is what makes a scheduled run's failure point visible after the fact,
   // which is the half of the issue a live canvas alone cannot answer.
   const [overlayRun, setOverlayRun] = useState<WorkflowRunOutcome | null>(null);
+  // Issue #596: the durable per-node output of the overlaid past run, fetched
+  // lazily once when a past run is opened (the history list is structural — no
+  // output — so the inspector reads what each node produced from here). `record:
+  // null` after a settled fetch means the run has no captured output (a 404 —
+  // predates capture / dry / hard-aborted), which the inspector renders as an
+  // explicit empty state.
+  const [overlayOutput, setOverlayOutput] = useState<{
+    runId: string;
+    loading: boolean;
+    record: WorkflowRunOutputRecord | null;
+  } | null>(null);
   // The run this view just POSTed, held until its history row arrives.
   //
   // The fallback for a console with no live stream: if `/events` 404s or the
@@ -340,6 +368,12 @@ export function WorkflowsView({
   // consults it so a console WITH a working stream never double-paints a run it
   // already watched, and one without it still gets the journaled answer.
   const liveRanRef = useRef<Set<string>>(new Set());
+  // Issue #863: the run this canvas adopted from the history rather than from a
+  // start frame. Held so the trail STAYS on screen once that run settles — the
+  // history read that reports it finished is the same read that stops reporting
+  // it as in flight, and dropping the seed on that tick would blank a canvas the
+  // operator has been watching fill in.
+  const adoptedFromHistoryRef = useRef<string | null>(null);
 
   // ---- Issue #339: the canvas as a link target -----------------------------
   //
@@ -989,6 +1023,63 @@ export function WorkflowsView({
     toast.success("Workflow created.");
   }, []);
 
+  // Issue #840 (PR-3): correct a failed run's workflow with the copilot. The
+  // affordance lives on the journaled failed run (keyed by runId) — the one
+  // surface that always carries the failure. On a corrected graph it opens the
+  // edit dialog hydrated from the correction (which keeps the same id, so Save is
+  // a new version); on an un-fixable failure it shows the reason inline under the
+  // run. The failed run's workflow is the selected one (the history is per
+  // selection), so the edit dialog's `graph` supplies the version token.
+  const handleFixWithCopilot = useCallback(
+    async (run: WorkflowRunOutcome) => {
+      if (!run.runId) return;
+      setFixingRunSeq(run.seq);
+      setFixReason(null);
+      try {
+        const res = await fixWorkflowFromRun(client, company, run.workflowId, {
+          runId: run.runId,
+          errorHint: run.error,
+        });
+        if (res.automatable && res.workflow) {
+          // The edit dialog binds to the SELECTED workflow's `graph` for its
+          // version token; if the operator changed selection while the fix was in
+          // flight, opening it now would write the correction of `run.workflowId`
+          // over a different workflow. Abandon rather than save the wrong one.
+          if (selectedIdRef.current !== run.workflowId) {
+            toast.message(
+              "Selection changed while the copilot was working — reopen Fix on that run to review its correction.",
+            );
+            return;
+          }
+          setPrefilledDraft({
+            summary: res.summary,
+            workflow: res.workflow,
+            notes: res.notes,
+            readiness: res.readiness,
+          });
+          setEditOpen(true);
+        } else {
+          setFixReason({
+            seq: run.seq,
+            reason: res.reason ?? "the copilot could not correct it.",
+          });
+        }
+      } catch (e) {
+        // A capability gap (404/409) or a network failure — surface it and leave
+        // the run row untouched; the operator can still edit by hand.
+        toast.error(
+          e instanceof Error ? e.message : "Couldn't reach the workflow copilot.",
+        );
+      } finally {
+        // Only the run that set the slot may clear it — if a second Fix started
+        // on another row while this one was in flight, this `finally` firing
+        // first must not re-enable that still-running row's button.
+        setFixingRunSeq((current) => (current === run.seq ? null : current));
+      }
+    },
+    [client, company],
+  );
+
   // Issue #371: the live canvas state, FOLDED from the frame window rather than
   // accumulated frame by frame.
   //
@@ -996,9 +1087,37 @@ export function WorkflowsView({
   // land in one render, and an accumulating reducer would see only the last —
   // losing a `workflow_run_started` that way strands every node frame behind
   // it. Recomputing from the window instead has no such state to lose.
+  //
+  // Issue #863: seeded with the run the HOST says is open, for the case the
+  // window cannot cover. The window only holds what arrived since this console
+  // connected, so a run that was already walking when the tab was opened (a
+  // cron fire, a run started from chat, a reload, an `EventSource` reconnect)
+  // has no start frame here and used to paint nothing at all — the whole run,
+  // blank, which is what #863 reports. The history read already carries that
+  // run with `running: true` and the nodes it has finished so far.
+  const inFlightSeed = useMemo(() => {
+    if (!selectedId || runsFor !== selectedId) return null;
+    // Only a run this console has NOT been following: a run whose frames are in
+    // the window folds from them, which is both fresher and the path every
+    // existing guarantee is written against.
+    const row = runs.find(
+      (r) => r.runId && (r.running || r.runId === adoptedFromHistoryRef.current),
+    );
+    if (!row?.runId) return null;
+    if (liveRanRef.current.has(row.runId) && row.runId !== adoptedFromHistoryRef.current) {
+      return null;
+    }
+    return {
+      runId: row.runId,
+      states: statesFromRun(row),
+      elapsed: elapsedFromRun(row),
+      scheduled: row.scheduled,
+    };
+  }, [runs, runsFor, selectedId]);
+
   const liveRun = useMemo(
-    () => foldLiveRun(runEvents, selectedId, graph),
-    [runEvents, selectedId, graph],
+    () => foldLiveRun(runEvents, selectedId, graph, inFlightSeed),
+    [runEvents, selectedId, graph, inFlightSeed],
   );
 
   // The optimistic frontier is only for the gap before the first frame. Once
@@ -1007,8 +1126,13 @@ export function WorkflowsView({
   useEffect(() => {
     if (!liveRun) return;
     liveRanRef.current.add(liveRun.runId);
+    // Issue #863: remember an adoption that came from the history rather than
+    // from a start frame, so the seed survives the run settling.
+    if (inFlightSeed && inFlightSeed.runId === liveRun.runId) {
+      adoptedFromHistoryRef.current = liveRun.runId;
+    }
     setOptimistic(null);
-  }, [liveRun]);
+  }, [liveRun, inFlightSeed]);
 
   // Issue #528: adopt the live run's id while the synchronous POST is still in
   // flight.
@@ -1083,6 +1207,10 @@ export function WorkflowsView({
     setActiveRunId(null);
     setResult(null);
     setRunRefusal(null);
+    // Issue #863: the adopted run belonged to the workflow being left. Holding
+    // it across the switch would keep painting one graph's trail onto another's
+    // canvas the moment the two share a node id.
+    adoptedFromHistoryRef.current = null;
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.
@@ -1179,6 +1307,57 @@ export function WorkflowsView({
     [graph, selectedNodeId],
   );
 
+  // Issue #596: lazily fetch a past run's per-node output ONCE when it is
+  // overlaid, so clicking any of its nodes can show what that node produced. A
+  // 404 (predates capture / dry / hard-aborted / older host) settles to `record:
+  // null`, which the inspector renders as an empty state rather than an error.
+  const overlayRunId = overlayRun?.runId ?? null;
+  useEffect(() => {
+    if (!overlayRunId) {
+      setOverlayOutput(null);
+      return;
+    }
+    let cancelled = false;
+    setOverlayOutput({ runId: overlayRunId, loading: true, record: null });
+    workflowRunOutput(client, company, overlayRunId)
+      .then((record) => {
+        if (!cancelled) setOverlayOutput({ runId: overlayRunId, loading: false, record });
+      })
+      .catch(() => {
+        // 404 (no captured output) or an older host without the route — either
+        // way there is nothing to show, which the inspector states plainly.
+        if (!cancelled) setOverlayOutput({ runId: overlayRunId, loading: false, record: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [overlayRunId, client, company]);
+
+  // The clicked node's output on the run being inspected (issue #596): a past
+  // run's node reads from the lazily-fetched durable snapshot; a live run's node
+  // reads from the in-memory result — the same Output section renders both.
+  // `undefined` when no run is being inspected, so the inspector shows only the
+  // node's static config, exactly as before.
+  const selectedNodeOutput = useMemo<NodeOutputView | undefined>(() => {
+    if (!selectedNode) return undefined;
+    if (overlayRun) {
+      if (!overlayRun.runId) return { state: "unavailable" };
+      if (!overlayOutput || overlayOutput.runId !== overlayRun.runId || overlayOutput.loading) {
+        return { state: "loading" };
+      }
+      if (!overlayOutput.record) return { state: "unavailable" };
+      const value = nodeOutputFor(overlayOutput.record.nodes, selectedNode.id);
+      if (value === undefined) return { state: "unavailable" };
+      return { state: "present", value, truncated: overlayOutput.record.truncated };
+    }
+    if (result) {
+      const value = nodeOutputFor(result.output, selectedNode.id);
+      if (value === undefined) return { state: "unavailable" };
+      return { state: "present", value, truncated: false };
+    }
+    return undefined;
+  }, [selectedNode, overlayRun, overlayOutput, result]);
+
   const onNodeClick = useCallback((_: unknown, node: Node) => {
     setSelectedNodeId(node.id);
   }, []);
@@ -1239,7 +1418,20 @@ export function WorkflowsView({
             </p>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        {/* Issue #824. `flex-wrap` on the ACTION ROW, not just on the header
+            above it. The header already wraps, but that wrap only breaks
+            between its two children — and this row is one child whose buttons
+            are `shrink-0`, so on its own line it stayed 1386px wide inside a
+            1289px container and overflowed into an `overflow-hidden` ancestor.
+            Nothing in that chain scrolls, so `New workflow` was not merely
+            off-screen, it could not be clicked.
+
+            The row grows every time a control is added — `Pause` (#814) took
+            the overhang from 22px to 113px, which is what finally made it
+            visible — so it needs a break point of its own rather than a wider
+            budget. `justify-end` keeps the wrapped line aligned to the right
+            edge it belongs to instead of drifting left under the title. */}
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
           <Select
             // Issue #406, half one. NOT `selectedId ?? undefined`: Base UI
             // decides controlled-vs-uncontrolled ONCE, on the first render,
@@ -1380,7 +1572,7 @@ export function WorkflowsView({
               <History className="mr-1.5 size-4" />
               History
               {runs.length > 0 && (
-                <Badge variant="secondary" className="ml-1.5 h-4 px-1.5 text-[10px] font-normal">
+                <Badge variant="secondary" className="ml-1.5 h-4 px-1.5 text-3xs font-normal">
                   {runs.length}
                 </Badge>
               )}
@@ -1611,6 +1803,28 @@ export function WorkflowsView({
         ) : !selectedId ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center text-sm text-muted-foreground">
             <p>This company has no saved workflows yet.</p>
+            {/* Issue #813: a first-time author has no on-ramp otherwise. One
+                compact prose block — what a workflow is, a worked example
+                (mirroring the copilot placeholder), and the create-time copilot
+                as the easiest path. Deliberately no template gallery. */}
+            <div className="max-w-md space-y-2 text-2xs leading-relaxed">
+              <p>
+                A workflow runs a sequence of steps on a schedule or on demand: a{" "}
+                <span className="font-medium text-foreground">trigger</span> starts it,{" "}
+                <span className="font-medium text-foreground">agents</span> and{" "}
+                <span className="font-medium text-foreground">tools</span> do the work,
+                and an <span className="font-medium text-foreground">output</span> step
+                reports the result somewhere.
+              </p>
+              <p className="italic">
+                e.g. “Every Monday morning, have the writer draft the weekly digest
+                and email it to the team.”
+              </p>
+              <p>
+                Describe it in plain words when you create one — the copilot drafts
+                the graph for you to review and edit.
+              </p>
+            </div>
             {/* Issue #341: opens the same dialog as the toolbar button, and
                 therefore must NOT carry the same name. "Create a workflow"
                 rather than "Create the first workflow" because this state is
@@ -1675,7 +1889,11 @@ export function WorkflowsView({
               />
             ) : (
               selectedNode && (
-                <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNodeId(null)} />
+                <NodeDetailPanel
+                  node={selectedNode}
+                  output={selectedNodeOutput}
+                  onClose={() => setSelectedNodeId(null)}
+                />
               )
             )}
           </>
@@ -1702,6 +1920,9 @@ export function WorkflowsView({
             // toggle rather than a one-way trip into overlay mode.
             setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
           }
+          onFixWithCopilot={handleFixWithCopilot}
+          fixingRunSeq={fixingRunSeq}
+          fixReason={fixReason}
         />
       )}
 
@@ -1726,10 +1947,17 @@ export function WorkflowsView({
         client={client}
         company={company}
         open={editOpen && graph !== null}
-        onOpenChange={setEditOpen}
+        onOpenChange={(o) => {
+          setEditOpen(o);
+          // Issue #840 (PR-3): a copilot correction is single-use — dropping it on
+          // close means the next plain Edit hydrates from the saved graph, not a
+          // stale correction.
+          if (!o) setPrefilledDraft(null);
+        }}
         workflow={graph}
         onSaved={handleSaved}
         onConflict={setConflict}
+        prefilledDraft={prefilledDraft}
       />
     </div>
   );

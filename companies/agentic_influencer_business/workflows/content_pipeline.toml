@@ -47,6 +47,8 @@ id = "gate"
 kind = "condition"
 name = "Sponsored?"
 summary = "Branch on whether this piece has a sponsor."
+[node.config]
+field = "=item.sponsored"
 
 [[node]]
 id = "sponsor"

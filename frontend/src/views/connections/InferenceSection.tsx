@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, BrainCircuit, Check, Loader2, RotateCcw, Save, Zap } from "lucide-react";
+import { BrainCircuit, Check, Loader2, RotateCcw, Save, Trash2, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getInferenceStatus,
+  restartInference,
   revertInference,
   setInference,
   testInference,
@@ -32,12 +33,77 @@ import { Skeleton } from "@/components/ui/skeleton";
 const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
 type Tier = (typeof TIERS)[number];
 
-const PROVIDER_LABELS: Record<InferenceProvider, string> = {
-  managed: "Managed (TinyHumans)",
-  openrouter: "OpenRouter",
-  ollama: "Ollama (local)",
-  openai_compatible: "Custom (OpenAI-compatible)",
+/**
+ * What each provider is, as data rather than as name comparisons scattered
+ * through the view.
+ *
+ * `acceptsKey` / `requiresBaseUrl` used to be written inline as
+ * `provider !== "ollama"` and `provider === "ollama" || provider ===
+ * "openai_compatible"`. Both were deny-lists over a closed set: a future local
+ * or credential-less provider would have inherited a key input nobody wanted
+ * simply by not being named in them. Asking the descriptor means a new provider
+ * declares what it needs when it is added here, and the view stops caring.
+ *
+ * `keyKind` is the other half of that. The credential a provider wants is
+ * vendor-specific, and this field is not the only place in Connections that
+ * accepts a TinyHumans key — so saying which vendor's key belongs here, per
+ * provider, is what stops one being pasted into the other.
+ */
+const PROVIDERS: Record<
+  InferenceProvider,
+  {
+    label: string;
+    /** Whether this provider authenticates with a bearer at all. */
+    acceptsKey: boolean;
+    /** Whether the endpoint must be given explicitly (no useful default). */
+    requiresBaseUrl: boolean;
+    /** Which vendor's credential belongs in the key field, in the operator's words. */
+    keyKind: string;
+    /** Form defaults applied when the operator picks this provider. */
+    preset: { baseUrl: string; models: Partial<Record<Tier, string>> };
+  }
+> = {
+  managed: {
+    label: "Managed (TinyHumans)",
+    acceptsKey: true,
+    requiresBaseUrl: false,
+    keyKind: "a TinyHumans API key",
+    preset: { baseUrl: "", models: {} },
+  },
+  openrouter: {
+    label: "OpenRouter",
+    acceptsKey: true,
+    requiresBaseUrl: false,
+    keyKind: "an OpenRouter key (`sk-or-…`)",
+    // OpenRouter's recommended DeepSeek pairing, prefilled.
+    preset: {
+      baseUrl: "",
+      models: { "chat-v1": "deepseek/deepseek-chat", "reasoning-v1": "deepseek/deepseek-r1" },
+    },
+  },
+  ollama: {
+    label: "Ollama (local)",
+    acceptsKey: false,
+    requiresBaseUrl: true,
+    keyKind: "no key — Ollama takes no bearer",
+    preset: { baseUrl: "http://localhost:11434/v1", models: { "chat-v1": "llama3.1" } },
+  },
+  openai_compatible: {
+    label: "Custom (OpenAI-compatible)",
+    acceptsKey: true,
+    requiresBaseUrl: true,
+    keyKind: "whatever key the endpoint below expects",
+    preset: { baseUrl: "", models: {} },
+  },
 };
+
+/**
+ * The base-ui `Select` wants a plain id -> label map for its `items` prop, so
+ * project one out of the descriptor rather than maintaining a second list.
+ */
+const PROVIDER_LABEL_ITEMS: Record<InferenceProvider, string> = Object.fromEntries(
+  (Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => [p, PROVIDERS[p].label]),
+) as Record<InferenceProvider, string>;
 
 /**
  * What the live cognition path's metering mode means for the Usage view — so a
@@ -54,20 +120,7 @@ function presetFor(provider: InferenceProvider): {
   baseUrl: string;
   models: Partial<Record<Tier, string>>;
 } {
-  switch (provider) {
-    case "openrouter":
-      return {
-        baseUrl: "",
-        // OpenRouter's recommended DeepSeek pairing, prefilled.
-        models: { "chat-v1": "deepseek/deepseek-chat", "reasoning-v1": "deepseek/deepseek-r1" },
-      };
-    case "ollama":
-      return { baseUrl: "http://localhost:11434/v1", models: { "chat-v1": "llama3.1" } };
-    case "openai_compatible":
-      return { baseUrl: "", models: {} };
-    case "managed":
-      return { baseUrl: "", models: {} };
-  }
+  return PROVIDERS[provider].preset;
 }
 
 type Load = "loading" | "ready" | "unavailable";
@@ -107,7 +160,9 @@ export function InferenceSection({
 }) {
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
-  const [busy, setBusy] = useState<"save" | "reset" | "test" | null>(null);
+  const [busy, setBusy] = useState<
+    "save" | "reset" | "test" | "removeKey" | "restart" | null
+  >(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
 
   // Switch form.
@@ -144,24 +199,22 @@ export function InferenceSection({
 
   async function save() {
     if (busy) return;
-    // Managed is a revert, and a revert cannot carry a credential — so a key
-    // typed under a different provider and left behind by a switch would be
-    // dropped by the save below while the toast claimed success (issue #265).
-    // Refuse instead: a save that reports success must never have discarded
-    // what the operator typed. The Save button is disabled in this state; this
-    // is the guard that makes the invariant hold regardless of the button.
-    if (provider === "managed" && key.trim()) {
-      toast.error(
-        "Managed uses the platform credential and can't store a key. Choose OpenRouter or Custom (OpenAI-compatible) to save it, or discard it first.",
-      );
-      return;
-    }
     setBusy("save");
     try {
-      // "Managed" means "use the platform default" — that's a revert, not a
-      // runtime override with an empty credential.
+      // "Managed" with no company key — neither typed now nor already stored —
+      // means "use the platform default", which is a revert rather than a
+      // runtime override. With a key it is a real override (issue #585): the
+      // company pays for its own agents on the platform brain, so the override
+      // has to be written or the key would be stored and then ignored.
+      //
+      // This is what retires issue #265's refusal guard. That guard existed
+      // because a managed save was *only* ever a revert, and a revert cannot
+      // carry a credential, so a typed key would have been dropped while the
+      // toast claimed success. The invariant it protected — a save that reports
+      // success never discarded what the operator typed — is what this branch
+      // now upholds directly, by storing the key instead of refusing it.
       let result: InferenceMutation;
-      if (provider === "managed") {
+      if (provider === "managed" && !key.trim() && !status?.keyConfigured) {
         result = await revertInference(client, company);
       } else {
         const cleanModels = Object.fromEntries(
@@ -194,6 +247,65 @@ export function InferenceSection({
       await refresh();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Couldn't update inference.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Clears the stored company key without changing the effective provider. */
+  async function removeKey() {
+    if (busy) return;
+    setBusy("removeKey");
+    const effective = (status?.provider as InferenceProvider) ?? provider;
+    try {
+      await setInference(client, company, {
+        provider: effective,
+        // Only echo the resolved base URL back for the providers that require
+        // one. `managed` and `openrouter` resolve theirs from the environment or
+        // a well-known default, and persisting the *displayed* value would pin
+        // the company to it — silently overriding `OPENCOMPANY_INFERENCE_URL`.
+        baseUrl: PROVIDERS[effective]?.requiresBaseUrl ? status?.baseUrl || undefined : undefined,
+        models: status && Object.keys(status.models).length ? status.models : undefined,
+        key: "",
+      });
+      toast.success("Removed the company key. Agents fall back on their next turn.");
+      setKey("");
+      setTest({ kind: "idle" });
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't remove the key.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Rebuild the company's runtime now, clearing the restart-required state.
+   *
+   * The banner used to name a restart and offer no way to perform one, which is
+   * a dead end for exactly the operator most likely to hit it: a hosted tenant
+   * cannot restart its own container, and the control plane has no button for
+   * it either.
+   *
+   * The resulting status is read from the response rather than assumed. A host
+   * that wired no rebuilder genuinely cannot do this and says so, and reporting
+   * success there would replace a visible dead end with an invisible one.
+   */
+  async function restartNow() {
+    if (busy) return;
+    setBusy("restart");
+    try {
+      const result = await restartInference(client, company);
+      if (result.status.restartRequired) {
+        // The rebuild ran and the company is still on the old brain. Follow the
+        // host's note, which names the process restart that would work.
+        toast.warning("Still needs a restart.", { description: result.note });
+      } else {
+        toast.success("Restarted. Agents think with the new provider from their next turn.");
+      }
+      setStatus(result.status);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't restart the company.");
     } finally {
       setBusy(null);
     }
@@ -239,11 +351,6 @@ export function InferenceSection({
   if (load === "unavailable") return null;
 
   const modelRows = status ? Object.entries(status.models) : [];
-  // A credential typed under a BYOK provider survives a switch to managed (the
-  // input is hidden, the state is not). Managed has nowhere to put it, so this
-  // is the one combination that would silently lose operator input on save.
-  const managedWouldDiscardKey = provider === "managed" && key.trim().length > 0;
-
   return (
     <section className="space-y-3">
       <div className="flex items-center gap-2">
@@ -251,6 +358,13 @@ export function InferenceSection({
         <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Inference (BYOK)
         </h3>
+        {/* Mirrors the Company credential card's own subtitle. Two cards in
+            Connections accept a key and one of them accepts a TinyHumans key,
+            so each says in one line which it is — the distinction is otherwise
+            only in a module doc no operator reads (#637). */}
+        <span className="text-xs text-muted-foreground">
+          the key your agents think with — not the company account key
+        </span>
       </div>
       <p className="text-sm text-muted-foreground">
         Choose which model provider your agents think with. Bring your own key for OpenRouter, a
@@ -269,12 +383,12 @@ export function InferenceSection({
             {status && (
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium">{PROVIDER_LABELS[status.provider as InferenceProvider] ?? status.provider}</span>
+                  <span className="font-medium">{PROVIDERS[status.provider as InferenceProvider]?.label ?? status.provider}</span>
                   <Badge variant={status.source === "runtime" ? "outline" : "secondary"}>
                     {status.source}
                   </Badge>
                   {status.keyConfigured && (
-                    <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                    <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                       <Check className="size-3" /> key set
                     </span>
                   )}
@@ -305,17 +419,43 @@ export function InferenceSection({
                     is the surface that stays until the restart happens. */}
                 {status.restartRequired && (
                   <div
-                    className="flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400"
+                    className="flex items-start gap-1.5 rounded-lg border border-status-blocked/40 bg-status-blocked-soft px-3 py-2 text-xs text-status-blocked-text"
                     data-testid="inference-restart-required"
                   >
                     <RotateCcw className="mt-px size-3.5 shrink-0" />
-                    <span>
-                      <span className="font-medium">Restart required.</span> This company started
-                      with no inference source, so it is running the offline echo brain and its
-                      scheduled workflows cannot fire. The brain is chosen at startup — this
-                      configuration is saved, but agents keep echoing until the company is
-                      restarted.
-                    </span>
+                    <div className="space-y-2">
+                      <span>
+                        <span className="font-medium">Restart required.</span> This company started
+                        with no inference source, so it is running the offline echo brain and its
+                        scheduled workflows cannot fire. The brain is chosen at startup — this
+                        configuration is saved, but agents keep echoing until the company is
+                        restarted.
+                      </span>
+                      {/* The action, not just the diagnosis. Telling a hosted
+                          operator to "restart the company" names something they
+                          have no way to do — the container is the unit of
+                          restart and the control plane has no button for it —
+                          so this rebuilds the runtime in place instead (#290).
+                          Only rendered for an admin, matching the route's own
+                          authority check, so a member is not shown a control
+                          that can only 403. */}
+                      {canManage && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null}
+                          data-testid="inference-restart-now"
+                          onClick={() => void restartNow()}
+                        >
+                          {busy === "restart" ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="size-3.5" />
+                          )}
+                          Restart now
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
                 {modelRows.length > 0 && (
@@ -329,7 +469,7 @@ export function InferenceSection({
                   </ul>
                 )}
                 {test.kind === "ok" && (
-                  <p className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                  <p className="flex items-center gap-1 text-xs text-status-done-text">
                     <Check className="size-3" /> {test.note}
                   </p>
                 )}
@@ -356,21 +496,21 @@ export function InferenceSection({
                     <Select
                       value={provider}
                       onValueChange={(v) => pickProvider(v as InferenceProvider)}
-                      items={PROVIDER_LABELS}
+                      items={PROVIDER_LABEL_ITEMS}
                     >
                       <SelectTrigger id="inference-provider" className="w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(Object.keys(PROVIDER_LABELS) as InferenceProvider[]).map((p) => (
+                        {(Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => (
                           <SelectItem key={p} value={p}>
-                            {PROVIDER_LABELS[p]}
+                            {PROVIDERS[p].label}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
-                  {(provider === "ollama" || provider === "openai_compatible") && (
+                  {PROVIDERS[provider].requiresBaseUrl && (
                     <div className="space-y-1">
                       <Label htmlFor="inference-base-url" className="text-xs">
                         Base URL
@@ -385,75 +525,65 @@ export function InferenceSection({
                   )}
                 </div>
 
-                {provider === "managed" ? (
-                  <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground" data-testid="inference-managed-note">
-                      Managed runs on the platform credential, so there is no key to paste here. To
-                      bring your own key, choose OpenRouter or Custom (OpenAI-compatible).
-                    </p>
-                    {managedWouldDiscardKey && (
-                      <div
-                        className="space-y-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-                        data-testid="inference-key-conflict"
-                      >
-                        <p className="flex items-start gap-1.5">
-                          <AlertTriangle className="mt-px size-3.5 shrink-0" />
-                          <span>
-                            You typed a key, and managed can&apos;t store one — saving now would throw
-                            it away. Choose OpenRouter or Custom (OpenAI-compatible) to save it, or
-                            discard it to stay on managed.
-                          </span>
-                        </p>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          data-testid="inference-discard-key"
-                          onClick={() => setKey("")}
-                        >
-                          Discard key
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {TIERS.map((tier) => (
-                        <div key={tier} className="space-y-1">
-                          <Label htmlFor={`inference-model-${tier}`} className="text-xs">
-                            {tier}
-                          </Label>
-                          <Input
-                            id={`inference-model-${tier}`}
-                            value={models[tier] ?? ""}
-                            placeholder="provider model id"
-                            onChange={(e) => setModel(tier, e.target.value)}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                    {provider !== "ollama" && (
-                      <div className="space-y-1">
-                        <Label htmlFor="inference-key" className="text-xs">
-                          API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
+                {provider !== "managed" && (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {TIERS.map((tier) => (
+                      <div key={tier} className="space-y-1">
+                        <Label htmlFor={`inference-model-${tier}`} className="text-xs">
+                          {tier}
                         </Label>
                         <Input
-                          id="inference-key"
-                          type="password"
-                          value={key}
-                          placeholder="write-only"
-                          autoComplete="off"
-                          onChange={(e) => setKey(e.target.value)}
+                          id={`inference-model-${tier}`}
+                          value={models[tier] ?? ""}
+                          placeholder="provider model id"
+                          onChange={(e) => setModel(tier, e.target.value)}
                         />
                       </div>
-                    )}
-                  </>
+                    ))}
+                  </div>
+                )}
+
+                {/*
+                  The key field is offered for `managed` too (issue #585). The
+                  company's TinyHumans key is the admin's to set, and hiding the
+                  input here was the whole reason it could only arrive as a
+                  deploy-time environment variable — `resolve_endpoint` has
+                  always preferred a stored key over the env default on this
+                  provider. Ollama is the one provider that takes no bearer.
+                */}
+                {PROVIDERS[provider].acceptsKey && (
+                  <div className="space-y-1">
+                    <Label htmlFor="inference-key" className="text-xs">
+                      API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
+                    </Label>
+                    <Input
+                      id="inference-key"
+                      type="password"
+                      value={key}
+                      placeholder="write-only"
+                      autoComplete="off"
+                      onChange={(e) => setKey(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground" data-testid="inference-key-note">
+                      Paste {PROVIDERS[provider].keyKind}. This field is scoped to the provider
+                      selected above and is stored against it — a key for any other vendor will
+                      fail at the first turn, so it is not the place for one.
+                      {provider === "managed" && " Leave it blank to keep running on the platform credential."}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Whatever you set here is what the company spends against: everyone you invite
+                      spends on it — inference, embeddings, tools and capabilities all bill to this
+                      one account, and spend cannot be attributed back to individual members.
+                      Removing someone from the roster stops their future access; it does not
+                      separate what they already spent.
+                    </p>
+                  </div>
                 )}
 
                 <div className="flex items-center gap-2">
                   <Button
                     data-testid="inference-save"
-                    disabled={busy !== null || managedWouldDiscardKey}
+                    disabled={busy !== null}
                     onClick={() => void save()}
                   >
                     {busy === "save" ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
@@ -463,6 +593,22 @@ export function InferenceSection({
                     {busy === "reset" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
                     Reset to managed
                   </Button>
+                  {status?.keyConfigured && (
+                    <Button
+                      variant="ghost"
+                      className="text-destructive"
+                      data-testid="inference-remove-key"
+                      disabled={busy !== null}
+                      onClick={() => void removeKey()}
+                    >
+                      {busy === "removeKey" ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="size-4" />
+                      )}
+                      Remove key
+                    </Button>
+                  )}
                 </div>
               </div>
             )}

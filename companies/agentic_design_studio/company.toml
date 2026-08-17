@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Design Studio harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -24,32 +24,17 @@ human_role = "Creative direction sign-off"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
-[[agent]]
-id = "brand_designer"
-role = "Brand Designer"
-description = "Identity systems, logos, and guidelines."
-
-[[agent]]
-id = "ui_designer"
-role = "UI Designer"
-description = "Product UI and design systems."
-
-[[agent]]
-id = "motion_designer"
-role = "Motion Designer"
-description = "Animation and motion graphics."
-
-[[agent]]
-id = "illustrator"
-role = "Illustrator"
-description = "Custom illustration and iconography."
-
-[[agent]]
-id = "user_researcher"
-role = "User Researcher"
-description = "User testing and design validation."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["design_pipeline"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

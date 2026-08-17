@@ -38,9 +38,15 @@
 //!
 //! Only **names and booleans** ever enter the prompt. No credential value is
 //! read, let alone rendered: presence is checked with the same
-//! `get(...).is_some()`-shaped probes
-//! [`token_configured`](crate::company::composio::token_configured) and
-//! [`auth_configured`](crate::company::mcp::auth_configured) use.
+//! `get(...).is_some()`-shaped probes the read planes use —
+//! [`auth_configured`](crate::company::mcp::auth_configured) for MCP, and for
+//! Composio the resolver
+//! [`resolve_credential`](crate::company::composio::resolve_credential)
+//! reduced to its `configured()` boolean. The resolver rather than
+//! [`token_configured`](crate::company::composio::token_configured)
+//! deliberately: the latter reads only the BYO override slot, so on a hosted
+//! tenant it is `false` for every company and the verdicts contradicted the
+//! working connectors the evidence pack lists two lines above (issue #886).
 //!
 //! # No run, and therefore no lock
 //!
@@ -625,8 +631,20 @@ struct Evidence {
     always_approve: Vec<String>,
     /// Whether outbound email is wired at all (presence, never credentials).
     mail_configured: bool,
-    /// Whether a Composio token exists for this company (presence only).
-    composio_token: bool,
+    /// Whether **any** Composio credential resolves for this company (presence
+    /// only, never the value).
+    ///
+    /// Issue #886: this is the resolver's answer
+    /// ([`resolve_credential`](crate::company::composio::resolve_credential)
+    /// `.configured()`), covering all three tiers — the BYO `composio/token`
+    /// override, the company's own TinyHumans key, and this instance's platform
+    /// identity. It used to read only the first slot, so on a hosted tenant it
+    /// was `false` for every company, and `verify_composio` told operators "no
+    /// Composio account can be reached" about connectors that were working.
+    ///
+    /// Distinct from [`Self::composio_reachable`], which is "did the probe
+    /// answer" — a liveness fact. This one is "do we hold a bearer at all".
+    composio_credential: bool,
 }
 
 impl Evidence {
@@ -726,6 +744,7 @@ async fn gather_evidence(
     // one seam the console's discovery route and the harness roster share.
     let mcp_servers = match crate::company::mcp::resolve_effective(
         runtime.id(),
+        runtime.default_mcp_servers(),
         &record.manifest.mcp_servers,
         runtime.secrets().as_ref(),
     )
@@ -768,10 +787,13 @@ async fn gather_evidence(
         Err(_) => Vec::new(),
     };
 
-    let composio_token =
-        crate::company::composio::token_configured(runtime.id(), runtime.secrets().as_ref())
-            .await
-            .unwrap_or(false);
+    let composio_credential = composio_credential_configured(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        crate::company::TinyhumansTokenSource::from_env(&crate::app::config::ProcessEnv)
+            .map(std::sync::Arc::new),
+    )
+    .await;
 
     Ok(Evidence {
         company_name: record.manifest.company.name.clone(),
@@ -790,8 +812,51 @@ async fn gather_evidence(
         workspace,
         skills,
         mail_configured: runtime.mail().is_some(),
-        composio_token,
+        composio_credential,
     })
+}
+
+/// Whether **any** Composio credential resolves for this company — presence
+/// only, never the value (issue #886).
+///
+/// Asks
+/// [`resolve_credential`](crate::company::composio::resolve_credential), which
+/// walks all three tiers: the BYO `composio/token` override, the company's own
+/// TinyHumans key, and this instance's platform identity. The previous probe
+/// was [`token_configured`](crate::company::composio::token_configured), which
+/// reads only the first — so on a hosted tenant, where nobody pastes a BYO
+/// token and the pod's identity is what wires the toolbelt, it answered `false`
+/// for every company. [`verify_composio`] and [`verify_credential`] then told
+/// operators "this company has no Composio credential, so no Composio account
+/// can be reached" about connectors that were demonstrably working, on the same
+/// evidence pack that listed those connectors as connected two lines above.
+///
+/// Takes the instance identity **already resolved** rather than an
+/// `&dyn EnvSource`, matching the console read planes: it keeps the tier matrix
+/// testable without mutating the process environment, and avoids holding a
+/// non-`Send` trait object across the await.
+///
+/// A store read error is `false` — fail closed. The verdicts this feeds already
+/// distinguish "no credential" from "not connected", and neither is worth
+/// aborting a planning pass over; the pass degrades exactly as it does for every
+/// other inventory it could not read.
+async fn composio_credential_configured(
+    company: &crate::ports::types::CompanyId,
+    secrets: &dyn crate::ports::SecretStore,
+    token_source: Option<Arc<crate::company::TinyhumansTokenSource>>,
+) -> bool {
+    match crate::company::composio::resolve_credential(company, secrets, token_source).await {
+        Ok(credential) => credential.configured(),
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                error = %err,
+                "[planning] could not resolve the Composio credential; treating this company as \
+                 having none for this pass"
+            );
+            false
+        }
+    }
 }
 
 /// Renders a bounded list of logical workspace paths from a flat node list.
@@ -1110,7 +1175,7 @@ fn evidence_prompt(e: &Evidence) -> String {
     }
     out.push_str(&format!(
         "- Composio credential configured: {}\n- Composio reachable this pass: {}\n",
-        e.composio_token, e.composio_reachable
+        e.composio_credential, e.composio_reachable
     ));
     out.push_str(&format!(
         "- Outbound email configured: {}\n",
@@ -1311,7 +1376,7 @@ fn verify_composio(e: &Evidence, name: &str) -> (PrereqStatus, String) {
             PrereqStatus::Satisfied,
             format!("{name} is connected through Composio"),
         ),
-        _ if !e.composio_token => (
+        _ if !e.composio_credential => (
             PrereqStatus::Missing,
             "this company has no Composio credential, so no Composio account can be reached — \
              set one from the Connections tab"
@@ -1379,7 +1444,7 @@ async fn verify_credential(
         };
     }
     if key.starts_with("composio") {
-        return if e.composio_token {
+        return if e.composio_credential {
             (
                 PrereqStatus::Satisfied,
                 "a Composio credential is configured".to_string(),

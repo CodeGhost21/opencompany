@@ -22,8 +22,25 @@ a scoped REST surface:
 - Multi-company: `/api/v1/companies/{id}/…`
 - Single-company alias: `/api/v1/company/…`
 
-The typed client (`src/api/client.ts`) resolves that scope, adds the operator
-`Bearer` token, and is the only place HTTP happens.
+The typed client (`src/api/client.ts`) resolves that scope, attaches whatever
+credential its connection holds, and is the only place HTTP happens.
+
+The console holds **N hosts at once** (`src/connections/`), one client per
+connection. Three deployment shapes fall out of that:
+
+- **Same-origin** — served by the host it operates. The session is an `HttpOnly`
+  cookie that nothing in the page can read. The ordinary case, unchanged.
+- **Hub** — one deployment at its own origin operating hosts on other origins,
+  built with `VITE_OC_HUB=1`. No cookie crosses an origin, so it carries a
+  session token itself in `x-opencompany-session`, and its event stream runs
+  over `fetch` because `EventSource` cannot set a header. See
+  [hub-console.md](../docs/spec/runtime/hub-console.md).
+- **Desktop** — routes through its own Rust core, where neither CORS nor the
+  cookie rules apply. See [desktop.md](../docs/spec/runtime/desktop.md).
+
+Which applies is **derived, not configured**: `needsCarriedSession` compares the
+host's origin with the document's, so a console cannot be told to hold a token
+where a cookie would have worked.
 
 Every surface is built to one pattern so the backend can land incrementally:
 
@@ -207,14 +224,25 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   revenue, byCategory, transactions). **Caveat:** the inference-cost component
   of spend is `0` until openhuman#4940 (as with Usage).
 
-### Connections — `src/views/ConnectionsView.tsx`, `src/lib/connections.ts`
-- OAuth catalog with connect/disconnect and connected-account state.
+### Connections — `src/views/ConnectionsView.tsx`, `src/lib/provider-grid.ts`
+- **One** provider grid with connect/disconnect and connected-account state,
+  plus the credential sections above it (MCP, inference, company key, Composio
+  token, channels).
 - **Source:** ✅ real (feature `oauth`) — `Company.connections` (GraphQL) reads
   manifest intent (`[[connection]]`) + live OAuth status; `POST
   …/connections/{provider}/start` returns the authorize URL,
   `…/disconnect` drops tokens, and `GET /api/v1/oauth/callback` completes the
   flow. Without the `oauth` feature the write routes `404 not_wired` and the
   console shows the read-only catalog.
+- **One list, one answer (issue #582).** The page used to render two provider
+  lists — `ComposioSection`'s grid off `GET …/composio/connections`, and a
+  categorised grid of eleven hardcoded tiles off `GET …/connections` — which
+  applied different rules to the same Composio state and so disagreed on screen.
+  Now: `GET …/connections` is the sole status source, the backend's Composio
+  catalog is the sole list of what can be connected, `src/lib/connections.ts` is
+  native-route metadata rather than a list, and `src/lib/provider-grid.ts` merges
+  the three into the rows `ProvidersSection` renders. `ComposioSection` keeps
+  only the credential layer.
 
 ### Domain & Email (Settings) — `src/components/domain-settings.tsx`, `src/lib/domain.ts`
 - Custom domain with generated DNS records (verification TXT, CNAME, DKIM, SPF)

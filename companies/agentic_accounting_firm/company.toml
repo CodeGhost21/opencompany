@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Accounting Firm harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -7,32 +7,17 @@ name = "Agentic Accounting Firm"
 output = "Books, taxes, payroll, and forecasts"
 human_role = "Sign-off on filings"
 
-[[agent]]
-id = "bookkeeper"
-role = "Bookkeeper"
-description = "Record transactions and reconcile accounts."
-
-[[agent]]
-id = "tax_preparer"
-role = "Tax Preparer"
-description = "Prepare tax filings."
-
-[[agent]]
-id = "payroll_agent"
-role = "Payroll Agent"
-description = "Run payroll and related filings."
-
-[[agent]]
-id = "forecaster"
-role = "Forecaster"
-description = "Build financial forecasts and budgets."
-
-[[agent]]
-id = "audit_prep"
-role = "Audit Preparer"
-description = "Assemble documentation for audits."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["month_end_close"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

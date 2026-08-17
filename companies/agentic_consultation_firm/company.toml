@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Consulting Firm harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -24,42 +24,17 @@ human_role = "Executive workshops"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
-[[agent]]
-id = "researcher"
-role = "Researcher"
-description = "Desk research and evidence gathering."
-
-[[agent]]
-id = "interviewer"
-role = "Interviewer"
-description = "Conduct and synthesize stakeholder interviews."
-
-[[agent]]
-id = "industry_analyst"
-role = "Industry Analyst"
-description = "Industry, market, and competitive analysis."
-
-[[agent]]
-id = "strategist"
-role = "Strategist"
-description = "Synthesize findings into strategy recommendations."
-
-[[agent]]
-id = "financial_modeler"
-role = "Financial Modeler"
-description = "Build the supporting financial models."
-
-[[agent]]
-id = "deck_builder"
-role = "Deck Builder"
-description = "Produce client-ready presentations."
-
-[[agent]]
-id = "implementation_planner"
-role = "Implementation Planner"
-description = "Turn strategy into an execution roadmap."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["engagement_pipeline"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

@@ -50,5 +50,11 @@ export default defineConfig({
     // imports `@playwright/test` and needs a browser — can never be collected
     // by this runner.
     include: ["test/unit/**/*.test.ts"],
+    // Runs before every file, in whichever environment that file asked for.
+    // It is a no-op except under jsdom on Node 25+, where it repairs the two
+    // storage globals Vitest declines to carry over from the window — without
+    // it, 57 tests in three files fail on `localStorage.clear` (issue #852).
+    // Not collected as a test: `include` above only matches `*.test.ts`.
+    setupFiles: ["./test/unit/setup/web-storage.ts"],
   },
 });

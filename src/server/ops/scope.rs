@@ -71,6 +71,21 @@ pub(crate) struct ScopedCompany {
     /// distinction [`CompanyEvent::OperatorMessage`](crate::ports::types::CompanyEvent::OperatorMessage)'s
     /// `by` already draws.
     pub(crate) actor: Option<Actor>,
+    /// Whether this principal may read the *money and arguments* an effect
+    /// carries — issue #618's rule, answered once here for routes that project
+    /// such a field (issue #705).
+    ///
+    /// **The decision, not the credential.** The comment below on `actor` is
+    /// the rule for this struct: the role does not travel. So this carries what
+    /// [`may_read_approval_contents`](crate::server::approval_visibility::may_read_approval_contents)
+    /// *decided*, resolved at the edge where the principal still exists, rather
+    /// than the role that decided it. Nothing downstream can re-derive the
+    /// answer differently, because nothing downstream has the input.
+    ///
+    /// Deliberately the same predicate the Approvals read uses rather than a
+    /// second one. Two role checks that can disagree about what an operator may
+    /// see is a worse outcome than the leak either was written to close.
+    pub(crate) may_read_contents: bool,
 }
 
 impl ScopedCompany {
@@ -123,6 +138,11 @@ impl FromRequestParts<AppState> for ScopedCompany {
         if let Some(resp) = refuse_until_password_changed(&auth) {
             return Err(resp);
         }
+        // Resolved here, while the principal still exists, because the role is
+        // about to be dropped on purpose (issue #705). This is the answer, not
+        // the input to it.
+        let may_read_contents =
+            crate::server::approval_visibility::may_read_approval_contents(&auth);
         // Keep the person, drop the credential: only a human principal names an
         // actor, and only the user id travels — never the email or the role.
         let actor = match auth {
@@ -132,7 +152,11 @@ impl FromRequestParts<AppState> for ScopedCompany {
             }),
             GqlAuth::Platform(_) => None,
         };
-        Ok(ScopedCompany { runtime, actor })
+        Ok(ScopedCompany {
+            runtime,
+            actor,
+            may_read_contents,
+        })
     }
 }
 
@@ -201,14 +225,24 @@ impl FromRequestParts<AppState> for AdminScopedCompany {
         // Addressing, company resolution and the temporary-password boundary
         // are already exactly right; this only adds the authority question on
         // top of them.
-        let ScopedCompany { runtime, actor } =
-            ScopedCompany::from_request_parts(parts, state).await?;
+        let ScopedCompany {
+            runtime,
+            actor,
+            // Not carried on: every principal that reaches this extractor may
+            // read contents by construction (an admin, or the platform bearer
+            // which this extractor admits and #618 refuses contents to anyway).
+            may_read_contents: _,
+        } = ScopedCompany::from_request_parts(parts, state).await?;
         match actor {
             // A human. `ScopedCompany` keeps the person but drops the role, so
             // the role has to be re-resolved — which is the whole reason this
             // class of gap existed.
             Some(actor) => {
-                let admin = require_admin(&parts.headers, state, &runtime).await?;
+                let peer = parts
+                    .extensions
+                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                    .map(|info| info.0);
+                let admin = require_admin(&parts.headers, state, &runtime, peer).await?;
                 Ok(AdminScopedCompany {
                     runtime,
                     admin: Some(admin),

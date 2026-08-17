@@ -187,6 +187,17 @@ pub struct CompanyScheduler {
     /// Per-schedule last-fired epoch minute, so a schedule fires at most once per
     /// minute no matter how often [`tick`](Self::tick) is called.
     last_fired: HashMap<usize, u64>,
+    /// Whether the one restart catch-up (issue #241) has **completed** — a pass
+    /// that got past the `ensure_running` guard AND touched the claim store
+    /// without error (issue #661 F1). Starts `false` and, crucially, is NOT set
+    /// by a pass that early-returned because the company was paused/archived: a
+    /// company paused across boot would otherwise silently forfeit its make-up
+    /// forever. [`spawn`](Self::spawn) calls [`catch_up`](Self::catch_up) once
+    /// before the loop and again on every tick while this stays `false`, so the
+    /// missed fire lands on the first minute the company is actually running.
+    /// Re-running a partial pass is idempotent: a fired schedule advanced its
+    /// durable anchor and a durable claim already made is not re-made.
+    caught_up: bool,
 }
 
 impl CompanyScheduler {
@@ -218,6 +229,7 @@ impl CompanyScheduler {
             schedules: parsed,
             clock,
             last_fired: HashMap::new(),
+            caught_up: false,
         })
     }
 
@@ -328,24 +340,51 @@ impl CompanyScheduler {
     /// (no anchor) makes up nothing. A claim-store read failure fails closed
     /// (skip), for the same reason [`tick`](Self::tick) does.
     ///
-    /// Run once, from [`spawn`](Self::spawn), before the steady-state loop.
+    /// Run from [`spawn`](Self::spawn) before the steady-state loop, and again on
+    /// every tick until it latches (issue #661 F1) — a no-op once it has, and one
+    /// `ensure_running` probe per minute while it has not.
+    ///
+    /// # Re-arming until one successful pass (issue #661 F1)
+    ///
+    /// The pre-loop-only call this replaced early-returned `Ok(0)` whenever
+    /// `ensure_running` rejected — so a company **paused across boot** and resumed
+    /// later never made up its missed fire, because the one attempt it ever got
+    /// happened while it was paused. This now latches only after a pass that got
+    /// *past* the `ensure_running` guard AND touched the store without error;
+    /// [`spawn`](Self::spawn) re-drives it every minute until then, so the make-up
+    /// lands on the first running minute. A pause never latches; a *transient*
+    /// store error on the anchor read or the claim clears `complete`, so that pass
+    /// does not latch either and a later tick retries — the same "defer, never
+    /// forfeit" doctrine the workflow scheduler's first-sight catch-up follows.
+    /// Re-running a partial pass is safe: a fired schedule advanced its durable
+    /// anchor, and a durable claim already made is not re-made.
     ///
     /// [`latest_fire`]: crate::ports::ScheduleFireStore::latest_fire
-    pub async fn catch_up(&self) -> Result<usize> {
+    pub async fn catch_up(&mut self) -> Result<usize> {
+        // Already made up — nothing more this process needs to do.
+        if self.caught_up {
+            return Ok(0);
+        }
         if self.schedules.is_empty() {
             return Ok(0);
         }
         let runtime = self.runtime();
         if runtime.ensure_running().await.is_err() {
+            // Paused/archived: do NOT latch, so a later resume still catches up.
             return Ok(0);
         }
         let now_minute = self.clock.now_millis() / MINUTE_MS;
         let store = runtime.schedule_fires().clone();
         let mut fired = 0;
+        // Whether this pass reached a verdict for every schedule without a
+        // transient store error. A single failed read/claim leaves it `false`, so
+        // the latch stays clear and a later tick retries rather than forfeiting.
+        let mut complete = true;
         for schedule in &self.schedules {
             let anchor = match store.latest_fire(runtime.id(), &schedule.id).await {
                 Ok(anchor) => anchor,
                 Err(err) => {
+                    complete = false;
                     tracing::warn!(
                         company = %runtime.id(),
                         schedule = %schedule.id,
@@ -378,13 +417,20 @@ impl CompanyScheduler {
                 }
                 // A simultaneously-booting replica claimed the catch-up first.
                 Ok(false) => {}
-                Err(err) => tracing::warn!(
-                    company = %runtime.id(),
-                    schedule = %schedule.id,
-                    %err,
-                    "scheduler: could not claim catch-up fire; skipping (fail closed)"
-                ),
+                Err(err) => {
+                    complete = false;
+                    tracing::warn!(
+                        company = %runtime.id(),
+                        schedule = %schedule.id,
+                        %err,
+                        "scheduler: could not claim catch-up fire; skipping (fail closed)"
+                    );
+                }
             }
+        }
+        // Latch only a clean pass; a partial one stays re-armed for a later tick.
+        if complete {
+            self.caught_up = true;
         }
         Ok(fired)
     }
@@ -449,6 +495,14 @@ impl CompanyScheduler {
                 tokio::select! {
                     _ = &mut notified => break,
                     _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {
+                        // Issue #661 F1: re-attempt the boot catch-up until it
+                        // latches. A no-op once made up; while the company is
+                        // paused this is one cheap `ensure_running` probe a minute,
+                        // so a company resumed after boot still makes up its missed
+                        // fire on its first running minute rather than never.
+                        if let Err(err) = self.catch_up().await {
+                            tracing::warn!(company = %self.runtime.id(), %err, "scheduled catch-up failed");
+                        }
                         if let Err(err) = self.tick().await {
                             tracing::warn!(company = %self.runtime.id(), %err, "scheduled cycle failed");
                         }
@@ -987,6 +1041,9 @@ mod test {
         async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> Result<usize> {
             Err(OpenCompanyError::Store("claim store is down".into()))
         }
+        async fn delete_schedule_fires(&self, _c: &CompanyId, _s: &str) -> Result<usize> {
+            Err(OpenCompanyError::Store("claim store is down".into()))
+        }
     }
 
     #[test]
@@ -1111,7 +1168,7 @@ mod test {
                 .unwrap()
         );
         let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
-        let scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+        let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
 
         assert_eq!(
             scheduler.catch_up().await.unwrap(),
@@ -1147,7 +1204,7 @@ mod test {
                 .unwrap(),
         );
         let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
-        let scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+        let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
         assert_eq!(scheduler.catch_up().await.unwrap(), 0);
         assert_eq!(fired_count(&rt).await, 0);
     }
@@ -1174,12 +1231,233 @@ mod test {
             .await
             .unwrap();
         let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
-        let a = CompanyScheduler::new(rt.clone(), &schedules, clock.clone()).unwrap();
-        let b = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+        let mut a = CompanyScheduler::new(rt.clone(), &schedules, clock.clone()).unwrap();
+        let mut b = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
 
         let fa = a.catch_up().await.unwrap();
         let fb = b.catch_up().await.unwrap();
         assert_eq!(fa + fb, 1, "only one booting replica fires the catch-up");
+        assert_eq!(fired_count(&rt).await, 1);
+    }
+
+    // --- issue #661 (F1): re-arm the boot catch-up until one successful pass ----
+
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Moves the company's durable lifecycle, so a test can pause the company
+    /// across a boot catch-up and later resume it.
+    async fn set_lifecycle(rt: &CompanyRuntime, lifecycle: &str) {
+        let store = rt.store().clone();
+        let mut record = store
+            .load(rt.id())
+            .await
+            .expect("loads")
+            .expect("the builder materialized a record");
+        record.lifecycle = lifecycle.to_string();
+        store.save(&record).await.expect("saves");
+    }
+
+    /// An in-memory claim store whose first N `latest_fire` reads error, then
+    /// works — the flaky-once double for "a transient store error does NOT latch
+    /// the boot catch-up, so a later pass retries" (issue #661 F1). `seed` presets
+    /// an anchor without consuming the fail budget.
+    struct FlakyOnceFires {
+        claims: Mutex<HashMap<(String, String), HashSet<u64>>>,
+        fail_latest: AtomicUsize,
+    }
+
+    impl FlakyOnceFires {
+        fn new(fail_latest: usize) -> Self {
+            Self {
+                claims: Mutex::new(HashMap::new()),
+                fail_latest: AtomicUsize::new(fail_latest),
+            }
+        }
+        fn seed(&self, c: &CompanyId, s: &str, m: u64) {
+            self.claims
+                .lock()
+                .unwrap()
+                .entry((c.as_ref().to_string(), s.to_string()))
+                .or_default()
+                .insert(m);
+        }
+    }
+
+    #[async_trait]
+    impl ScheduleFireStore for FlakyOnceFires {
+        async fn claim_fire(&self, c: &CompanyId, s: &str, m: u64) -> Result<bool> {
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .entry((c.as_ref().to_string(), s.to_string()))
+                .or_default()
+                .insert(m))
+        }
+        async fn latest_fire(&self, c: &CompanyId, s: &str) -> Result<Option<u64>> {
+            if self.fail_latest.load(Ordering::SeqCst) > 0 {
+                self.fail_latest.fetch_sub(1, Ordering::SeqCst);
+                return Err(OpenCompanyError::Store("flaky once claim store".into()));
+            }
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .get(&(c.as_ref().to_string(), s.to_string()))
+                .and_then(|set| set.iter().max().copied()))
+        }
+        async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> Result<usize> {
+            Ok(0)
+        }
+        async fn delete_schedule_fires(&self, c: &CompanyId, s: &str) -> Result<usize> {
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .remove(&(c.as_ref().to_string(), s.to_string()))
+                .map_or(0, |set| set.len()))
+        }
+    }
+
+    /// A company paused across boot gets its catch-up on RESUME, not never. The
+    /// pre-loop-only catch-up used to early-return on `ensure_running` and latch
+    /// nothing — but with no re-arm the missed fire was gone. Now the pause does
+    /// not latch, so the first running pass makes it up.
+    #[tokio::test]
+    async fn catch_up_skipped_while_paused_runs_on_resume() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .build()
+                .await
+                .unwrap(),
+        );
+        // Anchor two Mondays back so the most recent Monday (2026-07-13) is missed.
+        let sid = manifest_schedule_id("0 9 * * MON", "weekly standup");
+        rt.schedule_fires()
+            .claim_fire(rt.id(), &sid, millis_at(2026, 7, 6, 9, 0) / MINUTE_MS)
+            .await
+            .unwrap();
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
+        let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+
+        // Paused across boot: the guard rejects and nothing is made up — but the
+        // latch stays clear.
+        set_lifecycle(&rt, "paused").await;
+        assert_eq!(
+            scheduler.catch_up().await.unwrap(),
+            0,
+            "a paused company makes up nothing"
+        );
+        assert_eq!(fired_count(&rt).await, 0);
+
+        // Resumed: the very next catch-up pass makes up the missed fire.
+        set_lifecycle(&rt, "running").await;
+        assert_eq!(
+            scheduler.catch_up().await.unwrap(),
+            1,
+            "the resumed company gets its deferred catch-up"
+        );
+        assert_eq!(fired_count(&rt).await, 1);
+    }
+
+    /// One clean pass latches: a second pass is a no-op even when a genuinely new
+    /// occurrence has since been missed. Proven by contrast with a fresh
+    /// (non-latched) scheduler over the same store, which DOES make up the new one.
+    #[tokio::test]
+    async fn catch_up_latches_after_one_successful_pass() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let sid = manifest_schedule_id("0 9 * * MON", "weekly standup");
+        rt.schedule_fires()
+            .claim_fire(rt.id(), &sid, millis_at(2026, 7, 6, 9, 0) / MINUTE_MS)
+            .await
+            .unwrap();
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
+        let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock.clone()).unwrap();
+
+        // First pass fires the most recent missed Monday and LATCHES.
+        assert_eq!(scheduler.catch_up().await.unwrap(), 1);
+        assert_eq!(fired_count(&rt).await, 1);
+
+        // Advance a week: 2026-07-27 09:00 is now a genuinely new missed fire.
+        clock.set(millis_at(2026, 7, 27, 9, 5));
+        // The latched scheduler ignores it — that is the whole point of the latch.
+        assert_eq!(
+            scheduler.catch_up().await.unwrap(),
+            0,
+            "a latched scheduler runs no second pass"
+        );
+        assert_eq!(
+            fired_count(&rt).await,
+            1,
+            "no new fire from the latched one"
+        );
+
+        // A fresh scheduler (latch clear) over the SAME store proves the new miss
+        // was real and would have been caught but for the latch.
+        let mut fresh = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+        assert_eq!(
+            fresh.catch_up().await.unwrap(),
+            1,
+            "a non-latched scheduler still makes up the newly missed fire"
+        );
+        assert_eq!(fired_count(&rt).await, 2);
+    }
+
+    /// A pass that hit a transient store error does NOT latch, so a later pass
+    /// retries and fires — 0 then 1 across a flaky-once store.
+    #[tokio::test]
+    async fn a_failed_pass_does_not_latch() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let flaky = Arc::new(FlakyOnceFires::new(1));
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .with_schedule_fires(flaky.clone())
+                .build()
+                .await
+                .unwrap(),
+        );
+        let sid = manifest_schedule_id("0 9 * * MON", "weekly standup");
+        // Seed the anchor directly (bypassing the fail budget) so the miss is real.
+        flaky.seed(rt.id(), &sid, millis_at(2026, 7, 6, 9, 0) / MINUTE_MS);
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
+        let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+
+        // First pass: the anchor read errors, so the pass does not complete and
+        // must NOT latch.
+        assert_eq!(
+            scheduler.catch_up().await.unwrap(),
+            0,
+            "a store error fires nothing and does not latch"
+        );
+        assert_eq!(fired_count(&rt).await, 0);
+
+        // Second pass: the store now works, so the deferred catch-up fires.
+        assert_eq!(
+            scheduler.catch_up().await.unwrap(),
+            1,
+            "the retry makes up the missed fire"
+        );
         assert_eq!(fired_count(&rt).await, 1);
     }
 }

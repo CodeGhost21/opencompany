@@ -13,13 +13,16 @@
 // rather than two because an edit is the same form with the same rules — a
 // second one would drift the moment either side grew a field.
 
-import { useEffect, useId, useState } from "react";
-import { History, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { History, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
   CREATABLE_NODE_KINDS,
   DESTINATION_KINDS,
+  destinationLabel,
   createWorkflow,
+  draftWorkflowFromDescription,
+  listWiredChannels,
   listWorkflowRevisions,
   listWorkflows,
   restoreWorkflowRevision,
@@ -28,9 +31,12 @@ import {
   type WorkflowEdge,
   type WorkflowGraph,
   type WorkflowNode,
+  type WorkflowReadiness,
   type WorkflowRevision,
   type WorkflowSummary,
+  type PrefilledDraft,
 } from "@/api/workflows";
+import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import {
   blankConfigDraft,
   configDraftFrom,
@@ -40,6 +46,7 @@ import {
   configFromDraft,
   hasConfigForm,
 } from "@/lib/workflow-node-config";
+import { draftBanners } from "@/lib/workflow-draft";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
@@ -175,9 +182,10 @@ function scheduleProblem(schedule: string): string | null {
  * same thing. `destination_messages_match_the_console` in
  * `src/company/workflow_file.rs` fails if either side is reworded alone.
  */
-function destinationTargetProblem(
+export function destinationTargetProblem(
   kind: DraftNode["destinationKind"],
   target: string,
+  wiredChannels: string[],
 ): string | null {
   const value = target.trim();
   if (kind === "email" && !value.includes("@")) {
@@ -185,6 +193,18 @@ function destinationTargetProblem(
   }
   if (kind === "channel" && !value) {
     return "A channel destination needs a channel id — name the channel to post the report to.";
+  }
+  // #813: when the host told us which channels are wired, a target that is not
+  // one of them would only fail at delivery (`ChannelNotWired`) — catch it at
+  // author time instead. Skipped when the list is empty (host offered none), so
+  // a degraded free-text box is never wrongly rejected.
+  if (
+    kind === "channel" &&
+    value &&
+    wiredChannels.length > 0 &&
+    !wiredChannels.includes(value)
+  ) {
+    return `\`${value}\` is not a wired channel — this deployment has: ${wiredChannels.join(", ")}.`;
   }
   return null;
 }
@@ -349,6 +369,7 @@ export function WorkflowCreateDialog({
   workflow = null,
   onSaved,
   onConflict,
+  prefilledDraft = null,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -371,6 +392,14 @@ export function WorkflowCreateDialog({
    * hands it to the view, whose persistent banner carries the way out (Reload).
    */
   onConflict?: (message: string) => void;
+  /**
+   * A copilot-corrected graph to hydrate the form with directly (issue #840,
+   * PR-3), skipping the description→draft round trip. Combined with `workflow`
+   * (the saved graph the correction targets) this opens the dialog in edit mode
+   * showing the corrected nodes/edges, so Save writes a new *version* under the
+   * same id. The summary/notes/readiness banners render read-only.
+   */
+  prefilledDraft?: PrefilledDraft | null;
 }) {
   const editing = workflow !== null;
   const [id, setId] = useState("");
@@ -379,12 +408,19 @@ export function WorkflowCreateDialog({
   const [nodes, setNodes] = useState<DraftNode[]>(starterNodes());
   const [edges, setEdges] = useState<DraftEdge[]>([]);
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
+  /** The chat channels this company can actually deliver to (#813): the picker
+   * options for an output node's `channel` destination. Degrades to a free-text
+   * box when the host offers no list, so authoring is never blocked. */
+  const [wiredChannels, setWiredChannels] = useState<string[]>([]);
   /** The company's workflows, for the `sub_workflow` config picker (#541). The
    * graph's own id is dropped at render time — a sub-workflow can't call
    * itself. Degrades to a free-text id field when the host offers no list. */
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The submit-time error banner, so a failed submit can scroll it into view
+   * and focus it rather than leave the message off-screen (#813 defect 6). */
+  const errorRef = useRef<HTMLDivElement>(null);
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -401,6 +437,25 @@ export function WorkflowCreateDialog({
   /** The revision currently being restored, so its row can show a spinner and
    * every Restore button disables while one restore is in flight. */
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  // Issue #753: the create-time copilot. Create mode only — an edit already has
+  // a graph to change. `cognition` gates the composer the same way CopilotPanel
+  // does: on the offline `echo` brain there is no model to draft with, so Draft
+  // is disabled rather than failing on click. `null` until the check settles
+  // (and on a host without the route), which leaves it enabled — refusing to
+  // draft because we could not confirm would break it on hosts where it works.
+  const [copilotPrompt, setCopilotPrompt] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [draftSummary, setDraftSummary] = useState<string | null>(null);
+  const [draftReason, setDraftReason] = useState<string | null>(null);
+  // Host corrections the copilot made to the draft (issue #813) — e.g. a
+  // name/role→id rewrite — shown under the summary so the author sees WHY the
+  // hydrated graph differs from a literal reading of their request.
+  const [draftNotes, setDraftNotes] = useState<string[]>([]);
+  // Issue #840 (PR-3): the static readiness advisories over a copilot-corrected
+  // graph handed in via `prefilledDraft`. Read-only — it never blocks Save.
+  const [readiness, setReadiness] = useState<WorkflowReadiness | null>(null);
+  const [cognition, setCognition] = useState<CognitionPath | null>(null);
   const formId = useId();
 
   // Reload the roster (for the agent-node picker) and reset the draft each
@@ -432,6 +487,37 @@ export function WorkflowCreateDialog({
     setRevisionsLoaded(false);
     setRevisionsError(null);
     setRestoringId(null);
+    // Issue #753: a fresh open never carries a prior draft's prompt or result.
+    setCopilotPrompt("");
+    setDraftError(null);
+    setDraftSummary(null);
+    setDraftReason(null);
+    setDraftNotes([]);
+    // Issue #840 (PR-3): a copilot-corrected graph handed in hydrates the form
+    // directly — nodes/edges/name from the correction, not the description round
+    // trip — while `workflow` above still supplies the id + version token the
+    // conditional Save writes under. Its banners (summary/notes/readiness) render
+    // read-only below. Absent → a normal open, and the readiness banner clears.
+    //
+    // `g.id` comes from `workflow.id`, host-pinned server-side (the fix route
+    // never lets the copilot's own id vote — see `FixTarget`), so it is not
+    // attacker-influenceable in the current call path. `workflow?.id` is
+    // preferred anyway: it is the id the conditional Save on this dialog
+    // actually writes under, so hydrating from anything else would only ever
+    // be a latent bug if that invariant ever drifted.
+    if (prefilledDraft) {
+      const g = prefilledDraft.workflow;
+      setId(workflow?.id ?? g.id);
+      setName(g.name.trim());
+      setDescription(g.description ?? "");
+      setNodes(draftNodes(g));
+      setEdges(draftEdges(g));
+      setDraftSummary(prefilledDraft.summary ?? null);
+      setDraftNotes((prefilledDraft.notes ?? []).filter((n) => n.trim()));
+      setReadiness(prefilledDraft.readiness ?? null);
+    } else {
+      setReadiness(null);
+    }
     let live = true;
     (async () => {
       try {
@@ -454,10 +540,45 @@ export function WorkflowCreateDialog({
         if (live) setWorkflows([]);
       }
     })();
+    // Issue #813: the wired-channel picker's options. Same degrade-on-failure
+    // shape — a host that can't list channels leaves the channel target a
+    // free-text box rather than blocking authoring.
+    (async () => {
+      try {
+        const channels = await listWiredChannels(client, company);
+        if (live) setWiredChannels(channels);
+      } catch {
+        if (live) setWiredChannels([]);
+      }
+    })();
     return () => {
       live = false;
     };
-  }, [open, client, company, workflow]);
+  }, [open, client, company, workflow, prefilledDraft]);
+
+  // Issue #753: check the company's cognition path when the copilot is on screen
+  // (create mode). On the offline `echo` brain there is nothing to draft with, so
+  // Draft disables; the check runs separately from the reset above so a slow
+  // `/inference` read never delays clearing the form. Mirrors CopilotPanel:331.
+  useEffect(() => {
+    if (!open || editing) return;
+    let live = true;
+    setCognition(null);
+    (async () => {
+      try {
+        const status = await getInferenceStatus(client, company);
+        if (live) setCognition(status.cognition);
+      } catch {
+        // A host without the route tells us nothing either way — leave it enabled
+        // rather than blocking a copilot that works. (`cognition` stays null,
+        // which is not `echo`, so Draft is enabled.)
+        if (live) setCognition(null);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [open, editing, client, company]);
 
   function addNode() {
     setNodes((rows) => [...rows, blankNode()]);
@@ -539,7 +660,7 @@ export function WorkflowCreateDialog({
     if (field === "schedule") {
       problem = scheduleProblem(value);
     } else if (field === "destinationTarget") {
-      problem = destinationTargetProblem(node.destinationKind, value);
+      problem = destinationTargetProblem(node.destinationKind, value, wiredChannels);
     } else if (field.startsWith("config:")) {
       const key = field.slice("config:".length);
       const spec = configFieldSpecs(node.kind).find((s) => s.key === key);
@@ -610,6 +731,7 @@ export function WorkflowCreateDialog({
       const destinationProblem = destinationTargetProblem(
         n.destinationKind,
         n.destinationTarget,
+        wiredChannels,
       );
       if (destinationProblem) return `Node \`${nodeLabel(n)}\`: ${destinationProblem}`;
       // Kind-specific config (issue #541): required keys, malformed JSON, the
@@ -702,10 +824,96 @@ export function WorkflowCreateDialog({
     }
   }
 
+  // Issue #753: `echo` is the offline brain — there is no model to draft with, so
+  // the copilot composer is disabled until the check settles onto a real path.
+  const echoing = cognition === "echo";
+
+  /** Whether the form holds anything a copilot draft would overwrite. The blank
+   * starter — no id/name/description, no edges, one untouched `start` trigger —
+   * is NOT dirty, so the first draft hydrates without a confirm; anything the
+   * operator has already typed is, so it asks first. */
+  function isDraftDirty(): boolean {
+    if (id.trim() || name.trim() || description.trim()) return true;
+    if (edges.length > 0) return true;
+    if (nodes.length !== 1) return true;
+    const only = nodes[0];
+    return !(
+      only.kind === "trigger" &&
+      only.id === "start" &&
+      only.name === "Start" &&
+      !only.summary.trim() &&
+      !only.agent.trim() &&
+      !only.schedule.trim()
+    );
+  }
+
+  /** Draft a graph from the description and hydrate the form with it (issue
+   * #753). The hydrated, editable form IS the review surface — there is no
+   * read-only diff — so on success the operator lands in the ordinary create
+   * form with everything filled in, tweaks if needed, and presses Create. */
+  async function runDraft() {
+    const description = copilotPrompt.trim();
+    if (!description || drafting || echoing) return;
+    // Overwriting work the operator has already started is a confirm, not a
+    // silent clobber — the same courtesy the History restore extends.
+    if (
+      isDraftDirty() &&
+      !window.confirm(
+        "Replace what you've started with the drafted workflow? You can still edit it before creating.",
+      )
+    ) {
+      return;
+    }
+    setDrafting(true);
+    setDraftError(null);
+    setDraftSummary(null);
+    setDraftReason(null);
+    setDraftNotes([]);
+    try {
+      const drafted = await draftWorkflowFromDescription(client, company, description);
+      const banners = draftBanners(drafted);
+      if (drafted.automatable && drafted.workflow) {
+        const graph = drafted.workflow;
+        // Hydrate via the same helpers edit mode uses, so a drafted graph and a
+        // saved one populate the form identically.
+        setId(graph.id);
+        setName(graph.name);
+        setDescription(graph.description ?? "");
+        setNodes(draftNodes(graph));
+        setEdges(draftEdges(graph));
+        // A fresh draft clears both the submit banner and the per-field blur
+        // errors — they belonged to whatever was on screen before.
+        setError(null);
+        setFieldErrors({});
+        setDraftSummary(banners.summary);
+        // Any host corrections (issue #813) — e.g. a role→id rewrite — so the
+        // author sees WHY the drafted graph differs from a literal reading.
+        setDraftNotes(banners.notes);
+      } else {
+        // Not automatable: the form is left untouched, with the model's reason.
+        setDraftReason(banners.reason);
+      }
+    } catch (e) {
+      // A capability gap (404/409) or a network failure — surface it inline; the
+      // operator can still author by hand.
+      setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
+    } finally {
+      setDrafting(false);
+    }
+  }
+
   async function submit() {
     const problem = validate();
     if (problem) {
       setError(problem);
+      // Issue #813: the banner sits inline in a scrollable dialog and the Create
+      // button is below it, so on a long graph the message can land off-screen —
+      // the button then looks dead. Bring it into view and focus it (announced,
+      // deterministic — no timer) the frame after it renders.
+      requestAnimationFrame(() => {
+        errorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+        errorRef.current?.focus();
+      });
       return;
     }
     setSubmitting(true);
@@ -808,9 +1016,125 @@ export function WorkflowCreateDialog({
           <DialogDescription>
             {editing
               ? "Change the nodes, how they connect, or when it runs. Saving replaces the whole graph."
-              : "Define the graph by hand — nodes, then how they connect."}
+              : "Describe it and let the copilot draft it, or define the graph by hand — nodes, then how they connect."}
           </DialogDescription>
         </DialogHeader>
+
+        {/* Issue #840 (PR-3): the fix-from-run banners. A copilot-corrected graph
+            hydrated via `prefilledDraft` shows its summary, any host corrections,
+            and the static readiness advisories — read-only, so the operator sees
+            what changed and what still needs a look before Saving the new version.
+            Rendered regardless of mode (a fix opens the dialog in edit mode), and
+            only when a correction was handed in. */}
+        {prefilledDraft && (
+          <div className="space-y-2" data-testid="workflow-fix-banners">
+            {draftSummary && (
+              <Alert>
+                <AlertDescription>{draftSummary}</AlertDescription>
+              </Alert>
+            )}
+            {draftNotes.length > 0 && (
+              <Alert data-testid="workflow-fix-notes">
+                <AlertDescription>
+                  <ul className="list-disc space-y-1 pl-4">
+                    {draftNotes.map((note, i) => (
+                      <li key={i}>{note}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
+            {readiness && (
+              <Alert
+                variant={readiness.ok ? undefined : "destructive"}
+                data-testid="workflow-fix-readiness"
+              >
+                <AlertDescription>
+                  {readiness.ok ? (
+                    "The corrected workflow passes the static authoring checks."
+                  ) : (
+                    <>
+                      <p>
+                        The copilot corrected the workflow, but a few authoring
+                        checks still flag it — review before saving:
+                      </p>
+                      <ul className="mt-1 list-disc space-y-1 pl-4">
+                        {(readiness.advisories ?? []).map((advisory, i) => (
+                          <li key={i}>{advisory}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
+
+        {/* Issue #753: the create-time copilot. Create mode only — an edit
+            already has a graph. It drafts a graph from a sentence and hydrates
+            the form below with it; the operator reviews and edits in that form,
+            then presses Create as usual. Nothing is saved by drafting. */}
+        {!editing && (
+          <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
+            <Label htmlFor={`${formId}-copilot`} className="flex items-center gap-2">
+              <Sparkles className="size-4" />
+              Describe the workflow
+            </Label>
+            <Textarea
+              id={`${formId}-copilot`}
+              rows={2}
+              value={copilotPrompt}
+              onChange={(e) => setCopilotPrompt(e.target.value)}
+              placeholder="e.g. Every Monday morning, have the writer draft the weekly digest and email it to the team."
+              disabled={drafting || echoing}
+            />
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-2xs leading-snug text-muted-foreground">
+                {echoing
+                  ? "This company has no model configured, so the copilot can't draft yet — set one in Settings → Inference, or build the graph by hand below."
+                  : "The copilot fills in the form below — review and edit it, then Create."}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void runDraft()}
+                disabled={drafting || echoing || !copilotPrompt.trim()}
+                data-testid="workflow-copilot-draft"
+              >
+                <Sparkles className="mr-1 size-3.5" />
+                {drafting ? "Drafting…" : "Draft it"}
+              </Button>
+            </div>
+            {draftSummary && (
+              <Alert>
+                <AlertDescription>{draftSummary}</AlertDescription>
+              </Alert>
+            )}
+            {draftNotes.length > 0 && (
+              <Alert data-testid="workflow-copilot-notes">
+                <AlertDescription>
+                  <ul className="list-disc space-y-1 pl-4">
+                    {draftNotes.map((note, i) => (
+                      <li key={i}>{note}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
+            {draftReason && (
+              <Alert>
+                <AlertDescription>{draftReason}</AlertDescription>
+              </Alert>
+            )}
+            {draftError && (
+              <Alert variant="destructive">
+                <AlertDescription>{draftError}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="grid gap-2">
@@ -829,7 +1153,7 @@ export function WorkflowCreateDialog({
               placeholder="e.g. campaign_pipeline"
             />
             {editing && (
-              <p className="text-[11px] leading-snug text-muted-foreground">
+              <p className="text-2xs leading-snug text-muted-foreground">
                 A workflow&apos;s id can&apos;t change. It keys the saved graph, its
                 schedule and its run history.
               </p>
@@ -871,7 +1195,9 @@ export function WorkflowCreateDialog({
                 client={client}
                 company={company}
                 roster={roster}
+                wiredChannels={wiredChannels}
                 workflows={workflows}
+                createMode={!editing}
                 errors={{
                   schedule: fieldErrors[errorKey(n.key, "schedule")],
                   destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
@@ -928,9 +1254,18 @@ export function WorkflowCreateDialog({
         </div>
 
         {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
+          // Wrapper carries the ref/focus target so it works regardless of
+          // whether `Alert` forwards a ref (#813 defect 6).
+          <div
+            ref={errorRef}
+            tabIndex={-1}
+            data-testid="create-error"
+            className="outline-none"
+          >
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          </div>
         )}
 
         {/* Issue #274: the edit-history panel. Edit mode only — a workflow being
@@ -977,7 +1312,7 @@ export function WorkflowCreateDialog({
                     >
                       <div className="min-w-0">
                         <p className="truncate text-sm">{rev.name}</p>
-                        <p className="text-[11px] text-muted-foreground">
+                        <p className="text-2xs text-muted-foreground">
                           {relativeTime(rev.createdAtMillis)}
                         </p>
                       </div>
@@ -1027,7 +1362,7 @@ export function WorkflowCreateDialog({
 function FieldError({ id, message }: { id: string; message?: string }) {
   if (!message) return null;
   return (
-    <p id={id} className="text-[11px] leading-snug text-destructive">
+    <p id={id} className="text-2xs leading-snug text-destructive">
       {message}
     </p>
   );
@@ -1038,7 +1373,9 @@ function NodeRow({
   client,
   company,
   roster,
+  wiredChannels,
   workflows,
+  createMode,
   errors,
   configErrors,
   onValidateField,
@@ -1052,8 +1389,14 @@ function NodeRow({
   client: OpenCompanyClient;
   company: string | null;
   roster: TeamMemberDto[];
+  /** The company's wired chat channels (#813): the output-node channel-destination
+   * picker's options. Empty → the channel target degrades to a free-text box. */
+  wiredChannels: string[];
   /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
   workflows: WorkflowSummary[];
+  /** True while creating a new workflow (not editing an existing one), so the
+   * trigger row can disclose that a scheduled workflow is created paused (#813). */
+  createMode: boolean;
   /** Blur-time problems for this row's validated fields, if any. */
   errors: Partial<Record<ValidatedField, string>>;
   /** Blur-time problems for this row's config fields, keyed by engine key. */
@@ -1132,6 +1475,7 @@ function NodeRow({
           <ScheduleField
             client={client}
             company={company}
+            createMode={createMode}
             schedule={node.schedule}
             error={errors.schedule}
             onChange={(schedule) => onChange({ schedule })}
@@ -1160,7 +1504,12 @@ function NodeRow({
               }
             >
               <SelectTrigger className="h-8" aria-label="Send report to">
-                <SelectValue />
+                {/* base-ui renders the raw stored value in the collapsed
+                    control unless given text, which surfaced the bare
+                    `__none__` sentinel; map every value to its label. #813 */}
+                <SelectValue>
+                  {destinationLabel(node.destinationKind || NO_DESTINATION)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_DESTINATION}>
@@ -1173,7 +1522,33 @@ function NodeRow({
                 ))}
               </SelectContent>
             </Select>
-            {(node.destinationKind === "email" || node.destinationKind === "channel") && (
+            {node.destinationKind === "channel" && wiredChannels.length > 0 && (
+              <>
+                {/* #813: pick from the channels actually wired for this company,
+                    instead of a free-text box that only fails at delivery time. */}
+                <Select
+                  value={node.destinationTarget || ""}
+                  onValueChange={(v) => {
+                    onChange({ destinationTarget: v ?? "" });
+                    onValidateField("destinationTarget", v ?? "");
+                  }}
+                >
+                  <SelectTrigger className="h-8" aria-label="Channel id">
+                    <SelectValue placeholder="pick a wired channel" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {wiredChannels.map((channelId) => (
+                      <SelectItem key={channelId} value={channelId}>
+                        {channelId}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FieldError id={targetErrorId} message={errors.destinationTarget} />
+              </>
+            )}
+            {(node.destinationKind === "email" ||
+              (node.destinationKind === "channel" && wiredChannels.length === 0)) && (
               <>
                 <Input
                   value={node.destinationTarget}
@@ -1192,7 +1567,7 @@ function NodeRow({
               </>
             )}
             {node.destinationKind === "email" && (
-              <p className="text-[11px] leading-snug text-muted-foreground">
+              <p className="text-2xs leading-snug text-muted-foreground">
                 Only sends if this company grants email and the recipient has
                 already written in.
               </p>
@@ -1236,6 +1611,7 @@ function NodeRow({
 function ScheduleField({
   client,
   company,
+  createMode,
   schedule,
   error,
   onChange,
@@ -1243,6 +1619,8 @@ function ScheduleField({
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /** True on a new workflow, to disclose the created-paused default (#813). */
+  createMode: boolean;
   schedule: string;
   /** The blur-time cron problem for this field, when there is one. */
   error?: string;
@@ -1296,7 +1674,7 @@ function ScheduleField({
       )}
       <FieldError id={errorId} message={error} />
       {(showCustom || schedule) && (
-        <p className="text-[10px] text-muted-foreground">
+        <p className="text-3xs text-muted-foreground">
           5-field cron. Times are UTC.
         </p>
       )}
@@ -1312,6 +1690,17 @@ function ScheduleField({
           schedule={schedule}
           suppressError={Boolean(error)}
         />
+      )}
+      {/* A scheduled workflow is disarmed on create (#276 disarm rule,
+          src/company/workflow_create.rs); nothing else in the dialog says so,
+          so an author who sets a cron here would think it is armed. Disclose it
+          at author time — create mode only, and only once a real schedule is
+          set. #813 */}
+      {createMode && looksLikeCron(schedule) && (
+        <p className="text-3xs text-muted-foreground">
+          Heads up: a scheduled workflow is created paused. Resume it from the
+          list to arm the schedule.
+        </p>
       )}
     </div>
   );

@@ -27,13 +27,13 @@ export function TourTooltip({
       className="w-[340px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-border bg-popover text-popover-foreground shadow-xl ring-1 ring-black/5 dark:ring-white/10"
     >
       <div className="px-4 pt-4">
-        <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium tracking-wide text-primary tabular-nums">
+        <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-2xs font-medium tracking-wide text-primary tabular-nums">
           Step {index + 1} of {size}
         </span>
-        <h3 className="mt-2.5 font-heading text-[15px] leading-tight font-semibold">
+        <h3 className="mt-2.5 font-heading text-base leading-tight font-semibold">
           {step.title as ReactNode}
         </h3>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
+        <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
           {step.content as ReactNode}
         </p>
       </div>

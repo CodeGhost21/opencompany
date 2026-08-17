@@ -222,6 +222,21 @@ async fn register_company(
         builder = builder.with_template_provenance(provenance);
     }
     let runtime = builder.build().await?;
+    // A company with no sign-in on a host anyone can reach is an unauthenticated
+    // admin console, not a desktop app. `none` mode's whole premise is that the
+    // only caller is the person at the machine, so a routable bind contradicts
+    // it — and the contradiction is silent, because the host does start and does
+    // serve. Refuse at boot, where somebody is looking, exactly as a
+    // selected-but-unavailable storage backend does.
+    if !runtime.auth_mode().has_login() && !state.config().is_local_only() {
+        return Err(opencompany::error::OpenCompanyError::Config(format!(
+            "company `{}` is configured with `[users].mode = \"none\"`, which has no sign-in, \
+             but this host binds `{}` and would serve it to anyone who can reach that address. \
+             Bind loopback, or choose `email` or `wallet`.",
+            runtime.id().as_ref(),
+            state.config().bind,
+        )));
+    }
     let company_id = runtime.id().clone();
     let id = company_id.as_ref().to_string();
     // Record boot-company ownership so a shared-DB manager can later purge by
@@ -277,7 +292,26 @@ fn company_builder(
         state.config(),
     )
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
+    // Install-wide MCP defaults (issue #527): every company built on this
+    // instance gets them, which is what makes a fresh install useful with no
+    // per-company setup. Already normalized when the config resolved.
+    .with_default_mcp_servers(state.config().default_mcp_servers.clone())
     .with_host_base_url(state.config().host_base_url())
+    .with_workspace_quota(state.config().workspace_quota)
+    // Issue #752: the backend that serves this host's secrets, which the
+    // repository-credential gates refuse on. Threaded through `company_builder`
+    // rather than read from the environment further down, so a rebuild gets the
+    // same answer boot got.
+    .with_storage_kind(state.storage_kind())
+    // Issue #661 / M8: the deployment's standing bootstrap admin, normalized,
+    // so a fresh tenant's `owner` report reaches its creator before that first
+    // sign-in mints a user record. `None` (self-hosted, no injected address) is
+    // a no-op. BootRebuilder reuses this builder, so the grant survives rebuild.
+    .with_bootstrap_admin(state.config().bootstrap_admin())
+    // How humans sign in, when the host names it for every company it serves
+    // (`OPENCOMPANY_AUTH_MODE` / `config.toml`). `None` leaves each manifest's
+    // `[users].mode` to answer, which is the normal case.
+    .with_auth_mode_override(state.auth_mode_override())
     .with_skills_registry(state.shared_skill_registry()?)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
@@ -870,8 +904,26 @@ async fn run_openhuman(
     std::process::exit(status.code().unwrap_or(1));
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(feature = "openhuman")]
+const WORKER_STACK_BYTES: usize = openhuman_core::core::runtime::AGENT_WORKER_STACK_BYTES;
+#[cfg(not(feature = "openhuman"))]
+const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+#[cfg(feature = "openhuman")]
+const MAX_BLOCKING_THREADS: usize = openhuman_core::core::runtime::MAX_BLOCKING_THREADS;
+#[cfg(not(feature = "openhuman"))]
+const MAX_BLOCKING_THREADS: usize = 512;
+
+fn main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -1048,6 +1100,51 @@ async fn main() -> Result<()> {
             // injected `OPENCOMPANY_BIND` (and any `config.toml` `bind`) moved
             // `doctor`'s report while the host kept serving on the default —
             // silently, because the host does start and does serve.
+            // Install-wide MCP defaults (issue #527). Normalized here, at the
+            // boundary that reads the file, so a rejected entry is named at boot
+            // where somebody is looking — rather than silently thinning the list
+            // on every company's first agent turn. A bad entry is a warning, not
+            // a boot failure: these are additive convenience, and refusing to
+            // start over one malformed default would turn a cosmetic packaging
+            // error into an outage.
+            //
+            // Read before `resolve_serve_bind` below, which consumes
+            // `config_file`.
+            let default_mcp_servers = {
+                let raw = config_file
+                    .as_ref()
+                    .map(|c| c.default_mcp_servers.clone())
+                    .unwrap_or_default();
+                let (kept, problems) = opencompany::company::mcp::normalize_default_servers(&raw);
+                for problem in &problems {
+                    tracing::warn!(target: "opencompany::config", "{problem}");
+                }
+                kept
+            };
+            // A host-wide sign-in mode, when the deployment names one. Read
+            // before `resolve_serve_bind` consumes `config_file`. An unparseable
+            // value aborts boot rather than silently falling back to email:
+            // "the login screen you asked for is not the one you got" is not a
+            // failure anyone would notice from a running host.
+            let auth_mode_override = {
+                use std::str::FromStr as _;
+                let raw = std::env::var("OPENCOMPANY_AUTH_MODE")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| config_file.as_ref().and_then(|c| c.auth_mode.clone()));
+                match raw {
+                    Some(raw) => Some(opencompany::app::config::AuthMode::from_str(&raw)?),
+                    None => None,
+                }
+            };
+            // Read before `config_file` is consumed for `bind` just below.
+            // Whether this data root has been through the first-run setup flow
+            // (`server::setup`); absent — a fresh root, or one predating the
+            // flow — leaves it false, which is what puts the console into the
+            // wizard instead of a sign-in form for a host nobody configured.
+            let setup_complete = config_file
+                .as_ref()
+                .is_some_and(|c| c.setup_completed_at.is_some());
             let (bind, bind_source) = opencompany::app::config::resolve_serve_bind(
                 bind,
                 &ProcessEnv,
@@ -1055,6 +1152,7 @@ async fn main() -> Result<()> {
             );
             let state = AppState::new(AppConfig {
                 bind,
+                default_mcp_servers,
                 openhuman_root,
                 api_url,
                 tinyplace_api_url,
@@ -1062,11 +1160,24 @@ async fn main() -> Result<()> {
                 instance_name,
                 tenant_namespace,
                 admin_email,
+                auth_mode_override,
                 tinyhumans_credential,
+                // Issue #553: the workspace's enforced byte limits, read from
+                // the same `[workspace]` section as the soft disk quotas above
+                // and handed to every company's builder below.
+                workspace_quota: workspace_cfg.quota,
                 ..AppConfig::default()
             })
             .with_cors(opencompany::server::cors::CorsConfig::from_env()?)
             .with_home(home.clone())
+            // `setup_complete` above, and every `config.toml` read/write the
+            // first-run setup flow does, resolve against `data_root` — not
+            // `home`, which an explicit `--home` can point elsewhere (see
+            // `home_divergence_warning`). Recording it here is what lets
+            // `server::setup` resolve the same file rather than its own
+            // `state.home()`.
+            .with_config_root(data_root.clone())
+            .with_setup_complete(setup_complete)
             .with_quota(
                 env_usize("OPENCOMPANY_MAX_COMPANIES"),
                 env_usize("OPENCOMPANY_MAX_COMPANIES_PER_TENANT"),
@@ -1193,7 +1304,36 @@ async fn main() -> Result<()> {
                 spawn_telegram_poller(&state, &id, &shutdown, &mut scheduler_handles);
             }
             if companies.is_empty() {
-                println!("serving with no companies; pass --company <dir> to load one");
+                // Nothing was named on the command line, so adopt whatever this
+                // data root already holds. A company can reach a root without
+                // ever being named on a command line — the first-run setup flow
+                // (`server::setup`) seeds one — and without this an operator who
+                // completed setup, was told to restart for their settings to
+                // take effect, and did, came back to an empty host with their
+                // company sitting unread on disk.
+                //
+                // Adopting creates nothing: an empty root still starts empty,
+                // rather than inventing the starter company that only the
+                // packaged desktop's `bootstrap_companies` seeds.
+                let adopted = opencompany::desktop::adopt_companies(&state).await?;
+                for (id, manifest) in &adopted {
+                    let slug = id.as_ref();
+                    if let Some(handle) =
+                        spawn_scheduler(&state, slug, &manifest.schedules, &shutdown)
+                    {
+                        scheduler_handles.push(handle);
+                    }
+                    spawn_mailbox_poller(&state, slug, &shutdown, &mut scheduler_handles);
+                    spawn_telegram_poller(&state, slug, &shutdown, &mut scheduler_handles);
+                    println!(
+                        "adopted company `{slug}` ({}) from {}",
+                        manifest.company.name,
+                        home.display()
+                    );
+                }
+                if adopted.is_empty() {
+                    println!("serving with no companies; pass --company <dir> to load one");
+                }
             }
 
             // One workflow scheduler for the whole process, started even with no

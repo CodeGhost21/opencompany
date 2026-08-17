@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Game Business harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -7,42 +7,17 @@ name = "Agentic Game Business"
 output = "LiveOps, user acquisition, and monetization for a live game"
 human_role = "Monetization and growth strategy"
 
-[[agent]]
-id = "user_acquisition"
-role = "User Acquisition"
-description = "Run paid and organic UA campaigns."
-
-[[agent]]
-id = "monetization_designer"
-role = "Monetization Designer"
-description = "Design offers, pricing, and the in-game economy."
-
-[[agent]]
-id = "liveops_manager"
-role = "LiveOps Manager"
-description = "Plan and run events and content updates."
-
-[[agent]]
-id = "store_optimizer"
-role = "Store Optimizer"
-description = "App-store optimization and conversion."
-
-[[agent]]
-id = "analytics_analyst"
-role = "Analytics Analyst"
-description = "Track KPIs, LTV, retention, and cohorts."
-
-[[agent]]
-id = "community_manager"
-role = "Community Manager"
-description = "Grow and moderate the player community."
-
-[[agent]]
-id = "player_support"
-role = "Player Support"
-description = "Resolve player issues and refunds."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["liveops_pipeline"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

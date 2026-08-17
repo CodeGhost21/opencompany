@@ -10,17 +10,18 @@
 //! any parked approvals into the gate so an approval survives a restart.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::Result;
-use crate::app::config::BrainMode;
+use crate::app::config::{AuthMode, BrainMode};
 use crate::brain::medulla::MedullaTransport;
 use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::brain::{EchoBrain, HostedMedullaBrain};
-use crate::company::CompanyManifest;
 #[cfg(feature = "openhuman")]
 use crate::company::inference::{self, EnvDefault};
 use crate::company::runtime::{CompanyMail, CompanyRuntime, OpsStores};
+use crate::company::{CompanyManifest, GroupChat, Policy};
 use crate::feedback::github::{GitHubClient, RateLimiter};
 use crate::feedback::service::FeedbackFiler;
 use crate::feedback::store::FeedbackStore;
@@ -37,7 +38,7 @@ use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, OverlayWorkflow, SecretValue, TemplateProvenance,
+    CompanyId, CompanyRecord, OverlayWorkflow, PolicyOverride, SecretValue, TemplateProvenance,
 };
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
@@ -48,8 +49,10 @@ use crate::ports::{
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
 use crate::ports::ScheduleFireStore;
+// Separate line (#596) for the same reason.
+use crate::ports::WorkflowRunOutputStore;
 use crate::runtime::board_events::BoardAnnouncer;
-use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
+use crate::runtime::channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
 use crate::runtime::journal::RuntimeJournal;
 use crate::runtime::tools::{StubToolProvider, grant_matches};
@@ -137,8 +140,63 @@ pub(crate) fn agent_effective_grants(allow: &[String], agent_tools: &[String]) -
     dedup(grants)
 }
 
+/// One agent's effective grants under the **three-level** narrowing
+/// `[tools].allow ∩ desk.tools ∩ [[agent]].tools`.
+///
+/// `desk_allows` is the `tools` ceiling of every desk this agent sits on — the
+/// effective membership (manifest desks plus console-added ones), not just the
+/// manifest's, so a teammate added to a desk through the console is scoped the
+/// same as one written into `company.toml`.
+///
+/// This is [`agent_effective_grants`] applied twice, deliberately rather than
+/// incidentally: narrowing is one operation, and expressing the desk level as a
+/// second application of it is what guarantees the middle level can only ever
+/// *remove* capability. There is no path through this function that returns a
+/// grant the company allow-list does not already cover.
+///
+/// # The union, and the sharp edge in it
+///
+/// Desks combine by **union**, because desk membership is additive: joining the
+/// growth desk is how a marketer gains the ad tools. Intersecting instead would
+/// make each additional desk silently revoke capability, so adding someone to a
+/// desk could break work they already did.
+///
+/// The edge that follows: a desk with an empty `tools` ceiling narrows nothing,
+/// so an agent on both a restricted desk and an unrestricted one ends up
+/// **unrestricted**. That is the honest consequence of "empty means no
+/// ceiling" plus union, and it is the safe direction — a company that means to
+/// restrict a teammate states the ceiling on every desk that teammate sits on,
+/// or states it on the teammate. It is *not* a hole in the company grant: the
+/// widest this can ever resolve to is `allow` itself.
+pub(crate) fn agent_scoped_grants(
+    allow: &[String],
+    desk_allows: &[&[String]],
+    agent_tools: &[String],
+) -> Vec<String> {
+    // No desk states a ceiling (the common case, and every pre-existing
+    // manifest) → the desk level is skipped entirely and this is exactly the
+    // two-level behaviour that shipped before desks could scope anything.
+    let ceiling: Vec<String> = if desk_allows.iter().all(|desk| desk.is_empty()) {
+        allow.to_vec()
+    } else {
+        dedup(
+            desk_allows
+                .iter()
+                .flat_map(|desk| agent_effective_grants(allow, desk))
+                .collect(),
+        )
+    };
+    agent_effective_grants(&ceiling, agent_tools)
+}
+
 /// Whether the company allow-list covers an agent-requested grant glob.
-fn allow_covers(allow: &[String], tool: &str) -> bool {
+///
+/// `pub(crate)` so the tool catalog (`crate::company::tool_catalog`) can answer
+/// "does this company grant that?" with the *same* matcher the roster build
+/// uses. A catalog doing its own matching would be free to advertise a grant the
+/// gate does not honour — precisely the disagreement between what the console
+/// shows and what an agent can actually do that the catalog exists to end.
+pub(crate) fn allow_covers(allow: &[String], tool: &str) -> bool {
     let literal = tool.strip_suffix('*').unwrap_or(tool);
     allow.iter().any(|grant| grant_matches(grant, literal))
 }
@@ -181,6 +239,102 @@ fn dedup(grants: Vec<String>) -> Vec<String> {
 /// than a convention: `[tools]` and `[policy]` must be seed-wins, because a
 /// record-wins merge would let a runtime write **outlive a seed rollback** —
 /// privilege persisting after the operator revoked it in version control.
+/// Whether the operator's console `[policy]` override survives this rebuild
+/// (issue #562).
+///
+/// **Version control wins when it speaks, and stays quiet when it doesn't.**
+/// The override is kept while the seed's `[policy]` is unchanged, and dropped
+/// the moment the seed's `[policy]` differs from the one the previous boot ran.
+///
+/// # Why the condition is the whole point
+///
+/// The override is deliberately *not* a manifest merge — [`CompanyRecord::effective_policy`]
+/// resolves it ahead of the manifest instead, so `record.manifest` stays
+/// seed-authoritative and the invariant stated on [`merge_enabled_workflows`]
+/// is untouched in the letter.
+///
+/// Carrying it unconditionally would nonetheless reproduce that invariant's own
+/// named harm in the spirit. An operator tightens `[policy]` in `company.toml`,
+/// redeploys, and a looser console override silently wins — *"a runtime write
+/// outliving a seed rollback; privilege persisting after the operator revoked it
+/// in version control."* That reasoning is exactly why `[tools]` and `[policy]`
+/// are the two fields singled out, and an approval gate is precisely the thing
+/// it was written about. The per-teammate spend cap (issue #343) makes the
+/// opposite trade and is defensible doing so: a cap is a number, not the gate.
+///
+/// # Why it is conditional rather than always-clear
+///
+/// Dropping the override on *every* rebuild would be the opposite failure, and
+/// just as silent: a routine redeploy that changed nothing would revert the
+/// operator's console action, and nothing in the console would show the tier had
+/// moved back. So the seed only wins when it actually says something new.
+///
+/// # What counts as the seed speaking
+///
+/// Any change to `[policy]` — `mode`, `always_approve`, or
+/// `auto_approve_under_usd`. Comparing the whole block rather than just the
+/// field being overridden is deliberate: an operator who edits `[policy]` at all
+/// has turned their attention to the approval gate, and resolving *which* of
+/// their edits was meant to override the console is a guess. Clearing and
+/// letting them re-apply is the answer that cannot silently pick wrong.
+///
+/// `previous_seed` is the prior boot's `record.manifest.policy`, which is that
+/// boot's seed verbatim — `[policy]` is never merged, so the persisted manifest
+/// is the seed for this field.
+///
+/// This is a **second** clearing path, not a replacement for the explicit
+/// `DELETE …/policy` reset: that one is how an operator clears their own
+/// override without touching version control.
+fn carry_policy_override(
+    previous_seed: &Policy,
+    next_seed: &Policy,
+    held: Option<&PolicyOverride>,
+) -> Option<PolicyOverride> {
+    let held = held?;
+    (previous_seed == next_seed).then(|| held.clone())
+}
+
+/// Carries the operator's per-desk tool ceilings across a rebuild, dropping any
+/// whose desk had its seed `tools` edited in version control.
+///
+/// The same rule [`carry_policy_override`] applies to the approval gate, applied
+/// per desk to the capability gate — and it belongs here for the *stronger* of
+/// that function's two reasons. A desk ceiling decides which tools its members
+/// are wired with, so a console override outliving a seed that narrowed the desk
+/// is a runtime widening surviving the operator revoking it in version control.
+/// That is the exact failure the `[tools]`/`[policy]` seed-wins rule exists to
+/// prevent, and a per-desk grant is squarely within it rather than being "a
+/// number, not the gate" the way a spend cap is.
+///
+/// Per **desk** rather than whole-block, unlike the policy rule: desks are
+/// independent of one another, so an operator editing the finance desk's
+/// ceiling has said nothing about the creative desk's, and clearing both would
+/// revert a console action nobody's edit was about. Within a single desk the
+/// comparison is still whole-value, for the reason the policy rule gives — an
+/// operator who edited that desk's grant at all has turned their attention to
+/// it, and guessing which half of the edit was meant to win cannot silently
+/// pick right.
+///
+/// An override for a desk the seed does not declare (an operator-created desk)
+/// is always carried: version control never spoke about it, so it has no seed
+/// value that could have changed.
+fn carry_desk_tool_overrides(
+    previous_seed: &[GroupChat],
+    next_seed: &[GroupChat],
+    held: &std::collections::BTreeMap<String, Vec<String>>,
+) -> std::collections::BTreeMap<String, Vec<String>> {
+    let seed_tools = |desks: &[GroupChat], desk_id: &str| {
+        desks
+            .iter()
+            .find(|desk| desk.id == desk_id)
+            .map(|desk| desk.tools.clone())
+    };
+    held.iter()
+        .filter(|(desk_id, _)| seed_tools(previous_seed, desk_id) == seed_tools(next_seed, desk_id))
+        .map(|(desk_id, ceiling)| (desk_id.clone(), ceiling.clone()))
+        .collect()
+}
+
 fn merge_enabled_workflows(seed_enabled: &[String], overlays: &[OverlayWorkflow]) -> Vec<String> {
     let mut merged: Vec<String> = Vec::with_capacity(seed_enabled.len() + overlays.len());
     let mut seen = std::collections::HashSet::new();
@@ -202,6 +356,8 @@ pub struct RuntimeBuilder {
     home: PathBuf,
     id: CompanyId,
     manifest: CompanyManifest,
+    /// Install-wide default MCP servers (issue #527), from resolved config.
+    default_mcp_servers: Vec<crate::company::McpServer>,
     brain: Option<Arc<dyn Brain>>,
     brain_mode: Option<BrainMode>,
     credential: Option<SecretValue>,
@@ -222,18 +378,51 @@ pub struct RuntimeBuilder {
     secrets: Option<Arc<dyn SecretStore>>,
     inbox: Option<Arc<dyn InboxStore>>,
     mail: Option<CompanyMail>,
+    /// The deployment's standing bootstrap-admin address
+    /// (`AppConfig::bootstrap_admin`), pre-normalized, when the platform injects
+    /// one (issue #661 / M8). Threaded onto the workflow delivery bundle so an
+    /// `owner` report on a fresh tenant reaches the company's creator before
+    /// their first sign-in mints a user record. `None` everywhere but the hosted
+    /// serve path.
+    bootstrap_admin: Option<String>,
+    /// A host-wide override of this company's `[users].mode`
+    /// (`AppConfig::auth_mode_override`). `None` — the usual case — leaves the
+    /// manifest to answer.
+    auth_mode_override: Option<AuthMode>,
     tasks: Option<Arc<dyn TaskStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
+    /// Issue #553: the byte limits the workspace is held to. Defaults to a
+    /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
+    /// naming a quota is still not a way to write an unbounded file.
+    workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Issue #752: which storage backend is serving this host's secrets. Only
+    /// the repository-credential gates read it, and the default is the refusing
+    /// side (`fs`) — a runtime built without naming a backend is assumed to keep
+    /// secrets as plaintext on disk, because that is what
+    /// [`with_stores`](Self::with_stores) not being called actually means.
+    storage_kind: crate::store::StorageKind,
     facts: Option<Arc<dyn FactStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
     workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
     schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
+    run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
+    read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
+    notifications: Option<Arc<dyn crate::ports::notifications::NotificationStore>>,
     users: Option<Arc<dyn UserStore>>,
     sessions: Option<Arc<dyn SessionStore>>,
     login_codes: Option<Arc<dyn LoginCodeStore>>,
+    /// The runtime journal's durable sink (issue #726).
+    ///
+    /// `None` selects the filesystem default below — the company bundle's
+    /// `journal.jsonl`, which is where the journal has always lived. Set from
+    /// [`with_stores`](Self::with_stores) on every backend, because on a hosted
+    /// mongodb tenant the bundle directory is ephemeral scratch and a journal
+    /// left there loses every committed effect key and every parked approval on
+    /// the next container replacement.
+    journal_store: Option<Arc<dyn crate::ports::journal::JournalStore>>,
     seed_dir: Option<PathBuf>,
     /// The repo-level shared skill library, passed to the harness so a pre-fix
     /// registry install (whose stored `SKILL.md` is a one-line stub) is healed
@@ -294,6 +483,7 @@ impl RuntimeBuilder {
             home: home.into(),
             id,
             manifest,
+            default_mcp_servers: Vec::new(),
             brain: None,
             brain_mode: None,
             credential: None,
@@ -314,18 +504,26 @@ impl RuntimeBuilder {
             secrets: None,
             inbox: None,
             mail: None,
+            bootstrap_admin: None,
+            auth_mode_override: None,
             tasks: None,
             workspace: None,
+            workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            storage_kind: crate::store::StorageKind::default(),
             facts: None,
             artifacts: None,
             runs: None,
             workflow_revisions: None,
             schedule_fires: None,
+            run_output_store: None,
             usage: None,
             skills: None,
+            read_state: None,
+            notifications: None,
             users: None,
             sessions: None,
             login_codes: None,
+            journal_store: None,
             seed_dir: None,
             skills_registry: Arc::from([]),
             template_provenance: None,
@@ -355,6 +553,15 @@ impl RuntimeBuilder {
     ///
     /// An explicit brain wins over hosted-brain selection: setting this bypasses
     /// [`with_brain_mode`](Self::with_brain_mode) entirely.
+    /// Sets the install-wide default MCP servers (issue #527) — the normalized
+    /// `[[default_mcp_server]]` list from the instance `config.toml`. They merge
+    /// underneath this company's manifest servers, so a company that declares a
+    /// server of the same name keeps its own.
+    pub fn with_default_mcp_servers(mut self, servers: Vec<crate::company::McpServer>) -> Self {
+        self.default_mcp_servers = servers;
+        self
+    }
+
     pub fn with_brain(mut self, brain: Arc<dyn Brain>) -> Self {
         self.brain = Some(brain);
         self
@@ -430,11 +637,15 @@ impl RuntimeBuilder {
         self.runs = Some(handles.runs.clone());
         self.workflow_revisions = Some(handles.workflow_revisions.clone());
         self.schedule_fires = Some(handles.schedule_fires.clone());
+        self.run_output_store = Some(handles.run_outputs.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
+        self.read_state = Some(handles.read_state.clone());
+        self.notifications = Some(handles.notifications.clone());
         self.users = Some(handles.users.clone());
         self.sessions = Some(handles.sessions.clone());
         self.login_codes = Some(handles.login_codes.clone());
+        self.journal_store = Some(handles.journal.clone());
         self.with_store(handles.company.clone())
             .with_events(handles.events.clone())
             .with_memory(handles.memory.clone())
@@ -452,6 +663,22 @@ impl RuntimeBuilder {
     pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
         self.with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone())
+    }
+
+    /// Swaps just the runtime journal's durable sink (default: the company
+    /// bundle's `journal.jsonl`).
+    ///
+    /// [`with_stores`](Self::with_stores) sets this alongside every other port,
+    /// so production never calls it. It exists for the same reason
+    /// [`with_memory_overlay`](Self::with_memory_overlay) does — one port,
+    /// swapped on its own — and it is what lets a test put the at-most-once set
+    /// somewhere the company bundle is not.
+    pub fn with_journal_store(
+        mut self,
+        store: Arc<dyn crate::ports::journal::JournalStore>,
+    ) -> Self {
+        self.journal_store = Some(store);
+        self
     }
 
     /// Swaps the task board store (default: fs-backed).
@@ -481,6 +708,25 @@ impl RuntimeBuilder {
     /// Swaps the workspace store (default: fs-backed).
     pub fn with_workspace(mut self, workspace: Arc<dyn WorkspaceStore>) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    /// Sets the workspace's byte limits (default: 256 MiB per file, unlimited
+    /// tree). See [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace).
+    pub fn with_workspace_quota(mut self, quota: crate::runtime::WorkspaceQuota) -> Self {
+        self.workspace_quota = quota;
+        self
+    }
+
+    /// Records which storage backend serves this host's secrets (issue #752).
+    ///
+    /// Separate from [`with_stores`](Self::with_stores) because the two answer
+    /// different questions: `with_stores` hands over port *implementations*,
+    /// while this is the deployment's own name for the backend — the string an
+    /// operator set in `OPENCOMPANY_STORAGE` and the one the refusal quotes back
+    /// at them. Defaults to `fs`, the refusing side.
+    pub fn with_storage_kind(mut self, kind: crate::store::StorageKind) -> Self {
+        self.storage_kind = kind;
         self
     }
 
@@ -517,9 +763,36 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Swaps the per-node run-output store (default: fs-backed; #596).
+    pub fn with_run_output_store(
+        mut self,
+        run_output_store: Arc<dyn WorkflowRunOutputStore>,
+    ) -> Self {
+        self.run_output_store = Some(run_output_store);
+        self
+    }
+
     /// Swaps the usage meter (default: fs-backed).
     pub fn with_usage(mut self, usage: Arc<dyn UsageMeter>) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    /// Swaps the per-person channel read markers (default: fs-backed).
+    pub fn with_read_state(
+        mut self,
+        read_state: Arc<dyn crate::ports::read_state::ReadStateStore>,
+    ) -> Self {
+        self.read_state = Some(read_state);
+        self
+    }
+
+    /// Swaps the durable notification store (default: fs-backed).
+    pub fn with_notifications(
+        mut self,
+        notifications: Arc<dyn crate::ports::notifications::NotificationStore>,
+    ) -> Self {
+        self.notifications = Some(notifications);
         self
     }
 
@@ -708,6 +981,32 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Wires the deployment's standing bootstrap-admin address (issue #661 / M8),
+    /// pre-normalized by `AppConfig::bootstrap_admin`. Absent by default: only
+    /// the hosted serve path injects one, and `None` is a clean no-op that leaves
+    /// `owner` delivery resolving admins from the user store alone.
+    pub fn with_bootstrap_admin(mut self, bootstrap_admin: Option<String>) -> Self {
+        self.bootstrap_admin = bootstrap_admin;
+        self
+    }
+
+    /// Overrides how humans sign in to this company, beating its manifest's
+    /// `[users].mode`.
+    ///
+    /// This is where [`AppConfig::auth_mode_override`](crate::AppConfig) — the
+    /// `OPENCOMPANY_AUTH_MODE` / `config.toml` layers — wins, and it wins here
+    /// rather than at each read so that every part of the runtime sees one
+    /// answer. `None` is a clean no-op leaving the manifest to decide.
+    ///
+    /// The mode is resolved **once, at build**, and cached on the runtime,
+    /// because it is read on the request hot path: the alternative is a
+    /// `CompanyStore` read per request to re-parse a manifest that cannot change
+    /// without a rebuild.
+    pub fn with_auth_mode_override(mut self, auth_mode: Option<AuthMode>) -> Self {
+        self.auth_mode_override = auth_mode;
+        self
+    }
+
     /// Overrides the feedback store (default: the company bundle's feedback
     /// family).
     pub fn with_feedback(mut self, feedback: Arc<FeedbackStore>) -> Self {
@@ -835,8 +1134,15 @@ impl RuntimeBuilder {
                 // console routes, the agent tools, the publish drain, the
                 // seeder below — passes through this port, so none of them has
                 // to remember to emit. See [`WorkspaceAnnouncer`].
+                // Issue #553: and the tree refuses what it cannot afford,
+                // wrapped INSIDE the announcer so a refused write is never
+                // announced — the feed must not claim a file appeared that the
+                // quota rejected. See [`QuotaEnforcedWorkspace`].
                 workspace: Arc::new(WorkspaceAnnouncer::new(
-                    self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                    Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
+                        self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                        self.workspace_quota,
+                    )),
                     events.clone(),
                 )),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
@@ -844,8 +1150,14 @@ impl RuntimeBuilder {
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
+                workflow_run_outputs: self
+                    .run_output_store
+                    .clone()
+                    .unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
+                read_state: self.read_state.unwrap_or_else(|| fs_ops.clone()),
+                notifications: self.notifications.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
                 sessions: self.sessions.unwrap_or_else(|| fs_ops.clone()),
                 login_codes: self.login_codes.unwrap_or_else(|| fs_ops.clone()),
@@ -960,7 +1272,7 @@ impl RuntimeBuilder {
 
         // Channels: always the operator surface, plus any `openhuman` channel
         // the manifest enables when the daemon is reachable.
-        let channels = match self.channels {
+        let mut channels = match self.channels {
             Some(channels) => channels,
             None => {
                 let mut channels: Vec<Arc<dyn ChannelAdapter>> =
@@ -1016,10 +1328,79 @@ impl RuntimeBuilder {
         let journal = match handover.as_ref() {
             Some(h) => h.journal.clone(),
             None => {
-                let journal = Arc::new(RuntimeJournal::new(
-                    Bundle::new(home.clone(), &id).journal_jsonl(),
-                ));
+                // Issue #726: the journal's sink comes from the selected backend
+                // whenever one is open, and falls back to the company bundle's
+                // `journal.jsonl` only when it is not. Never a silent fs
+                // fallback under a database backend — that is the rule
+                // `open_storage` already states for every other durable port,
+                // and the journal was the one store outside it. On a hosted
+                // mongodb tenant `/data` is documented ephemeral scratch, so a
+                // journal left there loses every committed effect key and every
+                // parked approval on the next container replacement: previously
+                // executed effects become eligible to fire again, and parked
+                // approvals and grants silently vanish.
+                let (sink, sink_name) = match self.journal_store.clone() {
+                    Some(store) => (store, "backend"),
+                    None => (
+                        Arc::new(crate::store::FsJournalStore::new(home.clone()))
+                            as Arc<dyn crate::ports::journal::JournalStore>,
+                        "filesystem",
+                    ),
+                };
+
+                // The one-time import off the filesystem, gated on the sink's
+                // own receipt. Verbatim and in file order, raw strings — so a
+                // corrupt or merged line migrates byte-for-byte and the journal's
+                // own recovery still applies to it downstream.
+                //
+                // The receipt is what makes this safe to retry: `complete_import`
+                // clears before it copies and records the receipt last, so an
+                // interrupted import re-runs the whole copy instead of leaving a
+                // truncated prefix behind a closed gate. A truncated prefix is
+                // the bug itself — it drops at-most-once keys.
+                //
+                // Fatal on failure, deliberately. Booting with an empty journal
+                // because the import errored is indistinguishable, to every
+                // effect the company then runs, from having never executed
+                // anything.
+                //
+                // The gate is closed even when there is no file to import (an
+                // import of zero lines). That is one step stronger than "import
+                // if the file exists", and the step is load-bearing: it makes a
+                // `journal.jsonl` that appears *later* — a rollback, a stray copy
+                // into the data dir — unable to wipe and replace a journal the
+                // backend has since accumulated.
+                if !sink.journal_imported(&id).await? {
+                    let legacy = Bundle::new(home.clone(), &id).journal_jsonl();
+                    let lines: Vec<String> = crate::store::fs::read_lines_lossy(&legacy)
+                        .await?
+                        .into_iter()
+                        .filter(|line| !line.trim().is_empty())
+                        .collect();
+                    let count = lines.len();
+                    sink.complete_import(&id, lines).await?;
+                    if count > 0 {
+                        tracing::info!(
+                            company = %id,
+                            lines = count,
+                            "imported the filesystem journal into the storage backend; \
+                             the source file is left in place",
+                        );
+                    }
+                }
+
+                let journal = Arc::new(RuntimeJournal::with_store(sink, id.clone()));
                 journal.load().await?;
+                // Which sink the at-most-once guarantee is actually resting on.
+                // Worth one line at boot: "filesystem" under
+                // `OPENCOMPANY_STORAGE=mongodb` would mean the guarantee is
+                // resting on scratch, and that is not a thing an operator can
+                // otherwise see.
+                tracing::info!(
+                    company = %id,
+                    sink = sink_name,
+                    "runtime journal ready",
+                );
                 // Issue #386: a damaged line no longer fails the boot, which
                 // means the company can come up on an incomplete history. That
                 // is the right trade — an operator cannot repair a journal
@@ -1193,6 +1574,28 @@ impl RuntimeBuilder {
         // logged inside the sweep and never stops a company booting.
         if handover.is_none() {
             crate::runtime::sweep_interrupted_runs(&events, &id).await;
+
+            // Issue #390, the cycle-level equivalent, resting on the same three
+            // invariants: a cycle journals a start before it takes the serial
+            // lock, every cycle is driven in this process, and one process owns
+            // this journal. So a start with no finish at boot is a cycle that
+            // died with the last host.
+            //
+            // Gated on the handover for exactly the same reason as the sweep
+            // above: a cycle survives a live runtime swap, and sweeping mid-life
+            // would stamp "interrupted by a host restart" on one still running,
+            // whose real finish would then land after the synthetic one.
+            //
+            // Placed after `journal.load()`, whose replay is what populates the
+            // open set, and best-effort inside for the same reason.
+            let settled = journal.sweep_interrupted_cycles().await;
+            if settled > 0 {
+                tracing::info!(
+                    company = %id,
+                    settled,
+                    "settled cycles left open by a previous host process"
+                );
+            }
         }
 
         // The policy gate, rehydrated from the journal replay above so approvals
@@ -1298,6 +1701,8 @@ impl RuntimeBuilder {
         // way via `CompanyRuntime::set_builder` below.
         #[cfg(feature = "openhuman")]
         let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
+        #[cfg(feature = "openhuman")]
+        let mut workflow_harness_deps: Option<crate::harness::HarnessDeps> = None;
         // First-run company setup's polish pass, built from the SAME deps as the
         // planner and the workflow builder and installed the same way via
         // `CompanyRuntime::set_roster_builder` below.
@@ -1334,6 +1739,61 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_desks.clone())
             .unwrap_or_default();
+
+        // Desks are delivery destinations as well as inbound conversation
+        // threads. Resolve both manifest and operator-created candidates
+        // through CompanyRecord so this wiring cannot drift from the desk
+        // existence rules used by the server and the harness.
+        // Built fresh rather than cloned from `existing`: the persisted record
+        // carries the manifest of a PREVIOUS boot, so cloning it would wire
+        // desk channels from a stale `[[group_chat]]` list — a desk added to
+        // `company.toml` would never become a delivery destination, and one
+        // removed there would linger as one. The overlay halves are already
+        // lifted out of `existing` above, so this loses nothing.
+        let desk_record = CompanyRecord {
+            id: id.clone(),
+            manifest: self.manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: lifecycle.clone(),
+            overlay_agents: overlay_agents.clone(),
+            overlay_desk_members: overlay_desk_members.clone(),
+            overlay_desk_order: overlay_desk_order.clone(),
+            overlay_desks: overlay_desks.clone(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        };
+        let mut desk_ids = Vec::new();
+        let candidates = desk_record
+            .manifest
+            .group_chats
+            .iter()
+            .map(|desk| desk.id.as_str())
+            .chain(
+                desk_record
+                    .overlay_desks
+                    .iter()
+                    .map(|desk| desk.id.as_str()),
+            );
+        for candidate in candidates {
+            if let Some(desk_id) = desk_record.resolve_desk_id(candidate)
+                && desk_record.desk_exists(&desk_id)
+                && !desk_ids.contains(&desk_id)
+            {
+                desk_ids.push(desk_id);
+            }
+        }
+        for desk_id in desk_ids {
+            channels.push(Arc::new(DeskChannel::new(
+                id.clone(),
+                desk_id,
+                events.clone(),
+            )));
+        }
         // Issue #168: the runtime-authored workflow graph bodies. A rebuild that
         // dropped these would delete every workflow the console created on a
         // hosted tenant — they have no on-disk copy to fall back to.
@@ -1350,6 +1810,50 @@ impl RuntimeBuilder {
         let overlay_budgets = existing
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
+            .unwrap_or_default();
+        // Issue #562: the operator's `[policy]` override, carried across the
+        // rebuild — but ONLY while the seed's `[policy]` has not itself changed.
+        // See `carry_policy_override` for why that condition is the whole point.
+        let overlay_policy = existing.as_ref().and_then(|r| {
+            let carried = carry_policy_override(
+                &r.manifest.policy,
+                &self.manifest.policy,
+                r.overlay_policy.as_ref(),
+            );
+            if carried.is_none() && r.overlay_policy.is_some() {
+                tracing::info!(
+                    company = %id,
+                    seed_mode = %self.manifest.policy.mode,
+                    "[policy] the seed `[policy]` changed, so the console override was cleared — \
+                     version control wins when it speaks"
+                );
+            }
+            carried
+        });
+        // The per-desk tool ceilings, carried across the rebuild under the same
+        // seed-wins rule as the policy override above — see
+        // `carry_desk_tool_overrides` for why a desk grant needs it even more
+        // than the approval tier does.
+        let overlay_desk_tools = existing
+            .as_ref()
+            .map(|r| {
+                let carried = carry_desk_tool_overrides(
+                    &r.manifest.group_chats,
+                    &self.manifest.group_chats,
+                    &r.overlay_desk_tools,
+                );
+                for desk_id in r.overlay_desk_tools.keys() {
+                    if !carried.contains_key(desk_id) {
+                        tracing::info!(
+                            company = %id,
+                            desk = %desk_id,
+                            "[tools] the seed changed this desk's `tools`, so the console \
+                             ceiling was cleared — version control wins when it speaks"
+                        );
+                    }
+                }
+                carried
+            })
             .unwrap_or_default();
         // Issue #276: the workflows the operator switched off. This is the field
         // that makes the pause switch durable, and it is carried across the
@@ -1395,6 +1899,114 @@ impl RuntimeBuilder {
         // business, or the workflow phase would have to ask again.
         let setup = existing.as_ref().and_then(|r| r.setup.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
+
+        // Issue #752: a company whose roster holds `repo` does not come up on a
+        // backend that keeps secrets as plaintext on this container's disk.
+        //
+        // The bind-time refusal in `RepoManager::bind` covers new credentials.
+        // It cannot cover a company that bound one *before* this gate existed —
+        // that credential is already sitting on `/data`, and its agents would
+        // keep checking out under it forever. So the same condition is asked
+        // again here, where the answer is "this company does not start", and an
+        // operator restarting a tenant finds out at the moment they can still
+        // act on it.
+        //
+        // Read over the **effective roster**, not `[tools].allow` alone: an
+        // agent naming `tools = ["repo"]` under a company allow-list of `["*"]`
+        // holds an explicit `repo` grant that `grants_repo_explicit(&allow)`
+        // does not see, because the wildcard deliberately does not confer the
+        // namespace. Checking only the company line would miss exactly the
+        // configuration a wildcard company is most likely to have.
+        //
+        // NOT feature-gated, for the reason `build_agent` states about the repo
+        // tools themselves: a control compiled only under `openhuman` is a
+        // control most CI lanes never type-check.
+        if self.storage_kind.secrets_are_plaintext_on_disk() {
+            let roster_holds_repo =
+                crate::company::grants_repo_explicit(&self.manifest.tools.allow)
+                    || self
+                        .manifest
+                        .agents
+                        .iter()
+                        .map(|agent| {
+                            agent_effective_grants(&self.manifest.tools.allow, &agent.tools)
+                        })
+                        .chain(overlay_agents.iter().map(|overlay| {
+                            agent_effective_grants(&self.manifest.tools.allow, &overlay.tools)
+                        }))
+                        .any(|grants| crate::company::grants_repo_explicit(&grants));
+            if roster_holds_repo {
+                return Err(crate::error::OpenCompanyError::Config(
+                    crate::store::plaintext_secret_refusal(self.storage_kind),
+                ));
+            }
+        }
+
+        // Issue #245: the company's repository mirror cache, rooted at the same
+        // `companies/<slug>/` prefix the bundle uses so a company's whole
+        // footprint sits in one subtree — and therefore inside the one quota
+        // walk `DataLayout::usage_bytes` already does.
+        //
+        // Built here rather than lazily in the route because the location is a
+        // property of *this* runtime's home, and a route that had to derive it
+        // would be the second place that knows where a company's bytes live.
+        //
+        // The cache is capped by the same `tree_quota_bytes` that bounds the
+        // workspace tree: both answer "how much may one company hold on this
+        // host", and a mirror is company-held binary payload like any other. It
+        // needs no new knob, and a hosted tenant that already sets one gets the
+        // cache covered without touching its config.
+        let repos = {
+            let manager = crate::runtime::RepoManager::new(
+                id.clone(),
+                Bundle::new(home.clone(), &id).repos_dir(),
+                secrets.clone(),
+            )
+            .with_quota(self.workspace_quota.tree_quota_bytes)
+            // Issue #752: the manager refuses a bind when a credential would
+            // land as plaintext on this container's disk, so it has to be told
+            // which backend is actually serving secrets.
+            .with_storage_kind(self.storage_kind);
+            // The forge REST client (pull-request metadata + diff). Without the
+            // feature there is no HTTP client to give it, and the PR route says
+            // so rather than answering with an empty diff. Shadowed rather than
+            // reassigned, the same way `ops::router` folds in its feature-gated
+            // fragment.
+            #[cfg(feature = "github")]
+            let manager =
+                manager.with_host(std::sync::Arc::new(crate::runtime::HttpRepoHost::new()));
+            std::sync::Arc::new(manager)
+        };
+
+        // Issue #245, agent half: the bindings, read once here so the
+        // synchronous `build_agent` can name them in a tool description and
+        // resolve against them. Read only when the company explicitly grants
+        // `repo` — everything else has no repository tools to feed — and a
+        // read error degrades to empty with a warning rather than failing a
+        // boot over a capability the company may not even use.
+        // `HarnessPool::ensure` re-reads this every turn, so a bind, a rotation
+        // or a revoke lands without a restart; this is only the first value.
+        #[cfg(feature = "openhuman")]
+        let repo_bindings = if crate::company::grants_repo_explicit(&self.manifest.tools.allow) {
+            repos.list().await.unwrap_or_else(|err| {
+                tracing::warn!(
+                    company = %id,
+                    error = %err,
+                    "reading the repository bindings failed; agents start with none"
+                );
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
+
+        // Issue #245: a checkout's lifecycle is one turn's, and a host killed
+        // mid-turn ends no turn — so whatever the last process left under
+        // `<harness>/<company>/*/workspace/repos` is deleted before this one
+        // starts. Tenant-scoped (issue #664): it walks this company's subtree
+        // and nothing above it.
+        #[cfg(feature = "openhuman")]
+        crate::harness::repo::sweep_orphaned_checkouts(&home.join("harness"), &id).await;
 
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
@@ -1453,8 +2065,14 @@ impl RuntimeBuilder {
                             // onto the runtime below.
                             let steer = crate::company::steer::InflightRegistry::new();
                             steer_registry = Some(steer.clone());
-                            // Same shape, same reason (issue #383).
-                            let supervisor = crate::runtime::RunSupervisor::new();
+                            // Same shape, same reason (issue #383). Issue #401:
+                            // the per-company concurrency ceiling comes from the
+                            // manifest (validated `>= 1`), so this supervisor —
+                            // the one the harness deps and the console cancel
+                            // route both hold — enforces that cap on every run.
+                            let supervisor = crate::runtime::RunSupervisor::with_limit(
+                                self.manifest.workflows.max_in_flight_runs,
+                            );
                             run_supervisor = Some(supervisor.clone());
                             // Resolve the company's effective MCP servers to data
                             // (manifest ∪ runtime index, credentials materialized)
@@ -1462,6 +2080,7 @@ impl RuntimeBuilder {
                             // to no MCP servers rather than bricking boot.
                             let mcp_servers = crate::company::mcp::resolve_effective(
                                 &id,
+                                &self.default_mcp_servers,
                                 &self.manifest.mcp_servers,
                                 secrets.as_ref(),
                             )
@@ -1485,6 +2104,60 @@ impl RuntimeBuilder {
                             // (fail closed). `HarnessPool::ensure` re-resolves this
                             // each turn so a console token change takes effect
                             // without restart.
+                            // Issue #788: the per-company Chargebee connection,
+                            // resolved from THIS company's secret store — never
+                            // the environment, because two companies on one host
+                            // bill two different sites. Only companies that
+                            // explicitly grant `chargebee` resolve at all; with
+                            // either half of the pair missing it stays `None`
+                            // (fail closed). `HarnessPool::ensure` re-resolves it
+                            // each turn, so a key saved in the console's Billing
+                            // settings takes effect without a restart.
+                            // Issue #789: the per-company PayPal connection,
+                            // resolved from this company's own secret store for
+                            // the same reason chargebee is.
+                            //
+                            // A store read error degrades to `None` HERE, unlike
+                            // in `HarnessPool::resolve_*`, which keeps the last
+                            // known connection: at boot there is no last known
+                            // one to keep. It is warned rather than fatal —
+                            // refusing to start the company over an unreadable
+                            // billing credential would take down every other
+                            // tool it has — and the next turn re-resolves.
+                            #[cfg(feature = "paypal")]
+                            let paypal_config = if crate::company::grants_paypal_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::paypal::TenantPaypal::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[paypal] could not read the billing credential at \
+                                             boot; wiring no PayPal tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
+                            #[cfg(feature = "chargebee")]
+                            let chargebee_config = if crate::company::grants_chargebee_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::chargebee::TenantChargebee::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[chargebee] could not read the billing credential at \
+                                             boot; wiring no Chargebee tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -1512,6 +2185,9 @@ impl RuntimeBuilder {
                                 None
                             };
                             let deps = HarnessDeps {
+                                // Carried so live re-resolution merges the same
+                                // three layers boot did (issue #527).
+                                default_mcp_servers: self.default_mcp_servers.clone(),
                                 // A per-tenant provider that re-resolves the
                                 // effective inference config on every turn, so a
                                 // console BYOK switch takes effect next turn with
@@ -1529,6 +2205,15 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                // Issue #775: the shell audit sink is HOST-owned
+                                // and hangs off the data root, resolving to
+                                // `companies/<slug>/audit/<agent>/` — a sibling
+                                // of the `harness/` tree above, never inside it.
+                                // Passed explicitly rather than derived from
+                                // `workspace_root`'s parent so the boundary is a
+                                // stated fact rather than a directory
+                                // coincidence.
+                                audit_root: home.clone(),
                                 model_override,
                                 tasks: Some(ops.tasks.clone()),
                                 artifacts: Some(ops.artifacts.clone()),
@@ -1571,6 +2256,21 @@ impl RuntimeBuilder {
                                     crate::harness::workflow_refs::WorkflowRefQueue::default(),
                                 run_outputs: crate::harness::orchestrator::RunOutputCache::default(
                                 ),
+                                // Issue #596: the DURABLE, console-facing run
+                                // output store — distinct from `run_outputs`
+                                // above (the in-process agent cache). The runner
+                                // persists each settled run's bounded node output
+                                // here so a past run is readable from the console.
+                                // `None` degrades to no-persist, like `events`.
+                                run_output_store: self.run_output_store.clone(),
+                                // Issue #661 (M7): the SAME revision store the
+                                // console's workflow PUT/DELETE routes use, so
+                                // an agent edit snapshots the prior body and an
+                                // agent delete cascades the history exactly as
+                                // an operator's does. Taken from `ops` rather
+                                // than from `self`, which is `None` whenever the
+                                // caller did not override the filesystem default.
+                                workflow_revisions: Some(ops.workflow_revisions.clone()),
                                 // Issue #243: share the runtime's grant set, so a
                                 // grant the runtime mints on approve is the one
                                 // this agent's policy redeems on re-issue.
@@ -1630,6 +2330,10 @@ impl RuntimeBuilder {
                                 // resolved above (token from the secret store,
                                 // never an env/platform key). `None` fails closed.
                                 composio: composio_config,
+                                #[cfg(feature = "chargebee")]
+                                chargebee: chargebee_config,
+                                #[cfg(feature = "paypal")]
+                                paypal: paypal_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's
@@ -1647,7 +2351,22 @@ impl RuntimeBuilder {
                                     mail: self.mail.clone(),
                                     inbox: inbox.clone(),
                                     users: ops.users.clone(),
-                                    channels: channels.clone(),
+                                    // Issue #661 / M8: the deployment's standing
+                                    // bootstrap admin, so an `owner` report on a
+                                    // fresh tenant reaches the company's creator
+                                    // before their first sign-in mints a user
+                                    // record. `None` off the hosted serve path.
+                                    bootstrap_admin: self.bootstrap_admin.clone(),
+                                    // The operator adapter is an interactive
+                                    // response surface, not a workflow delivery
+                                    // destination: its buffer has no durable
+                                    // reader. Desk and provider adapters are the
+                                    // accepted workflow write paths.
+                                    channels: channels
+                                        .iter()
+                                        .filter(|channel| channel.channel_id() != OPERATOR_CHANNEL)
+                                        .cloned()
+                                        .collect(),
                                     // Issue #227: the same gate and journal the
                                     // runtime gets below — one approvals queue,
                                     // so a report parked by a workflow lands in
@@ -1675,7 +2394,20 @@ impl RuntimeBuilder {
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
                                 workspace: Some(ops.workspace.clone()),
+                                // Issue #245, agent half: the SAME manager the
+                                // console's bind/revoke routes write through
+                                // (wired onto the runtime below), so an operator
+                                // binding a repository is what the next turn's
+                                // `repo_checkout` resolves against — and the
+                                // one thing in this process holding the token.
+                                repos: Some(repos.clone()),
+                                repo_bindings,
+                                // One ledger per company runtime, shared by every
+                                // agent's tools and claimed per turn by the
+                                // brain's `CheckoutJanitor`.
+                                checkouts: crate::harness::repo::CheckoutLedger::default(),
                             };
+                            workflow_harness_deps = Some(deps.clone());
                             let record = CompanyRecord {
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
@@ -1691,6 +2423,8 @@ impl RuntimeBuilder {
                                 overlay_desks: overlay_desks.clone(),
                                 overlay_workflows: overlay_workflows.clone(),
                                 overlay_budgets: overlay_budgets.clone(),
+                                overlay_policy: overlay_policy.clone(),
+                                overlay_desk_tools: Default::default(),
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                                 setup: setup.clone(),
@@ -1829,6 +2563,8 @@ impl RuntimeBuilder {
                 overlay_desks,
                 overlay_workflows,
                 overlay_budgets,
+                overlay_policy,
+                overlay_desk_tools,
                 disabled_workflows,
                 template_provenance,
                 setup,
@@ -1881,6 +2617,20 @@ impl RuntimeBuilder {
         // (`companies/<name>`); record it so read resolvers can find committed
         // skills/workflows content on the serve path.
         runtime.set_source_dir(self.seed_dir.clone());
+        // How humans sign in, resolved once here rather than per request: the
+        // host-wide override wins, else the manifest's `[users].mode`. An
+        // unparseable manifest mode cannot reach this point — `validate` names it
+        // — so falling back to the default here is for a hand-built manifest in a
+        // test, not for a live misconfiguration.
+        runtime.set_auth_mode(
+            self.auth_mode_override.unwrap_or_else(|| {
+                AuthMode::from_str(&self.manifest.users.mode).unwrap_or_default()
+            }),
+        );
+        runtime.set_repos(repos);
+        // Install-wide MCP defaults (issue #527) — set before anything resolves
+        // the effective server set, so the first resolution already sees them.
+        runtime.set_default_mcp_servers(self.default_mcp_servers.clone());
 
         // Issue #290: adopt the outgoing runtime's serialising mutexes. Two
         // runtimes for one company each holding their own `serial` would let two
@@ -1979,6 +2729,10 @@ impl RuntimeBuilder {
         if let Some(builder) = builder {
             runtime.set_builder(builder);
         }
+        #[cfg(feature = "openhuman")]
+        if let Some(deps) = workflow_harness_deps {
+            runtime.set_workflow_harness_deps(deps);
+        }
         // Same rebuild treatment again. A setup pass interrupted by a rebuild
         // needs no recovery at all: it holds no lock, mints no run and writes
         // nothing, so the console simply re-asks and the operator loses nothing
@@ -2073,6 +2827,9 @@ async fn seed_workspace(
             // nor an agent, and the console says exactly that (issue #326).
             created_by: WorkspaceOrigin::Seed,
             updated_by: WorkspaceOrigin::Seed,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);
@@ -2317,12 +3074,218 @@ mod test {
     use super::*;
     use crate::openhuman::MockOpenHumanRpc;
     use crate::ports::types::ToolCall;
+    use crate::runtime::journal::ExecutedEffect;
 
     fn tmp_home(prefix: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix(prefix)
             .tempdir()
             .expect("tempdir")
+    }
+
+    mod scoped_grants {
+        use super::*;
+
+        fn strings(values: &[&str]) -> Vec<String> {
+            values.iter().map(|v| v.to_string()).collect()
+        }
+
+        /// Runs the three-level narrowing over `&str` slices, so each case below
+        /// reads as the table row it is.
+        fn scope(company: &[&str], desks: &[&[&str]], agent: &[&str]) -> Vec<String> {
+            let company = strings(company);
+            let desk_owned: Vec<Vec<String>> = desks.iter().map(|d| strings(d)).collect();
+            let desk_refs: Vec<&[String]> = desk_owned.iter().map(Vec::as_slice).collect();
+            agent_scoped_grants(&company, &desk_refs, &strings(agent))
+        }
+
+        /// No desk and no per-agent list: the company grant passes through
+        /// untouched. This is the shape every pre-existing manifest has, so it
+        /// is the case that must be byte-identical to the old behaviour.
+        #[test]
+        fn empty_levels_pass_through() {
+            assert_eq!(scope(&["*", "search"], &[], &[]), ["*", "search"]);
+            assert_eq!(scope(&["*", "search"], &[&[]], &[]), ["*", "search"]);
+            assert_eq!(scope(&["*", "search"], &[&[], &[]], &[]), ["*", "search"]);
+        }
+
+        /// The middle level does the work the feature exists for: a department
+        /// ceiling narrows every member without touching any member's own line.
+        #[test]
+        fn a_desk_ceiling_narrows_its_members() {
+            assert_eq!(scope(&["*", "search"], &[&["docs.*"]], &[]), ["docs.*"]);
+        }
+
+        /// And the agent narrows further still.
+        #[test]
+        fn an_agent_narrows_below_its_desk() {
+            assert_eq!(
+                scope(&["*", "search"], &[&["docs.*", "web"]], &["docs.*"]),
+                ["docs.*"]
+            );
+        }
+
+        /// Desks union, so joining a second desk *adds* capability rather than
+        /// removing it. Intersecting would make adding someone to a desk break
+        /// the job they already did.
+        #[test]
+        fn desks_combine_by_union() {
+            assert_eq!(
+                scope(&["*", "search"], &[&["docs.*"], &["web"]], &[]),
+                ["docs.*", "web"]
+            );
+        }
+
+        /// The documented sharp edge, asserted so it cannot change silently: a
+        /// desk with no ceiling narrows nothing, so an agent on both a
+        /// restricted and an unrestricted desk ends up unrestricted.
+        ///
+        /// Asserted by **coverage** rather than by list equality. The union
+        /// leaves the restricted desk's `docs.*` in the result beside the open
+        /// desk's `*`, which is redundant but not wrong — `*` already covers it
+        /// — and pinning the exact list here would be asserting the shape of the
+        /// bookkeeping instead of the capability it resolves to.
+        #[test]
+        fn an_unceilinged_desk_widens_the_union_back_to_the_company_grant() {
+            let company = ["*", "search"];
+            let resolved = scope(&company, &[&["docs.*"], &[]], &[]);
+            for grant in company {
+                assert!(
+                    allow_covers(&resolved, grant),
+                    "`{grant}` must survive an open desk: {resolved:?}"
+                );
+            }
+        }
+
+        /// The invariant that makes this safe to add: no path through the
+        /// narrowing can yield a grant the company did not already allow. A desk
+        /// ceiling naming something outside `[tools].allow` cannot widen.
+        #[test]
+        fn a_desk_can_never_widen_past_the_company_grant() {
+            // `search` is deliberately not in the company allow-list, and `*`
+            // never confers it.
+            assert_eq!(
+                scope(&["docs.*"], &[&["search", "shell"]], &[]),
+                Vec::<String>::new()
+            );
+            // Nor can the agent reach past a desk that did not grant it.
+            assert_eq!(
+                scope(&["*"], &[&["docs.*"]], &["shell"]),
+                Vec::<String>::new()
+            );
+        }
+
+        /// Adding the desk level must not disturb the two-level answer for a
+        /// company whose desks declare nothing — the regression that would hit
+        /// every shipped company at once.
+        #[test]
+        fn matches_the_two_level_resolver_when_no_desk_has_a_ceiling() {
+            for (company, agent) in [
+                (&["*", "media"][..], &[][..]),
+                (&["*", "media"][..], &["docs.*"][..]),
+                (&["docs.*", "web"][..], &["web"][..]),
+                (&["docs.*"][..], &["shell"][..]),
+            ] {
+                assert_eq!(
+                    agent_scoped_grants(&strings(company), &[&[], &[]], &strings(agent)),
+                    agent_effective_grants(&strings(company), &strings(agent)),
+                    "company={company:?} agent={agent:?}"
+                );
+            }
+        }
+    }
+
+    mod desk_tool_carry {
+        use super::*;
+
+        fn desk(id: &str, tools: &[&str]) -> GroupChat {
+            GroupChat {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: None,
+                members: Vec::new(),
+                tools: tools.iter().map(|t| t.to_string()).collect(),
+            }
+        }
+
+        fn held(entries: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
+            entries
+                .iter()
+                .map(|(id, tools)| {
+                    (
+                        id.to_string(),
+                        tools.iter().map(|t| t.to_string()).collect(),
+                    )
+                })
+                .collect()
+        }
+
+        /// A routine redeploy that changed nothing keeps the operator's console
+        /// ceilings — clearing on every rebuild would silently revert a console
+        /// action with nothing to show it had moved.
+        #[test]
+        fn an_unchanged_seed_carries_the_override() {
+            let seed = [desk("finance", &["docs.*"])];
+            let carried = carry_desk_tool_overrides(&seed, &seed, &held(&[("finance", &["web"])]));
+            assert_eq!(
+                carried.get("finance").map(Vec::as_slice),
+                Some(&["web".to_string()][..])
+            );
+        }
+
+        /// The security property: version control narrowing a desk must not be
+        /// silently overridden by a wider console value set before the edit.
+        #[test]
+        fn a_changed_seed_clears_that_desks_override() {
+            let carried = carry_desk_tool_overrides(
+                &[desk("finance", &["*"])],
+                &[desk("finance", &["docs.*"])],
+                &held(&[("finance", &["web"])]),
+            );
+            assert!(carried.is_empty(), "{carried:?}");
+        }
+
+        /// Per desk, not whole-block: editing one department says nothing about
+        /// another, and clearing both would revert an action nobody's edit was
+        /// about.
+        #[test]
+        fn editing_one_desk_leaves_another_desks_override_alone() {
+            let carried = carry_desk_tool_overrides(
+                &[desk("finance", &["*"]), desk("creative", &["docs.*"])],
+                &[desk("finance", &["docs.*"]), desk("creative", &["docs.*"])],
+                &held(&[("finance", &["web"]), ("creative", &["media"])]),
+            );
+            assert!(!carried.contains_key("finance"), "{carried:?}");
+            assert_eq!(
+                carried.get("creative").map(Vec::as_slice),
+                Some(&["media".to_string()][..])
+            );
+        }
+
+        /// An operator-created desk has no seed value that could have changed,
+        /// so its ceiling always survives a rebuild.
+        #[test]
+        fn an_override_for_a_desk_the_seed_does_not_declare_is_carried() {
+            let carried = carry_desk_tool_overrides(
+                &[desk("finance", &["*"])],
+                &[desk("finance", &["*"])],
+                &held(&[("adhoc", &["docs.*"])]),
+            );
+            assert!(carried.contains_key("adhoc"), "{carried:?}");
+        }
+
+        /// A desk deleted from the seed *has* changed — from declaring a ceiling
+        /// to declaring nothing — so its stale override is dropped rather than
+        /// outliving the desk in version control.
+        #[test]
+        fn deleting_a_desk_from_the_seed_clears_its_override() {
+            let carried = carry_desk_tool_overrides(
+                &[desk("finance", &["docs.*"])],
+                &[],
+                &held(&[("finance", &["web"])]),
+            );
+            assert!(carried.is_empty(), "{carried:?}");
+        }
     }
 
     /// Issue #242, the property this whole PR exists to create, proven across a
@@ -2430,6 +3393,254 @@ mod test {
             steps[1].step.status,
             TurnStepStatus::Running,
             "the call that was in flight when the host died reads as in flight"
+        );
+    }
+
+    /// **Issue #726, the headline**: a company whose data directory is destroyed
+    /// keeps its at-most-once set and its parked approvals, because the journal
+    /// lives in the storage backend rather than on the filesystem.
+    ///
+    /// This is the hosted failure, reproduced: on a mongodb tenant `/data` is
+    /// documented ephemeral scratch, so container replacement — a deploy, a
+    /// reschedule, a node drain, an OOM kill — takes `journal.jsonl` with it.
+    /// Before this change every effect that had already executed became eligible
+    /// to fire a second time and every parked approval, grant and standing grant
+    /// silently vanished. The `remove_dir_all` below IS that container
+    /// replacement.
+    #[tokio::test]
+    async fn a_backend_journal_survives_the_loss_of_the_whole_data_directory() {
+        use crate::ports::journal::MemoryJournalStore;
+        use crate::ports::types::EffectGroup;
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home = tmp_home("opencompany-journal-durability-");
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        let id = CompanyId::new("acme");
+        // One sink, shared across both boots — the database that outlives the
+        // container, standing in for sqlite/mongodb so the proof holds in the
+        // default build rather than only behind a cargo feature.
+        let sink = Arc::new(MemoryJournalStore::default());
+        let approval = crate::ports::types::ApprovalId::new("ap-1");
+        let effect = crate::ports::types::Effect {
+            kind: "filing.submit".into(),
+            group: EffectGroup::Sign,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+
+        // --- boot 1: an effect executes at most once, and an approval parks.
+        {
+            let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+                .with_id(id.clone())
+                .with_journal_store(sink.clone())
+                .build()
+                .await
+                .expect("first boot");
+            crate::runtime::cycle::execute_effect_once(&rt, "k", &effect, Some("t-1"))
+                .await
+                .expect("execute the effect once");
+            rt.journal
+                .record_parked(
+                    &approval,
+                    &effect,
+                    1_000,
+                    TaskLink::Task { id: "t-1".into() },
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("park an approval");
+            assert!(rt.journal.is_executed("k"));
+        }
+
+        // --- the container is replaced: `/data` is gone, every byte of it.
+        std::fs::remove_dir_all(home.path()).expect("destroy the data directory");
+        assert!(
+            !Bundle::new(home.path().to_path_buf(), &id)
+                .journal_jsonl()
+                .exists(),
+            "the filesystem journal must really be gone for this to prove anything"
+        );
+
+        // --- boot 2: same backend, brand new (empty) data directory.
+        let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_journal_store(sink)
+            .build()
+            .await
+            .expect("second boot");
+
+        assert!(
+            rt.journal.is_executed("k"),
+            "the committed key must survive the container: without it the effect \
+             is eligible to fire a second time"
+        );
+        let pending = rt.journal.pending();
+        assert_eq!(pending.len(), 1, "the parked approval must survive too");
+        assert_eq!(
+            pending[0].id, approval,
+            "and with its original id, so the operator's console link still resolves"
+        );
+        assert_eq!(
+            pending[0].task,
+            Some(TaskLink::Task { id: "t-1".into() }),
+            "and still linked to the card it was parked for"
+        );
+    }
+
+    /// A company's journal file, as a previous host left it: `keys` committed in
+    /// order, at the bundle path the fs journal has always used.
+    async fn seed_filesystem_journal(home: &std::path::Path, id: &CompanyId, keys: &[&str]) {
+        let journal = RuntimeJournal::new(Bundle::new(home.to_path_buf(), id).journal_jsonl());
+        for (n, key) in keys.iter().enumerate() {
+            journal
+                .record_executed(
+                    key,
+                    ExecutedEffect {
+                        kind: "filing.submit".into(),
+                        amount_usd: None,
+                        task_id: Some("t-1".into()),
+                        at_millis: 1_000 + n as u64,
+                        irreversible: true,
+                    },
+                )
+                .await
+                .expect("seed a legacy journal line");
+        }
+    }
+
+    /// **Issue #726**: an existing filesystem journal is imported into the
+    /// backend exactly **once**, and the receipt is what makes the second boot a
+    /// no-op.
+    ///
+    /// The re-import is not a cosmetic inefficiency. `complete_import` clears
+    /// before it copies, so a second import would delete every key the backend
+    /// accumulated after the first one — un-committing effects that have already
+    /// run. The gate is the only thing standing between the migration and that.
+    #[tokio::test]
+    async fn a_filesystem_journal_is_imported_once_and_the_receipt_blocks_the_rest() {
+        use crate::ports::journal::MemoryJournalStore;
+
+        let home = tmp_home("opencompany-journal-import-");
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        let id = CompanyId::new("acme");
+        seed_filesystem_journal(home.path(), &id, &["k-legacy"]).await;
+
+        let sink = Arc::new(MemoryJournalStore::default());
+        let legacy_path = Bundle::new(home.path().to_path_buf(), &id).journal_jsonl();
+
+        // --- boot 1: the file is imported, and left where it was.
+        {
+            let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+                .with_id(id.clone())
+                .with_journal_store(sink.clone())
+                .build()
+                .await
+                .expect("first boot");
+            assert!(
+                rt.journal.is_executed("k-legacy"),
+                "the pre-existing at-most-once key must reach the backend"
+            );
+            assert!(
+                legacy_path.exists(),
+                "the source file stays in place: a rollback to an older binary \
+                 must still find the history it knows how to read"
+            );
+            // A key committed after the migration — this is what a second import
+            // would destroy.
+            rt.journal
+                .record_executed(
+                    "k-after",
+                    ExecutedEffect {
+                        kind: "payment.send".into(),
+                        amount_usd: Some(12.0),
+                        task_id: Some("t-2".into()),
+                        at_millis: 2_000,
+                        irreversible: true,
+                    },
+                )
+                .await
+                .expect("commit a key against the backend");
+        }
+
+        // --- boot 2: the receipt is closed, so nothing is re-imported.
+        let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_journal_store(sink)
+            .build()
+            .await
+            .expect("second boot");
+        assert!(
+            rt.journal.is_executed("k-after"),
+            "a re-import would have cleared this key and re-armed an effect that \
+             has already run"
+        );
+        assert!(rt.journal.is_executed("k-legacy"));
+    }
+
+    /// **Issue #726**: an import interrupted between the copy and the receipt is
+    /// re-run whole, not resumed.
+    ///
+    /// A partial copy behind a closed gate is the bug the receipt exists to
+    /// prevent — it is a set of at-most-once keys that quietly went missing. So
+    /// the retry must **replace** what the interrupted attempt wrote rather than
+    /// append to it: no duplicates, and nothing from the source left behind.
+    #[tokio::test]
+    async fn an_import_interrupted_before_its_receipt_is_re_run_whole() {
+        use crate::ports::journal::{JournalStore, MemoryJournalStore};
+
+        let home = tmp_home("opencompany-journal-partial-");
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        let id = CompanyId::new("acme");
+        seed_filesystem_journal(home.path(), &id, &["k-0", "k-1", "k-2"]).await;
+
+        // A crash mid-import: the first line copied, the receipt never written.
+        let sink = Arc::new(MemoryJournalStore::default());
+        let source = crate::store::fs::read_lines_lossy(
+            &Bundle::new(home.path().to_path_buf(), &id).journal_jsonl(),
+        )
+        .await
+        .expect("read the source journal");
+        sink.complete_import(&id, vec![source[0].clone()])
+            .await
+            .expect("a partial copy");
+        sink.forget_receipt(&id);
+
+        let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_journal_store(sink.clone())
+            .build()
+            .await
+            .expect("boot after the interrupted import");
+
+        for key in ["k-0", "k-1", "k-2"] {
+            assert!(
+                rt.journal.is_executed(key),
+                "{key} must be present after the retry: a resumed-rather-than-restarted \
+                 import is how at-most-once keys go missing"
+            );
+        }
+        assert_eq!(
+            sink.read_journal(&id).await.expect("read back").len(),
+            3,
+            "the retry replaces the partial copy; it must not append a second one"
+        );
+        assert!(
+            sink.journal_imported(&id).await.expect("gate"),
+            "and the retry closes the gate"
         );
     }
 
@@ -2568,6 +3779,7 @@ mod test {
                     created_at_millis: 1,
                     expires_at_millis: 10,
                     accepted_at_millis: None,
+                    notified_at_millis: None,
                 },
             )
             .await
@@ -2736,6 +3948,8 @@ mod test {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
@@ -2869,9 +4083,11 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md — plus the two system roots
+        // Seeded: README.md, Brand/, Brand/voice.md — plus the system roots
         // boot always scaffolds beside them (issue #551), which are not seeded
-        // content and so are not what the re-seed gate is about.
+        // content and so are not what the re-seed gate is about. Filtering by
+        // `SYSTEM_ROOTS` rather than by name keeps this honest as that set
+        // changes (issue #645 took `Desks/` out of it).
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
             let mut names: Vec<String> = tree
                 .iter()
@@ -2909,7 +4125,8 @@ mod test {
     }
 
     /// Issue #551: boot lays down the workspace's system roots — and nothing
-    /// inside them.
+    /// inside them. Since issue #645 that is `Agents/` alone: `Desks/` had no
+    /// producer, so it is minted on first use instead of standing empty here.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
     /// that agent produces something, so a roster of teammates who have done
@@ -2918,10 +4135,10 @@ mod test {
     /// Also pins the two gates the seeding block above does NOT share: this
     /// runs with **no** `seed_dir` (the provisioned-tenant and desktop shape),
     /// and it runs again on a workspace that is no longer empty — which is how
-    /// an existing company picks the roots up.
+    /// an existing company picks the root up.
     #[tokio::test]
     async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
-        use crate::company::workspace_scaffold::{AGENTS_ROOT, DESKS_ROOT};
+        use crate::company::workspace_scaffold::AGENTS_ROOT;
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -2946,9 +4163,9 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, DESKS_ROOT],
-            "boot provisions the two roots with no seed dir, and no folder for a \
-             teammate that has produced nothing"
+            vec![AGENTS_ROOT],
+            "boot provisions the managed root with no seed dir — no `Desks/`, and no \
+             folder for a teammate that has produced nothing"
         );
         for node in &tree {
             assert!(node.parent_id.is_none());
@@ -2959,6 +4176,19 @@ mod test {
         // An existing, non-empty workspace: an `is_empty` gate would have
         // skipped this boot entirely, and a company that predates the feature
         // would never get its roots.
+        //
+        // With one managed root, deleting it would leave the tree empty and
+        // stop pinning that. A lazily-minted desk folder stands in for the
+        // content a real company would have — and doubles as the #645 check
+        // that boot neither re-manages, duplicates nor disturbs a `Desks/` that
+        // already exists.
+        crate::company::workspace_scaffold::ensure_desk_folder(
+            runtime.workspace().as_ref(),
+            &id,
+            "creative_studio",
+        )
+        .await
+        .unwrap();
         let agents_root = tree
             .iter()
             .find(|n| n.name == AGENTS_ROOT)
@@ -2983,16 +4213,16 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, DESKS_ROOT],
-            "the deleted root was re-provisioned and the surviving one not duplicated"
+            vec![AGENTS_ROOT, "Desks", "creative_studio"],
+            "the deleted root was re-provisioned, and the unmanaged `Desks/` left as it stood"
         );
     }
 
-    /// The roots are part of what a workspace *is*, not a projection of the
-    /// roster: a company with no agents at all still gets both.
+    /// The root is part of what a workspace *is*, not a projection of the
+    /// roster: a company with no agents at all still gets it.
     #[tokio::test]
     async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
-        use crate::company::workspace_scaffold::{AGENTS_ROOT, DESKS_ROOT};
+        use crate::company::workspace_scaffold::AGENTS_ROOT;
 
         let home_dir = tmp_home("oc-noagents-");
         let id = CompanyId::new("acme");
@@ -3008,7 +4238,7 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT, DESKS_ROOT]);
+        assert_eq!(names, vec![AGENTS_ROOT]);
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the
@@ -3064,6 +4294,217 @@ mod test {
 
     fn parse(toml_src: &str) -> CompanyManifest {
         toml::from_str(toml_src).expect("valid manifest")
+    }
+
+    // ---- issue #752: `repo` needs a backend that keeps secrets off disk ----
+
+    /// A company that already bound a repository predates the bind-time gate,
+    /// so the *restart* is where it has to be caught. A repo-granted company on
+    /// an fs host does not come up.
+    #[tokio::test]
+    async fn a_repo_granted_company_does_not_boot_on_a_plaintext_secret_backend() {
+        let home = tmp_home("oc-752-boot-");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["repo", "shell"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(CompanyId::new("acme"))
+            // The default, spelled out: this is what a local `serve` is.
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect_err("an fs host must refuse to bring up a repo-granted company");
+        let message = err.to_string();
+        assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
+        assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
+        assert!(message.contains("`repo` grant"), "{message}");
+    }
+
+    /// The wildcard case, which a check against `[tools].allow` alone would let
+    /// through: `*` deliberately does **not** confer `repo`, so the company line
+    /// reads as ungranted while the agent naming `repo` explicitly holds it.
+    #[tokio::test]
+    async fn an_agent_that_names_repo_under_a_wildcard_company_is_caught_too() {
+        let home = tmp_home("oc-752-boot-wildcard-");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["*"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            tools = ["repo"]
+            "#,
+        );
+        // The company line itself is not an explicit grant — if it were, this
+        // test would pass for the wrong reason.
+        assert!(!crate::company::grants_repo_explicit(&manifest.tools.allow));
+        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect_err("an agent-level `repo` grant must be caught at boot");
+        assert!(err.to_string().contains("OPENCOMPANY_STORAGE=fs"), "{err}");
+    }
+
+    /// The other side, without which the two above only prove the check is on:
+    /// the same company boots on the backend that keeps secrets out of the
+    /// container, and a company that grants no `repo` boots on fs unaffected.
+    #[tokio::test]
+    async fn the_same_company_boots_where_secrets_leave_the_container() {
+        let home = tmp_home("oc-752-boot-ok-");
+        let granted = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["repo", "shell"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        RuntimeBuilder::new(home.path().to_path_buf(), granted)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Mongodb)
+            .build()
+            .await
+            .expect("mongodb-backed secrets must clear the #752 boot gate");
+
+        let ungranted_home = tmp_home("oc-752-boot-ungranted-");
+        let ungranted = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["shell", "web"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        RuntimeBuilder::new(ungranted_home.path().to_path_buf(), ungranted)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect("a company without `repo` is untouched by this gate");
+    }
+
+    // ---- `[policy]` override across a rebuild (issue #562) ----------------
+
+    fn seed_policy(mode: &str, always: &[&str], under: Option<f64>) -> Policy {
+        Policy {
+            mode: mode.to_string(),
+            always_approve: always.iter().map(|s| s.to_string()).collect(),
+            auto_approve_under_usd: under,
+        }
+    }
+
+    fn held_override(mode: &str) -> PolicyOverride {
+        use crate::ports::types::{Actor, ActorKind};
+        PolicyOverride {
+            mode: Some(mode.to_string()),
+            always_approve: None,
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "admin-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// A rebuild that does not touch `[policy]` leaves the console override
+    /// alone (issue #562).
+    ///
+    /// The half that makes the feature durable. Clearing on every rebuild would
+    /// mean a routine redeploy silently reverting the operator's console action,
+    /// with nothing in the console showing the tier had moved back — the exact
+    /// mirror of the failure the other half prevents.
+    #[test]
+    fn an_unchanged_seed_policy_leaves_the_override_alone() {
+        let seed = seed_policy("supervised", &["payment.send"], None);
+        let carried = carry_policy_override(&seed, &seed.clone(), Some(&held_override("full")));
+        assert_eq!(carried.and_then(|o| o.mode).as_deref(), Some("full"));
+    }
+
+    /// A seed `[policy]` change clears the override — version control wins when
+    /// it speaks.
+    ///
+    /// **The security half.** Without it, an operator tightening `[policy]` in
+    /// `company.toml` and redeploying would find a looser console override
+    /// silently still in force: a runtime write outliving a seed rollback, which
+    /// is the named harm that makes `[tools]` / `[policy]` seed-authoritative in
+    /// the first place. An approval gate is precisely what that rule was written
+    /// about.
+    #[test]
+    fn a_changed_seed_policy_clears_the_override() {
+        let before = seed_policy("full", &["payment.send"], None);
+        let tightened = seed_policy("supervised", &["payment.send"], None);
+        assert!(
+            carry_policy_override(&before, &tightened, Some(&held_override("full"))).is_none(),
+            "a tightened seed must clear a looser console override"
+        );
+
+        // Loosening the seed clears it too. The rule is "the seed spoke", not
+        // "the seed got stricter" — an operator who edits `[policy]` at all has
+        // turned their attention to the gate, and guessing which of their edits
+        // was meant to lose to the console is a guess that can pick wrong
+        // silently.
+        let loosened = seed_policy("full", &["payment.send"], None);
+        assert!(
+            carry_policy_override(&tightened, &loosened, Some(&held_override("readonly")))
+                .is_none()
+        );
+    }
+
+    /// Any field of `[policy]` counts as the seed speaking, not just `mode`.
+    ///
+    /// `always_approve` is the operator's real lever — it wins over every tier
+    /// including `full` — so an edit to it that left a console override standing
+    /// would be the same hole through a different field.
+    #[test]
+    fn every_policy_field_counts_as_the_seed_speaking() {
+        let base = seed_policy("supervised", &["payment.send"], None);
+
+        let list_changed = seed_policy("supervised", &["payment.send", "filing.submit"], None);
+        assert!(
+            carry_policy_override(&base, &list_changed, Some(&held_override("full"))).is_none()
+        );
+
+        let threshold_changed = seed_policy("supervised", &["payment.send"], Some(1.0));
+        assert!(
+            carry_policy_override(&base, &threshold_changed, Some(&held_override("full")))
+                .is_none()
+        );
+    }
+
+    /// With no override held there is nothing to carry, whatever the seed did.
+    #[test]
+    fn no_override_carries_nothing() {
+        let before = seed_policy("supervised", &[], None);
+        let after = seed_policy("full", &[], None);
+        assert!(carry_policy_override(&before, &before.clone(), None).is_none());
+        assert!(carry_policy_override(&before, &after, None).is_none());
     }
 
     /// A bodiless overlay stub — `merge_enabled_workflows` only reads the id.
@@ -3416,6 +4857,13 @@ mod test {
         assert_eq!(runtime.channels.len(), 2);
         assert!(runtime.channels.iter().any(|c| c.channel_id() == "email"));
 
+        // The #813 accessor the console's channel picker reads names BOTH: the
+        // always-wired `operator` and the openhuman-backed provider channel, so
+        // a workflow author can target either.
+        let wired = runtime.wired_channel_ids();
+        assert!(wired.contains(&"operator".to_string()));
+        assert!(wired.contains(&"email".to_string()));
+
         // A granted call routes through the OpenHuman transport.
         let result = runtime
             .tools
@@ -3445,6 +4893,9 @@ mod test {
         // No openhuman channel is added when the daemon is unreachable.
         assert_eq!(runtime.channels.len(), 1);
         assert_eq!(runtime.channels[0].channel_id(), "operator");
+        // The #813 accessor the console's channel picker reads: `operator` is
+        // always wired, so a workflow always has at least one real target.
+        assert_eq!(runtime.wired_channel_ids(), vec!["operator".to_string()]);
 
         // Tools degrade to the grant-enforcing built-in: ungranted rejected,
         // granted returns a well-formed not-implemented result — and the RPC
@@ -3479,6 +4930,135 @@ mod test {
         assert!(!granted.ok);
         // Only the boot-time `health()` probe touched the transport.
         assert_eq!(rpc.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn wires_manifest_and_overlay_desks_as_delivery_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            [[group_chat]]
+            id = "engineering"
+            name = "Engineering"
+            members = ["ceo"]
+            "#,
+        );
+        let id = CompanyId::new("acme");
+        FsCompanyStore::new(dir.path())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: vec![crate::ports::types::OverlayDesk {
+                    id: "research".to_string(),
+                    name: "Research".to_string(),
+                    description: None,
+                    members: vec!["ceo".to_string()],
+                }],
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(dir.path(), manifest)
+            .with_id(id)
+            .build()
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = runtime
+            .channels
+            .iter()
+            .map(|channel| channel.channel_id())
+            .collect();
+        assert!(ids.contains(&"engineering"));
+        assert!(ids.contains(&"research"));
+    }
+
+    /// A desk added to `company.toml` since the last boot is wired on this one.
+    ///
+    /// The persisted record carries the manifest of a PREVIOUS boot, so reusing
+    /// it for desk resolution silently wires yesterday's `[[group_chat]]` list:
+    /// a desk the operator has just added would never become a delivery
+    /// destination, and the only symptom would be a workflow refusing a
+    /// destination the manifest plainly declares. The overlay halves still come
+    /// from the persisted record, which the `research` assertion pins.
+    #[tokio::test]
+    async fn a_desk_added_to_the_manifest_since_the_last_boot_is_wired() {
+        use crate::ports::CompanyStore;
+        use crate::store::FsCompanyStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let common = r#"
+            [company]
+            name = "Acme"
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            [[group_chat]]
+            id = "engineering"
+            name = "Engineering"
+            members = ["ceo"]
+        "#;
+        let persisted = parse(common);
+        let booting = parse(&format!(
+            "{common}\n[[group_chat]]\nid = \"growth\"\nname = \"Growth\"\nmembers = [\"ceo\"]\n"
+        ));
+        let id = CompanyId::new("acme");
+        FsCompanyStore::new(dir.path())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: persisted,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: vec![crate::ports::types::OverlayDesk {
+                    id: "research".to_string(),
+                    name: "Research".to_string(),
+                    description: None,
+                    members: vec!["ceo".to_string()],
+                }],
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+
+        let runtime = RuntimeBuilder::new(dir.path(), booting)
+            .with_id(id)
+            .build()
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = runtime
+            .channels
+            .iter()
+            .map(|channel| channel.channel_id())
+            .collect();
+        assert!(ids.contains(&"growth"), "{ids:?}");
+        assert!(ids.contains(&"engineering"), "{ids:?}");
+        assert!(ids.contains(&"research"), "{ids:?}");
     }
 
     #[cfg(feature = "tinyplace")]
@@ -3687,6 +5267,265 @@ mod test {
         format!("http://{addr}")
     }
 
+    /// Issue #707: a desk reorder reaches a **resident** runtime, with no
+    /// rebuild and no restart.
+    ///
+    /// This is the assertion that was missing. The neighbouring #133 test is
+    /// named `..._after_rebuild` and rebuilds the brain before asserting, so it
+    /// only ever proved the builder *seeds* the order — nobody had asked what a
+    /// live company does when the operator saves one. The answer was: keep
+    /// routing to the old lead until the process restarted, because
+    /// `HarnessBrain.record` was a build-time snapshot and the only caller of
+    /// `rebuild_company` is an inference-settings change.
+    ///
+    /// So the write here goes through the store exactly as
+    /// `set_desk_order` (`src/server/operator.rs`) does — load, mutate, save —
+    /// and then the SAME runtime object runs a second turn. No rebuild happens
+    /// anywhere in this test, which is the whole point of it.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_desk_reorder_reaches_a_resident_runtime_without_a_rebuild() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::{CompanyEvent, OverlayDeskOrder};
+        use crate::store::{FsCompanyStore, FsContextStore};
+
+        let home_dir = tmp_home("oc-707-order-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("order-co");
+
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Order Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[agent]]
+            id = "eng2"
+            role = "Engineer Two"
+
+            [[group_chat]]
+            id = "eng"
+            name = "Engineering"
+            members = ["eng1", "eng2"]
+            "#,
+        );
+
+        // The blueprint lead is `eng1`; no operator order yet.
+        let store = FsCompanyStore::new(home.clone());
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+
+        let stub = spawn_stub("desk lead reply").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    credential: crate::company::Credential::from_value("k"),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let desk_turn = |text: &'static str| CompanyEvent::OperatorMessage {
+            parent: None,
+            text: text.to_string(),
+            by: None,
+            chat: Some("eng".to_string()),
+            deliverable: None,
+        };
+
+        // Baseline: the blueprint lead answers. Asserted rather than assumed, so
+        // a later failure cannot be explained away as "the desk never routed".
+        runtime
+            .run_cycle(vec![desk_turn("who leads?")])
+            .await
+            .expect("first cycle");
+        let context: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(home.clone()));
+        let labels = |outcomes: Vec<crate::ports::types::ChunkMeta>| -> Vec<String> {
+            outcomes.into_iter().map(|m| m.label).collect()
+        };
+        let before = labels(context.list(&id, "task-outcome/").await.unwrap());
+        assert!(
+            before.contains(&"task-outcome/eng1".to_string()),
+            "the blueprint lead must answer before the reorder; saw {before:?}"
+        );
+
+        // The console write: load, mutate, save. Nothing rebuilds.
+        let mut record = store.load(&id).await.unwrap().expect("record");
+        record.overlay_desk_order.push(OverlayDeskOrder {
+            desk_id: "eng".to_string(),
+            ordered: vec!["eng2".to_string(), "eng1".to_string()],
+        });
+        store.save(&record).await.unwrap();
+
+        // The same runtime, a second turn.
+        runtime
+            .run_cycle(vec![desk_turn("who leads now?")])
+            .await
+            .expect("second cycle");
+        let after = labels(context.list(&id, "task-outcome/").await.unwrap());
+        assert!(
+            after.contains(&"task-outcome/eng2".to_string()),
+            "the reordered lead eng2 never answered — the resident brain routed on a stale \
+             record; saw {after:?}"
+        );
+    }
+
+    /// Issue #707, the same defect through `overlay_desks` + `overlay_desk_members`:
+    /// a desk the operator creates on a **resident** runtime is reachable.
+    ///
+    /// Sharper than staleness alone, because it pins a divergence: the store
+    /// resolves the new desk's lead while the runtime routes as though the desk
+    /// does not exist. Both are asserted, at the same instant.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_new_overlay_desk_is_reachable_on_a_resident_runtime() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::{CompanyEvent, OverlayDesk, OverlayDeskMember};
+        use crate::store::{FsCompanyStore, FsContextStore};
+
+        let home_dir = tmp_home("oc-707-desk-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("desk-co");
+
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Desk Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[agent]]
+            id = "eng2"
+            role = "Engineer Two"
+            "#,
+        );
+
+        let store = FsCompanyStore::new(home.clone());
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+                setup: None,
+            })
+            .await
+            .unwrap();
+
+        let stub = spawn_stub("desk reply").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    credential: crate::company::Credential::from_value("k"),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // The console creates a desk and puts `eng2` on it.
+        let mut record = store.load(&id).await.unwrap().expect("record");
+        // Deliberately EMPTY: the `OverlayDeskMember` row below is the only
+        // membership source, so this test cannot pass by way of a desk's own
+        // founding members. Without that, it would still be green if
+        // `effective_desk_members` ignored `overlay_desk_members` outright —
+        // which is half of what it is here to prove.
+        record.overlay_desks.push(OverlayDesk {
+            id: "design".to_string(),
+            name: "Design".to_string(),
+            description: None,
+            members: Vec::new(),
+        });
+        record.overlay_desk_members.push(OverlayDeskMember {
+            desk_id: "design".to_string(),
+            agent_id: "eng2".to_string(),
+        });
+        store.save(&record).await.unwrap();
+
+        // What every already-correct consumer sees at this instant.
+        let fresh = store.load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            crate::runtime::delegation_tools::desk_lead(&fresh, "design"),
+            Some("eng2".to_string()),
+            "the stored record must resolve the new desk, or this test proves nothing"
+        );
+
+        runtime
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                parent: None,
+                text: "hello design".to_string(),
+                by: None,
+                chat: Some("design".to_string()),
+                deliverable: None,
+            }])
+            .await
+            .expect("cycle");
+
+        let context: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(home.clone()));
+        let routed: Vec<String> = context
+            .list(&id, "task-outcome/")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.label)
+            .collect();
+        assert!(
+            routed.contains(&"task-outcome/eng2".to_string()),
+            "a desk chat must reach the desk's member; the runtime routed as though the desk \
+             did not exist; saw {routed:?}"
+        );
+    }
+
     /// Builder-level regression for the `overlay_desk_order` seeding path (#133).
     /// The harness test `desk_order_change_updates_routing_after_rebuild` exercises
     /// `brain_over(record)` directly; this one drives the real
@@ -3748,6 +5587,8 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
                 setup: None,
@@ -3781,6 +5622,7 @@ mod test {
                 text: "who leads?".to_string(),
                 by: None,
                 chat: Some("eng".to_string()),
+                deliverable: None,
             }])
             .await
             .expect("cycle");

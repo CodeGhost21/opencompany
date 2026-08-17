@@ -46,7 +46,7 @@ why this is not a read/write split: [authority.md](authority.md).
 | `tasks` | `POST …/tasks`, `GET …/tasks`, `GET …/tasks/{id}` (the Task Detail read, #185), `PATCH`/`DELETE …/tasks/{id}`, `GET …/tasks/inflight`, `POST …/tasks/{id}/steer` (#111), `POST …/tasks/{id}/discussion` (#335), `DELETE …/tasks/{id}/discussion/{seq}` (#358) |
 | `task_export` | `GET …/tasks/{id}/export` (the task's record as a document, #352) |
 | `memory` | `POST …/memory`, `DELETE …/memory/{id}` (journals `MemoryFactDeleted`) |
-| `workspace` | `GET …/workspace`, `GET …/workspace/file/{id}`, `POST …/workspace`, `PUT …/workspace/file/{id}`, `PATCH`/`DELETE …/workspace/{id}` (the two `GET`s are REST twins of the GraphQL reads — the console has no GraphQL client, #177). Node bodies carry `createdBy`/`updatedBy` (#326) |
+| `workspace` | `GET …/workspace`, `GET …/workspace/file/{id}`, `GET …/workspace/search?q=…` (#607), `POST …/workspace`, `PUT …/workspace/file/{id}`, `PATCH`/`DELETE …/workspace/{id}`, `POST …/workspace/sweep-empty-agent-folders?dry_run=` (#700, removes only folders with no children counted structurally), `POST …/workspace/merge-duplicate-folders?dry_run=` (#759, folds duplicate sibling folders into the oldest twin and reports the file collisions it refuses to decide) (the `GET`s are REST twins of the GraphQL reads — the console has no GraphQL client, #177). Node bodies carry `createdBy`/`updatedBy` (#326) |
 | `skills` | `POST …/skills`, `GET …/skills/registry`, `POST …/skills/{slug}/install\|uninstall`, `PUT …/skills/{slug}` |
 | `team` | `POST …/team`, `DELETE …/team/{id}`, `PUT …/team/{id}/inbox` (overlay; roster-only in v1) |
 | `mail` | `POST …/inboxes/{key}/read` |
@@ -282,57 +282,12 @@ The pause switch, what it does **not** stop, why it lives in
 `disabled_workflows` rather than the manifest, and the create/edit disarm rule
 have their own focused page: [pausing-workflows.md](pausing-workflows.md).
 
-### Connections: hosted versus the self-hosted hatch
+### Connections: hosted versus the self-hosted hatch (issues #396, #404, #582, #822)
 
-`ops::connections` (feature `oauth`) runs OAuth with **this host's own provider
-application** — a client id/secret an operator registered themselves and handed
-to the process as `OPENCOMPANY_OAUTH_<PROVIDER>_ID` / `_SECRET`. That is the
-only way a standalone checkout can complete a handshake, and it is supported for
-exactly that reason. It is a hatch, not a deployment mode — the same framing
-`ops::composio` uses for its BYO token. A hosted tenant is injected no
-`OPENCOMPANY_OAUTH_*` variable at all, so on that host `provider_config`
-resolves nothing and a local Connect can only fail.
-
-The read plane says which it is. `ops::connections_read::connect_route` answers
-one question per provider — *can a Connect click possibly succeed here, and by
-which route?* — as a `credentialSource` tier, stored-wins:
-
-| Tier | When | Console |
-| --- | --- | --- |
-| `static` | a token is already stored for this provider (BYO override), **or** this host registered its own provider app *and* has a state signing secret (the hatch) | Connect button, as today |
-| `attested` | no stored token, and the pod carries a platform-**projected** identity (`TINYHUMANS_TOKEN_FILE` naming a file that exists) | "Managed by the platform", no local Connect |
-| `none` | neither | read-only "not available on this host" |
-
-**The hatch also needs `OPENCOMPANY_OAUTH_STATE_SECRET`** (issue #318). The
-`state` nonce binds an in-flight authorization to one company, provider and
-expiry, and the callback verifies it before exchanging the code — it is the
-flow's CSRF defence. That signing key used to fall back to a literal baked into
-this repository, which made the value public, identical across every
-unconfigured deployment, and constructible rather than obtainable: verifying it
-proved only that it was well-formed. There is now **no default**. A host with a
-registered provider application but no secret reports `none` rather than
-offering a button whose check is void, `start` refuses with a message naming the
-variable, and the process logs the misconfiguration once — a tile has no room to
-name a variable, and an operator reads logs. Whitespace-only counts as unset, so
-an empty shell expansion gets the closed door rather than a secret of `" "`.
-
-`attested` deliberately requires the projected-file tier, not
-`TinyhumansTokenSource::from_env` as a whole: that resolver also accepts a
-long-lived `TINYHUMANS_API_KEY`, which a self-hoster commonly sets to buy
-inference. Accepting it here would tell such an operator their working Connect
-button is platform-managed and take it away. Both the REST route and the GraphQL
-`Company.connections` resolver project the field through the same
-`connect_route_from_env`, so the two read shapes cannot drift.
-
-**Provider mapping to the platform backend.** Its registered OAuth providers are
-`notion`, `google`, `gmail`, `github`, `twitter`, `discord` and `instagram`. Two
-consequences for the console catalog: `gmail` is a registered provider *name* but
-not a separate provider application — it is Google's app requested with the Gmail
-skill scopes, so a Gmail connect and a Google connect share one grant (which is
-why the backend merges scopes incrementally rather than replacing them). And
-there is **no Slack provider** at all (the backend's only Slack credential is an
-internal alerting bot), so Slack has no hosted route except Composio, which runs
-its own OAuth.
+The self-hosted OAuth hatch and why the console stopped offering it, the
+`credentialSource` tiers, the single connection status behind the console's one
+provider grid, and the two non-interchangeable disconnect routes have their own
+focused page: [connections.md](connections.md).
 
 ## tiny.place A2A inbound + discovery (`tinyplace` feature)
 

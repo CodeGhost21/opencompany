@@ -102,7 +102,7 @@ function Section({
         {hiddenUnread > 0 && (
           <span
             title={UNREAD_IS_LOCAL}
-            className="ml-auto rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-4 text-primary-foreground"
+            className="ml-auto rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
           >
             {hiddenUnread > 99 ? "99+" : hiddenUnread}
           </span>
@@ -167,7 +167,7 @@ function ChannelRow({
           // and a badge that quietly means something narrower than it looks is
           // worse than one that says so.
           title={UNREAD_IS_LOCAL}
-          className="shrink-0 rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-4 text-primary-foreground"
+          className="shrink-0 rounded-full bg-primary px-1.5 text-3xs font-semibold leading-4 text-primary-foreground"
         >
           {unread > 99 ? "99+" : unread}
         </span>
@@ -179,7 +179,7 @@ function ChannelRow({
 function ChannelIcon({ channel }: { channel: Channel }) {
   if (channel.kind === "dm") {
     return channel.member ? (
-      <Avatar name={channel.name} tone={channel.tone} className="size-5 text-[9px]" />
+      <Avatar name={channel.name} tone={channel.tone} className="size-5 text-3xs" />
     ) : (
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );

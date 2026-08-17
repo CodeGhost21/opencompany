@@ -59,6 +59,36 @@ export const MOCK_BRAIN_BIND = process.env.PW_MOCK_BRAIN_BIND || "127.0.0.1:8099
 export const MCP_FIXTURE_BIND = process.env.PW_MCP_FIXTURE_BIND || "127.0.0.1:8098";
 
 /**
+ * A host built with `--features composio`, pointed at
+ * [`composio-backend.mjs`](./composio-backend.mjs) rather than the platform.
+ *
+ * Set `PW_COMPOSIO=1` when both are true. The default-feature binary compiles
+ * none of the live Composio plane — every route on it answers `409 not in this
+ * build` — so a spec about *which connected account an agent acts as* has
+ * nothing to drive there. A declaration rather than a probe, for the same
+ * reason {@link LIVE_BRAIN} is one: the person who chose the feature set is the
+ * only one who knows.
+ */
+export const COMPOSIO = process.env.PW_COMPOSIO === "1";
+
+/** Where `composio-backend.mjs` listens when this run starts it. */
+export const COMPOSIO_FIXTURE_BIND = process.env.PW_COMPOSIO_FIXTURE_BIND || "127.0.0.1:8097";
+
+/**
+ * The fixture's base URL, for a spec that reads back what the host sent it.
+ * Defaulted only when this run started it — against a host you brought, the
+ * backend it dials is yours to name.
+ */
+export const COMPOSIO_FIXTURE_URL =
+  process.env.PW_COMPOSIO_FIXTURE_URL ||
+  (COMPOSIO && MANAGES_HOST ? `http://${COMPOSIO_FIXTURE_BIND}` : undefined);
+
+/** The reason string a `COMPOSIO` skip carries, so no skip is ever bare. */
+export const COMPOSIO_REASON =
+  "needs a --features composio host pointed at test/e2e/composio-backend.mjs; " +
+  "set PW_COMPOSIO=1 to run (issue #820).";
+
+/**
  * The **URL** of an MCP server an agent may be told to call.
  *
  * `PW_MCP_SERVER` was retired in #414, and rightly: it carried a path to a

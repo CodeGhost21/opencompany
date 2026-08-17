@@ -3,7 +3,13 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { LIVE_BRAIN, MCP_FIXTURE_BIND, MOCK_BRAIN_BIND } from "./test/e2e/capabilities";
+import {
+  COMPOSIO,
+  COMPOSIO_FIXTURE_BIND,
+  LIVE_BRAIN,
+  MCP_FIXTURE_BIND,
+  MOCK_BRAIN_BIND,
+} from "./test/e2e/capabilities";
 
 // `package.json` is `"type": "module"`, so this file is ESM and `__dirname`
 // does not exist here — it type-checks against `@types/node` and then throws at
@@ -98,9 +104,30 @@ const inferenceEnv: Record<string, string> = managesFixtures
   ? {
       OPENCOMPANY_INFERENCE_KEY: "mock-brain",
       OPENCOMPANY_INFERENCE_URL: `http://${MOCK_BRAIN_BIND}/v1`,
-      PW_HOST_PASSTHROUGH: "OPENCOMPANY_INFERENCE_KEY OPENCOMPANY_INFERENCE_URL",
     }
   : {};
+
+/** Whether this run also brings up the Composio fixture backend (issue #820). */
+const managesComposio = managesHost && COMPOSIO;
+
+/**
+ * Where the host's Composio calls go, when this run is standing a fixture up.
+ *
+ * The same `PW_HOST_PASSTHROUGH` caveat applies as above and is the reason the
+ * two blocks are joined below rather than each setting the variable: `host.sh`
+ * copies an allowlist into an empty environment, so a second assignment here
+ * would quietly replace the first and the inference URL would never arrive.
+ */
+const composioEnv: Record<string, string> = managesComposio
+  ? { OPENCOMPANY_COMPOSIO_BACKEND_URL: `http://${COMPOSIO_FIXTURE_BIND}` }
+  : {};
+
+const passthrough = [...Object.keys(inferenceEnv), ...Object.keys(composioEnv)];
+const hostEnv: Record<string, string> = {
+  ...inferenceEnv,
+  ...composioEnv,
+  ...(passthrough.length > 0 ? { PW_HOST_PASSTHROUGH: passthrough.join(" ") } : {}),
+};
 
 /**
  * One `webServer` entry per fixture, ahead of the host.
@@ -111,7 +138,20 @@ const inferenceEnv: Record<string, string> = managesFixtures
  * only — the host reads its inference URL at boot but does not dial it until a
  * turn runs, well after every server here is ready.
  */
-const fixtureServers = managesFixtures
+const fixtureServers = [
+  ...(managesComposio
+    ? [
+        {
+          command: `node ./test/e2e/composio-backend.mjs --bind ${COMPOSIO_FIXTURE_BIND}`,
+          url: `http://${COMPOSIO_FIXTURE_BIND}/healthz`,
+          reuseExistingServer: !process.env.CI,
+          timeout: 30_000,
+          stdout: "pipe" as const,
+          stderr: "pipe" as const,
+        },
+      ]
+    : []),
+  ...(managesFixtures
   ? [
       {
         command: `node ./test/e2e/mock-brain.mjs --bind ${MOCK_BRAIN_BIND}`,
@@ -129,8 +169,9 @@ const fixtureServers = managesFixtures
         stdout: "pipe" as const,
         stderr: "pipe" as const,
       },
-    ]
-  : [];
+      ]
+    : []),
+];
 
 export default defineConfig({
   testDir: "./test/e2e",
@@ -163,7 +204,7 @@ export default defineConfig({
           stderr: "pipe" as const,
           env: {
             PW_HOST_BIND: new URL(baseURL).host,
-            ...inferenceEnv,
+            ...hostEnv,
           },
         },
       ]

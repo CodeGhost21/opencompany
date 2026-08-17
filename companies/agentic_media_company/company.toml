@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Media Company harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -24,47 +24,17 @@ human_role = "Editorial standards"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
-[[agent]]
-id = "story_scout"
-role = "Story Scout"
-description = "Find and pitch story ideas."
-
-[[agent]]
-id = "source_verifier"
-role = "Source Verifier"
-description = "Verify sources and fact-check."
-
-[[agent]]
-id = "writer"
-role = "Writer"
-description = "Write and edit articles."
-
-[[agent]]
-id = "illustrator"
-role = "Illustrator"
-description = "Create article illustrations."
-
-[[agent]]
-id = "translator"
-role = "Translator"
-description = "Localize stories across languages."
-
-[[agent]]
-id = "seo_optimizer"
-role = "SEO Optimizer"
-description = "Optimize articles for search."
-
-[[agent]]
-id = "publisher"
-role = "Publisher"
-description = "Publish to the CMS."
-
-[[agent]]
-id = "social_distributor"
-role = "Social Distributor"
-description = "Distribute across social channels."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["newsroom_pipeline"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

@@ -15,33 +15,28 @@
 //!   most once) rather than repeating it.
 //! * **Durable approvals.** Parked effects are journaled and rehydrated on boot,
 //!   so an approval survives a restart with its original [`ApprovalId`].
+//!
+//! Both guarantees are only as durable as what the records are written to, which
+//! is why the sink is a port ([`JournalStore`], issue #726) rather than a file
+//! path. On a hosted mongodb tenant the container's `/data` is ephemeral scratch,
+//! so a journal pinned to the filesystem there lost every committed key and every
+//! parked approval on container replacement. Everything semantic — the record
+//! enum, replay, corrupt-line recovery — lives here and is backend-agnostic; the
+//! store below it only keeps opaque lines in order.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::Result;
-use crate::error::OpenCompanyError;
-use crate::ports::types::{Actor, ApprovalId, Effect};
+use crate::ports::journal::{Durability, JournalStore};
+use crate::ports::types::{Actor, ApprovalId, CompanyId, Effect, EventSeq};
 use crate::runtime::grants::{GrantId, GrantedCall, StandingGrant};
 pub use crate::runtime::types::TaskLink;
-use crate::store::fs::{PathLocks, append_line};
-
-/// Journal append locks, keyed by path, shared by every [`RuntimeJournal`] in
-/// the process (issue #386).
-///
-/// The lock this replaced was a field on `RuntimeJournal`, so two journals over
-/// one file serialised against nothing — which is the state the type has always
-/// been in, and which nothing stopped a caller reaching. A `static` is the only
-/// thing two independently-constructed instances can share.
-///
-/// In-process only, and deliberately so: a second *process* on the same
-/// `OPENCOMPANY_DATA_DIR` is outside any lock's reach. What keeps that case from
-/// tearing is [`append_line`]'s single `O_APPEND` write, not this.
-static JOURNAL_WRITE_LOCKS: LazyLock<PathLocks> = LazyLock::new(PathLocks::default);
+use crate::store::fs::FsJournalStore;
 
 /// One durable journal record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,6 +107,24 @@ enum JournalRecord {
         /// `#[serde(default)]` is what lets a pre-#379 line replay.
         #[serde(default)]
         thread: Option<String>,
+        /// Which **thread within that channel** produced the parking cycle
+        /// (issue #435) — the root the raising message hangs off, as that
+        /// root's own [`EventSeq`].
+        ///
+        /// A separate field rather than a widening of `thread`, because the two
+        /// answer different questions and both are needed: `thread` says which
+        /// channel, this says where inside it. Overloading `thread` would have
+        /// silently changed the meaning of every existing reader of it — see
+        /// [`ApprovalOrigin::parent`] for the whole argument.
+        ///
+        /// `None` for a park raised straight into a channel rather than inside
+        /// a thread, which is also every line written before this field
+        /// existed. Both mean the same thing downstream and correctly so: the
+        /// channel is the answer, which is exactly the pre-#435 behaviour.
+        ///
+        /// `#[serde(default)]` is what lets a pre-#435 line replay.
+        #[serde(default)]
+        parent: Option<EventSeq>,
         /// Which **cycle** parked it (issue #469) — the turn key.
         ///
         /// The three keys above all answer "what is this approval about". This
@@ -237,6 +250,124 @@ enum JournalRecord {
         /// Epoch-millis the expiry was recorded.
         at_millis: u64,
     },
+    /// A cycle began (issue #390).
+    ///
+    /// Written **before the per-company serial lock is taken**, which is the
+    /// whole point of the record — see
+    /// [`open_cycles`](RuntimeJournal::open_cycles) for why after the lock would
+    /// miss the case this exists for.
+    CycleStarted {
+        /// The cycle's id — the same `cycle_id`
+        /// [`ApprovalParked::cycle`](JournalRecord::ApprovalParked) already
+        /// correlates approvals on. No second identifier is introduced, for the
+        /// reason `run_supervisor` gives for reusing `run_id`.
+        cycle_id: String,
+        /// Epoch-millis the cycle started.
+        at_millis: u64,
+        /// A short, stable label for what kicked the cycle off, so an operator
+        /// reading an open bracket can tell a stuck approval continuation from
+        /// a stuck chat turn without joining anything.
+        trigger: String,
+    },
+    /// A cycle ended, for any reason (issue #390).
+    CycleFinished {
+        /// The cycle this closes.
+        cycle_id: String,
+        /// Epoch-millis the cycle ended.
+        at_millis: u64,
+        /// `None` when the cycle completed; the failure otherwise.
+        ///
+        /// A cycle that returned `Err` and one the host never finished are both
+        /// failures an operator may need to retry, but they are different facts
+        /// and the read side must not merge them — a boot sweep writes
+        /// [`INTERRUPTED_BY_HOST_RESTART`] here, and a real failure writes what
+        /// actually went wrong.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+impl JournalRecord {
+    /// Which failure this record must survive.
+    ///
+    /// Host durability is bought for exactly the records whose loss would make
+    /// the runtime **repeat an external action**, and for nothing else. The
+    /// frequency asymmetry is the whole argument, and it runs the helpful way:
+    /// the dangerous records are rare and the frequent records are harmless.
+    /// [`EffectExecuted`](Self::EffectExecuted) is written at human-approval
+    /// scale, immediately in front of a network call that costs 100ms-2s, so a
+    /// flush ahead of it is invisible; [`CycleStarted`](Self::CycleStarted) is
+    /// written on the front edge of *every* cycle, before the per-company serial
+    /// lock, and losing it costs an observability bracket. A blanket flush would
+    /// tax the hottest cosmetic record in the journal to protect the rarest
+    /// dangerous one.
+    ///
+    /// The match is **wildcard-free on purpose, and must stay that way**: a new
+    /// record kind is a compile error until its author has decided which failure
+    /// it must survive. That decision — not the two flushes — is what #392
+    /// delivers. Same reasoning as [`TaskLink`] being an enum rather than a bare
+    /// `Option`: the type refuses to let a decision be skipped by default.
+    fn durability(&self) -> Durability {
+        match self {
+            // Written *before* the side effect runs (`execute_effect_once`), so
+            // losing it makes the next boot re-fire the effect mechanically —
+            // the single duplication this journal exists to prevent.
+            Self::EffectExecuted { .. } => Durability::Host,
+            // Losing it silently un-revokes: the grant replays live on the next
+            // boot and keeps admitting calls until its own deadline, undoing an
+            // operator's withdrawal of authority. An operator action, so rare
+            // enough that the flush costs nothing measurable.
+            Self::StandingGrantRevoked { .. } => Durability::Host,
+            // Losing it re-arms a grant whose tool already ran. Replay keeps the
+            // `ApprovalGranted` that minted it and drops the redemption, so the
+            // grant returns to the live set and `GrantSet::consume` will admit
+            // the identical call again — no card, no operator, until the grant's
+            // own TTL. That is a repeated external action under an authority the
+            // operator spent once, which is the criterion above.
+            //
+            // The flush does not close the window on its own, and is not claimed
+            // to: redemption happens inside a sync `ToolPolicy::check` with no
+            // journal handle, so the id is buffered and written at cycle end
+            // (`CompanyCycle::run`), and a crash inside *that* gap loses the
+            // record before any append is reached. Flushing removes the part
+            // this file controls — the record that was written but only
+            // page-cached. Narrowing a duplication window is worth one flush on
+            // a record written at operator-decision scale; the batching is the
+            // remaining half and is not this issue's to close.
+            Self::GrantConsumed { .. } => Durability::Host,
+            // Losing a park loses the *question*: the approval vanishes and the
+            // agent parks it again on its next attempt. Nothing external fired.
+            Self::ApprovalParked { .. } => Durability::Process,
+            // Bookkeeping after the decision. A ghost approval that is approved
+            // a second time cannot duplicate the effect, because the effect's
+            // own commit is host-durable and `is_executed` skips it.
+            Self::ApprovalResolved { .. } => Durability::Process,
+            // Recomputed: the parked record carries the deadline, so replay
+            // re-expires it.
+            Self::ApprovalExpired { .. } => Durability::Process,
+            // Audit-only. The queue removal rides on the paired
+            // `ApprovalResolved`, and the original effect stays recoverable from
+            // the earlier `ApprovalParked`.
+            Self::ApprovalAmended { .. } => Durability::Process,
+            // Written *before* the grant goes live, so losing it forgets a YES:
+            // the agent is blocked again and the operator is re-asked. The safe
+            // direction — the cost of the loss is an extra question, never an
+            // extra call.
+            Self::ApprovalGranted { .. } => Durability::Process,
+            // The same direction as `ApprovalGranted`, one scope wider.
+            Self::StandingGrantMinted { .. } => Durability::Process,
+            // Deadline arithmetic rather than state: `replayed_standing_grants`
+            // takes `now_millis` and re-expires anything past its deadline on
+            // the next boot regardless of whether the record survived.
+            Self::GrantExpired { .. } => Durability::Process,
+            Self::StandingGrantExpired { .. } => Durability::Process,
+            // Observability brackets, and the highest-volume records here.
+            // Losing either half reads as an interrupted cycle — which, after a
+            // host crash, it was.
+            Self::CycleStarted { .. } => Durability::Process,
+            Self::CycleFinished { .. } => Durability::Process,
+        }
+    }
 }
 
 /// A parked approval awaiting resolution.
@@ -259,6 +390,25 @@ pub struct PendingApproval {
     /// whose triggers were ambiguous). Both are the same fact downstream: no
     /// channel owns this approval, so it is shown on the Approvals page only.
     pub thread: Option<String>,
+    /// The turn that parked it (issue #469), carried out to the read side by
+    /// issue #842 so the console can ask about a turn's gated calls **once**.
+    ///
+    /// Not a new fact and deliberately not a new record: `ApprovalParked`
+    /// already journals the parking cycle, because #469 needed to know which
+    /// approvals one turn is blocked on in order to continue it exactly once.
+    /// #842 is the same grouping seen from the operator's side — a turn that
+    /// reached three sites parked three calls, and being asked three times is
+    /// the same fact told badly. Projecting the key it already had is the whole
+    /// of the mechanism; each park stays its own record, its own decision and
+    /// its own host-scoped grant.
+    ///
+    /// `None` for a pre-#469 journal line and for every park raised outside a
+    /// cycle (a workflow node, a scheduler tick): `park_and_journal` in
+    /// `workflows::delivery` passes no turn key, because a run holds no
+    /// continuation for one to belong to. Both read downstream as "belongs to
+    /// no batch", which renders exactly as it did before this field existed:
+    /// one card, decided on its own.
+    pub batch: Option<String>,
 }
 
 /// What an approval *was*, retained for the whole life of the journal — after
@@ -314,6 +464,48 @@ pub struct ApprovalOrigin {
     /// still recoverable — which is what lets a follow-up cycle's own re-park
     /// stay in the channel the first sign-off was asked in.
     pub thread: Option<String>,
+    /// The **thread within** that conversation the parking cycle answered
+    /// (issue #435): the root message the raising message hangs off, as that
+    /// root's own [`EventSeq`].
+    ///
+    /// Strictly finer-grained than [`thread`](Self::thread), never a substitute
+    /// for it. `thread` names the channel a continuation is delivered to; this
+    /// names where inside that channel it is threaded. A continuation needs
+    /// both, and a `parent` without a `thread` is meaningless — a sequence
+    /// number with no channel to resolve it against.
+    ///
+    /// **Why not widen `thread`.** `thread` is misleadingly named: it has
+    /// always held a *channel* id (a desk id, or a roster agent id for a DM),
+    /// and every reader of it — the approvals feed's channel filter, the
+    /// continuation's `chat_id`, the grant's routing — depends on that. Making
+    /// it mean "thread" would have changed all of them at once, silently, and
+    /// the compiler could not have caught a single one because the type is
+    /// unchanged. A new field makes the addition additive by construction: the
+    /// no-thread path is not merely preserved, it is untouched.
+    ///
+    /// **The root, not the raising message.** The console folds a transcript
+    /// one level deep — a reply whose parent is itself a reply renders nowhere
+    /// (`buildTimeline` in `frontend/src/views/chat/model.ts`, pinned by the
+    /// timeline unit test "renders a grandchild nowhere: the fold is exactly
+    /// one level deep" in `frontend/test/unit/chat-timeline.test.ts`). That
+    /// test exists for this decision: without it, growing a second fold level
+    /// in the console would make the choice below unnecessary and nothing would
+    /// say so — the routing would survive as an unexplained convention.
+    ///
+    /// So a continuation parented to the raising *message* would vanish
+    /// precisely when that message is itself a thread reply, which is the case
+    /// this issue exists to fix. Parenting to the root is also what the chat
+    /// route already does for an ordinary answer — "the answer joins the thread
+    /// its question was asked in, rather than opening one under the question"
+    /// (issue #364, `crate::server::operator`) — so this is that established
+    /// rule applied to the continuation, not a second convention. It is stable
+    /// under an edit of the raising message for the same reason.
+    ///
+    /// `None` for a park with no thread behind it — a message posted straight
+    /// into a channel, a workflow delivery, a scheduler tick — and for every
+    /// line written before this field existed. All of them mean "the channel is
+    /// the answer", which is the pre-#435 behaviour, unchanged.
+    pub parent: Option<EventSeq>,
     /// The **turn** that parked it: the id of the parking cycle (issue #469).
     ///
     /// The key that groups the several approvals one turn can raise, so the
@@ -321,6 +513,26 @@ pub struct ApprovalOrigin {
     /// once per decision. `None` for a pre-#469 journal line, which continues
     /// on its own exactly as it used to.
     pub cycle: Option<String>,
+}
+
+/// Where an approval was raised: the channel, and the thread inside it
+/// (issue #435).
+///
+/// The pair a continuation needs in order to land back where it was asked for.
+/// Returned as one value by
+/// [`approval_conversation`](Journal::approval_conversation) so the two can
+/// never be read from different approvals; see that method for why.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ApprovalConversation {
+    /// The channel — see [`ApprovalOrigin::thread`], whose name this mirrors
+    /// and whose channel-not-thread meaning it keeps.
+    pub thread: Option<String>,
+    /// The thread root within that channel — see [`ApprovalOrigin::parent`].
+    ///
+    /// Only meaningful alongside `thread`. A `parent` with no `thread` cannot
+    /// arise from a park — both are stamped from one cycle, and a cycle with no
+    /// channel has no thread either — and would not be resolvable if it did.
+    pub parent: Option<EventSeq>,
 }
 
 /// One approval currently waiting in the in-memory queue.
@@ -390,7 +602,13 @@ pub struct ExecutedEffect {
 /// (short), and the parse error names the column without quoting it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CorruptLine {
-    /// The line's 1-based number in the journal file.
+    /// The record's 1-based position in what the [`JournalStore`] read back.
+    ///
+    /// For the filesystem backend that is the line's number in `journal.jsonl`,
+    /// unchanged — the fs store returns every `\n`-separated segment, blanks
+    /// included, so a blank line does not shift the count. For a database
+    /// backend there is no file to open, and the number locates the record in
+    /// append order.
     pub line: usize,
     /// The line's length in bytes.
     pub bytes: usize,
@@ -398,10 +616,43 @@ pub struct CorruptLine {
     pub message: String,
 }
 
+/// A cycle that journaled a start and no finish (issue #390).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenCycle {
+    /// The cycle's id.
+    pub cycle_id: String,
+    /// Epoch-millis it started.
+    pub at_millis: u64,
+    /// What kicked it off — see [`JournalRecord::CycleStarted::trigger`].
+    pub trigger: String,
+}
+
+/// The error stamped on a cycle the host never got to finish (issue #390).
+///
+/// Phrased as a host fact rather than an agent fault, exactly as
+/// [`INTERRUPTED_BY_RESTART`](crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART)
+/// is for a workflow run: nothing about the turn went wrong, the process holding
+/// it went away. An operator reading this should retry the approval, not go
+/// looking at their agent.
+pub const INTERRUPTED_BY_HOST_RESTART: &str = concat!(
+    "this cycle was interrupted by a host restart and never finished; ",
+    "if it was an approval's follow-up, re-approving is a safe no-op that ",
+    "mints no second grant"
+);
+
 /// In-memory state rebuilt from (and kept in sync with) `journal.jsonl`.
 #[derive(Default)]
 struct State {
     executed: HashSet<String>,
+    /// Cycles that started and have not finished (issue #390).
+    ///
+    /// A start inserts, a finish removes; whatever is left when replay ends
+    /// either is running right now or died with a previous host. Telling those
+    /// two apart is not this map's job — it is the boot sweep's, and the sweep
+    /// is half the requirement rather than a follow-up. Without it every crashed
+    /// cycle reads as in-flight forever, which is worse than the log line this
+    /// replaces because it looks like live work.
+    open_cycles: HashMap<String, OpenCycle>,
     /// Lines the last replay could not read — see [`CorruptLine`].
     corrupt: Vec<CorruptLine>,
     /// Every irreversible effect that ran for a board task, indexed by that
@@ -506,37 +757,67 @@ impl State {
 /// A per-company append-only journal backing at-most-once effects and the
 /// durable approval queue.
 ///
-/// One process should own a given journal file, but [`append`](Self::append) no
-/// longer depends on that for integrity (issue #386). Every record is written
-/// whole — terminator included — in a single `O_APPEND` write that has reached
-/// the kernel before the call returns, so a concurrent writer can land a record
-/// before or after but never inside one. Writers in *this* process additionally
-/// serialise on [`JOURNAL_WRITE_LOCKS`], which keeps records in call order, so a
-/// park cannot be replayed after the resolution that drains it.
+/// One process should own a given company's journal, but [`append`](Self::append)
+/// no longer depends on that for integrity (issue #386). The filesystem store
+/// writes every record whole — terminator included — in a single `O_APPEND`
+/// write that has reached the kernel before the call returns, so a concurrent
+/// writer can land a record before or after but never inside one, and it
+/// serialises writers within the process on a per-path lock. A database backend
+/// gets the same property more cheaply: a row or document insert is atomic, and
+/// its sequence comes from the server, so two live hosts interleave without
+/// collision.
+///
+/// Writers through *one* `RuntimeJournal` additionally serialise on
+/// [`write_lock`](Self::write_lock), which keeps records in call order — so a
+/// park cannot be replayed after the resolution that drains it. That lock is
+/// held across the store call, which is what keeps a backend's sequence
+/// allocation in call order too.
+/// The company id a [`file-pinned`](RuntimeJournal::new) journal reports.
+///
+/// The store behind that constructor addresses one named file and never looks at
+/// the id, so this is what shows up in a log line rather than a key anything
+/// resolves. Named instead of empty so a stray appearance in a trace is
+/// self-explaining.
+const FILE_PINNED_COMPANY: &str = "<file-pinned journal>";
+
 pub struct RuntimeJournal {
-    path: PathBuf,
+    store: Arc<dyn JournalStore>,
+    company: CompanyId,
     state: StdMutex<State>,
-    write_lock: Arc<TokioMutex<()>>,
+    write_lock: TokioMutex<()>,
 }
 
 impl RuntimeJournal {
-    /// Opens (or prepares) the journal at `path` without loading it.
+    /// Opens the journal for `company` over `store`, without loading it.
     ///
     /// Call [`load`](Self::load) to replay an existing journal into memory.
-    ///
-    /// Two journals over one path share an append lock. The key is the
-    /// absolutised path, so a relative and an absolute spelling of one file
-    /// match; a symlinked or `..`-laden spelling still does not, and falls back
-    /// on the atomic write for its safety.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let write_lock =
-            JOURNAL_WRITE_LOCKS.get(&std::path::absolute(&path).unwrap_or_else(|_| path.clone()));
+    pub fn with_store(store: Arc<dyn JournalStore>, company: CompanyId) -> Self {
         Self {
-            path,
+            store,
+            company,
             state: StdMutex::new(State::default()),
-            write_lock,
+            write_lock: TokioMutex::new(()),
         }
+    }
+
+    /// Opens (or prepares) a filesystem journal at `path` without loading it.
+    ///
+    /// The convenience constructor over [`with_store`](Self::with_store) for the
+    /// case where a caller has a file rather than a backend — every test in the
+    /// crate, and nothing in production, which resolves its store from the
+    /// selected backend in `RuntimeBuilder`.
+    ///
+    /// The store is pinned to the named file and ignores the company id, so the
+    /// id here is a label rather than a key. Two journals over one path still
+    /// share an append lock: the key is the absolutised path, so a relative and
+    /// an absolute spelling of one file match; a symlinked or `..`-laden
+    /// spelling still does not, and falls back on the atomic write for its
+    /// safety.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self::with_store(
+            Arc::new(FsJournalStore::at_file(path)),
+            CompanyId::new(FILE_PINNED_COMPANY),
+        )
     }
 
     /// Replays the on-disk journal into memory, reconstructing the executed-key
@@ -558,24 +839,17 @@ impl RuntimeJournal {
     /// about is exactly the recoverable kind, and skipping it is the outcome
     /// worth working to avoid.
     pub async fn load(&self) -> Result<()> {
-        // Read bytes, not a `String`. A torn write can split a multi-byte
-        // codepoint, and `read_to_string` would fail the whole load on that one
-        // bad byte — failing the boot for exactly the damage this function
-        // exists to survive. Decoding per line instead keeps a single mangled
-        // line on the `CorruptLine` path with the rest of the journal intact.
-        let contents = match tokio::fs::read(&self.path).await {
-            Ok(contents) => contents,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(self.io_err(e)),
-        };
+        // The store hands back lines, never bytes, and decodes lossily on the
+        // way: a torn write can split a multi-byte codepoint, and a whole-file
+        // UTF-8 decode would fail the entire load on that one bad byte — failing
+        // the boot for exactly the damage this function exists to survive.
+        // Per-line decoding keeps a single mangled line on the `CorruptLine`
+        // path with the rest of the journal intact.
+        let lines = self.store.read_journal(&self.company).await?;
 
         let mut state = State::default();
-        for (index, raw) in contents.split(|b| *b == b'\n').enumerate() {
-            // Lossy on purpose: invalid bytes become U+FFFD, the line then fails
-            // to parse as JSON, and it lands on the same skip-and-log path as
-            // any other unrecoverable line rather than aborting the replay.
-            let line = String::from_utf8_lossy(raw);
-            let line = line.as_ref();
+        for (index, line) in lines.iter().enumerate() {
+            let line = line.as_str();
             if line.trim().is_empty() {
                 continue;
             }
@@ -588,7 +862,7 @@ impl RuntimeJournal {
                         message,
                     };
                     tracing::error!(
-                        journal = %self.path.display(),
+                        company = %self.company,
                         line = corrupt.line,
                         bytes = corrupt.bytes,
                         error = %corrupt.message,
@@ -600,11 +874,11 @@ impl RuntimeJournal {
             };
             if records.len() > 1 {
                 // Recovered, not lost — so not a `CorruptLine`. Still worth
-                // saying out loud: the file carries damage from a host that
+                // saying out loud: the journal carries damage from a host that
                 // predates the write fix, and a reader looking at it by hand
                 // should know why one line holds several records.
                 tracing::warn!(
-                    journal = %self.path.display(),
+                    company = %self.company,
                     line = index + 1,
                     records = records.len(),
                     "journal line holds several records with no separator; \
@@ -651,6 +925,7 @@ impl RuntimeJournal {
                 at_millis,
                 task,
                 thread,
+                parent,
                 cycle,
             } => {
                 state.retain_approval_effect(&id, &effect);
@@ -662,6 +937,7 @@ impl RuntimeJournal {
                         task: task.clone(),
                         run_id: effect.run_id.clone(),
                         thread: thread.clone(),
+                        parent,
                         cycle: cycle.clone(),
                     },
                 );
@@ -714,7 +990,184 @@ impl RuntimeJournal {
             JournalRecord::StandingGrantExpired { id, .. } => {
                 state.standing_grants.remove(&id);
             }
+            // Issue #390: start inserts, finish removes. A finish for a cycle
+            // this journal never started removes nothing, which is right rather
+            // than a gap — a pre-#390 line has no start to be matched against,
+            // so no such cycle can be sitting in the map.
+            JournalRecord::CycleStarted {
+                cycle_id,
+                at_millis,
+                trigger,
+            } => {
+                state.open_cycles.insert(
+                    cycle_id.clone(),
+                    OpenCycle {
+                        cycle_id,
+                        at_millis,
+                        trigger,
+                    },
+                );
+            }
+            JournalRecord::CycleFinished { cycle_id, .. } => {
+                state.open_cycles.remove(&cycle_id);
+            }
         }
+    }
+
+    /// Opens a cycle's bracket (issue #390).
+    ///
+    /// # Called before the serial lock, deliberately
+    ///
+    /// The issue's body asked for this "as the follow-up cycle takes the serial
+    /// lock". That placement cannot see the failure the issue exists for. The
+    /// per-company serial lock is held for a **whole** cycle, so a continuation
+    /// spawned behind a busy company waits on it for an unbounded time — and
+    /// every way an operator ends up with "I approved, it said `recorded: true`,
+    /// nothing happened" is on the near side of that lock:
+    ///
+    /// * the host dies after `tokio::spawn` but before the task is first polled;
+    /// * the host dies while the task is queued on the lock;
+    /// * the spawned task panics before the cycle body runs.
+    ///
+    /// Bracketing after the lock would report every one of those as though the
+    /// cycle had never been asked for, which is the state of the world today.
+    ///
+    /// # The window this still does not cover
+    ///
+    /// A host that dies between the **durable verdict** and `tokio::spawn`
+    /// writes no start at all, so nothing — not this bracket, not the sweep —
+    /// can see it, and the operator is exactly as blind as before. Closing that
+    /// needs a record written when the verdict is settled (an "owed
+    /// continuation"), which is a different feature from a cycle bracket and is
+    /// deliberately not built here. Named rather than left to be discovered, in
+    /// the register of `run_supervisor`'s two known gaps.
+    ///
+    /// # Ordering
+    ///
+    /// Appends serialise on [`JOURNAL_WRITE_LOCKS`], **not** on the cycle's
+    /// serial lock, so brackets from concurrent cycles interleave in the file.
+    /// That is harmless for [`open_cycles`](Self::open_cycles), which folds by
+    /// id rather than by position — but the journal stops reading as one
+    /// sequential story by hand, and anyone doing that should know why.
+    pub async fn record_cycle_started(&self, cycle_id: &str, trigger: &str) -> Result<()> {
+        let at_millis = crate::ports::now_millis();
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .open_cycles
+            .insert(
+                cycle_id.to_string(),
+                OpenCycle {
+                    cycle_id: cycle_id.to_string(),
+                    at_millis,
+                    trigger: trigger.to_string(),
+                },
+            );
+        self.append(&JournalRecord::CycleStarted {
+            cycle_id: cycle_id.to_string(),
+            at_millis,
+            trigger: trigger.to_string(),
+        })
+        .await
+    }
+
+    /// Closes a cycle's bracket (issue #390). `error` is `None` on success.
+    ///
+    /// A **panicking** cycle task journals nothing here — it unwinds past this
+    /// call — so it reads as open until the next boot sweep settles it. That is
+    /// the same exposure `run_supervisor` documents for a panicking workflow
+    /// run, and the same remedy covers both.
+    pub async fn record_cycle_finished(&self, cycle_id: &str, error: Option<String>) -> Result<()> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .open_cycles
+            .remove(cycle_id);
+        self.append(&JournalRecord::CycleFinished {
+            cycle_id: cycle_id.to_string(),
+            at_millis: crate::ports::now_millis(),
+            error,
+        })
+        .await
+    }
+
+    /// Cycles that started and never finished, oldest first (issue #390).
+    ///
+    /// Only honest because [`sweep_interrupted_cycles`](Self::sweep_interrupted_cycles)
+    /// settles the strays at boot. Without it this would report every cycle any
+    /// dead host ever started as in-flight forever.
+    pub fn open_cycles(&self) -> Vec<OpenCycle> {
+        let mut open: Vec<OpenCycle> = self
+            .state
+            .lock()
+            .expect("journal state poisoned")
+            .open_cycles
+            .values()
+            .cloned()
+            .collect();
+        // Sorted so the surface is deterministic; a `HashMap` order would make
+        // two reads of an unchanged journal disagree for no reason.
+        open.sort_by(|a, b| {
+            a.at_millis
+                .cmp(&b.at_millis)
+                .then(a.cycle_id.cmp(&b.cycle_id))
+        });
+        open
+    }
+
+    /// Settles every cycle left open by a previous host process, returning how
+    /// many were closed (issue #390).
+    ///
+    /// # Why an unterminated start is provably dead at boot
+    ///
+    /// The same argument
+    /// [`sweep_interrupted_runs`](crate::runtime::sweep_interrupted_runs) rests
+    /// on: a cycle journals its start before it does anything, every cycle is
+    /// driven inside this process, and one process owns this journal. So at
+    /// boot, before any entry point can have started a cycle, an unmatched start
+    /// cannot belong to a live one — there are no live ones. No timeout
+    /// heuristic is needed.
+    ///
+    /// # It must NOT run on a rebuild
+    ///
+    /// That argument holds at boot and is false the moment a company has been
+    /// serving. A cycle survives a live runtime swap
+    /// ([`rebuild_company`](crate::runtime::rebuild_company)), so sweeping
+    /// mid-life would stamp "interrupted by a host restart" on a cycle still
+    /// running — and its real finish would then land after the synthetic one,
+    /// leaving two contradictory outcomes for one cycle id. The caller gates on
+    /// the handover being absent; see the call site in the runtime builder.
+    ///
+    /// Best-effort: an append failure is logged and swallowed, because
+    /// record-keeping must never stop a company from booting.
+    pub async fn sweep_interrupted_cycles(&self) -> usize {
+        let open = self.open_cycles();
+        let mut settled = 0;
+        for cycle in open {
+            tracing::info!(
+                company = %self.company,
+                cycle = %cycle.cycle_id,
+                trigger = %cycle.trigger,
+                started_at = cycle.at_millis,
+                "settling a cycle left open by a previous host process"
+            );
+            match self
+                .record_cycle_finished(
+                    &cycle.cycle_id,
+                    Some(INTERRUPTED_BY_HOST_RESTART.to_string()),
+                )
+                .await
+            {
+                Ok(()) => settled += 1,
+                Err(err) => tracing::warn!(
+                    company = %self.company,
+                    cycle = %cycle.cycle_id,
+                    %err,
+                    "could not settle an interrupted cycle; it stays open in the journal"
+                ),
+            }
+        }
+        settled
     }
 
     /// Whether an effect under `key` was already committed.
@@ -732,19 +1185,52 @@ impl RuntimeJournal {
     /// A no-op (returns `Ok`) if the key is already committed — which is also
     /// what keeps the executed-effect list free of duplicates: the second
     /// commit under a key never reaches the append.
+    ///
+    /// **A failed append releases the key again.** The in-memory set is a mirror
+    /// of what the file holds, and holding a key the append refused makes it lie
+    /// in the one direction that is silent: `execute_effect_once` aborts before
+    /// `perform_effect` on the error, so nothing external fired — but a later
+    /// attempt under the same key would then find the key present, take the
+    /// `Ok(())` early return, and skip the effect *reporting success*. The
+    /// effect would never run and no caller would ever hear that. Releasing the
+    /// key makes the retry a real retry.
+    ///
+    /// This does not weaken at-most-once, because the two are on opposite sides
+    /// of the side effect. The guarantee is about a crash *after* a commit that
+    /// succeeded; this is a commit that failed, before which nothing ran. The
+    /// worst case is the uncertain one — the write reached the file and only the
+    /// flush failed — and it still cannot duplicate: the retry appends a second
+    /// line for the key (replay dedupes, `executed` is a set) and runs the
+    /// effect exactly once, and a crash before the retry replays the first line
+    /// and skips the effect entirely. Every path is one execution or none.
+    ///
+    /// Contrast [`record_grant_consumed`](Self::record_grant_consumed), which
+    /// deliberately does *not* roll back: its tool has already run by the time
+    /// the record is written, so keeping the grant spent in memory is the safe
+    /// direction and restoring it would re-arm a grant that was redeemed.
     pub async fn record_executed(&self, key: &str, effect: ExecutedEffect) -> Result<()> {
         {
             let mut state = self.state.lock().expect("journal state poisoned");
             if !state.executed.insert(key.to_string()) {
                 return Ok(());
             }
-            state.index_executed(effect.clone());
         }
-        self.append(&JournalRecord::EffectExecuted {
-            key: key.to_string(),
-            effect: Some(effect),
-        })
-        .await
+        let appended = self
+            .append(&JournalRecord::EffectExecuted {
+                key: key.to_string(),
+                effect: Some(effect.clone()),
+            })
+            .await;
+        let mut state = self.state.lock().expect("journal state poisoned");
+        match appended {
+            // Indexed only once the commit is on the file, so the retry warnings
+            // built from it describe effects the journal actually committed.
+            Ok(()) => state.index_executed(effect),
+            Err(_) => {
+                state.executed.remove(key);
+            }
+        }
+        appended
     }
 
     /// Records a newly parked approval and which board task it belongs to
@@ -765,15 +1251,28 @@ impl RuntimeJournal {
     /// continue a turn once rather than once per approval it raised. `Option`
     /// on the same terms as `thread`: absent means "this host did not record a
     /// turn", which falls back to continuing the approval on its own.
+    ///
+    /// `conversation` carries the channel **and** the thread root inside it as
+    /// one value (issue #435), rather than as two adjacent parameters. Both of
+    /// its fields are `Option` on the terms above, and its `parent` is only ever
+    /// meaningful alongside its `thread` — see [`ApprovalOrigin::parent`]. They
+    /// travel together for the same reason
+    /// [`approval_conversation`](Self::approval_conversation) returns them
+    /// together: two same-shaped `Option`s side by side in a call are trivially
+    /// transposable by a caller and the compiler would not notice, and a park is
+    /// the one place a wrong pairing would be written down durably. The
+    /// `ApprovalConversation` this hands back on the read side is the same type,
+    /// so a continuation round-trips one value instead of re-assembling two.
     pub async fn record_parked(
         &self,
         id: &ApprovalId,
         effect: &Effect,
         at_millis: u64,
         task: TaskLink,
-        thread: Option<String>,
+        conversation: ApprovalConversation,
         cycle: Option<String>,
     ) -> Result<()> {
+        let ApprovalConversation { thread, parent } = conversation;
         {
             let mut state = self.state.lock().expect("journal state poisoned");
             state.origins.insert(
@@ -784,6 +1283,7 @@ impl RuntimeJournal {
                     task: Some(task.clone()),
                     run_id: effect.run_id.clone(),
                     thread: thread.clone(),
+                    parent,
                     cycle: cycle.clone(),
                 },
             );
@@ -805,6 +1305,7 @@ impl RuntimeJournal {
             at_millis,
             task: Some(task),
             thread,
+            parent,
             cycle,
         })
         .await
@@ -1023,12 +1524,33 @@ impl RuntimeJournal {
     /// [`cycle_thread_id`](crate::runtime::cycle) needs so a second sign-off
     /// re-parks in the channel the first one was asked in.
     pub fn approval_thread(&self, id: &ApprovalId) -> Option<Option<String>> {
+        self.approval_conversation(id).map(|c| c.thread)
+    }
+
+    /// Where one approval was raised, channel **and** thread, in a single read
+    /// (issue #435).
+    ///
+    /// One accessor rather than an `approval_thread` plus an `approval_parent`,
+    /// deliberately. The two values are only meaningful together — a parent is
+    /// a sequence number with no channel to resolve it against — and reading
+    /// them separately would take the state lock twice, admitting a torn pair
+    /// that names one approval's channel and another's thread. Nothing today
+    /// mutates an origin after it is inserted, so that tear is currently
+    /// unreachable; this keeps it unreachable by construction rather than by
+    /// coincidence.
+    ///
+    /// `None` is "no such approval". A present [`ApprovalConversation`] may
+    /// still hold `None` in either field, on the terms each documents.
+    pub fn approval_conversation(&self, id: &ApprovalId) -> Option<ApprovalConversation> {
         self.state
             .lock()
             .expect("journal state poisoned")
             .origins
             .get(id)
-            .map(|o| o.thread.clone())
+            .map(|o| ApprovalConversation {
+                thread: o.thread.clone(),
+                parent: o.parent,
+            })
     }
 
     /// Records a minted single-use grant (issue #243).
@@ -1187,6 +1709,13 @@ impl RuntimeJournal {
                 at_millis: parked.at_millis,
                 task: parked.task.clone(),
                 thread: parked.thread.clone(),
+                // Issue #842: the turn key the entry already carries for #469's
+                // continuation counter, read out rather than recomputed. The
+                // two must name the same set — the batch the operator is asked
+                // about in one card is precisely the batch the runtime holds a
+                // single continuation for — and reading one field is how that
+                // stays true without a rule anyone has to remember.
+                batch: parked.cycle.clone(),
             })
             .collect();
         out.sort_by(|a, b| {
@@ -1197,59 +1726,53 @@ impl RuntimeJournal {
         out
     }
 
-    /// Appends one record, whole, and does not return until the write syscall
-    /// has completed.
+    /// Appends one record, whole, and does not return until the sink has made it
+    /// durable to the level the record asked for.
     ///
-    /// **The guarantee is process-crash durability, not host-crash durability.**
-    /// There is no `sync_data`/`sync_all` here, so the bytes are in the kernel's
-    /// page cache rather than on stable storage when this returns: killing the
-    /// process cannot lose them, but a host crash or power loss between the
-    /// append and the flush still can. The at-most-once contract therefore holds
-    /// against a process dying — the case this codebase actually handles, and
-    /// the one the boot reaper and the interrupted-run sweep are built around —
-    /// and not against losing the machine. Whether an `fsync` per append is
-    /// worth its cost on this path is a separate decision (see #392).
+    /// **Durability is per record kind, by decision (issue #392).** Every record
+    /// declares which failure it must outlast through
+    /// [`JournalRecord::durability`], and this is the single choke point that
+    /// passes that decision to the sink:
     ///
-    /// Delegates to [`append_line`](crate::store::fs::append_line), which emits
-    /// the record **and** its newline in a single blocking `write_all` under
-    /// `O_APPEND`. This used to open a `tokio::fs::File` and write the two
-    /// halves separately, then drop the handle without flushing — and tokio's
-    /// async `File` returns from `write_all` once the write is *queued* on a
-    /// blocking task, not once it lands. Measured on this code, 199 of 200
-    /// appends returned with their bytes still in flight. Two consequences, both
-    /// live:
+    /// * The three [`Durability::Host`] kinds — `EffectExecuted`,
+    ///   `GrantConsumed` and `StandingGrantRevoked` — are on stable storage
+    ///   before this returns. So the at-most-once contract holds against
+    ///   **losing the machine** for precisely the records whose loss would
+    ///   repeat an external action, and a failed flush fails the append — which
+    ///   aborts `execute_effect_once` before `perform_effect` and so cannot
+    ///   produce the duplicate it is guarding against.
+    /// * The other ten are [`Durability::Process`]: killing the process cannot
+    ///   lose them, a host crash can. That is the decision, not a gap left open.
+    ///   Losing any of them makes the runtime **re-ask** — an approval is parked
+    ///   again, an operator is prompted again, a cycle bracket reads as
+    ///   interrupted — and never re-fire. Flushing them would tax the journal's
+    ///   highest-volume records to protect against a re-asked question.
     ///
-    /// * The queued newline could be overtaken by the next append's opening
-    ///   brace, putting two records on one physical line — the
-    ///   `serde_json` "trailing characters" failure this issue was filed for.
-    /// * `Ok(())` meant "queued", not "written". A commit that `record_executed`
-    ///   had already reported durable could still be lost to a crash, and an
-    ///   `ENOSPC` on the real write was never reported to anyone. The
-    ///   at-most-once guarantee rests on that record being on disk *before* the
-    ///   side effect runs, so this was the more serious half.
+    /// What each backend does to honour the two levels is its own business and
+    /// is documented on [`append_journal`](JournalStore::append_journal): an
+    /// `O_APPEND` write with (or without) a `sync_data`, a sqlite commit under
+    /// `synchronous=FULL` (or `NORMAL`), a mongodb insert with (or without)
+    /// `j:true`.
     ///
-    /// Identical to the corruption PR #43 removed from `store::fs::append_line`
-    /// and the feedback store's copy of it; the journal was the last twin.
+    /// Issue #726 removed the bound this used to carry. The journal was
+    /// constructed unconditionally on the filesystem, so a hosted tenant whose
+    /// `/data` is ephemeral scratch did not keep its journal across a container
+    /// replacement — let alone a host crash — and gained nothing from the flush.
+    /// The sink now comes from the selected storage backend, so the flush is
+    /// bought on a volume that outlives the container.
+    ///
+    /// The write lock is taken **around the store call**, not merely around the
+    /// serialisation, and that is load-bearing: a backend that allocates a
+    /// sequence number inside the append would otherwise be free to allocate two
+    /// concurrent appends out of call order, and a park replayed after the
+    /// resolution that drains it resurrects a resolved approval.
     async fn append(&self, record: &JournalRecord) -> Result<()> {
         let line = serde_json::to_string(record)?;
+        let durability = record.durability();
         let _guard = self.write_lock.lock().await;
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| self.io_err_at(parent, e))?;
-        }
-        append_line(&self.path, &line).await
-    }
-
-    fn io_err(&self, source: std::io::Error) -> OpenCompanyError {
-        self.io_err_at(&self.path, source)
-    }
-
-    fn io_err_at(&self, path: &Path, source: std::io::Error) -> OpenCompanyError {
-        OpenCompanyError::StoreIo {
-            path: path.to_path_buf(),
-            source,
-        }
+        self.store
+            .append_journal(&self.company, &line, durability)
+            .await
     }
 }
 
@@ -1288,13 +1811,14 @@ fn replay_line(line: &str) -> std::result::Result<Vec<JournalRecord>, String> {
 impl std::fmt::Debug for RuntimeJournal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeJournal")
-            .field("path", &self.path)
+            .field("company", &self.company)
             .finish_non_exhaustive()
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::path::Path;
     use std::sync::Arc;
 
     use super::*;
@@ -1366,6 +1890,89 @@ mod test {
         // The re-commit is also what keeps the description list free of
         // duplicates: one key, one entry, however many times it is committed.
         assert_eq!(reloaded.irreversible_effects("t-1").len(), 1);
+    }
+
+    /// **Issue #726**: a journal over a non-filesystem store replays exactly
+    /// what the same records replay over a file — and survives the loss of the
+    /// bundle directory, which is the whole point.
+    ///
+    /// Every semantic decision (the record enum, replay, the parked queue, the
+    /// grant sets) lives above the store, so this is what proves the split is
+    /// real rather than merely stated: the same call sequence through two
+    /// different sinks must produce identical state, and the sink that is not a
+    /// file must still hold it after `/data` is gone.
+    #[tokio::test]
+    async fn a_journal_over_a_non_filesystem_store_replays_identically() {
+        use crate::ports::journal::MemoryJournalStore;
+
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemoryJournalStore::default());
+
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        // The same call sequence through both sinks: a committed key, a parked
+        // approval, a minted grant, a resolution.
+        let approval = ApprovalId::new("ap-1");
+        for journal in [
+            RuntimeJournal::with_store(store.clone(), company.clone()),
+            RuntimeJournal::new(&path),
+        ] {
+            journal
+                .record_executed("cyc:0", executed(1_000))
+                .await
+                .unwrap();
+            journal
+                .record_parked(
+                    &approval,
+                    &effect(),
+                    2_000,
+                    TaskLink::Task { id: "t-1".into() },
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+            journal.record_granted(&grant("g-1", 3_000)).await.unwrap();
+        }
+
+        // The bundle directory is gone — a container replacement on a tenant
+        // whose `/data` is ephemeral scratch. The file-backed journal loses
+        // everything; the ported one loses nothing.
+        drop(dir);
+
+        let over_store = RuntimeJournal::with_store(store.clone(), company.clone());
+        over_store.load().await.unwrap();
+        let over_file = RuntimeJournal::new(&path);
+        over_file.load().await.unwrap();
+
+        assert!(
+            over_store.is_executed("cyc:0"),
+            "the at-most-once key must survive the loss of the data dir"
+        );
+        assert!(
+            !over_file.is_executed("cyc:0"),
+            "the file-backed journal is exactly what this issue is about: \
+             losing /data un-commits every key"
+        );
+        assert_eq!(
+            over_store.pending().len(),
+            1,
+            "the parked approval must survive too"
+        );
+        assert_eq!(over_store.pending()[0].id, approval, "with its original id");
+        assert_eq!(
+            over_store.replayed_grants().len(),
+            1,
+            "and so must a live grant"
+        );
+        assert!(over_store.corruption().is_empty());
+
+        // Isolation: another company on the same store sees none of it.
+        let other = RuntimeJournal::with_store(store, CompanyId::new("globex"));
+        other.load().await.unwrap();
+        assert!(!other.is_executed("cyc:0"));
+        assert!(other.pending().is_empty());
     }
 
     /// **Issue #351**: the executed record says what ran, for which card, and
@@ -1494,7 +2101,7 @@ mod test {
                 &effect(),
                 1_000,
                 TaskLink::Task { id: "t-1".into() },
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -1558,7 +2165,14 @@ mod test {
         };
 
         journal
-            .record_parked(&id, &parked, 1_000, TaskLink::Unlinked, None, None)
+            .record_parked(
+                &id,
+                &parked,
+                1_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
         journal.record_resolved(&id).await.unwrap();
@@ -1599,7 +2213,7 @@ mod test {
                 },
                 1_000,
                 TaskLink::Unlinked,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -1632,7 +2246,14 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-1");
         journal
-            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None, None)
+            .record_parked(
+                &id,
+                &effect(),
+                now_millis(),
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(journal.pending().len(), 1);
@@ -1674,7 +2295,7 @@ mod test {
                 &effect(),
                 1_000,
                 TaskLink::Task { id: "t-1".into() },
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -1685,14 +2306,21 @@ mod test {
                 &effect(),
                 1_100,
                 TaskLink::Task { id: "t-2".into() },
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
             .unwrap();
         // No card behind it (a workflow delivery, an operator-chat turn).
         journal
-            .record_parked(&orphan, &effect(), 1_200, TaskLink::Unlinked, None, None)
+            .record_parked(
+                &orphan,
+                &effect(),
+                1_200,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1720,6 +2348,7 @@ mod test {
                 task: Some(TaskLink::Task { id: "t-1".into() }),
                 run_id: None,
                 thread: None,
+                parent: None,
                 cycle: None,
             }),
         );
@@ -1773,7 +2402,14 @@ mod test {
         // fact, written explicitly, and must not read back as the legacy shape.
         let fresh = ApprovalId::new("appr-new");
         journal
-            .record_parked(&fresh, &effect(), 5_000, TaskLink::Unlinked, None, None)
+            .record_parked(
+                &fresh,
+                &effect(),
+                5_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -1840,7 +2476,10 @@ mod test {
                 &effect(),
                 5_000,
                 TaskLink::Unlinked,
-                Some("desk-finance".to_string()),
+                ApprovalConversation {
+                    thread: Some("desk-finance".to_string()),
+                    parent: None,
+                },
                 None,
             )
             .await
@@ -1883,6 +2522,105 @@ mod test {
         assert_eq!(reloaded.approval_thread(&legacy_id), Some(None));
     }
 
+    /// Issue #435: the thread root survives a resolution and a reload on
+    /// exactly the terms the channel does, and a line written before the field
+    /// existed replays as "no thread" rather than failing to parse.
+    ///
+    /// The reload half is the one that matters. The continuation is journaled
+    /// *after* the operator decides, so a restart between the two is an
+    /// ordinary case, not an exotic one — and a root that did not survive it
+    /// would silently drop the answer back into the channel.
+    #[tokio::test]
+    async fn a_thread_root_survives_resolution_and_reload_and_a_pre_435_line_replays() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        // A pre-#435 line: stamped with a channel, no `parent` key at all.
+        let legacy = serde_json::json!({
+            "record": "ApprovalParked",
+            "id": "appr-pre435",
+            "effect": effect(),
+            "at_millis": 4_000,
+            "task": { "link": "unlinked" },
+            "thread": "desk-finance",
+        });
+        tokio::fs::write(&path, format!("{legacy}\n"))
+            .await
+            .unwrap();
+        let journal = RuntimeJournal::new(&path);
+        journal.load().await.expect("a pre-#435 line still replays");
+        let legacy_id = ApprovalId::new("appr-pre435");
+        assert_eq!(
+            journal.approval_conversation(&legacy_id),
+            Some(ApprovalConversation {
+                thread: Some("desk-finance".to_string()),
+                parent: None,
+            }),
+            "the channel is untouched and the missing root reads as no thread",
+        );
+
+        // A park raised inside thread 7 of that channel.
+        let threaded = ApprovalId::new("appr-threaded");
+        journal
+            .record_parked(
+                &threaded,
+                &effect(),
+                5_000,
+                TaskLink::Unlinked,
+                ApprovalConversation {
+                    thread: Some("desk-finance".to_string()),
+                    parent: Some(EventSeq::new(7)),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Resolving drains the queue but must not drain the origin: the
+        // continuation reads the root back from here, after the fact.
+        journal.record_resolved(&threaded).await.unwrap();
+        assert!(journal.pending().iter().all(|p| p.id != threaded));
+        assert_eq!(
+            journal.approval_conversation(&threaded),
+            Some(ApprovalConversation {
+                thread: Some("desk-finance".to_string()),
+                parent: Some(EventSeq::new(7)),
+            }),
+        );
+
+        // It is on disk, and it comes back from the raw line.
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        let line = raw
+            .lines()
+            .find(|l| l.contains("appr-threaded"))
+            .expect("the threaded park was appended");
+        assert!(
+            line.contains(r#""parent":7"#),
+            "a thread-rooted park must say so on disk: {line}",
+        );
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert_eq!(
+            reloaded.approval_conversation(&threaded),
+            Some(ApprovalConversation {
+                thread: Some("desk-finance".to_string()),
+                parent: Some(EventSeq::new(7)),
+            }),
+        );
+        assert_eq!(
+            reloaded.approval_conversation(&legacy_id),
+            Some(ApprovalConversation {
+                thread: Some("desk-finance".to_string()),
+                parent: None,
+            }),
+        );
+        // And the #379 accessor still answers the question it always did.
+        assert_eq!(
+            reloaded.approval_thread(&threaded),
+            Some(Some("desk-finance".to_string())),
+        );
+    }
+
     #[tokio::test]
     async fn expired_record_removes_parked_and_survives_reload() {
         let dir = tmp_dir();
@@ -1890,7 +2628,14 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-exp");
         journal
-            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None, None)
+            .record_parked(
+                &id,
+                &effect(),
+                now_millis(),
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(journal.pending().len(), 1);
@@ -1914,7 +2659,14 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-amend");
         journal
-            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked, None, None)
+            .record_parked(
+                &id,
+                &effect(),
+                now_millis(),
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1955,11 +2707,25 @@ mod test {
         let resolved = ApprovalId::new("appr-resolved");
         let expired = ApprovalId::new("appr-expired");
         journal
-            .record_parked(&resolved, &effect(), 1_000, TaskLink::Unlinked, None, None)
+            .record_parked(
+                &resolved,
+                &effect(),
+                1_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
         journal
-            .record_parked(&expired, &effect(), 2_000, TaskLink::Unlinked, None, None)
+            .record_parked(
+                &expired,
+                &effect(),
+                2_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1983,14 +2749,96 @@ mod test {
         assert_eq!(origins.get(&expired).map(|o| o.at_millis), Some(2_000));
     }
 
+    // --- The cycle bracket (issue #390) ----------------------------------
+
+    /// A cycle's bracket survives a restart as an *open* one, which is what the
+    /// boot sweep then settles. Both halves in one test because neither is
+    /// meaningful alone: an open bracket nobody settles is worse than no
+    /// bracket — it reports a dead cycle as live work, forever.
+    #[tokio::test]
+    async fn an_interrupted_cycle_replays_as_open_and_is_swept_at_boot() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .record_cycle_started("cycle-1", "approval-continuation")
+            .await
+            .unwrap();
+        journal
+            .record_cycle_started("cycle-2", "operator-message")
+            .await
+            .unwrap();
+        journal
+            .record_cycle_finished("cycle-2", None)
+            .await
+            .unwrap();
+
+        // A fresh journal over the same file: the host died with `cycle-1` open.
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        let open = reloaded.open_cycles();
+        assert_eq!(open.len(), 1, "only the unfinished one replays as open");
+        assert_eq!(open[0].cycle_id, "cycle-1");
+        assert_eq!(open[0].trigger, "approval-continuation");
+
+        // The sweep settles it, and a second boot finds nothing left to settle —
+        // so a swept cycle cannot be settled twice into two contradictory
+        // outcomes for one id.
+        assert_eq!(reloaded.sweep_interrupted_cycles().await, 1);
+        assert!(reloaded.open_cycles().is_empty());
+
+        let after = RuntimeJournal::new(&path);
+        after.load().await.unwrap();
+        assert!(after.open_cycles().is_empty());
+        assert_eq!(
+            after.sweep_interrupted_cycles().await,
+            0,
+            "a second boot has nothing to settle"
+        );
+    }
+
+    /// A cycle that fails still closes its bracket, carrying the reason — a
+    /// failed cycle is not an open one, and an operator reading the bracket
+    /// needs to tell "it broke" from "it never came back".
+    #[tokio::test]
+    async fn a_failed_cycle_closes_its_bracket_with_the_error() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        journal
+            .record_cycle_started("cycle-1", "approval-continuation")
+            .await
+            .unwrap();
+        assert_eq!(journal.open_cycles().len(), 1);
+        journal
+            .record_cycle_finished("cycle-1", Some("the brain fell over".into()))
+            .await
+            .unwrap();
+        assert!(
+            journal.open_cycles().is_empty(),
+            "a failure closes the bracket; only a host that never came back leaves it open"
+        );
+
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert!(
+            reloaded.open_cycles().is_empty(),
+            "and it stays closed on replay"
+        );
+    }
+
     fn grant(id: &str, at_millis: u64) -> GrantedCall {
         GrantedCall {
             approval_id: ApprovalId::new(id),
             agent: "finance".into(),
             tool: "composio_execute".into(),
-            args: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            args: crate::policy::test_support::composio_send_args(),
             at_millis,
             origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
         }
     }
 
@@ -2021,7 +2869,7 @@ mod test {
         assert_eq!(replayed[0].tool, "composio_execute");
         assert_eq!(
             replayed[0].args,
-            serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            crate::policy::test_support::composio_send_args(),
             "the exact arguments the operator approved survive the restart"
         );
     }
@@ -2089,6 +2937,8 @@ mod test {
             at_millis: 1_000,
             expires_at_millis,
             origin_thread: None,
+            origin_parent: None,
+            origin_task: None,
             scope: None,
         }
     }
@@ -2184,7 +3034,7 @@ mod test {
                 &effect(),
                 500,
                 TaskLink::Unlinked,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2216,7 +3066,14 @@ mod test {
 
         let parked_id = ApprovalId::new("appr-parked");
         journal
-            .record_parked(&parked_id, &effect(), 500, TaskLink::Unlinked, None, None)
+            .record_parked(
+                &parked_id,
+                &effect(),
+                500,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
         journal
@@ -2579,5 +3436,268 @@ mod test {
                 serde_json::to_string(&record).unwrap()
             );
         }
+    }
+
+    /// One value of every [`JournalRecord`] variant (issue #392).
+    ///
+    /// Hand-built, so it carries its own completeness check below — the tag
+    /// count. The *classification* needs no such guard: `durability`'s match is
+    /// wildcard-free, so a new variant cannot compile until somebody decides
+    /// which failure it must survive.
+    fn every_record_kind() -> Vec<JournalRecord> {
+        vec![
+            JournalRecord::EffectExecuted {
+                key: "k".into(),
+                effect: Some(executed(1)),
+            },
+            JournalRecord::ApprovalParked {
+                id: ApprovalId::new("a"),
+                effect: effect(),
+                at_millis: 1,
+                task: Some(TaskLink::Unlinked),
+                thread: None,
+                parent: None,
+                cycle: None,
+            },
+            JournalRecord::ApprovalResolved {
+                id: ApprovalId::new("a"),
+            },
+            JournalRecord::ApprovalExpired {
+                id: ApprovalId::new("a"),
+                at_millis: 2,
+            },
+            JournalRecord::ApprovalAmended {
+                id: ApprovalId::new("a"),
+                amended_effect: effect(),
+                at_millis: 3,
+            },
+            JournalRecord::ApprovalGranted {
+                grant: grant("a", 4),
+            },
+            JournalRecord::GrantConsumed {
+                id: ApprovalId::new("a"),
+                effect: None,
+            },
+            JournalRecord::GrantExpired {
+                id: ApprovalId::new("a"),
+                at_millis: 5,
+            },
+            JournalRecord::StandingGrantMinted {
+                grant: standing("s", "composio_execute", 9),
+            },
+            JournalRecord::StandingGrantRevoked {
+                id: GrantId::new("s"),
+                by: revoker(),
+                at_millis: 6,
+            },
+            JournalRecord::StandingGrantExpired {
+                id: GrantId::new("s"),
+                at_millis: 7,
+            },
+            JournalRecord::CycleStarted {
+                cycle_id: "c".into(),
+                at_millis: 8,
+                trigger: "test".into(),
+            },
+            JournalRecord::CycleFinished {
+                cycle_id: "c".into(),
+                at_millis: 9,
+                error: None,
+            },
+        ]
+    }
+
+    /// The operator who takes a standing grant back.
+    fn revoker() -> Actor {
+        Actor {
+            kind: crate::ports::types::ActorKind::User,
+            id: "user-42".into(),
+        }
+    }
+
+    /// A record's `record` tag — the same name the serialized line carries, so a
+    /// failure names the variant rather than an index.
+    fn record_tag(record: &JournalRecord) -> String {
+        serde_json::to_value(record).unwrap()["record"]
+            .as_str()
+            .expect("every record is tagged")
+            .to_string()
+    }
+
+    /// **Issue #392**: the host-durable set is a policy, and this pins it.
+    ///
+    /// The wildcard-free match in [`JournalRecord::durability`] already makes
+    /// *completeness* a compile error — a new variant will not build until it is
+    /// classified. What no compiler can catch is an existing kind being moved
+    /// across the line: flipping `EffectExecuted` to `Process` compiles, passes
+    /// every other test in this file, and silently gives up the one guarantee
+    /// the journal exists for. This is the test that notices.
+    #[test]
+    fn host_durable_kinds_are_exactly_the_three_that_could_repeat_an_action() {
+        let all = every_record_kind();
+        let tags: HashSet<String> = all.iter().map(record_tag).collect();
+        assert_eq!(
+            tags.len(),
+            13,
+            "every JournalRecord variant must appear once in every_record_kind"
+        );
+
+        let mut host: Vec<String> = all
+            .iter()
+            .filter(|record| record.durability() == Durability::Host)
+            .map(record_tag)
+            .collect();
+        host.sort();
+        assert_eq!(
+            host,
+            vec![
+                "EffectExecuted".to_string(),
+                "GrantConsumed".to_string(),
+                "StandingGrantRevoked".to_string()
+            ],
+            "the host-durable set is these three kinds and nothing else; \
+             widening it taxes the hot path, narrowing it lets an effect duplicate \
+             or a spent grant re-arm"
+        );
+    }
+
+    /// **Issue #392**: a host-durable record's append really does take the
+    /// flushing path, and a process-durable one really does not.
+    ///
+    /// What this proves and what it does not. It proves the **policy** (which
+    /// kinds route where) and the **plumbing** (the flush was requested and its
+    /// syscall returned `Ok` — the append would have failed otherwise), plus
+    /// that the record is readable back afterwards. It does **not** prove the
+    /// bytes reached stable storage, and no portable unit test can: a synced and
+    /// an unsynced line are byte-identical on disk, and `SIGKILL` does not drop
+    /// the page cache, so no process-level test can simulate host loss. Proving
+    /// that needs a crash-consistency harness — dm-log-writes, or a VM whose
+    /// unsynced page cache is dropped — which this repo does not have. The OS
+    /// contract carries the rest.
+    #[tokio::test]
+    async fn host_records_route_through_the_durable_append() {
+        use crate::store::fs::append_probe;
+
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        journal.record_cycle_started("c-1", "test").await.unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 0),
+            "CycleStarted is process-durable and must not flush"
+        );
+
+        journal.record_executed("k-1", executed(1)).await.unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 1),
+            "EffectExecuted must flush before its side effect runs"
+        );
+
+        journal
+            .record_standing_revoked(&GrantId::new("s-1"), revoker(), 6)
+            .await
+            .unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 2),
+            "StandingGrantRevoked must flush"
+        );
+
+        journal
+            .record_grant_consumed(&ApprovalId::new("appr-1"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 3),
+            "GrantConsumed must flush: losing it re-arms a grant whose tool ran"
+        );
+
+        journal.record_cycle_finished("c-1", None).await.unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (2, 3),
+            "CycleFinished is process-durable and must not flush"
+        );
+
+        // The durable path must leave a journal that still replays.
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert!(reloaded.is_executed("k-1"), "the flushed commit replays");
+    }
+
+    /// **Issue #392**: a host-durable record creates its journal's parent chain
+    /// durably too.
+    ///
+    /// The wiring half of `create_dir_all_durable`. A journal's *first* append
+    /// is the one that creates the directories, and it is also the one most
+    /// likely to be an `EffectExecuted` commit. Reaching for the plain
+    /// `create_dir_all` there would flush the record under ancestors that were
+    /// not flushed, and a host crash takes the subtree — and the record with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_host_record_flushes_the_directories_its_journal_creates() {
+        use crate::store::fs::append_probe;
+
+        let dir = tmp_dir();
+        let companies = dir.path().join("companies");
+        let home = companies.join("acme");
+        let journal = RuntimeJournal::new(home.join("journal.jsonl"));
+
+        journal.record_executed("k-1", executed(1)).await.unwrap();
+
+        for (created, holder) in [("companies", dir.path()), ("acme", &companies)] {
+            assert!(
+                append_probe::dir_syncs(holder) > 0,
+                "the directory holding the entry naming `{created}` must be flushed \
+                 before a host-durable record is reported durable"
+            );
+        }
+        assert!(
+            append_probe::dir_syncs(&home) > 0,
+            "the journal file's own directory entry must be flushed"
+        );
+    }
+
+    /// **Issue #392**: a commit whose append fails must release its key, so the
+    /// next attempt under that key is a real retry.
+    ///
+    /// Holding the key would make the failure silent in the worst way. The
+    /// append error aborts `execute_effect_once` before `perform_effect`, so
+    /// nothing external ran; a later attempt would then find the key present,
+    /// take the already-committed early return, and report `Ok` for an effect
+    /// that never happened and never will.
+    ///
+    /// The fault is injected by putting a **directory** where the journal file
+    /// belongs: `append`'s `create_dir_all` on the parent still succeeds, and
+    /// the append's own `open` then fails with `EISDIR`. A real failure of the
+    /// real `append_line_durable`, with no production seam added to stage it.
+    #[tokio::test]
+    async fn a_failed_commit_releases_the_key_for_a_retry() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        tokio::fs::create_dir_all(&path).await.unwrap();
+        let journal = RuntimeJournal::new(&path);
+
+        let first = journal.record_executed("k-1", executed(1)).await;
+        assert!(
+            first.is_err(),
+            "the append cannot land on a path occupied by a directory"
+        );
+        assert!(
+            !journal.is_executed("k-1"),
+            "a key whose commit never reached the file must not be held: \
+             the effect did not run, so the key must not claim it did"
+        );
+
+        let retry = journal.record_executed("k-1", executed(1)).await;
+        assert!(
+            retry.is_err(),
+            "the retry must re-attempt the commit and surface the failure again, \
+             never take the already-committed early return and report success"
+        );
     }
 }

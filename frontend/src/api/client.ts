@@ -7,11 +7,14 @@
 //     and calls use `/api/v1/companies/{id}/*`.
 
 import type { ConsoleConfig } from "../config";
-import { defaultTransport } from "./transport";
+import type { TaskDeliverable } from "./tasks";
+import { defaultTransport, needsCarriedSession } from "./transport";
 import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type ReadMarker,
+  type ReadStateResponse,
   type ApiErrorBody,
   type AppSpec,
   type ApprovalSummary,
@@ -45,10 +48,11 @@ export class OpenCompanyClient {
   readonly baseUrl: string;
   readonly defaultCompany: string | null;
   private readonly token: string | null;
+  private readonly session: string | null;
   private readonly transport: Transport;
 
   constructor(
-    config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken">,
+    config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken" | "sessionHeader">,
     // Injected so a desktop shell can route the same client through its own
     // core, and so tests can drive one without a network. Defaults to the
     // browser's `fetch`/`EventSource`, which is what every web build uses.
@@ -57,7 +61,34 @@ export class OpenCompanyClient {
     this.baseUrl = config.baseUrl;
     this.defaultCompany = config.company;
     this.token = config.operatorToken;
+    this.session = config.sessionHeader ?? null;
     this.transport = transport;
+  }
+
+  /**
+   * The credential headers every request carries, whichever kind this client
+   * holds.
+   *
+   * One method rather than the line repeated at each call site, because a
+   * request path that forgot one would not fail loudly — it would silently
+   * make an *anonymous* request, and the surfaces that read fine anonymously
+   * would look like they worked.
+   *
+   * Both may be present: a platform bearer authenticates the *hosting layer*
+   * and a session authenticates a *person*, and a hub console holding a
+   * platform token still signs its operator in per tenant.
+   */
+  private authHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers["authorization"] = `Bearer ${this.token}`;
+    }
+    // Only ever set for a connection that cannot use a cookie — a console on a
+    // different origin from its host. Same-origin consoles leave this null and
+    // keep the HttpOnly cookie, which nothing here can read. See
+    // `SESSION_CARRIER_HEADER` in the host's `users/cookie.rs`.
+    if (this.session) headers["x-opencompany-session"] = this.session;
+    return headers;
   }
 
   /** Resolves the `/companies/{id}` vs single-company `/company` route prefix. */
@@ -69,10 +100,15 @@ export class OpenCompanyClient {
   /** Called on any 401, so the app can drop to the login view. */
   onUnauthorized: (() => void) | null = null;
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    extraHeaders?: Record<string, string>,
+  ): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders(), extraHeaders);
 
     let res: TransportResponse;
     try {
@@ -112,6 +148,56 @@ export class OpenCompanyClient {
   }
 
   /**
+   * A POST carrying `FormData`, for the workspace upload route (issue #553).
+   *
+   * Separate from `post` because the two are incompatible in both directions:
+   * `request` sets `content-type: application/json` and `JSON.stringify`s its
+   * body, and a multipart upload must instead let the browser set the header so
+   * it can include the boundary it generated. Setting it by hand produces a
+   * body the server cannot parse.
+   *
+   * Like `getBlob`, this reaches `fetch` directly — the `Transport` surface
+   * takes a `string` body and cannot express a `FormData`.
+   */
+  async postForm<T>(path: string, form: FormData): Promise<T> {
+    const headers: Record<string, string> = {};
+    Object.assign(headers, this.authHeaders());
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers,
+        body: form,
+        credentials: "include",
+      });
+    } catch {
+      throw new ApiError(
+        0,
+        "network_error",
+        `cannot reach the company host at ${this.baseUrl || "this origin"}`,
+      );
+    }
+    const text = await res.text();
+    if (!(res.status >= 200 && res.status < 300)) {
+      if (res.status === 401) this.onUnauthorized?.();
+      // Adapted to the shape `httpError` reads, so a failed direct-`fetch`
+      // read produces the same `ApiError` envelope as every other route.
+      throw httpError(
+        {
+          status: res.status,
+          statusText: res.statusText,
+          url: res.url,
+          text,
+          header: (name: string) => res.headers.get(name),
+        },
+        text,
+      );
+    }
+    return (text ? parseJson(text) : undefined) as T;
+  }
+
+  /**
    * A GET whose answer is a document, not JSON (issue #352).
    *
    * `request` parses every successful response as JSON and hands back
@@ -127,7 +213,7 @@ export class OpenCompanyClient {
    */
   async getDocument(path: string): Promise<{ text: string; filename?: string }> {
     const headers: Record<string, string> = {};
-    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+    Object.assign(headers, this.authHeaders());
 
     let res: TransportResponse;
     try {
@@ -144,6 +230,63 @@ export class OpenCompanyClient {
   }
 
   /**
+   * A GET whose answer is **bytes** (issue #553).
+   *
+   * The workspace can hold images, PDFs and archives now, and the console has
+   * to be able to show one. `getDocument` above cannot: the whole `Transport`
+   * surface is text — `TransportResponse` exposes `res.text` and nothing else —
+   * so anything read through it has already been decoded and a PNG would come
+   * back mangled.
+   *
+   * So this is the one method that reaches past the transport to `fetch`
+   * directly, because it needs a `Blob` the transport has no way to express.
+   * Everything else about it matches `getDocument`: the same bearer header, the
+   * same `credentials: "include"`, the same 401 hand-off.
+   *
+   * It returns a `Blob` rather than a URL so the caller owns the object URL's
+   * lifetime — an object URL leaks until it is revoked, and only the component
+   * holding it knows when that is.
+   */
+  async getBlob(path: string): Promise<Blob> {
+    const headers: Record<string, string> = {};
+    Object.assign(headers, this.authHeaders());
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, {
+        method: "GET",
+        headers,
+        credentials: "include",
+      });
+    } catch {
+      throw new ApiError(
+        0,
+        "network_error",
+        `cannot reach the company host at ${this.baseUrl || "this origin"}`,
+      );
+    }
+    if (!res.ok) {
+      if (res.status === 401) this.onUnauthorized?.();
+      // The body of a failed blob read is an error envelope, not bytes, so it
+      // is safe (and useful) to read it as text for the message.
+      const text = await res.text().catch(() => "");
+      // Adapted to the shape `httpError` reads, so a failed direct-`fetch`
+      // read produces the same `ApiError` envelope as every other route.
+      throw httpError(
+        {
+          status: res.status,
+          statusText: res.statusText,
+          url: res.url,
+          text,
+          header: (name: string) => res.headers.get(name),
+        },
+        text,
+      );
+    }
+    return res.blob();
+  }
+
+  /**
    * Subscribes to this host's company event stream.
    *
    * On the client rather than in the hook so that "everything that talks to a
@@ -151,12 +294,50 @@ export class OpenCompanyClient {
    * know which transport it is on, and every future caller would too.
    */
   subscribeToEvents(company: string | null | undefined, handlers: StreamHandlers): () => void {
-    return this.transport.subscribe(`${this.baseUrl}${this.scope(company)}/events`, handlers);
+    return this.transport.subscribe(
+      `${this.baseUrl}${this.scope(company)}/events`,
+      handlers,
+      // The same credential the request path carries. A stream authenticated
+      // differently from the requests beside it would load every view and then
+      // never update one.
+      this.authHeaders(),
+    );
   }
 
   /** A typed POST, for surfaces that live outside this class (e.g. auth). */
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>("POST", path, body);
+  }
+
+  /**
+   * Whether a sign-in through this client yields a session it must hold itself.
+   *
+   * Exposed so a caller knows to *store* what {@link postSignIn} returns. It is
+   * the same question `needsCarriedSession` answers, kept on the client so no
+   * view has to re-derive it from a base url.
+   */
+  get carriesOwnSession(): boolean {
+    return needsCarriedSession(this.baseUrl);
+  }
+
+  /**
+   * A POST to a sign-in route, asking for a carrier this client can use.
+   *
+   * Separate from {@link post} so the carrier request cannot leak onto an
+   * ordinary call: the header is meaningless everywhere but a route that mints
+   * a session, and a client sending it indiscriminately would be asserting
+   * something about itself on every request it makes.
+   *
+   * On a same-origin console this is exactly `post` — no header, and the host
+   * replies with the `HttpOnly` cookie it always did.
+   */
+  postSignIn<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(
+      "POST",
+      path,
+      body,
+      this.carriesOwnSession ? { "x-opencompany-session-carrier": "header" } : undefined,
+    );
   }
 
   /** A typed PATCH, for surfaces that live outside this class (e.g. auth). */
@@ -240,10 +421,21 @@ export class OpenCompanyClient {
      * id — callers strip the `h` prefix with `toHostMessageId` first.
      */
     parent?: string | null,
+    /**
+     * The once-vs-workflow choice for the card this line opens (issue #580).
+     * Only `"workflow"` reaches the wire: `"once"` (and the default) is sent as
+     * *nothing at all*, so an ordinary message keeps the exact body shape it had
+     * before #580 — the same omitted-field compatibility rule the deliverable
+     * field follows everywhere (see `CreateTask.deliverable`).
+     */
+    deliverable?: TaskDeliverable,
   ): Promise<ChatResponse> {
-    const body: { text: string; chat?: string; parent?: string } = { text };
+    const body: { text: string; chat?: string; parent?: string; deliverable?: TaskDeliverable } = {
+      text,
+    };
     if (chat) body.chat = chat;
     if (parent) body.parent = parent;
+    if (deliverable === "workflow") body.deliverable = deliverable;
     return this.request<ChatResponse>("POST", `${this.scope(company)}/chat`, body);
   }
 
@@ -347,15 +539,53 @@ export class OpenCompanyClient {
    * A desk's persisted transcript (issue #65), so the console can rehydrate a
    * thread on login/reload instead of always starting empty. `desk` is the
    * thread id (as passed to {@link chat}); omitted reads the operator/General
-   * line. Hosts that don't expose `.../chat/history` yet return 404 — callers
-   * fall back to an empty transcript.
+   * line. `before` is an exclusive message-id cursor and `limit` bounds one
+   * page; callers decide whether an unavailable route is an empty transcript
+   * or an error they need to surface.
    */
-  getChatHistory(desk?: string | null, company?: string | null): Promise<ChatHistoryMessageDto[]> {
-    const qs = desk ? `?desk=${encodeURIComponent(desk)}` : "";
+  getChatHistory(
+    desk?: string | null,
+    company?: string | null,
+    options?: { before?: string; limit?: number },
+  ): Promise<ChatHistoryMessageDto[]> {
+    const query = new URLSearchParams();
+    if (desk) query.set("desk", desk);
+    if (options?.before) query.set("before", options.before);
+    if (options?.limit !== undefined) query.set("limit", String(options.limit));
+    const qs = query.size > 0 ? `?${query}` : "";
     return this.request<ChatHistoryMessageDto[]>(
       "GET",
       `${this.scope(company)}/chat/history${qs}`,
     );
+  }
+
+  /**
+   * Where the signed-in person has read to, per channel (issue #755).
+   *
+   * A host that predates this route answers 404; the caller treats that as "no
+   * markers" and falls back to the in-browser floor, so an older host degrades
+   * to the previous behaviour rather than throwing on load.
+   */
+  readState(company?: string | null): Promise<ReadStateResponse> {
+    return this.request<ReadStateResponse>("GET", `${this.scope(company)}/chat/read-state`);
+  }
+
+  /**
+   * Moves one channel's read floor forward.
+   *
+   * The host's write is monotonic, and it answers with where the marker
+   * actually stands — which is not always what was sent, because two tabs of
+   * one person race constantly.
+   */
+  markChannelRead(
+    channelId: string,
+    lastReadAt: number,
+    company?: string | null,
+  ): Promise<ReadMarker> {
+    return this.request<ReadMarker>("PUT", `${this.scope(company)}/chat/read-state`, {
+      channelId,
+      lastReadAt,
+    });
   }
 
   /** The approvals awaiting the operator. */

@@ -3,7 +3,10 @@
 // generic, company-agnostic roster the operator can edit. Either way, agents
 // are user-definable here.
 
-import type { TeamMemberDto } from "@/api/types";
+import type { AgentDeskDto, TeamMemberDto } from "@/api/types";
+
+/** A desk a teammate sits on, as the roster read reports it. */
+export type TeamMemberDesk = AgentDeskDto;
 
 export interface TeamMember {
   id: string;
@@ -39,6 +42,41 @@ export interface TeamMember {
   budgetSetBy?: string;
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
+  /**
+   * The cognition tier this company declared for the teammate, verbatim
+   * (issue #643). Undefined means it declared none — render that as "not
+   * declared", never as a default tier.
+   */
+  tier?: string;
+  /**
+   * Whether the host resolved this teammate as the company's orchestrator.
+   *
+   * A separate question from `tier`, answered by the host's roster rule: an
+   * untagged company still has an orchestrator, and a second teammate tagged
+   * with the orchestrator tier is not one. Undefined means the host does not
+   * answer it.
+   */
+  isOrchestrator?: boolean;
+  /**
+   * The tool grants this teammate **actually holds** — its own `[[agent]].tools`
+   * line narrowed by the company's `[tools].allow`, resolved by the host
+   * (issue #601).
+   *
+   * The `effective` list and only that: the agent detail view shows the same
+   * one, from the same server-side function the harness builds the agent with,
+   * so the two surfaces cannot disagree about a teammate. Empty means either
+   * "holds nothing" or "this host does not report grants" — both draw no tools,
+   * and neither is a licence to invent some.
+   */
+  effectiveTools: string[];
+  /**
+   * The desks this teammate sits on, host order (manifest desks first, then
+   * operator-created ones). Empty means it sits on none.
+   *
+   * This is the company's real grouping axis, and the overview graph's
+   * department pillars are drawn from it.
+   */
+  desks: TeamMemberDesk[];
 }
 
 const TONE_KEYS = ["sky", "violet", "amber", "emerald", "rose", "cyan", "indigo", "teal"];
@@ -78,6 +116,16 @@ export function fromDto(dto: TeamMemberDto): TeamMember {
     // which the card renders differently from "an admin set this".
     budgetSetBy: dto.budgetSetBy,
     budgetSetAtMillis: dto.budgetSetAtMillis,
+    // Same rule again (issue #643): `undefined` means the company declared no
+    // tier, or the host predates the field. Both are "cannot say" — coalescing
+    // either into a tier string is the bug this closed.
+    tier: dto.tier,
+    isOrchestrator: dto.isOrchestrator,
+    // A host predating issue #601 sends neither, and an empty list is the
+    // honest reading of that: it draws no tools and no desk rather than a
+    // guess at either.
+    effectiveTools: dto.tools?.effective ?? [],
+    desks: dto.desks ?? [],
   };
 }
 
@@ -148,16 +196,38 @@ export function newMember(fields: { name: string; role: string; description: str
     description: fields.description.trim(),
     tone: toneFor(memberId),
     inboxEnabled: false,
+    // Same as `member` above: nothing on a host has granted this teammate
+    // anything or seated it anywhere yet.
+    effectiveTools: [],
+    desks: [],
   };
 }
 
+/**
+ * The tile colours behind a desk's or teammate's initials.
+ *
+ * **The keys are legacy slot names, not colour claims.** They are persisted
+ * against desks and members and arrive from the host, so they cannot be
+ * renamed; what they resolve to is the console's identity palette
+ * (`--tone-*`), which deliberately avoids amber, green and red.
+ *
+ * That avoidance is the point. These tones used to be drawn from the same
+ * Tailwind palette as run status, so a desk keyed `emerald` was tinted the
+ * exact green that means "done", and one keyed `rose` the red that means
+ * "failed" — a colour saying two different things on the same screen. Five
+ * tones rather than eight, because five hues clear of the status vocabulary
+ * is what the hue circle has room for; a hash over five still gives a stable,
+ * well-distributed colour per name.
+ *
+ * See `--tone-1` in index.css and docs/design-system/color.md.
+ */
 export const TEAM_TONES: Record<string, string> = {
-  sky: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
-  violet: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
-  amber: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-  emerald: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
-  rose: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
-  cyan: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
-  indigo: "bg-indigo-500/15 text-indigo-600 dark:text-indigo-400",
-  teal: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
+  violet: "bg-tone-1/15 text-tone-1-text",
+  indigo: "bg-tone-1/15 text-tone-1-text",
+  sky: "bg-tone-2/15 text-tone-2-text",
+  cyan: "bg-tone-2/15 text-tone-2-text",
+  teal: "bg-tone-3/15 text-tone-3-text",
+  emerald: "bg-tone-3/15 text-tone-3-text",
+  rose: "bg-tone-4/15 text-tone-4-text",
+  amber: "bg-tone-5/15 text-tone-5-text",
 };

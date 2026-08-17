@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
 import { cn } from "@/lib/utils";
@@ -6,6 +6,7 @@ import { ApprovalRow } from "./ApprovalRow";
 import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
+import { WorkingIndicator } from "./WorkingIndicator";
 import { channelTitle, type Channel, type TimelineItem } from "./model";
 
 interface Props {
@@ -35,8 +36,18 @@ interface Props {
   askerNames?: Map<string, string>;
   /** The verdict each inline card is currently waiting on. */
   decidingApprovals?: ReadonlyMap<string, Verdict>;
+  /** Decisions that did not land, per approval id (#842) — see `ApprovalRow`. */
+  failedApprovals?: Record<string, string>;
   onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
 }
+
+/**
+ * How close to the bottom still counts as "parked at the bottom", in CSS
+ * pixels. Sub-pixel layout and a fractional `clientHeight` mean the arithmetic
+ * rarely lands on exactly zero, so a strict test would read a view that is
+ * visibly at the bottom as scrolled away and stop following.
+ */
+const BOTTOM_SLACK_PX = 32;
 
 /**
  * The scrolling body of a channel.
@@ -45,6 +56,18 @@ interface Props {
  * what a chat log wants and what a plain scroll container does not do on its
  * own. Day dividers ride along as sticky pills so the date stays legible while
  * you scroll through it.
+ *
+ * Anchoring is two rules, not one (issue #757):
+ *
+ * 1. **Arriving at a channel jumps, it does not travel.** Opening a channel
+ *    anchors instantly in a layout effect, before the browser paints, so the
+ *    first frame the operator sees is already the newest message. Animating
+ *    here would be animating from a position that was never theirs — and the
+ *    longer the transcript, the longer the slide.
+ * 2. **Growth follows, but only if they are already at the bottom.** A tool row
+ *    or reply arriving while they watch should glide into view; the same row
+ *    arriving while they have scrolled up to read history must not yank the
+ *    viewport away from what they are reading.
  */
 export function MessageTimeline({
   channel,
@@ -57,22 +80,64 @@ export function MessageTimeline({
   now,
   askerNames,
   decidingApprovals,
+  failedApprovals,
   onDecideApproval,
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
+  /**
+   * Is the view parked at the bottom, and therefore still following?
+   *
+   * A ref rather than state on purpose: it is read inside effects and written
+   * from a scroll handler that fires at frame rate. Making it state would
+   * re-render the whole transcript on every wheel tick to compute a value no
+   * rendered output depends on.
+   */
+  const following = useRef(true);
+  /** The channel the growth effect has already settled on. See rule 2. */
+  const settledOn = useRef<string | null>(null);
 
+  const trackFollowing = useCallback(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    following.current = fromBottom <= BOTTOM_SLACK_PX;
+  }, []);
+
+  // Rule 1 — arriving at a channel. `useLayoutEffect` so the jump happens
+  // before paint: with `useEffect` the browser paints the un-anchored position
+  // first, which is the flash this issue is about. `channel.id` is the
+  // dependency, not `items.length` — two channels can hold the same number of
+  // rows, and an effect keyed on the count would not fire for that switch at
+  // all, leaving the new channel wearing the old one's scroll offset.
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    following.current = true;
+  }, [channel.id]);
+
+  // Rule 2 — growth while the channel is open. Each new tool row grows the
+  // block at the bottom, so the scroll has to follow it as the turn works, not
+  // only when the reply lands. A card arriving counts too — it is the thing the
+  // operator has to act on. Skipped entirely when they have scrolled away.
+  //
+  // `channel.id` is a dependency so the first pass after a switch can *defer*:
+  // the layout effect above has already anchored this channel, and animating on
+  // top of that is the very travel rule 1 removes.
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
+    if (settledOn.current !== channel.id) {
+      settledOn.current = channel.id;
+      return;
+    }
+    if (!following.current) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    // Each new tool row grows the block at the bottom, so the scroll has to
-    // follow it as the turn works, not only when the reply lands. A card
-    // arriving counts too — it is the thing the operator has to act on.
-  }, [items.length, typing, liveStepCount]);
+  }, [channel.id, items.length, typing, liveStepCount]);
 
   return (
-    <div ref={scroller} className="flex-1 overflow-y-auto">
+    <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
       <div className="flex min-h-full flex-col justify-end pb-4">
         <ChannelIntro channel={channel} empty={items.length === 0} />
         {items.map((item) =>
@@ -89,12 +154,18 @@ export function MessageTimeline({
           ) : (
             <ApprovalRow
               key={item.key}
-              approval={item.approval}
+              approvals={item.approvals}
               now={now ?? Date.now()}
               askerNames={askerNames ?? EMPTY_NAMES}
-              deciding={decidingApprovals?.get(item.approval.id) ?? null}
+              /* Narrowed to this card's own items (#842): a decision in flight
+                 on another turn's batch is not this card's business, which is
+                 the same rule #373 established one level down. */
+              deciding={decidingIn(item.approvals, decidingApprovals)}
               decided={item.decided}
-              onDecide={(verdict, scope) => onDecideApproval?.(item.approval, verdict, scope)}
+              failed={failedApprovals ?? EMPTY_FAILURES}
+              onDecide={(approval, verdict, scope) =>
+                onDecideApproval?.(approval, verdict, scope)
+              }
             />
           ),
         )}
@@ -111,13 +182,41 @@ export function MessageTimeline({
 /** Stable identity so a missing `askerNames` cannot churn the card's props. */
 const EMPTY_NAMES: Map<string, string> = new Map();
 
+/** Stable identity, for the same reason as {@link EMPTY_NAMES}. */
+const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+
+/** Ditto — no failure has been recorded on any card. */
+const EMPTY_FAILURES: Record<string, string> = {};
+
+/**
+ * The in-flight verdicts belonging to one card's items (#842).
+ *
+ * The shell keeps one map for the whole console, and a batch card must not
+ * spin — or disable its buttons — because a different turn's approval is being
+ * decided. Returns the shared empty map when nothing of this card's is in
+ * flight, so the common case allocates nothing and the props stay identical
+ * between renders.
+ */
+function decidingIn(
+  approvals: ApprovalSummary[],
+  deciding: ReadonlyMap<string, Verdict> | undefined,
+): ReadonlyMap<string, Verdict> {
+  if (!deciding?.size) return EMPTY_DECIDING;
+  const mine = new Map<string, Verdict>();
+  for (const a of approvals) {
+    const verdict = deciding.get(a.id);
+    if (verdict) mine.set(a.id, verdict);
+  }
+  return mine.size ? mine : EMPTY_DECIDING;
+}
+
 function DayDivider({ label }: { label: string }) {
   return (
     <div
       aria-label={label}
       className="pointer-events-none sticky top-2 z-20 flex justify-center py-2"
     >
-      <p className="rounded-full border bg-background px-2.5 py-1 text-[11px] font-medium tracking-wide text-muted-foreground">
+      <p className="rounded-full border bg-background px-2.5 py-1 text-2xs font-medium tracking-wide text-muted-foreground">
         {label}
       </p>
     </div>
@@ -164,9 +263,11 @@ function LiveTurnRow({ channel, steps }: { channel: Channel; steps: TurnStep[] }
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9 shrink-0"
       />
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 space-y-1.5">
+        {/* The line names the step actually in flight (#787), above the
+            timeline that details every step. Same source, one phrasing. */}
+        <WorkingIndicator srLabel="Working…" steps={steps} />
         <StepTimeline steps={steps} defaultOpen />
-        <span className="sr-only">Working…</span>
       </div>
     </div>
   );
@@ -181,19 +282,8 @@ function TypingRow({ channel }: { channel: Channel }) {
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9"
       />
-      <span className="flex items-center gap-1 rounded-full bg-muted px-3 py-2">
-        <Dot />
-        <Dot className="[animation-delay:150ms]" />
-        <Dot className="[animation-delay:300ms]" />
-        <span className="sr-only">Replying…</span>
-      </span>
+      <WorkingIndicator srLabel="Replying…" />
     </div>
-  );
-}
-
-function Dot({ className }: { className?: string }) {
-  return (
-    <span className={cn("size-1.5 animate-bounce rounded-full bg-muted-foreground", className)} />
   );
 }
 

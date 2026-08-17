@@ -25,20 +25,24 @@ import { cn } from "@/lib/utils";
 // coloured dot alone puts the whole signal on hue, which a colourblind reader
 // or a glance at the collapsed rail can miss.
 const TONE_DOT: Record<string, string> = {
-  live: "bg-emerald-500",
-  idle: "bg-amber-500",
-  stopped: "bg-rose-500",
+  live: "bg-status-done",
+  idle: "bg-status-blocked",
+  stopped: "bg-status-failed",
 };
 
 const TONE_TEXT: Record<string, string> = {
-  live: "text-emerald-600 dark:text-emerald-400",
-  idle: "text-amber-600 dark:text-amber-400",
-  stopped: "text-rose-600 dark:text-rose-400",
+  live: "text-status-done-text",
+  idle: "text-status-blocked-text",
+  stopped: "text-status-failed-text",
 };
 
 // Discord's brand blurple, lifted a step in dark mode so it clears the
-// sidebar's surface instead of sinking into it.
-const DISCORD_BLURPLE = "text-[#5865f2] dark:text-[#7f8ffa]";
+// sidebar's surface instead of sinking into it. Named tokens rather than raw
+// hex — the colour is deliberately not ours, and saying so in the token name
+// is what stops it being "fixed" into the palette later. See `--brand-discord`
+// in index.css.
+const DISCORD_BLURPLE =
+  "text-(--brand-discord-on-light) dark:text-(--brand-discord-on-dark)";
 
 /**
  * A sidebar row at rest: dimmed until you reach for it.
@@ -161,12 +165,23 @@ export function SidebarControls({
       )}
 
       <SidebarMenuItem>
+        {/* Deliberately NOT `RESTING_ROW`.
+
+            The resting dim is `opacity-60`, which is safe for a row of
+            near-white text — 16.87:1 becomes 6.60:1 — and destroys a
+            mid-tone hue: the blurple measures 6.36:1 at full strength and
+            3.04:1 dimmed, under the 4.5:1 a 14px label needs. Recovering
+            that inside the dim would mean lightening the blurple by five
+            steps, at which point it is a pale lavender and no longer reads
+            as Discord's colour at all.
+
+            So this row is not dimmed. Its hue already sets it apart from the
+            nav above, without help from the property doing the damage. */}
         <SidebarMenuButton
           tooltip="Join our Discord"
           className={cn(
             DISCORD_BLURPLE,
-            "hover:text-[#5865f2] dark:hover:text-[#7f8ffa]",
-            RESTING_ROW,
+            "hover:text-(--brand-discord-on-light) dark:hover:text-(--brand-discord-on-dark)",
           )}
           render={<a href={DISCORD_INVITE_URL} target="_blank" rel="noreferrer" />}
         >

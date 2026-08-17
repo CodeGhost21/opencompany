@@ -123,6 +123,14 @@ impl WorkspaceAnnouncer {
 
 #[async_trait]
 impl WorkspaceStore for WorkspaceAnnouncer {
+    /// Delegated, not defaulted (issue #665). This wrapper sits *outside* the
+    /// quota decorator, so taking the trait's permissive default here would
+    /// answer "yes" for every upload and hide the only implementation that knows
+    /// the company's cap.
+    async fn admit_upload(&self, company: &CompanyId, name: &str, len: u64) -> Result<()> {
+        self.inner.admit_upload(company, name, len).await
+    }
+
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
         self.inner.tree(company).await
     }
@@ -167,6 +175,74 @@ impl WorkspaceStore for WorkspaceAnnouncer {
         Ok(())
     }
 
+    /// Claims through, and announces `opened` **only when the folder was
+    /// actually minted** (issue #759).
+    ///
+    /// An adoption changed nothing: the folder was already standing, already in
+    /// the tree the console last read, already announced when whoever created it
+    /// created it. Announcing it again would tell an open Workspace tab that
+    /// something appeared, on a publish that only walked past it — and the
+    /// publish walk adopts on nearly every publish a company ever makes, so the
+    /// noise would be the common case rather than an edge one.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        let claim = self
+            .inner
+            .adopt_or_create_folder(company, parent, name, origin)
+            .await?;
+        if let crate::ports::workspace::FolderClaim::Created(node) = &claim {
+            self.announce(company, &node.id, CHANGE_OPENED).await;
+        }
+        Ok(claim)
+    }
+
+    /// A binary node appearing in the tree is the same event as a note
+    /// appearing: something the operator did not type is now there to look at.
+    /// An uploaded image or a published chart therefore reaches an open
+    /// Workspace tab exactly like a note does, which is the whole point of
+    /// announcing at the store instead of at the callers.
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<WorkspaceNode> {
+        let stamped = self.inner.create_binary(company, node, bytes).await?;
+        self.announce(company, &node.id, CHANGE_OPENED).await;
+        Ok(stamped)
+    }
+
+    /// Replaces a payload through, then announces `updated` — unconditionally,
+    /// for the reason [`write`](Self::write) gives.
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<WorkspaceNode> {
+        let node = self
+            .inner
+            .write_binary(company, id, bytes, mime, author)
+            .await?;
+        self.announce(company, id, CHANGE_UPDATED).await;
+        Ok(node)
+    }
+
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+        self.inner.read_bytes(company, id).await
+    }
+
     /// Renames/moves through, then announces `updated` — unless nothing moved.
     ///
     /// **A rename that changes nothing says nothing.** The port takes `None` for
@@ -195,6 +271,40 @@ impl WorkspaceStore for WorkspaceAnnouncer {
             self.announce(company, id, CHANGE_UPDATED).await;
         }
         Ok(node)
+    }
+
+    /// Promotes a staged file and emits the same logical changes the former
+    /// delete-plus-rename sequence emitted, but only after the atomic store
+    /// operation has decided its winner.
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: Option<&str>,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<WorkspaceNode>> {
+        let promoted = self
+            .inner
+            .swap_files(company, expected_id, replacement_id, name)
+            .await?;
+        match &promoted {
+            Some(node) => {
+                // Only a republish retires a node. A first publish (issue #697)
+                // supersedes nothing, so announcing a removal would name an id
+                // that never existed and close a watcher's handle on a file it
+                // never had open.
+                if let Some(superseded) = expected_id {
+                    self.announce(company, superseded, CHANGE_REMOVED).await;
+                }
+                self.announce(company, &node.id, CHANGE_UPDATED).await;
+            }
+            None => {
+                // `create(_binary)` announced the private staging node as
+                // opened; the losing swap consumed it, so close that loop.
+                self.announce(company, replacement_id, CHANGE_REMOVED).await;
+            }
+        }
+        Ok(promoted)
     }
 
     /// Deletes through, and announces only when a node was actually removed —
@@ -296,6 +406,9 @@ mod test {
             updated_at_millis: 1,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         }
     }
 
@@ -326,6 +439,41 @@ mod test {
         assert_eq!(
             changes(&log),
             vec![("n-1".to_string(), "opened".to_string())]
+        );
+    }
+
+    /// Issue #759: a folder claim announces `opened` when it **mints** the
+    /// folder and says nothing when it adopts one.
+    ///
+    /// Both halves are load-bearing. Without the first, a published deliverable
+    /// would appear in a tab that never learned its folder existed. Without the
+    /// second, every publish into an established folder — which is nearly every
+    /// publish a company ever makes — would put an `opened` frame on the feed
+    /// for a node that has been sitting there for weeks.
+    #[tokio::test]
+    async fn a_folder_claim_announces_only_when_it_mints_the_folder() {
+        let (_dir, store, log, co) = wired();
+
+        let claim = store
+            .adopt_or_create_folder(&co, None, "Agents", WorkspaceOrigin::Seed)
+            .await
+            .unwrap();
+        assert!(claim.was_created());
+        assert_eq!(
+            changes(&log),
+            vec![(claim.node().id.clone(), "opened".to_string())]
+        );
+        log.appended.lock().unwrap().clear();
+
+        let adopted = store
+            .adopt_or_create_folder(&co, None, "Agents", WorkspaceOrigin::Seed)
+            .await
+            .unwrap();
+        assert!(!adopted.was_created());
+        assert_eq!(adopted.node().id, claim.node().id);
+        assert!(
+            changes(&log).is_empty(),
+            "adopting a folder that was already standing changed nothing"
         );
     }
 

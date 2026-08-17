@@ -41,6 +41,14 @@ struct Recorded {
     acks: Vec<EffectResult>,
     tool_answers: Vec<ToolResultFrame>,
     inference_answers: Vec<RecordedInference>,
+    /// Cycle ids the brain asked for that nothing had scripted.
+    ///
+    /// An unscripted cycle yields a bare `CycleComplete`, which is a *silent*
+    /// empty cycle: every downstream assertion then reads "expected 1, saw 0"
+    /// and points at the effect rather than at the miss. Recording it turns
+    /// "the fixture and the runtime disagree about the cycle id" into something
+    /// a test can assert (issue #800).
+    unmatched_cycles: Vec<String>,
 }
 
 /// An in-memory [`SidecarTransport`] that scripts cycle frames and records calls.
@@ -48,6 +56,12 @@ struct Recorded {
 pub struct MockSidecarTransport {
     /// Scripted frames keyed by cycle id.
     plans: Mutex<HashMap<String, Vec<SidecarFrame>>>,
+    /// Frames for the **next** cycle the brain opens, when no exact id is
+    /// scripted. Consumed on use — see [`Self::script_any_cycle`].
+    fallback_plan: Mutex<Option<Vec<SidecarFrame>>>,
+    /// Whether a fallback was ever scripted, so a later empty cycle reads as
+    /// expected rather than as a missed plan.
+    fallback_scripted: Mutex<bool>,
     /// An error to return from every `post_events`.
     post_events_error: Mutex<Option<OrchErrorCode>>,
     /// Recorded calls.
@@ -69,6 +83,33 @@ impl MockSidecarTransport {
             frames.push(SidecarFrame::CycleComplete);
         }
         self.plans.lock().unwrap().insert(cycle_id.into(), frames);
+    }
+
+    /// Scripts frames for **whichever** cycle the brain opens.
+    ///
+    /// Prefer this in end-to-end tests. Keying a plan to a hand-computed cycle
+    /// id couples the test to the event sequence the runtime happens to assign
+    /// — which is how the two `e2e_*` tests here silently stopped exercising
+    /// anything: they scripted `seq 0` while the runtime posts the event log's
+    /// real seq, so the brain drained an empty cycle and every assertion failed
+    /// against a plausible-looking zero (issue #800). The id's own format is
+    /// covered by `wire::cycle_id`'s tests; a cycle-drain test should not
+    /// re-derive it.
+    /// **One-shot.** The plan is consumed by the first unscripted cycle, and
+    /// every later cycle drains empty. A turn does not always open exactly one
+    /// cycle — resolving a parked approval opens another — and a replaying plan
+    /// would re-emit its effect there, re-parking what the test just resolved.
+    pub fn script_any_cycle(&self, mut frames: Vec<SidecarFrame>) {
+        if !matches!(frames.last(), Some(SidecarFrame::CycleComplete)) {
+            frames.push(SidecarFrame::CycleComplete);
+        }
+        *self.fallback_plan.lock().unwrap() = Some(frames);
+        *self.fallback_scripted.lock().unwrap() = true;
+    }
+
+    /// Cycle ids the brain opened that nothing had scripted.
+    pub fn unmatched_cycles(&self) -> Vec<String> {
+        self.recorded.lock().unwrap().unmatched_cycles.clone()
     }
 
     /// Makes every subsequent `post_events` fail with `code`.
@@ -122,13 +163,30 @@ impl SidecarTransport for MockSidecarTransport {
     }
 
     fn cycle_frames(&self, cycle_id: &str) -> BoxStream<'static, Result<SidecarFrame>> {
-        let frames = self
-            .plans
-            .lock()
-            .unwrap()
-            .get(cycle_id)
-            .cloned()
-            .unwrap_or_else(|| vec![SidecarFrame::CycleComplete]);
+        let exact = self.plans.lock().unwrap().get(cycle_id).cloned();
+        let frames = match exact {
+            Some(frames) => frames,
+            None => match self.fallback_plan.lock().unwrap().take() {
+                Some(frames) => frames,
+                // A consumed fallback means later cycles are *expected* empty,
+                // so they are not recorded as misses.
+                None if *self.fallback_scripted.lock().unwrap() => {
+                    vec![SidecarFrame::CycleComplete]
+                }
+                None => {
+                    // Nothing scripted for this cycle, exactly or otherwise.
+                    // Still an empty cycle, so existing tests that script no
+                    // plan keep their behaviour — but recorded, so a test can
+                    // tell an empty cycle apart from a missed one (#800).
+                    self.recorded
+                        .lock()
+                        .unwrap()
+                        .unmatched_cycles
+                        .push(cycle_id.to_string());
+                    vec![SidecarFrame::CycleComplete]
+                }
+            },
+        };
         stream::iter(frames.into_iter().map(Ok)).boxed()
     }
 

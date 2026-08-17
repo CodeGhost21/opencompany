@@ -40,6 +40,8 @@ id = "gate"
 kind = "condition"
 name = "Promising?"
 summary = "Advance to trial planning or report back."
+[node.config]
+field = "=item.promising"
 
 [[node]]
 id = "trial"

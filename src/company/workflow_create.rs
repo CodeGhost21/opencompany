@@ -153,11 +153,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::company::{
-    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, list_workflows_union,
-    parse_workflow, raw_workflow_from_toml, render_workflow,
+    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, WorkflowNodeKind,
+    list_workflows_union, parse_workflow, raw_workflow_from_toml, render_workflow,
+    required_config_problems,
 };
 use crate::error::{OpenCompanyError, Result};
-use crate::ports::CompanyStore;
 use crate::ports::events::EventLog;
 use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
@@ -165,6 +165,8 @@ use crate::ports::types::{
     CompanyEvent, CompanyId, CompanyRecord, OverlayWorkflow, WorkflowEnabledReason,
 };
 use crate::ports::workflow_revisions::{WorkflowRevisionRecord, WorkflowRevisionStore};
+use crate::ports::{CompanyStore, ScheduleFireStore};
+use crate::runtime::workflow_schedule_id;
 use crate::server::ops::language;
 
 /// Max nodes a freshly authored graph may declare. A larger graph is refused
@@ -486,6 +488,52 @@ pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWork
     })
 }
 
+/// The inverse of [`raw_workflow_from_spec`] at the parsed-graph layer (issue
+/// #840, PR-3): rebuilds a [`WorkflowGraphSpec`] from a persisted, validated
+/// [`WorkflowFile`]. The fix-from-run copilot needs the failing workflow's saved
+/// graph *as a spec* — both to hand the agent as evidence and to pin its identity
+/// through the correction — and the read path produces a `WorkflowFile`, so this
+/// is the one conversion between them.
+///
+/// `on_error`/`retry` have no field on [`WorkflowNodeSpec`] (the builder never
+/// authors them), so they are dropped: the copilot re-proposes the graph's nodes,
+/// and the host-owned id/name are what the fix path pins, not the engine policy.
+///
+/// Gated with the create-time copilot that is its only caller, the same footing
+/// as [`courtesy_validate_draft`] and [`workflow_graph_from_spec`].
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_spec_from_graph(file: WorkflowFile) -> WorkflowGraphSpec {
+    WorkflowGraphSpec {
+        id: file.id,
+        name: file.name,
+        description: file.description,
+        nodes: file
+            .nodes
+            .into_iter()
+            .map(|n| WorkflowNodeSpec {
+                id: n.id,
+                kind: n.kind.as_str().to_string(),
+                name: n.name,
+                summary: n.summary,
+                agent: n.agent,
+                schedule: n.schedule,
+                config: n.config,
+                requires_approval: n.requires_approval,
+                destination: n.destination,
+            })
+            .collect(),
+        edges: file
+            .edges
+            .into_iter()
+            .map(|e| WorkflowEdgeSpec {
+                from: e.from,
+                to: e.to,
+                label: e.label,
+            })
+            .collect(),
+    }
+}
+
 /// Runs the full author-time validation on a candidate graph **without
 /// persisting it** — the builder pass's courtesy check (issue #580), so a
 /// proposal that could never be created never reaches In Review.
@@ -521,6 +569,38 @@ pub(crate) fn courtesy_validate_draft(draft: &RawWorkflow, record: &CompanyRecor
     })?;
     validate_draft_against_record(draft, record)?;
     Ok(())
+}
+
+/// Lowers a copilot draft [`WorkflowGraphSpec`] into the tinyflows
+/// [`WorkflowGraph`](tinyflows::model::WorkflowGraph) the run-time gates read,
+/// through the SAME `RawWorkflow → render → parse → translate` pipeline the
+/// create path uses (issue #840). It is the seam the create-time copilot's
+/// `check_workflow` tool runs [`tinyflows::gates::failures`] over, so a draft is
+/// checked against exactly the graph the engine would compile — not a second,
+/// drifting translation.
+///
+/// Fallible on the render/parse half: a spec whose kind or shape `parse_workflow`
+/// refuses cannot be translated, and the error is mapped to an actionable
+/// [`InvalidRequest`](OpenCompanyError::InvalidRequest) the same way
+/// [`courtesy_validate_draft`] maps it — so the tool hands the model one honest
+/// sentence rather than a 500.
+///
+/// Gated with the copilot it serves (its only caller is
+/// `crate::harness::workflow_build`), so it is not dead code in the default build.
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_graph_from_spec(
+    spec: &WorkflowGraphSpec,
+) -> Result<tinyflows::model::WorkflowGraph> {
+    let raw = raw_workflow_from_spec(spec)?;
+    let toml_src = render_workflow(&raw)?;
+    let file = parse_workflow(&toml_src).map_err(|err| match err {
+        OpenCompanyError::DataInvalid { problems, .. } => {
+            OpenCompanyError::InvalidRequest(problems.join(" "))
+        }
+        OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
+        other => other,
+    })?;
+    Ok(crate::workflows::translate::translate(&file))
 }
 
 /// Journals a best-effort [`WorkflowEnabledChanged`](CompanyEvent::WorkflowEnabledChanged).
@@ -648,7 +728,76 @@ fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) ->
                 }
             },
             "tool_call" => validate_tool_call_node(node, record)?,
+            // Per-kind required config (issue #661): reject a `condition` with no
+            // `field`, an `http_request` missing `method`/`url`, or a `switch`
+            // with no discriminant at author time — the same gate the on-disk
+            // `validate` applies, surfaced here as a 400 so the console/builder
+            // draft path never persists a graph whose runtime behaviour is
+            // silently wrong. `tool_call` keeps its richer `validate_tool_call_node`
+            // (slug + namespace/grant); the structural kinds share the helper.
+            "condition" | "http_request" | "switch" => {
+                let kind = match node.kind.as_str() {
+                    "condition" => WorkflowNodeKind::Condition,
+                    "http_request" => WorkflowNodeKind::HttpRequest,
+                    _ => WorkflowNodeKind::Switch,
+                };
+                // Report EVERY missing-config problem for the node, not just the
+                // first: an `http_request` missing both `method` AND `url` should
+                // name both, since the draft path is where a human/model iterates.
+                let problems = required_config_problems(
+                    kind,
+                    &format!("node `{}`", node.id),
+                    node.config.as_ref(),
+                );
+                if !problems.is_empty() {
+                    return Err(OpenCompanyError::InvalidRequest(problems.join(" ")));
+                }
+            }
             _ => {}
+        }
+    }
+
+    // Condition branch labels must read `yes`/`no` at author time (issue #661).
+    // `parse_workflow` is now LENIENT on this rule (issue #682) so pre-#661 saved
+    // graphs still load, which means ALL author-time strictness for it has to
+    // live here — mirroring the on-disk `validate` strict rule. The sole
+    // exception is the `error` recovery edge of a condition that is also
+    // `on_error = "route"`, whose routing is validated separately. The label is
+    // lowercased + trimmed before matching (it is compared, never persisted as a
+    // lookup key), matching the load rule's asymmetry vs the verbatim `slug`.
+    let condition_ids: HashSet<&str> = draft
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "condition" && !node.id.trim().is_empty())
+        .map(|node| node.id.as_str())
+        .collect();
+    let route_ids: HashSet<&str> = draft
+        .nodes
+        .iter()
+        .filter(|node| node.on_error.as_deref() == Some("route") && !node.id.trim().is_empty())
+        .map(|node| node.id.as_str())
+        .collect();
+    for edge in &draft.edges {
+        if !condition_ids.contains(edge.from.as_str()) {
+            continue;
+        }
+        let is_route_error =
+            edge.label.as_deref() == Some("error") && route_ids.contains(edge.from.as_str());
+        let is_yes_no = edge
+            .label
+            .as_deref()
+            .map(|label| label.trim().to_ascii_lowercase())
+            .is_some_and(|label| matches!(label.as_str(), "yes" | "no"));
+        if !is_route_error && !is_yes_no {
+            let shown = edge
+                .label
+                .as_deref()
+                .map(|label| format!("`{label}`"))
+                .unwrap_or_else(|| "no label".to_string());
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "an edge leaves condition node `{}` with {shown} — a condition's branches must be labeled `yes` or `no`.",
+                edge.from
+            )));
         }
     }
 
@@ -742,6 +891,45 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
                 node.id
             )));
         }
+        // (d) Required args present (issue #813). The engine reads a `tool_call`'s
+        // arguments from `config.args` (tinyflows
+        // `nodes/integration/tool_call.rs`), so a known slug whose required args
+        // are absent THERE runs and does nothing useful — the legal-but-empty
+        // `read_workspace_state` (which cannot read a file anyway) was the case
+        // that motivated this. Reject the missing args at author time, naming them
+        // and what the tool is, so the console/copilot fixes it now instead of
+        // shipping a dud node. Same philosophy as the #661 `required_config`
+        // arm, one level down (the args sub-table, not the config root). Because
+        // this is the SHARED create/update gate, a hand-author hears it at save
+        // and the create-time copilot hears it via courtesy validation → one
+        // corrective retry. A tool with no required args (`read_workspace_state`)
+        // is unaffected here — its uselessness is handled by copilot grounding.
+        if let Some(info) = crate::workflows::caps::workflow_tool_info(slug) {
+            let args = node
+                .config
+                .as_ref()
+                .and_then(toml::Value::as_table)
+                .and_then(|table| table.get("args"))
+                .and_then(toml::Value::as_table);
+            let missing: Vec<&str> = info
+                .required_args
+                .iter()
+                .copied()
+                .filter(|arg| !tool_arg_present(args, arg))
+                .collect();
+            if !missing.is_empty() {
+                return Err(OpenCompanyError::InvalidRequest(format!(
+                    "node `{}` calls tool `{slug}` but its `config.args` is missing {} — {}.",
+                    node.id,
+                    missing
+                        .iter()
+                        .map(|arg| format!("`{arg}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    info.capability
+                )));
+            }
+        }
     }
     #[cfg(not(feature = "openhuman"))]
     {
@@ -752,6 +940,102 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
     }
 
     Ok(())
+}
+
+/// The granted `tool_call` slugs this company may author and pass create-time
+/// validation (issue #753). Deployment wiring is intentionally not checked:
+/// author-now-wire-later remains legal, while prompt grounding uses the
+/// effective sibling below.
+///
+/// It is the exact companion of [`validate_tool_call_node`]'s grant half: a slug
+/// survives here iff that gate would accept it — its namespace covered by
+/// `[tools].allow`, with the priced `search` family requiring an **explicit**
+/// `search` grant (a `*` wildcard never confers it). So the tools the copilot
+/// shows the model are precisely the ones a proposed `tool_call` node will clear
+/// at courtesy validation, and the two cannot drift: both read
+/// [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) (itself pinned to
+/// `namespace_of`) and both apply the same grant rule.
+///
+/// Gated with the copilot it serves — the only caller is
+/// `crate::harness::workflow_build`, and the grant helpers live behind the
+/// `openhuman` feature, so in the default build this would be dead code over
+/// symbols that are not compiled.
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_callable_tool_slugs(record: &CompanyRecord) -> Vec<String> {
+    let grants = &record.manifest.tools.allow;
+    // Reads the rich [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) since #813
+    // (the same grant rule, just the catalogue as the source), so the slugs the
+    // copilot grounds on and the ones it can validate come from one table.
+    crate::workflows::caps::WORKFLOW_TOOL_CATALOG
+        .iter()
+        .filter(|info| {
+            if info.namespace == "search" {
+                crate::company::grants_search_explicit(grants)
+            } else {
+                crate::harness::build::grants_cover(grants, info.namespace)
+            }
+        })
+        .map(|info| info.slug.to_string())
+        .collect()
+}
+
+/// The tools the create-time copilot may ground on: catalogue, company grant,
+/// and deployment wiring all agree. Create validation intentionally remains
+/// permissive for a granted-but-unwired tool so an operator may author now and
+/// wire the provider later; this narrower set is prompt grounding only.
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_effective_tool_slugs(
+    record: &CompanyRecord,
+    wired: Option<&std::collections::BTreeSet<&'static str>>,
+) -> Vec<String> {
+    let grants = &record.manifest.tools.allow;
+    crate::workflows::caps::WORKFLOW_TOOL_CATALOG
+        .iter()
+        .filter(|info| {
+            let granted = if info.namespace == "search" {
+                crate::company::grants_search_explicit(grants)
+            } else {
+                crate::harness::build::grants_cover(grants, info.namespace)
+            };
+            granted && wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
+        })
+        .map(|info| info.slug.to_string())
+        .collect()
+}
+
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_granted_but_unwired_tool_slugs(
+    record: &CompanyRecord,
+    wired: Option<&std::collections::BTreeSet<&'static str>>,
+) -> Vec<String> {
+    let grants = &record.manifest.tools.allow;
+    crate::workflows::caps::WORKFLOW_TOOL_CATALOG
+        .iter()
+        .filter(|info| {
+            let granted = if info.namespace == "search" {
+                crate::company::grants_search_explicit(grants)
+            } else {
+                crate::harness::build::grants_cover(grants, info.namespace)
+            };
+            granted && !wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
+        })
+        .map(|info| info.slug.to_string())
+        .collect()
+}
+
+/// Whether a required `config.args` key is present and carries a usable value
+/// (issue #813): a non-blank string — a `=`-expression that binds at run time
+/// counts — or any non-null non-string value (a number, a non-empty array or
+/// table). A blank string or an absent key is treated as missing.
+#[cfg(feature = "openhuman")]
+fn tool_arg_present(args: Option<&toml::Table>, key: &str) -> bool {
+    match args.and_then(|table| table.get(key)) {
+        Some(toml::Value::String(text)) => !text.trim().is_empty(),
+        Some(toml::Value::Array(items)) => !items.is_empty(),
+        Some(toml::Value::Table(table)) => !table.is_empty(),
+        Some(_) => true, // integer / float / bool / datetime — presence is meaningful
+        None => false,
+    }
 }
 
 /// An opaque version token for a stored overlay body: the hex SHA-256 of the
@@ -1244,13 +1528,28 @@ pub(crate) async fn set_company_workflow_enabled(
 /// version token, so "delete the thing I was looking at" can't remove something
 /// that changed underneath the operator.
 ///
+/// After the committed save, three best-effort cascades tear down what the
+/// workflow leaves behind: its durable scheduler fire ledger (issue #708), its
+/// revision history (issue #274), and an audit-journal entry. The fire-ledger
+/// purge runs **first** and **only after** the save has committed and the write
+/// lock is dropped: purging before a successful save could strip a still-live
+/// workflow's claim rows on a save failure (a #241-class cross-replica
+/// double-fire); purging after means a delete+recreate of the same id — which
+/// reuses the restart-stable `workflow-<id>` schedule key — starts against an
+/// empty ledger, with no inherited anchor and every past minute claimable
+/// again. A purge failure is logged, never rolled back: the workflow is already
+/// gone, and the worst case is one bounded, logged reinstatement of the old
+/// pre-fix behaviour — the same contract as the revision cascade below.
+///
 /// Returns the removed workflow's display name for the audit journal (falling
 /// back to the id when the stored body no longer parses).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn delete_company_workflow(
     company: &CompanyId,
     source_dir: Option<&Path>,
     store: &Arc<dyn CompanyStore>,
     revisions: &Arc<dyn WorkflowRevisionStore>,
+    schedule_fires: Option<&Arc<dyn ScheduleFireStore>>,
     events: Option<&Arc<dyn EventLog>>,
     wid: &str,
     expected_version: Option<&str>,
@@ -1289,6 +1588,35 @@ pub(crate) async fn delete_company_workflow(
     store.save(&record).await?;
 
     drop(_lock);
+
+    // Issue #708: purge the schedule's durable fire ledger, minting the key at
+    // the ONE authoritative site (`workflow_schedule_id`) so this key can never
+    // drift from the scheduler's. This runs AFTER the committed save on purpose
+    // (see the doc): purging before a save that then fails would strip a
+    // still-live workflow's claim rows and risk a #241-class double-fire.
+    // Best-effort, exactly like the revision cascade below: the workflow is
+    // already gone, so a failure is logged rather than rolled back — a leftover
+    // ledger merely re-instates the bounded pre-fix behaviour once, on a
+    // recreate of the same id.
+    //
+    // `schedule_fires` is `Option` for the same reason `events` is: not every
+    // caller wires it. The HTTP delete path passes the runtime store (`Some`) —
+    // that is the path a scheduled workflow can be deleted from, so it is the
+    // only one that can orphan a ledger. The agent `delete_workflow` tool passes
+    // `None`, and correctly: it refuses to delete a scheduled workflow at all
+    // (`refuse_scheduled`), so no fire ledger can exist for it to leave behind.
+    if let Some(fires) = schedule_fires {
+        let schedule_id = workflow_schedule_id(wid);
+        if let Err(err) = fires.delete_schedule_fires(company, &schedule_id).await {
+            tracing::warn!(
+                company = %company,
+                workflow = %wid,
+                schedule = %schedule_id,
+                error = %err,
+                "workflow deleted but its schedule fire ledger could not be purged"
+            );
+        }
+    }
 
     // Issue #274: cascade the workflow's revision history away with it, so a
     // removed workflow leaves no orphaned snapshots behind. Best-effort in the
@@ -1537,6 +1865,88 @@ mod tests {
         Arc::new(MemRevisions::default())
     }
 
+    /// An in-memory [`ScheduleFireStore`] so the delete-time fire-ledger purge
+    /// (issue #708) can be asserted without a real backend. Only the verbs the
+    /// delete path exercises need real behaviour; `claim_fire` seeds a ledger
+    /// and `delete_schedule_fires` purges one schedule's rows.
+    #[derive(Default)]
+    struct MemFires {
+        /// `(company, schedule_id) -> claimed minutes`.
+        rows: StdMutex<std::collections::HashMap<(String, String), std::collections::HashSet<u64>>>,
+        /// Arm the next `delete_schedule_fires` call to error, to prove the
+        /// delete succeeds even when the purge cascade fails.
+        fail_delete: std::sync::atomic::AtomicBool,
+    }
+
+    impl MemFires {
+        fn seed(&self, company: &CompanyId, schedule_id: &str, minute: u64) {
+            self.rows
+                .lock()
+                .unwrap()
+                .entry((company.as_ref().to_string(), schedule_id.to_string()))
+                .or_default()
+                .insert(minute);
+        }
+        fn minutes(&self, company: &CompanyId, schedule_id: &str) -> Vec<u64> {
+            let rows = self.rows.lock().unwrap();
+            let mut ms: Vec<u64> = rows
+                .get(&(company.as_ref().to_string(), schedule_id.to_string()))
+                .map(|set| set.iter().copied().collect())
+                .unwrap_or_default();
+            ms.sort_unstable();
+            ms
+        }
+        fn arm_delete_failure(&self) {
+            self.fail_delete
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl ScheduleFireStore for MemFires {
+        async fn claim_fire(&self, c: &CompanyId, s: &str, m: u64) -> Result<bool> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .entry((c.as_ref().to_string(), s.to_string()))
+                .or_default()
+                .insert(m))
+        }
+        async fn latest_fire(&self, c: &CompanyId, s: &str) -> Result<Option<u64>> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(&(c.as_ref().to_string(), s.to_string()))
+                .and_then(|set| set.iter().max().copied()))
+        }
+        async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> Result<usize> {
+            Ok(0)
+        }
+        async fn delete_schedule_fires(&self, c: &CompanyId, s: &str) -> Result<usize> {
+            if self
+                .fail_delete
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(OpenCompanyError::Store("flaky fire-ledger purge".into()));
+            }
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .remove(&(c.as_ref().to_string(), s.to_string()))
+                .map_or(0, |set| set.len()))
+        }
+    }
+
+    /// A throwaway fire store for delete tests that do not assert on the purge —
+    /// the common case. Tests that DO assert the purge hold their own
+    /// `Arc<MemFires>` so they can read it back.
+    fn fires() -> Arc<dyn ScheduleFireStore> {
+        Arc::new(MemFires::default())
+    }
+
     // --- fixtures ------------------------------------------------------------
 
     /// A committed seed graph, id `seeded` / name `Seeded flow`.
@@ -1577,6 +1987,8 @@ to = "done"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -2459,6 +2871,7 @@ to = "done"
             None,
             &store,
             &revs(),
+            Some(&fires()),
             Some(&log_dyn),
             "greeter",
             Some(&version),
@@ -2496,6 +2909,79 @@ to = "done"
         }
     }
 
+    /// #708: a committed delete purges the schedule's durable fire ledger under
+    /// the exact `workflow-<id>` key, so a recreated same-id workflow inherits
+    /// no anchor and no stale claim.
+    #[tokio::test]
+    async fn deleting_a_workflow_purges_its_schedule_fire_ledger() {
+        let company = CompanyId::new("acme");
+        let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
+
+        // A ledger for greeter's schedule, plus a sibling schedule's row to
+        // prove the purge is scoped to exactly the deleted workflow's key.
+        let fires = Arc::new(MemFires::default());
+        let greeter_key = workflow_schedule_id("greeter");
+        fires.seed(&company, &greeter_key, 100);
+        fires.seed(&company, &greeter_key, 101);
+        fires.seed(&company, &workflow_schedule_id("other"), 100);
+        let fires_dyn: Arc<dyn ScheduleFireStore> = fires.clone();
+
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires_dyn),
+            None,
+            "greeter",
+            None,
+        )
+        .await
+        .expect("deletes");
+
+        assert!(
+            fires.minutes(&company, &greeter_key).is_empty(),
+            "the deleted workflow's whole fire ledger is purged"
+        );
+        assert_eq!(
+            fires.minutes(&company, &workflow_schedule_id("other")),
+            vec![100],
+            "a sibling workflow's schedule ledger is untouched"
+        );
+    }
+
+    /// #708: the purge is best-effort. A purge failure is logged, never rolled
+    /// back — the workflow is already gone, so the delete still succeeds.
+    #[tokio::test]
+    async fn a_failing_fire_ledger_purge_still_deletes_the_workflow() {
+        let company = CompanyId::new("acme");
+        let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
+
+        let fires = Arc::new(MemFires::default());
+        fires.seed(&company, &workflow_schedule_id("greeter"), 100);
+        fires.arm_delete_failure();
+        let fires_dyn: Arc<dyn ScheduleFireStore> = fires.clone();
+
+        let name = delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires_dyn),
+            None,
+            "greeter",
+            None,
+        )
+        .await
+        .expect("delete succeeds even when the purge cascade errors");
+        assert_eq!(name, "Greeter");
+
+        // The graph is gone despite the purge error.
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert!(record.overlay_workflows.is_empty(), "body must be gone");
+        assert!(record.manifest.workflows.enabled.is_empty());
+    }
+
     /// The delete is durable across the #208 boot rebuild *because* the overlay
     /// body is gone: `merge_enabled_workflows` re-derives `enabled` from seed
     /// ids ∪ surviving overlay ids, so there is nothing left to resurrect. This
@@ -2504,9 +2990,18 @@ to = "done"
     async fn a_deleted_workflow_has_nothing_left_for_the_boot_merge_to_re_enable() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        delete_company_workflow(&company, None, &store, &revs(), None, "greeter", None)
-            .await
-            .expect("deletes");
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "greeter",
+            None,
+        )
+        .await
+        .expect("deletes");
 
         let record = store.load(&company).await.unwrap().unwrap();
         let surviving: Vec<&str> = record
@@ -2532,11 +3027,20 @@ to = "done"
             .await
             .expect("someone edits first");
 
+        // A held fire store, seeded under the workflow's schedule key, proves the
+        // refused delete purges NOTHING — the purge runs only after a committed
+        // save, so a version-refused delete (which never saves) leaves the live
+        // workflow's ledger intact (#708).
+        let fires = Arc::new(MemFires::default());
+        fires.seed(&company, &workflow_schedule_id("greeter"), 42);
+        let fires_dyn: Arc<dyn ScheduleFireStore> = fires.clone();
+
         let err = delete_company_workflow(
             &company,
             None,
             &store,
             &revs(),
+            Some(&fires_dyn),
             None,
             "greeter",
             Some(&stale),
@@ -2547,6 +3051,11 @@ to = "done"
 
         let record = store.load(&company).await.unwrap().unwrap();
         assert_eq!(record.overlay_workflows.len(), 1, "nothing was removed");
+        assert_eq!(
+            fires.minutes(&company, &workflow_schedule_id("greeter")),
+            vec![42],
+            "a version-refused delete never reaches the purge — the ledger is intact"
+        );
     }
 
     /// Deleting a source-defined workflow is refused: `merge_enabled_workflows`
@@ -2570,6 +3079,7 @@ to = "done"
             Some(dir.path()),
             &store,
             &revs(),
+            Some(&fires()),
             None,
             "seeded",
             None,
@@ -2586,9 +3096,18 @@ to = "done"
     async fn deleting_an_unknown_workflow_is_not_found() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        let err = delete_company_workflow(&company, None, &store, &revs(), None, "ghost", None)
-            .await
-            .expect_err("unknown id");
+        let err = delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "ghost",
+            None,
+        )
+        .await
+        .expect_err("unknown id");
         assert!(
             matches!(err, OpenCompanyError::CompanyNotFound(_)),
             "{err:?}"
@@ -2599,10 +3118,18 @@ to = "done"
     async fn deleting_a_traversal_id_is_invalid() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        let err =
-            delete_company_workflow(&company, None, &store, &revs(), None, "../secrets", None)
-                .await
-                .expect_err("traversal id");
+        let err = delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "../secrets",
+            None,
+        )
+        .await
+        .expect_err("traversal id");
         assert!(
             matches!(err, OpenCompanyError::InvalidRequest(_)),
             "{err:?}"
@@ -2624,9 +3151,18 @@ to = "done"
                 .expect("seed");
         }
 
-        delete_company_workflow(&company, None, &store, &revs(), None, "b", None)
-            .await
-            .expect("deletes the middle one");
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "b",
+            None,
+        )
+        .await
+        .expect("deletes the middle one");
 
         let record = store.load(&company).await.unwrap().unwrap();
         let ids: Vec<&str> = record
@@ -2651,9 +3187,18 @@ to = "done"
         rec.manifest.workflows.enabled.push("greeter".to_string());
         let store = store_of(MemStore::failing(rec));
 
-        delete_company_workflow(&company, None, &store, &revs(), None, "greeter", None)
-            .await
-            .expect_err("save fails");
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "greeter",
+            None,
+        )
+        .await
+        .expect_err("save fails");
 
         let record = store.load(&company).await.unwrap().unwrap();
         assert_eq!(record.overlay_workflows.len(), 1, "nothing was removed");
@@ -2704,11 +3249,43 @@ to = "done"
     }
 
     /// A `trigger → tool_call` draft. `slug` of `None` omits `config` entirely,
-    /// so the ungated slug-presence check fires.
+    /// so the ungated slug-presence check fires. Otherwise the node carries a
+    /// generic `config.args` table with every workflow-tool required-arg key set
+    /// (issue #813), so a positive-control slug clears the required-args arm — the
+    /// arm checks only presence, so the extra keys are harmless and this stays
+    /// feature-agnostic (no catalogue reference).
     fn tool_call_draft(id: &str, name: &str, slug: Option<&str>) -> RawWorkflow {
+        let mut args = toml::map::Map::new();
+        for key in [
+            "command",
+            "edits",
+            "operation",
+            "data",
+            "filename",
+            "url",
+            "path",
+            "query",
+        ] {
+            args.insert(key.to_string(), toml::Value::String("x".to_string()));
+        }
+        tool_call_draft_args(id, name, slug, Some(toml::Value::Table(args)))
+    }
+
+    /// A `trigger → tool_call` draft with explicit control over `config.args` —
+    /// used to exercise the #813 required-args arm (absent args, present args)
+    /// directly. `args` of `None` omits the `args` table entirely.
+    fn tool_call_draft_args(
+        id: &str,
+        name: &str,
+        slug: Option<&str>,
+        args: Option<toml::Value>,
+    ) -> RawWorkflow {
         let config = slug.map(|slug| {
             let mut table = toml::map::Map::new();
             table.insert("slug".to_string(), toml::Value::String(slug.to_string()));
+            if let Some(args) = &args {
+                table.insert("args".to_string(), args.clone());
+            }
             toml::Value::Table(table)
         });
         RawWorkflow {
@@ -2983,6 +3560,326 @@ to = "done"
             "{err:?}"
         );
         assert!(err.to_string().contains("cannot run"), "{err}");
+    }
+
+    // --- #813: required `config.args` on a workflow tool_call -----------------
+
+    /// A granted `tool_call` whose required `config.args` are absent is refused at
+    /// author time, naming the missing args — the same gate the create-time
+    /// copilot hears via courtesy validation. `csv_export` needs `data` and
+    /// `filename`; the run would otherwise export nothing.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_missing_required_args_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args("wf", "WF", Some("csv_export"), None),
+        )
+        .await
+        .expect_err("missing required args");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("config.args") && msg.contains("data") && msg.contains("filename"),
+            "the missing args are named: {msg}"
+        );
+    }
+
+    /// The same slug WITH its required args under `config.args` is accepted — the
+    /// arm gates the absence, not the tool. A `=`-expression counts as present.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_required_args_is_accepted() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        let mut args = toml::map::Map::new();
+        args.insert(
+            "data".to_string(),
+            toml::Value::String("=nodes.pick.items".to_string()),
+        );
+        args.insert(
+            "filename".to_string(),
+            toml::Value::String("out.csv".to_string()),
+        );
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args(
+                "wf",
+                "WF",
+                Some("csv_export"),
+                Some(toml::Value::Table(args)),
+            ),
+        )
+        .await
+        .expect("required args present");
+    }
+
+    /// `read_workspace_state` has NO required args, so an empty-args node is not
+    /// blocked by the arm — its inability to read a file is a grounding concern
+    /// (the copilot's honest capability line), not an author-time gate.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_no_required_args_is_accepted_empty() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["shell"]),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args("wf", "WF", Some("read_workspace_state"), None),
+        )
+        .await
+        .expect("read_workspace_state needs no args");
+    }
+
+    /// A required arg that is PRESENT but blank (a whitespace-only string or an
+    /// empty array/table) counts as missing — presence alone is not enough, since
+    /// a `""` filename would export to nowhere. This is the branch that carries
+    /// the real difference from a plain `contains_key` check.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_a_blank_required_arg_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        let mut args = toml::map::Map::new();
+        // Empty array and a whitespace-only string: both present, both unusable.
+        args.insert("data".to_string(), toml::Value::Array(Vec::new()));
+        args.insert(
+            "filename".to_string(),
+            toml::Value::String("   ".to_string()),
+        );
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft_args(
+                "wf",
+                "WF",
+                Some("csv_export"),
+                Some(toml::Value::Table(args)),
+            ),
+        )
+        .await
+        .expect_err("blank required args count as missing");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("data") && msg.contains("filename"),
+            "both blank args are named: {msg}"
+        );
+    }
+
+    // --- issue #661/#682: required config + condition labels on the draft path
+
+    /// A minimal draft — trigger → condition `gate` → two outputs — with the
+    /// gate's `config.field` and both branch labels parameterised. Since
+    /// `parse_workflow` is now lenient on the #661 rules (issue #682), these are
+    /// the graphs that prove the create/update path still enforces them strictly.
+    fn condition_draft(
+        field: Option<&str>,
+        yes_label: Option<&str>,
+        no_label: Option<&str>,
+    ) -> RawWorkflow {
+        let config = field.map(|field| {
+            let mut table = toml::map::Map::new();
+            table.insert("field".to_string(), toml::Value::String(field.to_string()));
+            toml::Value::Table(table)
+        });
+        let node = |id: &str, kind: &str, config: Option<toml::Value>| RawNode {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            name: id.to_string(),
+            summary: None,
+            agent: None,
+            schedule: None,
+            config,
+            on_error: None,
+            retry: None,
+            requires_approval: None,
+            destination: None,
+        };
+        RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                node("start", "trigger", None),
+                node("gate", "condition", config),
+                node("a", "output", None),
+                node("b", "output", None),
+            ],
+            edges: vec![
+                RawEdge {
+                    from: "start".to_string(),
+                    to: "gate".to_string(),
+                    label: None,
+                },
+                RawEdge {
+                    from: "gate".to_string(),
+                    to: "a".to_string(),
+                    label: yes_label.map(str::to_string),
+                },
+                RawEdge {
+                    from: "gate".to_string(),
+                    to: "b".to_string(),
+                    label: no_label.map(str::to_string),
+                },
+            ],
+        }
+    }
+
+    /// A condition draft with no `config.field` is refused at author time even
+    /// though `parse_workflow` would now let it load.
+    #[tokio::test]
+    async fn draft_condition_without_field_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            condition_draft(None, Some("yes"), Some("no")),
+        )
+        .await
+        .expect_err("condition with no field");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("config.field"), "{err}");
+    }
+
+    /// A condition branch labeled anything but `yes`/`no` is refused at author
+    /// time — the load path is lenient, so this rule now lives entirely here.
+    #[tokio::test]
+    async fn draft_condition_with_non_yes_no_label_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            condition_draft(Some("=item.ok"), Some("pass"), Some("no")),
+        )
+        .await
+        .expect_err("off-vocabulary condition label");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("labeled `yes` or `no`"), "{err}");
+    }
+
+    /// The positive control: a condition with a `field` and `yes`/`no` branches
+    /// is accepted by the same author path.
+    #[tokio::test]
+    async fn draft_condition_with_field_and_yes_no_labels_is_valid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            condition_draft(Some("=item.approved"), Some("yes"), Some("no")),
+        )
+        .await
+        .expect("a well-formed condition draft is accepted");
+    }
+
+    /// An http_request draft missing BOTH `method` and `url` reports both in one
+    /// 400 — the draft path collects every required-config problem for a node,
+    /// not just the first, so a human/model iterating hears the full list.
+    #[tokio::test]
+    async fn draft_http_request_missing_method_and_url_reports_both() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let draft = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+                RawNode {
+                    id: "fetch".to_string(),
+                    kind: "http_request".to_string(),
+                    name: "Fetch".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "fetch".to_string(),
+                label: None,
+            }],
+        };
+        let err = create_company_workflow(&company, None, &store, None, draft)
+            .await
+            .expect_err("http_request with no method or url");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains("config.method"), "{message}");
+        assert!(message.contains("config.url"), "{message}");
     }
 
     // --- issue #276: arming, disarming, and the switch -----------------------

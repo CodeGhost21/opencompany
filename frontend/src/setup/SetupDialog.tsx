@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Check, Loader2, Sparkles, Users } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { proposeRoster, type ProposedAgent } from "@/api/setup";
+import { proposeRoster, type ProposedAgent } from "@/api/company-setup";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,

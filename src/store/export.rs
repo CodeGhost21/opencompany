@@ -33,7 +33,7 @@ use crate::ports::store::CompanyStore;
 use crate::ports::types::{
     BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk,
     EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember, OverlayDeskOrder,
-    OverlayWorkflow, StoredEvent, TemplateProvenance,
+    OverlayWorkflow, PolicyOverride, StoredEvent, TemplateProvenance,
 };
 
 /// Canonical bundle file and directory names, matching the fs
@@ -124,6 +124,19 @@ struct BundleMeta {
     /// `#[serde(default)]` for back-compat with older bundles.
     #[serde(default)]
     overlay_budgets: Vec<BudgetOverride>,
+    /// The operator's `[policy]` override at export time (issue #562).
+    /// `#[serde(default)]` for back-compat with older bundles, which read as
+    /// `None` — the manifest's `[policy]` decides, exactly as before.
+    #[serde(default)]
+    overlay_policy: Option<PolicyOverride>,
+    /// The operator-set per-desk tool ceilings at export time. Preserved so an
+    /// export→import does not silently widen a desk back to the company's full
+    /// grant — the same class of loss `overlay_policy` above is carried to
+    /// prevent, on the axis that decides capability rather than autonomy.
+    /// `#[serde(default)]` for back-compat with older bundles, which read as
+    /// empty: the manifest's ceilings decide, exactly as before.
+    #[serde(default)]
+    overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids switched off at export time (issue #276). Preserved so
     /// an export→import does not silently re-arm a schedule the operator had
     /// paused — which is the one direction this bundle must never move on its
@@ -189,6 +202,17 @@ struct BundleContents {
     /// The operator-set per-teammate daily spend caps, carried through the
     /// bundle so export→import preserves console-set budgets (issue #343).
     overlay_budgets: Vec<BudgetOverride>,
+    /// The operator's `[policy]` override, carried through the bundle so
+    /// export→import preserves a console-set autonomy tier (issue #562).
+    ///
+    /// Without this an exported company would come back on the manifest's tier,
+    /// silently re-tightening (or re-loosening) the approval gate on import —
+    /// the same class of loss #343 fixed for spend caps.
+    overlay_policy: Option<PolicyOverride>,
+    /// The operator-set per-desk tool ceilings, carried through the bundle so
+    /// export→import preserves a console-narrowed department (rather than
+    /// restoring it at the company's full grant).
+    overlay_desk_tools: std::collections::BTreeMap<String, Vec<String>>,
     /// The workflow ids switched off, carried through the bundle so an import
     /// restores a paused workflow paused (issue #276).
     disabled_workflows: Vec<String>,
@@ -244,6 +268,8 @@ impl BundleContents {
             overlay_desks: record.overlay_desks,
             overlay_workflows: record.overlay_workflows,
             overlay_budgets: record.overlay_budgets,
+            overlay_policy: record.overlay_policy,
+            overlay_desk_tools: record.overlay_desk_tools,
             disabled_workflows: record.disabled_workflows,
         })
     }
@@ -273,6 +299,8 @@ impl BundleContents {
                 overlay_desks: self.overlay_desks.clone(),
                 overlay_workflows: self.overlay_workflows.clone(),
                 overlay_budgets: self.overlay_budgets.clone(),
+                overlay_policy: self.overlay_policy.clone(),
+                overlay_desk_tools: self.overlay_desk_tools.clone(),
                 disabled_workflows: self.disabled_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
                 setup: self.setup.clone(),
@@ -318,6 +346,8 @@ impl BundleContents {
             overlay_desks: self.overlay_desks.clone(),
             overlay_workflows: self.overlay_workflows.clone(),
             overlay_budgets: self.overlay_budgets.clone(),
+            overlay_policy: self.overlay_policy.clone(),
+            overlay_desk_tools: self.overlay_desk_tools.clone(),
             disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
             setup: self.setup.clone(),
@@ -429,6 +459,8 @@ impl BundleContents {
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
+            overlay_policy: meta.overlay_policy,
+            overlay_desk_tools: meta.overlay_desk_tools,
             disabled_workflows: meta.disabled_workflows,
         })
     }
@@ -765,6 +797,7 @@ mod test {
                 text: "kick off".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .expect("cycle");
@@ -953,6 +986,8 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1032,6 +1067,8 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1160,6 +1197,8 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1248,6 +1287,8 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
             setup: None,
@@ -1325,6 +1366,7 @@ mod test {
             name: "Dana Designer".into(),
             role: "Design".into(),
             description: Some("Owns the brand".into()),
+            tools: Vec::new(),
         }];
         // That teammate added to the `eng` desk through the membership overlay.
         let desk_members = vec![OverlayDeskMember {
@@ -1360,6 +1402,8 @@ mod test {
             overlay_desks: desks.clone(),
             overlay_workflows: workflows.clone(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1512,6 +1556,25 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: budgets.clone(),
+            // Issue #562: a console-set tier rides the same bundle, and for the
+            // same reason the paused workflow below does — a `None` here could
+            // not have detected the field being dropped, and dropping it would
+            // silently move an imported company's approval gate back to whatever
+            // the manifest shipped with.
+            overlay_policy: Some(PolicyOverride {
+                mode: Some("auto".to_string()),
+                always_approve: Some(vec!["payment.send".to_string()]),
+                set_by: admin_actor(),
+                at_millis: 1_700_000_000_002,
+            }),
+            // Non-empty for the same reason the tier above is: an empty map here
+            // could not detect the field being dropped from the bundle, and
+            // dropping it would silently restore an imported company's narrowed
+            // desk at the company's full tool grant.
+            overlay_desk_tools: std::collections::BTreeMap::from([(
+                "research".to_string(),
+                vec!["docs.*".to_string()],
+            )]),
             // Issue #276: a paused workflow rides the same bundle. The empty
             // list this fixture used to carry could not have detected the field
             // being dropped — and dropping it would silently re-arm a schedule
@@ -1543,6 +1606,26 @@ mod test {
         assert!(
             !dst_record.workflow_enabled("digest"),
             "the bundle round-trip re-armed a paused workflow"
+        );
+        // Issue #562: the console-set tier survives export→import, attribution
+        // included. Without this the seeded fixture proves nothing — a bundle
+        // path that dropped the field would still pass every other assertion
+        // here, and an imported company would silently run the manifest's gate.
+        let policy = dst_record
+            .overlay_policy
+            .as_ref()
+            .expect("the policy override was dropped by the bundle round-trip");
+        assert_eq!(policy.mode.as_deref(), Some("auto"));
+        assert_eq!(
+            policy.always_approve.as_deref(),
+            Some(["payment.send".to_string()].as_slice())
+        );
+        assert_eq!(policy.set_by, admin_actor());
+        assert_eq!(policy.at_millis, 1_700_000_000_002);
+        assert_eq!(
+            dst_record.effective_policy().mode,
+            "auto",
+            "the imported company must run the tier the operator set, not the manifest's"
         );
 
         // Cap, attribution and timestamp, read the way every surface reads them.
@@ -1599,6 +1682,8 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1670,6 +1755,7 @@ mod test {
                 text: "hi".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             }])
             .await
             .unwrap();

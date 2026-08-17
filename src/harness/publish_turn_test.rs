@@ -311,12 +311,14 @@ fn brain_with(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
         workspace_root: dir.to_path_buf(),
+        audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
         tasks: Some(ops.clone()),
         artifacts: with_artifacts.then(|| ops.clone() as Arc<dyn ArtifactStore>),
         skills: None,
         skills_source_dir: None,
         skills_registry: Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
@@ -326,6 +328,8 @@ fn brain_with(
         pending_publishes: Default::default(),
         workflow_refs: Default::default(),
         run_outputs: Default::default(),
+        run_output_store: None,
+        workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),
@@ -334,10 +338,17 @@ fn brain_with(
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
     };
     let record = CompanyRecord {
@@ -351,6 +362,8 @@ fn brain_with(
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
+        overlay_policy: None,
+        overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
@@ -404,6 +417,8 @@ fn card(id: &str) -> TaskRecord {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     }
 }
 
@@ -1171,6 +1186,7 @@ fn chat(text: &str) -> CycleRequest {
             by: None,
             chat: None,
             parent: None,
+            deliverable: None,
         }],
         event_seqs: Vec::new(),
         compressed_history: Vec::new(),

@@ -80,7 +80,7 @@ function Line({ channel, message }: { channel: Channel; message: ChatMessage }) 
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
           <span className="truncate text-sm font-semibold tracking-tight">{sender.name}</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+          <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
             {formatTime(message.at)}
           </span>
         </div>

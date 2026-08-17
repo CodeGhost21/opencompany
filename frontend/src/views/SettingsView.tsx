@@ -25,10 +25,12 @@ import {
 } from "@/components/ui/card";
 import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
+import { PolicySettings } from "@/components/policy-settings";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { restartTour } from "@/tour/state";
+import { preloadTour } from "@/tour/TourController";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
 interface Props {
@@ -51,6 +53,11 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
         {/* Pairing this machine. Renders nothing in a browser, where the
             session cookie already works. */}
         <DevicePairing />
+
+        {/* Approvals: the autonomy tier and the always-ask list (issue #562).
+            High in the page on purpose — an operator who comes to settings
+            because they are drowning in approval cards is here for this. */}
+        <PolicySettings client={client} company={company} />
 
         {/* Connection */}
         <Card>
@@ -128,6 +135,11 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             </div>
             <Button
               variant="outline"
+              // The tour's code is lazily loaded, so without this the download
+              // starts on the click and the button appears to do nothing until
+              // it lands. Pointing at it is intent enough to fetch.
+              onPointerEnter={preloadTour}
+              onFocus={preloadTour}
               onClick={() => {
                 restartTour(scope);
                 toast.success("Starting the product tour.");
@@ -168,7 +180,21 @@ function LifecycleControls({
   feed: CompanyFeed;
 }) {
   const [busy, setBusy] = useState(false);
-  const state = feed.status.lifecycle;
+  /**
+   * The state this control just asked for, shown until the feed confirms it.
+   *
+   * Without this the buttons lag the click by two round trips: the action
+   * itself, and then the `refresh` that re-reads the company. `busy` cleared as
+   * soon as the action returned, so in between the operator saw re-enabled
+   * buttons still offering "Pause" on a company they had just paused — which
+   * reads as a click that did not register, and invites a second one.
+   *
+   * Cleared in `finally` rather than on success, so a *failed* action reverts
+   * to whatever the feed says instead of leaving the console asserting a state
+   * the host rejected.
+   */
+  const [pending, setPending] = useState<string | null>(null);
+  const state = pending ?? feed.status.lifecycle;
   const archived = state === "archived";
   const running = state === "running";
   const paused = state === "paused";
@@ -176,14 +202,21 @@ function LifecycleControls({
   async function run(action: LifecycleAction) {
     if (busy) return;
     setBusy(true);
+    // Before the await, so the buttons move on the click rather than on the
+    // response. This is the whole point of tracking it separately.
+    setPending(resultOf(action));
     try {
       await client.lifecycle(action, company);
       toast.success(`Company ${labelFor(action)}.`);
-      void feed.refresh();
+      // Awaited, unlike before: `pending` is dropped in `finally`, and dropping
+      // it while the refresh was still in flight would flip the buttons back to
+      // the stale lifecycle for exactly as long as that request took.
+      await feed.refresh();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       toast.error(`Couldn't ${action} — ${msg}`);
     } finally {
+      setPending(null);
       setBusy(false);
     }
   }
@@ -284,6 +317,28 @@ function InfoRow({ label, children }: { label: string; children: React.ReactNode
       {children}
     </div>
   );
+}
+
+/**
+ * The lifecycle an action lands the company in.
+ *
+ * Separate from {@link labelFor} even though three of the four strings match:
+ * that one writes a sentence to a person ("Company resumed.") and this one has
+ * to equal what the host reports in `status.lifecycle`, which is why `resume`
+ * differs. Sharing one function would make the two meanings drift into each
+ * other the first time either wording changed.
+ */
+function resultOf(action: LifecycleAction): string {
+  switch (action) {
+    case "pause":
+      return "paused";
+    case "resume":
+      return "running";
+    case "suspend":
+      return "suspended";
+    case "archive":
+      return "archived";
+  }
 }
 
 function labelFor(action: LifecycleAction): string {

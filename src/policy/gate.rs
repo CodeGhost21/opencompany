@@ -395,12 +395,16 @@ impl ApprovalGate for ManifestApprovalGate {
         //    stub, so this list is currently always empty.
 
         // 2. `always_approve` effect kinds park regardless of mode or amount.
-        if self
-            .policy
-            .always_approve
-            .iter()
-            .any(|kind| kind == effect.kind())
-        {
+        //
+        //    The match is `always_approve::matches`, shared with the harness
+        //    tool policy. This arm used to compare exactly while the harness
+        //    also honoured a leading segment, so one operator list meant two
+        //    different things depending on which brain was running (issue
+        //    #684). Adopting the harness rule here widens this arm: an entry
+        //    like `payment` now parks `payment.send` natively, where before it
+        //    parked nothing. That direction is the fail-safe one — an operator
+        //    who named a family meant the family.
+        if crate::policy::always_approve::matches(&self.policy.always_approve, effect.kind()) {
             return Ok(PolicyDecision::RequireApproval);
         }
 
@@ -456,13 +460,21 @@ mod test {
     use super::*;
     use crate::ports::types::ActorKind;
 
+    /// The fence these tests run under, written out rather than taken from
+    /// [`DEFAULT_ALWAYS_APPROVE`](crate::company::DEFAULT_ALWAYS_APPROVE).
+    ///
+    /// It used to be the default, which made every assertion below depend on a
+    /// constant these tests do not own — and when that constant turned out to
+    /// gate nothing on the *other* approval path, nothing here noticed, because
+    /// on this path it did match (issue #684). A test that borrows a shipped
+    /// default tests the default, not the mechanism; the default is empty now
+    /// and this list is the mechanism's own fixture.
+    const FENCE: &[&str] = &["payment.send"];
+
     fn policy(mode: &str, cap: Option<f64>) -> Policy {
         Policy {
             mode: mode.to_string(),
-            always_approve: crate::company::DEFAULT_ALWAYS_APPROVE
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+            always_approve: FENCE.iter().map(|s| s.to_string()).collect(),
             auto_approve_under_usd: cap,
         }
     }
@@ -516,7 +528,7 @@ mod test {
     #[tokio::test]
     async fn always_approve_overrides_full() {
         let gate = ManifestApprovalGate::new(policy("full", None));
-        // `payment.send` is in the default always_approve list.
+        // `payment.send` is in FENCE, this module's always_approve fixture.
         assert_eq!(
             decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
             PolicyDecision::RequireApproval
@@ -830,7 +842,7 @@ mod test {
         let gate = ManifestApprovalGate::new(policy("supervised", Some(100.0)));
         let mut cheap = effect("payment.send", EffectGroup::Spend);
         cheap.amount_usd = Some(1.0);
-        // `payment.send` is in the default always_approve list, so it parks...
+        // `payment.send` is in FENCE, this module's always_approve fixture, so it parks...
         assert_eq!(decide(&gate, &cheap).await, PolicyDecision::RequireApproval);
         // ...but a dollar under a hundred-dollar cap is not irreversible.
         assert!(!gate.is_irreversible(&cheap));
@@ -977,7 +989,7 @@ mod test {
     async fn releasing_restores_normal_evaluation() {
         let gate = ManifestApprovalGate::new(policy("full", None));
         let spend = effect("payment.send", EffectGroup::Spend);
-        // `payment.send` is in the default always_approve list, so `full` parks it.
+        // `payment.send` is in FENCE, this module's always_approve fixture, so `full` parks it.
         let before = decide(&gate, &spend).await;
         assert_eq!(before, PolicyDecision::RequireApproval);
 

@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Law Firm harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -24,32 +24,17 @@ human_role = "Approving filings"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
-[[agent]]
-id = "legal_researcher"
-role = "Legal Researcher"
-description = "Case law and legal research."
-
-[[agent]]
-id = "contract_drafter"
-role = "Contract Drafter"
-description = "Draft contracts and legal documents."
-
-[[agent]]
-id = "litigation_support"
-role = "Litigation Support"
-description = "Prepare materials for litigation."
-
-[[agent]]
-id = "discovery_agent"
-role = "Discovery Agent"
-description = "Run and review document discovery."
-
-[[agent]]
-id = "compliance_agent"
-role = "Compliance Agent"
-description = "Check regulatory compliance."
-
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.
 [workflows]
 enabled = ["matter_pipeline"]
+
+# Approval tier for this company (issue #605). Declared explicitly rather than
+# left to the serde default, so the tier a shipped company runs on is readable
+# from its own manifest instead of inferred from an absent block.
+#
+# `auto` runs the agent's own sandbox writes and outward reads unattended and
+# still parks everything that leaves the company or spends money. `always_approve`
+# is omitted, so it keeps its default.
+[policy]
+mode = "auto"

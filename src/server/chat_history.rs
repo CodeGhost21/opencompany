@@ -8,10 +8,13 @@
 //! it; both surfaces call through it instead of each keeping their own copy of
 //! the filter + projection logic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::tasks::{
+    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
+};
 use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq, StoredEvent, TurnStep};
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
@@ -23,35 +26,146 @@ use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 /// across the two ids depending on which one happened to write it (issue #65).
 pub const MAIN_THREAD_ID: &str = "main";
 
+/// The largest message page either history surface may materialize. Keeping
+/// the limit beside the shared reader prevents a new caller from turning its
+/// `Vec` reservation back into an allocation controlled by the request.
+pub const CHAT_HISTORY_PAGE_LIMIT: usize = 200;
+
+/// Does this stored chat id mean the General desk?
+///
+/// **Four spellings, one desk.** The console addresses its default thread as
+/// `"main"`, the chat route stores an unaddressed message as `None`, older
+/// events carry `""`, and the desk's own id/name is `"General"`. [`owns`] has
+/// admitted all four since issue #65, which is what stops a transcript from
+/// splitting across whichever id happened to write each message.
+///
+/// Exposed because that equivalence is **not** local to history rendering.
+/// `CompanyRuntime::resolvable_parent` compares a remembered thread root's chat
+/// id against the channel being answered into, and comparing the raw strings
+/// there made a root stored as `None` fail to match the `"General"` it is
+/// rendered under — so a threaded approval rooted in an unaddressed message
+/// silently resumed in the channel, which is the exact symptom issue #435 set
+/// out to remove. Two places deciding "same conversation?" by different rules
+/// is the drift; one function is the fix. See [`same_conversation`].
+pub fn is_general_chat(chat: Option<&str>) -> bool {
+    match chat {
+        None => true,
+        Some(chat) => {
+            chat.is_empty()
+                || chat.eq_ignore_ascii_case(MAIN_THREAD_ID)
+                || chat.eq_ignore_ascii_case(GENERAL_DESK)
+        }
+    }
+}
+
+/// Do two stored chat ids name the same conversation (issue #435)?
+///
+/// Every spelling of the General desk is one conversation — see
+/// [`is_general_chat`] — and everything else compares verbatim, because a desk
+/// id is an opaque identifier and two desks differing only in case are two
+/// desks. Deliberately **not** a general-purpose case-insensitive compare: the
+/// folding is a fact about one desk's history, not a licence to loosen the
+/// others.
+pub fn same_conversation(a: Option<&str>, b: Option<&str>) -> bool {
+    if is_general_chat(a) || is_general_chat(b) {
+        return is_general_chat(a) && is_general_chat(b);
+    }
+    a == b
+}
+
 /// Whether a stored event belongs to the desk identified by `desk_id` /
 /// `desk_name`.
 ///
-/// Both `AgentReply`s and `OperatorMessage`s match on the desk id or name
-/// verbatim, plus — only for the General/operator desk — the console's `"main"`
-/// thread id and an empty chat id, so no historical message is orphaned by the
-/// id it happened to be journaled under (issue #65). An operator message routes
-/// by its stored `chat` id symmetrically with an agent reply's `chat_id`; only
-/// a legacy operator message with no stored chat id (empty/`None`) falls back
-/// to belonging to the General desk.
+/// Both `AgentReply`s and `OperatorMessage`s route by their stored chat id,
+/// matched against the desk's id and its name through [`same_conversation`] — so
+/// a named desk still compares verbatim and the General desk answers to every
+/// spelling of itself, and no historical message is orphaned by the id it
+/// happened to be journaled under (issue #65).
+///
+/// **Folded on both sides, not just the event's** (issue #435). The General
+/// check used to key on the *desk being asked for* being spelled `"General"`,
+/// which the console never does: its default thread is `"main"`, so
+/// `?desk=main` resolves to `("main", "main")` — no group chat is named `main` —
+/// and every event journaled under `"General"` was excluded from the one
+/// transcript that should hold them. An unaddressed chat post is exactly that
+/// pair: the operator message stores `chat: None` and its answer is journaled
+/// with `chat_id: "General"`, so the console's main line dropped both halves of
+/// its own conversation. The asymmetry also put this function at odds with
+/// `resolvable_parent`, which now folds through the same rule: a continuation
+/// could be parented to a root the main line refuses to render, and the console
+/// drops a reply whose parent it cannot find rather than showing it flat.
+///
+/// **A third kind of event routes here since issue #377**: the dispatch
+/// terminal. A card raised from a channel settles somewhere — `in_review`,
+/// `paused`, `todo` — and until #377 nothing structural said so in the channel
+/// it came from, so a reader saw the agent's relay prose and reasonably
+/// concluded the work had finished when it had in fact parked. The terminal
+/// routes by the origin the card recorded at raise time, matched on exactly the
+/// terms the other two are.
+///
+/// **`None` is not the General desk.** Everywhere else in this module a missing
+/// chat id means *the id was never addressed* and folds into General; on a
+/// terminal it means *no conversation raised this card* — it was created on the
+/// board, by a scheduler, or before the origin was recorded. Folding that into
+/// General would post a marker about board-only work into the operator's main
+/// line, which is a different bug from the one #377 fixes, so this arm answers
+/// `false` for every desk including General. It is the single most bug-prone
+/// line in this function and has its own test.
 pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
-    let is_general_desk =
-        desk_id.eq_ignore_ascii_case(GENERAL_DESK) || desk_name.eq_ignore_ascii_case(GENERAL_DESK);
-    match event {
-        CompanyEvent::AgentReply { chat_id, .. } => {
-            chat_id == desk_id
-                || chat_id == desk_name
-                || (is_general_desk
-                    && (chat_id.is_empty() || chat_id.eq_ignore_ascii_case(MAIN_THREAD_ID)))
-        }
-        CompanyEvent::OperatorMessage { chat, .. } => {
-            let chat = chat.as_deref().unwrap_or_default();
-            chat == desk_id
-                || chat == desk_name
-                || (is_general_desk
-                    && (chat.is_empty() || chat.eq_ignore_ascii_case(MAIN_THREAD_ID)))
-        }
-        _ => false,
-    }
+    let stored = match event {
+        CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.as_str()),
+        CompanyEvent::OperatorMessage { chat, .. } => chat.as_deref(),
+        // Issue #377. `None` short-circuits to `false` here rather than
+        // falling through to the shared tail: `same_conversation` reads a
+        // `None` as "unaddressed, therefore General", and this event's `None`
+        // means the opposite — no conversation raised this card, so it belongs
+        // to no conversation's history.
+        CompanyEvent::DeskTaskCompleted { origin_chat_id, .. } => match origin_chat_id.as_deref() {
+            Some(origin) => Some(origin),
+            None => return false,
+        },
+        _ => return false,
+    };
+    same_conversation(stored, Some(desk_id)) || same_conversation(stored, Some(desk_name))
+}
+
+/// The channel line a settled dispatch leaves behind (issue #377) —
+/// `finished → In review`.
+///
+/// Deliberately **structural and short**: where the card landed, and nothing
+/// else. The run's prose already reaches the same channel as the orchestrator's
+/// relay bubble (#151), so repeating it here would put one run's words into one
+/// conversation twice. What was missing was never the words — it was the fact
+/// that the card *settled*, and *where*, which a reader watching only the prose
+/// could not tell apart from "still working".
+///
+/// "finished" means *the run stopped*, not *it succeeded* — the same reading
+/// [`CompanyEvent::DeskTaskCompleted`] itself takes. A cancelled or failed
+/// dispatch lands in To-do and says so; a paused one says Paused. That is the
+/// whole point: the misleading case this exists for is precisely the run that
+/// stopped without finishing the work.
+///
+/// An unrecognised column id passes through **verbatim**, the same posture
+/// `harness::lifecycle::relay_text` takes — a newer host naming a column this
+/// build has not heard of should read a little raw, never render blank.
+///
+/// Pinned by tests on both sides of the wire: the console has its own
+/// `dispatchMarkerText` (`frontend/src/lib/chat.ts`), because the live SSE
+/// frame carries the raw column id rather than prose. Two spellings of one
+/// sentence can only *reword* a marker across a reload — never double it, since
+/// the dedupe is on identity — but the tests couple them anyway, on the same
+/// terms `BOARD_COLUMNS` and the console's `TASK_COLUMNS` are coupled.
+pub fn dispatch_marker_text(column: &str) -> String {
+    let landing = match column {
+        COLUMN_TODO => "To-do",
+        COLUMN_PLANNING => "Planning",
+        COLUMN_IN_PROGRESS => "In progress",
+        COLUMN_PAUSED => "Paused",
+        COLUMN_IN_REVIEW => "In review",
+        COLUMN_DONE => "Done",
+        other => other,
+    };
+    format!("finished → {landing}")
 }
 
 /// Who is reading a desk history. `mine` is relative to this.
@@ -151,15 +265,14 @@ fn reaction_actor_key(by: &Option<Actor>) -> String {
 /// route's explicit `on` flag idempotent — and a row that ends up `off` is
 /// dropped entirely rather than kept as a zero. Order is first-set order, so a
 /// message's chips do not reshuffle between reads.
-fn fold_reactions(
-    stored: &[StoredEvent],
-    viewer: &Viewer,
-    authors: &HashMap<String, String>,
-) -> HashMap<String, Vec<ReactionView>> {
+struct ReactionFold {
     // (message, actor, emoji) → (position among first-seen keys, currently on).
-    let mut state: HashMap<(u64, String, String), (usize, bool)> = HashMap::new();
-    let mut seen = 0usize;
-    for event in stored {
+    state: HashMap<(u64, String, String), (usize, bool)>,
+    seen: usize,
+}
+
+impl ReactionFold {
+    fn observe(&mut self, event: &StoredEvent, wanted: Option<&HashSet<u64>>) {
         let CompanyEvent::ReactionToggled {
             message_seq,
             emoji,
@@ -167,46 +280,72 @@ fn fold_reactions(
             by,
         } = &event.event
         else {
-            continue;
+            return;
         };
+        if wanted.is_some_and(|ids| !ids.contains(&message_seq.value())) {
+            return;
+        }
         let key = (message_seq.value(), reaction_actor_key(by), emoji.clone());
-        match state.get_mut(&key) {
+        match self.state.get_mut(&key) {
             Some(slot) => slot.1 = *on,
             None => {
-                state.insert(key, (seen, *on));
-                seen += 1;
+                self.state.insert(key, (self.seen, *on));
+                self.seen += 1;
             }
         }
     }
 
-    let mut rows: Vec<(usize, u64, String, String)> = state
-        .into_iter()
-        .filter(|(_, (_, on))| *on)
-        .map(|((message, actor, emoji), (order, _))| (order, message, actor, emoji))
-        .collect();
-    rows.sort_unstable();
+    fn finish(
+        self,
+        viewer: &Viewer,
+        authors: &HashMap<String, String>,
+    ) -> HashMap<String, Vec<ReactionView>> {
+        let mut rows: Vec<(usize, u64, String, String)> = self
+            .state
+            .into_iter()
+            .filter(|(_, (_, on))| *on)
+            .map(|((message, actor, emoji), (order, _))| (order, message, actor, emoji))
+            .collect();
+        rows.sort_unstable();
 
-    let mut out: HashMap<String, Vec<ReactionView>> = HashMap::new();
-    for (_, message, actor, emoji) in rows {
-        let (by_label, mine) = match actor.strip_prefix("user:") {
-            Some(user_id) => (
-                authors
-                    .get(user_id)
-                    .cloned()
-                    .unwrap_or_else(|| "someone".to_string()),
-                *viewer == Viewer::User(user_id.to_string()),
-            ),
-            None => ("operator".to_string(), matches!(viewer, Viewer::Operator)),
-        };
-        out.entry(message.to_string())
-            .or_default()
-            .push(ReactionView {
-                emoji,
-                by_label,
-                mine,
-            });
+        let mut out: HashMap<String, Vec<ReactionView>> = HashMap::new();
+        for (_, message, actor, emoji) in rows {
+            let (by_label, mine) = match actor.strip_prefix("user:") {
+                Some(user_id) => (
+                    authors
+                        .get(user_id)
+                        .cloned()
+                        .unwrap_or_else(|| "someone".to_string()),
+                    *viewer == Viewer::User(user_id.to_string()),
+                ),
+                None => ("operator".to_string(), matches!(viewer, Viewer::Operator)),
+            };
+            out.entry(message.to_string())
+                .or_default()
+                .push(ReactionView {
+                    emoji,
+                    by_label,
+                    mine,
+                });
+        }
+        out
     }
-    out
+}
+
+#[cfg(test)]
+fn fold_reactions(
+    stored: &[StoredEvent],
+    viewer: &Viewer,
+    authors: &HashMap<String, String>,
+) -> HashMap<String, Vec<ReactionView>> {
+    let mut fold = ReactionFold {
+        state: HashMap::new(),
+        seen: 0,
+    };
+    for event in stored {
+        fold.observe(event, None);
+    }
+    fold.finish(viewer, authors)
 }
 
 impl MessageView {
@@ -271,6 +410,40 @@ impl MessageView {
                     reactions: Vec::new(),
                 }
             }
+            // The dispatch terminal (issue #377), as the channel marker a
+            // reader needs to see the card settle.
+            //
+            // A **dedicated arm**, not a lean on the defensive fallback below:
+            // that one renders `format!("{other:?}")`, so without this the
+            // marker would reach a person as a line of Rust `Debug` output —
+            // and it would do so only on reload, which is the half of this
+            // feature nobody watches while developing it.
+            //
+            // Authored as `system` on both keys, which is what makes the
+            // console render it as a centred pill rather than a company bubble
+            // (`MessageRow`), and `mine: false` because nobody said it.
+            // `task_id` carries the card so the pill can link to it — the same
+            // field, and therefore the same renderer, an `AgentReply`'s "card
+            // opened" chip uses. No new `MessageView` field: this type is
+            // shared with the GraphQL `Message` projection, and the reuse is
+            // what keeps #377 additive on both wire surfaces at once.
+            //
+            // No `steps` and no `parent_id`: a marker is not a turn and is
+            // never threaded, so `ThreadPanel` needs nothing from it.
+            CompanyEvent::DeskTaskCompleted {
+                task_id, column, ..
+            } => MessageView {
+                id,
+                channel: "system".to_string(),
+                author: "system".to_string(),
+                text: dispatch_marker_text(&column),
+                at_millis,
+                mine: false,
+                steps: Vec::new(),
+                task_id: Some(task_id),
+                parent_id: None,
+                reactions: Vec::new(),
+            },
             // `owns` never admits other variants into a history.
             other => MessageView {
                 id,
@@ -316,8 +489,7 @@ pub async fn author_labels(
 ///
 /// `before_seq` is an opaque EventLog cursor (a sequence position); only
 /// messages before it are considered. `first` caps how many of the remaining,
-/// most-recent messages come back. Returns the page plus the total count of
-/// matching messages (before the `first` cap, after the `before_seq` cut).
+/// most-recent messages come back.
 ///
 /// Shared by the GraphQL `Chat.history` resolver and the REST
 /// `GET .../chat/history` route so the two can never disagree about what a
@@ -329,38 +501,131 @@ pub async fn history_for_desk(
     viewer: &Viewer,
     before_seq: Option<u64>,
     first: usize,
-) -> Result<(Vec<MessageView>, i32), OpenCompanyError> {
-    let stored = runtime
-        .events()
-        .read_from(runtime.id(), EventSeq::new(0), usize::MAX)
-        .await?;
-    // One roster read per history, not one per message: the scan above is
-    // already O(log), and an N+1 on top of it would be worse.
-    let authors = author_labels(runtime).await?;
-    // Issue #364: reactions ride the same full-log read the messages do — a
-    // second pass over a list already in memory, not a second query. Folded
-    // before the messages are consumed, and attached only to messages this desk
-    // owns, so a reaction can no more cross a desk boundary than the message it
-    // is about can.
-    let mut reactions = fold_reactions(&stored, viewer, &authors);
+) -> Result<Vec<MessageView>, OpenCompanyError> {
+    // A page is events rather than messages: a busy company can put unrelated
+    // events between two chat turns. Walking backward keeps the newest `first`
+    // transcript entries without ever materialising that unrelated journal.
+    const EVENT_PAGE: usize = 512;
 
-    let mut messages: Vec<MessageView> = stored
-        .into_iter()
-        .filter(|event| owns(desk_id, desk_name, &event.event))
-        .filter(|event| before_seq.is_none_or(|before| event.seq.value() < before))
-        .map(|event| MessageView::project(event, viewer, &authors))
-        .map(|mut view| {
-            view.reactions = reactions.remove(&view.id).unwrap_or_default();
-            view
-        })
-        .collect();
-
-    let total = messages.len() as i32;
-    // Keep the most recent `first`, still in chronological order.
-    if messages.len() > first {
-        messages.drain(0..messages.len() - first);
+    // A zero-sized GraphQL page is a valid request, and the REST limit can be
+    // clamped to zero. It must not touch the journal merely to construct an
+    // empty response.
+    let first = first.min(CHAT_HISTORY_PAGE_LIMIT);
+    if first == 0 {
+        return Ok(Vec::new());
     }
-    Ok((messages, total))
+
+    // One roster read per history, not one per message.
+    let authors = author_labels(runtime).await?;
+    let mut cursor = before_seq.map(EventSeq::new);
+    let mut messages = Vec::with_capacity(first);
+    while messages.len() < first {
+        let page = runtime
+            .events()
+            .read_before(runtime.id(), cursor, EVENT_PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|event| event.seq);
+        for event in page {
+            if owns(desk_id, desk_name, &event.event) {
+                messages.push(MessageView::project(event, viewer, &authors));
+                if messages.len() == first {
+                    break;
+                }
+            }
+        }
+    }
+
+    // `read_before` supplies each page newest-first, as does `messages` above.
+    // Restore chronological order for the renderer before attaching reactions.
+    messages.reverse();
+
+    // Reactions necessarily follow their message. Once the displayed window is
+    // known, fold only toggles that could affect one of its messages, streaming
+    // forward from the window's oldest id through the current tail. The cursor
+    // limits *messages*, not the reaction snapshot: a later toggle still
+    // changes the state displayed on an older message.
+    let wanted: HashSet<u64> = messages
+        .iter()
+        .filter_map(|message| message.id.parse::<u64>().ok())
+        .collect();
+    if let Some(oldest) = wanted.iter().min().copied() {
+        let mut next = oldest.saturating_add(1);
+        let mut fold = ReactionFold {
+            state: HashMap::new(),
+            seen: 0,
+        };
+        loop {
+            let page = runtime
+                .events()
+                .read_from(runtime.id(), EventSeq::new(next), EVENT_PAGE)
+                .await?;
+            if page.is_empty() {
+                break;
+            }
+            for event in &page {
+                fold.observe(event, Some(&wanted));
+            }
+            next = page
+                .last()
+                .map(|event| event.seq.value().saturating_add(1))
+                .unwrap_or(next);
+            if page.len() < EVENT_PAGE {
+                break;
+            }
+        }
+        let mut reactions = fold.finish(viewer, &authors);
+        for message in &mut messages {
+            message.reactions = reactions.remove(&message.id).unwrap_or_default();
+        }
+    }
+    Ok(messages)
+}
+
+/// Counts a desk's messages before a cursor without materialising them.
+///
+/// GraphQL's [`Page`](crate::server::graphql::pagination::Page) exposes an
+/// unpaginated `total`, while the REST transcript endpoint deliberately does
+/// not. Keep that potentially full journal walk out of [`history_for_desk`],
+/// so bounded transcript readers stop as soon as their requested window is
+/// complete.
+pub async fn history_total_for_desk(
+    runtime: &CompanyRuntime,
+    desk_id: &str,
+    desk_name: &str,
+    before_seq: Option<u64>,
+) -> Result<i32, OpenCompanyError> {
+    const EVENT_PAGE: usize = 512;
+
+    let mut next = EventSeq::new(0);
+    let mut total = 0i32;
+    loop {
+        let page = runtime
+            .events()
+            .read_from(runtime.id(), next, EVENT_PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        for event in &page {
+            if before_seq.is_some_and(|before| event.seq.value() >= before) {
+                return Ok(total);
+            }
+            if owns(desk_id, desk_name, &event.event) {
+                total = total.saturating_add(1);
+            }
+        }
+        let Some(last) = page.last() else {
+            break;
+        };
+        next = EventSeq::new(last.seq.value().saturating_add(1));
+        if page.len() < EVENT_PAGE {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 #[cfg(test)]
@@ -379,6 +644,17 @@ mod test {
         }
     }
 
+    /// `None` is the shape the chat route stores for an unaddressed post.
+    fn operator_message(chat: Option<&str>) -> CompanyEvent {
+        CompanyEvent::OperatorMessage {
+            parent: None,
+            text: "hi".to_string(),
+            by: None,
+            chat: chat.map(str::to_string),
+            deliverable: None,
+        }
+    }
+
     #[test]
     fn general_desk_owns_agent_replies_under_general_and_main() {
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &agent_reply(GENERAL_DESK)));
@@ -389,6 +665,51 @@ mod test {
         ));
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &agent_reply("")));
         assert!(!owns(GENERAL_DESK, GENERAL_DESK, &agent_reply("strategy")));
+    }
+
+    /// The console asks for its default line as `?desk=main`, which resolves to
+    /// `("main", "main")` — no group chat is named `main` — so the desk side has
+    /// to fold too (issue #435).
+    ///
+    /// The pair that made this reachable: an unaddressed chat post journals the
+    /// operator message with `chat: None` and its answer with
+    /// `chat_id: "General"`, so before this both halves of that conversation were
+    /// missing from the one transcript that should hold them.
+    #[test]
+    fn the_main_line_owns_what_was_journaled_under_general() {
+        for stored in [GENERAL_DESK, MAIN_THREAD_ID, ""] {
+            assert!(
+                owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &agent_reply(stored)),
+                "a reply stored as `{stored}` belongs to the main line",
+            );
+            assert!(
+                owns(
+                    MAIN_THREAD_ID,
+                    MAIN_THREAD_ID,
+                    &operator_message(Some(stored))
+                ),
+                "an operator message stored as `{stored}` belongs to the main line",
+            );
+        }
+        // The unaddressed post itself — the case that produces the pair above.
+        assert!(owns(
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &operator_message(None)
+        ));
+
+        // …and the fold stops at the General family: a named desk's traffic
+        // does not join the main line, in either direction.
+        assert!(!owns(
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &agent_reply("strategy")
+        ));
+        assert!(!owns(
+            "strategy",
+            "Strategy desk",
+            &operator_message(Some(GENERAL_DESK))
+        ));
     }
 
     #[test]
@@ -417,6 +738,7 @@ mod test {
                 id: "u1".to_string(),
             }),
             chat: Some(MAIN_THREAD_ID.to_string()),
+            deliverable: None,
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));
@@ -431,6 +753,7 @@ mod test {
             text: "hi".to_string(),
             by: None,
             chat: Some(MAIN_THREAD_ID.to_string()),
+            deliverable: None,
         };
         // The console queries the main thread with desk = ("main", "main").
         assert!(owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
@@ -447,6 +770,7 @@ mod test {
             text: "hi".to_string(),
             by: None,
             chat: Some("strategy".to_string()),
+            deliverable: None,
         };
         assert!(owns("strategy", "Strategy desk", &event));
         assert!(!owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
@@ -565,6 +889,7 @@ mod test {
                     text: "a follow-up".to_string(),
                     by: None,
                     chat: Some("studio".to_string()),
+                    deliverable: None,
                 },
             ),
             &Viewer::Operator,
@@ -603,8 +928,161 @@ mod test {
             text: "hi".to_string(),
             by: None,
             chat: None,
+            deliverable: None,
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));
+    }
+
+    /* ---- issue #377: the dispatch terminal as a channel marker ---- */
+
+    /// A settled dispatch, as the harness journals it. `desk` is deliberately
+    /// an agent id (`engineer`) and never a channel id (`engineering`) — that
+    /// difference is the whole reason the origin has to be carried.
+    fn desk_task_completed(origin: Option<&str>, column: &str) -> CompanyEvent {
+        CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "engineer".to_string(),
+            output: "the run's prose".to_string(),
+            column: column.to_string(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: origin.map(str::to_string),
+        }
+    }
+
+    /// The terminal routes by the origin the card recorded, on exactly the same
+    /// terms a reply does: the desk's id or its name, and nothing else.
+    #[test]
+    fn a_terminal_belongs_to_the_channel_its_card_was_raised_in() {
+        let event = desk_task_completed(Some("engineering"), COLUMN_IN_REVIEW);
+        assert!(owns("engineering", "Engineering desk", &event));
+        // …and by the desk's *name*, for a card whose origin was journaled
+        // under it — the same either-spelling rule a reply routes by.
+        let by_name = desk_task_completed(Some("Engineering desk"), COLUMN_IN_REVIEW);
+        assert!(owns("engineering", "Engineering desk", &by_name));
+        // …and nowhere else. A settle in one channel must not surface in
+        // another, which is what would make the marker worse than no marker.
+        assert!(!owns("strategy", "Strategy desk", &event));
+        assert!(!owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
+        // The responder is not the channel — matching on it would file every
+        // settle under a desk whose id happens to equal an agent's.
+        assert!(!owns("engineer", "engineer", &event));
+    }
+
+    /// **The most bug-prone line in `owns`.** A card no conversation raised
+    /// belongs to no conversation's history — General emphatically included.
+    ///
+    /// Everywhere else in this module a missing chat id means "unaddressed,
+    /// therefore General". On a terminal it means the opposite: the card was
+    /// created on the board, by a scheduler, or before the origin was recorded.
+    /// Folding it would post markers about board-only work into the operator's
+    /// main line, which is a *new* bug rather than the one #377 fixes.
+    #[test]
+    fn a_terminal_with_no_origin_belongs_to_nobody_not_to_general() {
+        let event = desk_task_completed(None, COLUMN_IN_REVIEW);
+        assert!(
+            !owns(GENERAL_DESK, GENERAL_DESK, &event),
+            "an origin-less terminal must not fold into the General desk",
+        );
+        assert!(
+            !owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event),
+            "nor into the console's main line, which is General's other spelling",
+        );
+        assert!(!owns("", "", &event));
+        assert!(!owns("engineering", "Engineering desk", &event));
+    }
+
+    /// A terminal whose origin *is* one of General's four spellings still folds
+    /// like every other event does — the exception above is about `None`, not
+    /// about loosening [`same_conversation`].
+    #[test]
+    fn a_terminal_raised_on_the_main_line_folds_like_any_other_event() {
+        for origin in [GENERAL_DESK, MAIN_THREAD_ID, ""] {
+            let event = desk_task_completed(Some(origin), COLUMN_PAUSED);
+            assert!(
+                owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event),
+                "a terminal stored as `{origin}` belongs to the main line",
+            );
+            assert!(
+                owns(GENERAL_DESK, GENERAL_DESK, &event),
+                "…and to the General desk's own id/name",
+            );
+            assert!(
+                !owns("strategy", "Strategy desk", &event),
+                "…and to no named desk",
+            );
+        }
+    }
+
+    /// The marker's wording, pinned per column. The console holds the same
+    /// literals (`dispatchMarkerText`, `frontend/src/lib/chat.ts`) because the
+    /// live frame carries the raw column id; these two tests are what couple
+    /// them.
+    #[test]
+    fn the_marker_names_where_the_card_landed() {
+        assert_eq!(
+            dispatch_marker_text(COLUMN_IN_REVIEW),
+            "finished → In review"
+        );
+        assert_eq!(dispatch_marker_text(COLUMN_PAUSED), "finished → Paused");
+        assert_eq!(dispatch_marker_text(COLUMN_TODO), "finished → To-do");
+        assert_eq!(dispatch_marker_text(COLUMN_DONE), "finished → Done");
+        assert_eq!(dispatch_marker_text(COLUMN_PLANNING), "finished → Planning");
+        assert_eq!(
+            dispatch_marker_text(COLUMN_IN_PROGRESS),
+            "finished → In progress"
+        );
+    }
+
+    /// A column this build has not heard of reads a little raw rather than
+    /// rendering blank — the same fallback `relay_text` takes, and the reason a
+    /// newer host cannot produce an empty pill here.
+    #[test]
+    fn an_unknown_column_passes_through_verbatim() {
+        assert_eq!(
+            dispatch_marker_text("shipped_to_orbit"),
+            "finished → shipped_to_orbit"
+        );
+    }
+
+    /// The terminal projects as a system line carrying its card — not as the
+    /// `Debug` dump the defensive fallback would have rendered into a person's
+    /// transcript.
+    #[test]
+    fn project_renders_a_terminal_as_a_card_linked_system_marker() {
+        let view = MessageView::project(
+            at(
+                21,
+                desk_task_completed(Some("engineering"), COLUMN_IN_REVIEW),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(view.author, "system");
+        assert_eq!(view.channel, "system");
+        assert_eq!(view.text, "finished → In review");
+        assert_eq!(
+            view.task_id.as_deref(),
+            Some("t-1"),
+            "the pill links the card"
+        );
+        assert!(!view.mine);
+        assert!(view.steps.is_empty(), "a marker is not a turn");
+        assert!(view.parent_id.is_none(), "a marker is never threaded");
+        assert_eq!(view.id, "21", "the host id the console dedupes a reload on");
+    }
+
+    /// The run's prose stays out of the marker. It already reaches this same
+    /// channel as the orchestrator's relay bubble (#151); repeating it here
+    /// would put one run's words into one conversation twice.
+    #[test]
+    fn the_marker_does_not_repeat_the_runs_prose() {
+        let view = MessageView::project(
+            at(22, desk_task_completed(Some("engineering"), COLUMN_PAUSED)),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert!(!view.text.contains("the run's prose"), "{}", view.text);
+        assert_eq!(view.text, "finished → Paused");
     }
 }

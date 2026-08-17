@@ -47,14 +47,19 @@ approvals](#in-conversation-approvals-issue-379)), `ApprovalResolved`,
 `PaymentReceived`, `LifecycleChanged`, `AgentReply`, `MemoryFactDeleted`,
 `TaskDispatched`, `McpCallFailed`, `WorkflowCreated` (a new saved workflow
 graph was authored + enabled via the console `POST …/workflows` route or the
-orchestrator's `create_workflow` tool; journaled best-effort after persist),
+orchestrator's `create_workflow` tool; journaled best-effort after persist —
+`WorkflowUpdated` / `WorkflowDeleted` are journaled the same way and now reach
+the same two surfaces, since issue #661 gave the orchestrator `update_workflow`
+and `delete_workflow` alongside it),
 `TaskSteered` (an operator paused, cancelled, or redirected an in-flight task
 or delegation), `DeskTaskCompleted` (a dispatched board task finished its run —
 the terminal anchor a per-task timeline ends on; "completed" means the run
-stopped, not that it succeeded, `column` carries where the card landed, and
+stopped, not that it succeeded, `column` carries where the card landed,
 `artifact_ids` names the deliverables the run published — empty, and omitted
 from the wire, for the many tasks that produce no file; see
-[artifacts.md](artifacts.md)),
+[artifacts.md](artifacts.md) — and `origin_chat_id` records the conversation the
+card was raised from, absent when none did, see
+[the settle marker below](#the-settle-a-channel-can-see-issue-377)),
 `TaskDiscussionPosted` (a human posted to a card's discussion thread, issue
 #335 — the Discussion tab's whole store, folded back out by
 `GET …/tasks/{task_id}` beside that card's timeline), `WorkflowUpdated` /
@@ -284,6 +289,60 @@ now uses `grant.origin_thread`, falling back to the agent when there is none,
 which is the previous behaviour kept for exactly the cases it was already right
 for.
 
+### The settle a channel can see (issue #377)
+
+A card dispatched from a channel can park in `paused`, or bounce back to `todo`
+on a failure or a cancellation. The channel showed none of that. All it got was
+the orchestrator's relay prose (#151), which reads like an answer — so a reader,
+live or arriving fresh after a reload, reasonably concluded the work had
+finished. Two correct halves producing one wrong impression.
+
+The fix is a **card-linked system marker**, not another bubble: `finished → In
+review`, carrying the column and a link to the card, and deliberately **not** the
+run's prose. The prose is already in that channel; repeating it would put one
+run's words into one conversation twice. What was missing was never the words —
+it was the structural fact that the card settled, and where.
+
+**The origin is captured, never derived.** `DeskTaskCompleted` gains
+`origin_chat_id`, stamped at the single emission point
+(`HarnessBrain::journal_task_outcome`) off `TaskRecord.origin_chat_id`, which
+every conversational creation path has recorded since #151. It cannot be
+recovered from the fields that were already there: `desk` is the *responder*, an
+agent id like `engineer`, and a channel is a desk id like `engineering`.
+Re-deriving it at completion time would also put a second "which conversation is
+this?" rule beside `chat_history`'s, which is precisely the drift #435 exists to
+have removed.
+
+**`None` means no conversation raised this card** — a board-native card, a
+scheduler's — and is emphatically *not* folded into the General desk, even
+though every other missing chat id in `chat_history` is. Folding it would post
+markers about board-only work into the operator's main line: a new bug, not the
+one being fixed. The frame omits `chatId` rather than sending null, so
+"board-created" is a presence check on the console, the same shape
+`approval_parked` uses for a page-only approval.
+
+**`chat_history::owns` admits the terminal**, which is what makes the marker
+survive a reload; without it the live line would appear and then vanish. Because
+`MessageView` is shared with the GraphQL `Message` projection, `Chat.history`
+starts returning system marker rows on existing fields — additive on both wire
+surfaces, and named here rather than discovered in review.
+
+**The stream frame drops `output`.** Nothing read it, and removing it at the
+projection is what stops a later reader from reintroducing the duplicate. An
+out-of-tree consumer of `/events` loses that field.
+
+Dedupe is on **identity**, never content: the live line is born under the host's
+own sequence (`h<seq>`, #483/#498's mechanism), which is exactly the id
+`chat/history` mints for the same event, so hydration recognises its own twin.
+The marker sentence exists twice — `dispatch_marker_text` on the host,
+`dispatchMarkerText` in the console, because the live frame is thin and carries
+the raw column id — and tests on both sides pin the identical literals. Drift can
+only reword a marker across a reload; it can never double one.
+
+Pre-#377 journal lines carry no origin, so existing channels grow no
+retroactive markers. That is correct rather than a migration gap: the fact was
+not recorded, and inventing one would be worse than its absence.
+
 ### What a retry would repeat (issue #351)
 
 Re-entering a run re-runs its effects, and the two facts needed to warn about
@@ -304,6 +363,32 @@ it, which is precisely when a retry dialog is the only warning anyone gets.
 There is **no payload**. The record is read back onto an operator's screen
 through `GET …/tasks/{task_id}`, which scrubs by construction, so recipients and
 message bodies are never retained in the first place.
+
+**The amount is admin-only** (issue #705). Unlike the payload, the amount *is*
+retained — the whole point of the record is to say what a retry would repeat,
+and "sent a payment" is a materially weaker warning than "sent a payment of
+$2,400". So it is restricted at read time rather than dropped at write time,
+through the *same* predicate that restricts an approval's amount for issue #618
+(`approval_visibility::may_read_approval_contents`). A Member gets the row —
+what a retry would re-do stays visible to whoever is doing the work — without
+the number.
+
+Two consequences worth stating, because both were a defect before:
+
+* **The decision travels, not the role.** `ScopedCompany` deliberately drops the
+  role at the edge, so it carries what the predicate *decided*. Nothing
+  downstream can answer the question differently, because nothing downstream
+  holds the input.
+* **Hidden is not absent.** `amountUsd` is omitted from a Member's response and
+  `amountHidden: true` is set in its place — but only where an amount was
+  actually withheld. Without that flag a withheld payment and a free tool call
+  are the same bytes, and a reader cannot tell "this cost nothing" from "you may
+  not see what this cost". The flag is skipped when false, so an admin's
+  response is byte-identical to before.
+
+The redaction is applied inside `assemble_detail`, which the JSON route and the
+export document (issue #352) both call, so the guarantee covers the exported
+record too rather than depending on two callers remembering.
 
 The task attribution comes from the cycle that ran the effect. Under
 `supervised` an irreversible effect never executes in the cycle that emitted it

@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Loader2, ShieldCheck, X } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -20,7 +22,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
-import { approvalSummary, timeAgo, toolAction } from "@/lib/language";
+import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
+import { approvalSummary, grantHeadline, timeAgo, toolAction } from "@/lib/language";
+import { startVisiblePolling } from "@/lib/visible-poll";
+import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
 
 /**
  * Below this, a lost connection cannot have outlived the fast part of a resolve.
@@ -93,6 +98,29 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
   const { approvals, now } = feed;
   const askerNames = useAskerNames(client, company, approvals);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
+  /**
+   * How many rows each turn's batch still has waiting (#842).
+   *
+   * The page stays **itemised** — one row per gated call, each independently
+   * approvable, exactly as `Standing permissions` below lists one revocable row
+   * per grant. This is the one thing it borrows from the conversation's
+   * consolidated card: a row says how many others were asked for alongside it,
+   * so an operator who arrives here from the toast can tell "this is one of
+   * three from one turn" from "these are three unrelated requests" — which is
+   * the difference between deciding the batch and deciding a queue.
+   *
+   * Counted over what is still pending rather than over the whole batch, so the
+   * number shrinks as rows are decided instead of promising a fourth row that
+   * has already been signed off.
+   */
+  const batchTotals = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const a of approvals) {
+      if (!a.batch) continue;
+      counts.set(a.batch, (counts.get(a.batch) ?? 0) + 1);
+    }
+    return counts;
+  }, [approvals]);
 
   const markInFlight = (id: string, verdict: Verdict | null) =>
     setInFlight((prev) => {
@@ -109,7 +137,7 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
     markInFlight(a.id, verdict);
     const startedAt = Date.now();
     try {
-      await client.resolveApproval(a.id, verdict, undefined, company, { scope });
+      const answer = await client.resolveApproval(a.id, verdict, undefined, company, { scope });
       // Issue #243: approving no longer just records a verdict — it hands the
       // agent a single-use grant and re-dispatches it to make the call. The old
       // "Approved: …" read as "done", which was the exact lie that made the
@@ -125,14 +153,19 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
       // cold-recipient report — and naming an agent there is the same shape of
       // small lie the wording above exists to remove. The work is still in
       // flight either way, so both halves say so; only the actor changes.
+      // Issue #561: what happens next is the host's answer, not this view's
+      // guess. A turn continues once, when the last decision it parked lands,
+      // so approving one of several releases nothing — and saying otherwise is
+      // the one part of this flow that actively misleads.
+      const stillAwaiting = "stillAwaiting" in answer ? answer.stillAwaiting : undefined;
       const line =
         verdict !== "approve"
           ? `Declined: ${approvalSummary(a)}`
           : scope.kind === "tool"
             ? `Approved — ${toolAction(a.kind).toLowerCase()} won't ask again until this permission expires. Take it back under Standing permissions.`
             : a.agent
-              ? `Approved — the agent is completing the action: ${approvalSummary(a)}`
-              : `Approved — carrying it out now: ${approvalSummary(a)}`;
+              ? approvedLine(stillAwaiting, approvalSummary(a))
+              : approvedByRuntimeLine(stillAwaiting, approvalSummary(a));
       onResolved(line);
       toast.success(line);
       // The agent's reply arrives as a journaled `AgentReply` on its own thread,
@@ -203,6 +236,7 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
                   now={now}
                   askerNames={askerNames}
                   deciding={inFlight.get(a.id) ?? null}
+                  batchTotal={batchTotals.get(a.batch ?? "") ?? 1}
                   onDecide={(verdict, scope) => void decide(a, verdict, scope)}
                 />
               ))}
@@ -298,10 +332,15 @@ function useStandingGrants(client: OpenCompanyClient, company: string | null) {
     // poll-visible in v1 (there is no event for them), and a permission list is
     // not something an operator watches change — a minute is well inside the
     // shortest duration on offer.
-    const timer = setInterval(() => void refreshGrants(), 60_000);
+    //
+    // Gated on visibility since #581. The cadence was never the problem; a tab
+    // left open for a week was, and the load-on-visible read means a returning
+    // operator sees the current grants at once rather than up to a minute of a
+    // list that may already have been revoked elsewhere.
+    const dispose = startVisiblePolling(() => void refreshGrants(), 60_000);
     return () => {
       live = false;
-      clearInterval(timer);
+      dispose();
     };
   }, [client, company, refreshGrants]);
 
@@ -389,41 +428,6 @@ function StandingPermissions({
 }
 
 /**
- * What one standing permission actually covers, in one line (#457).
- *
- * `toolAction` alone answers "which tool", which is the whole sentence for
- * `file_write` and only half of it for `composio_execute`: that name carries
- * every action of every connected provider, so a row reading "Act in one of its
- * connected accounts" leaves an operator unable to tell a permission over their
- * code host from one over their mailbox — and a permission you cannot read is
- * one you cannot decide to revoke. When the host names a scope, the row names
- * the provider.
- *
- * Composed as a suffix rather than a second phrasing table: the tool's own words
- * stay in `lib/language`, so there is nothing here to drift out of step with it.
- */
-function grantHeadline(g: StandingGrant): string {
-  const action = toolAction(g.tool);
-  return g.scope ? `${action} — ${providerLabel(g.scope)} only` : action;
-}
-
-/**
- * A toolkit identifier as a person would write it: `microsoft_teams` →
- * "Microsoft Teams".
- *
- * Mechanical on purpose. A lookup table of pretty provider names would render
- * the ~30 toolkits it knew and the raw slug for everything else, and the ones it
- * did not know would be exactly the ones added most recently.
- */
-function providerLabel(scope: string): string {
-  return scope
-    .split("_")
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
-/**
  * What to call whoever granted a permission.
  *
  * Never the raw actor id: that is a runtime identifier, and showing one to an
@@ -468,6 +472,7 @@ function ApprovalCard({
   now,
   askerNames,
   deciding,
+  batchTotal,
   onDecide,
 }: {
   approval: ApprovalSummary;
@@ -475,6 +480,11 @@ function ApprovalCard({
   askerNames: Map<string, string>;
   /** The verdict this card is waiting on, or `null` when it is idle (#373). */
   deciding: Verdict | null;
+  /**
+   * How many rows this turn's batch still has waiting, including this one
+   * (#842). `1` — the default for an approval with no batch — says nothing.
+   */
+  batchTotal: number;
   onDecide: (verdict: Verdict, scope: GrantScope) => void;
 }) {
   // Per-card, like the in-flight verdict and for the same reason: two cards can
@@ -526,6 +536,12 @@ function ApprovalCard({
           }
         />
 
+        {/* Issue #596: for a workflow pre-publish gate, show the VERBATIM content
+            the run is about to publish — the draft awaiting sign-off — above the
+            raw payload. Additive display only; the decide/grant path below is
+            untouched (epic #558). */}
+        <WorkflowContentReview approval={a} />
+
         <ApprovalPayload approval={a} />
 
         <ApprovalScopeControl
@@ -544,7 +560,17 @@ function ApprovalCard({
              approve is not done when the button stops spinning, it is handed
              to the agent. A decline IS terminal, so it only has to record. */
           status={
-            deciding ? (deciding === "approve" ? "Waiting for the agent…" : "Recording…") : undefined
+            deciding
+              ? deciding === "approve"
+                ? "Waiting for the agent…"
+                : "Recording…"
+              : batchTotal > 1
+                ? // Deliberately a count and not a link: the row is decided
+                  // here, on its own, and pointing at the others would imply a
+                  // batch decision this page does not offer. The conversation's
+                  // card is where one Approve covers all of them (#842).
+                  `1 of ${batchTotal} from the same turn`
+                : undefined
           }
         />
       </CardContent>
@@ -552,10 +578,87 @@ function ApprovalCard({
   );
 }
 
+/** The effect kind a paused workflow gate parks as — mirrors
+ * `WORKFLOW_APPROVE_KIND` in `src/runtime/workflow_resume.rs`. */
+const WORKFLOW_APPROVE_KIND = "workflow.approve";
+/** The payload key carrying the upstream nodes' content — mirrors
+ * `PAYLOAD_CONTENT` in `src/runtime/workflow_resume.rs`. */
+const PAYLOAD_CONTENT_KEY = "content";
+
+/**
+ * The "Content awaiting review" block (issue #596): for a workflow pre-publish
+ * gate, the verbatim output of the nodes feeding the gate — the actual draft the
+ * run is about to publish — so an operator signs off on the CONTENT, not a blind
+ * approval card.
+ *
+ * Renders nothing for any non-workflow card, or a workflow card with no content
+ * payload (an older host, or a gate with no upstream output). Read-only display
+ * built from the same `run-output` parse the run inspector uses, so a draft reads
+ * identically here and there.
+ */
+function WorkflowContentReview({ approval }: { approval: ApprovalSummary }) {
+  const sections = useMemo(() => {
+    if (approval.kind !== WORKFLOW_APPROVE_KIND) return [];
+    if (!isRecord(approval.payload)) return [];
+    const content = approval.payload[PAYLOAD_CONTENT_KEY];
+    if (!isRecord(content)) return [];
+    return Object.entries(content).map(([nodeId, value]) => ({
+      nodeId,
+      value,
+      messages: parseNodeMessages(value),
+    }));
+  }, [approval]);
+
+  if (sections.length === 0) return null;
+
+  return (
+    <div
+      /* Blocked, not running. This arrived in the sky/running colour, which
+         says "the machine is working on it" about the one state that means
+         the opposite: it is parked until a person reads it. Same correction
+         as `runTone`'s "awaiting approval" arm. */
+      className="space-y-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2"
+      data-testid="workflow-content-review"
+    >
+      <p className="text-3xs font-medium uppercase tracking-wide text-status-blocked-text">
+        Content awaiting review
+      </p>
+      {sections.map((section) => (
+        <div key={section.nodeId} className="space-y-1">
+          <p className="text-3xs uppercase tracking-wide text-muted-foreground">
+            {section.nodeId}
+          </p>
+          {section.messages.length > 0 ? (
+            section.messages.map((m, i) => (
+              <div key={i} className={i > 0 ? "border-t pt-1" : undefined}>
+                {m.text ? (
+                  <div className="prose prose-sm max-w-none dark:prose-invert">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                    {m.agentRef ?? "—"}
+                  </p>
+                )}
+              </div>
+            ))
+          ) : (
+            // No parseable message text — show the raw value so the operator still
+            // sees exactly what is about to publish rather than nothing.
+            <pre className="overflow-auto whitespace-pre-wrap rounded border bg-muted/40 p-2 font-mono text-2xs leading-snug">
+              {JSON.stringify(section.value, null, 2)}
+            </pre>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function EmptyApprovals({ onGoToConversation }: { onGoToConversation: () => void }) {
   return (
     <div className="mt-16 flex flex-col items-center gap-3 text-center">
-      <div className="flex size-12 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-status-done-soft text-status-done-text">
         <ShieldCheck className="size-6" />
       </div>
       <div className="space-y-1">

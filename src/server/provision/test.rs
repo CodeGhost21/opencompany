@@ -9,6 +9,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::Brain;
 use crate::ports::types::{
@@ -40,6 +41,18 @@ fn platform_state(home: &std::path::Path, max_per_tenant: Option<usize>) -> AppS
         .with_home(home.to_path_buf())
         .with_platform_auth(PlatformAuthConfig::new(verifier))
         .with_quota(None, max_per_tenant)
+}
+
+/// A platform state bound to a routable address rather than loopback, for
+/// exercising the same none-mode refusal `serve --company` applies at boot.
+fn routable_platform_state(home: &std::path::Path) -> AppState {
+    let verifier = Arc::new(UnsignedTenantVerifier::new(PLATFORM_SECRET));
+    AppState::new(AppConfig {
+        bind: "0.0.0.0:8080".to_string(),
+        ..AppConfig::default()
+    })
+    .with_home(home.to_path_buf())
+    .with_platform_auth(PlatformAuthConfig::new(verifier))
 }
 
 /// A platform state in shared-single-DB mode for the workload tenant
@@ -160,6 +173,37 @@ async fn provision_then_list_then_status() {
         .unwrap();
     assert_eq!(status.status(), StatusCode::OK);
     assert_eq!(json_body(status).await["id"], "acme");
+}
+
+/// The same refusal boot applies to a `none`-mode company on a routable bind:
+/// a company with no sign-in reachable from anywhere is an unauthenticated
+/// admin console. A tenant's manifest can request `[users].mode = "none"`, but
+/// this host must not silently serve it, regardless of which path created the
+/// runtime.
+#[tokio::test]
+async fn provisioning_a_none_mode_company_on_a_routable_bind_is_refused() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = routable_platform_state(&home);
+    let app = router(state);
+
+    let toml = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[users]\nmode = \"none\"\n";
+    let response = app
+        .clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), toml))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = json_body(response).await;
+    assert_eq!(body["code"], "auth_mode_none_not_allowed");
+
+    // Refused, so nothing was registered.
+    let response = app
+        .clone()
+        .oneshot(get_req("/api/v1/companies/acme", Some(PLATFORM_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1144,4 +1188,154 @@ async fn webhook_emitted_on_approval_requested() {
     // The delivery carries a non-empty signature header value.
     assert!(!approval.1.is_empty());
     assert!(approval.1.starts_with("kh1="));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #605 — the tier a provisioned company is recorded on
+// ---------------------------------------------------------------------------
+
+/// The tier `id` was persisted with, read back off the stored record rather
+/// than off the response.
+///
+/// The record is what matters here: it is the manifest a rebuild re-reads and
+/// the only place a platform-provisioned tenant's tier is written down at all,
+/// since it has no `company.toml` anywhere on disk.
+async fn recorded_mode(state: &AppState, id: &str) -> String {
+    let id = CompanyId::new(id);
+    let runtime = state.registry().get(&id).expect("company is registered");
+    runtime
+        .store()
+        .load(&id)
+        .await
+        .expect("store readable")
+        .expect("record exists")
+        .manifest
+        .policy
+        .mode
+}
+
+/// Issue #605: a company provisioned from a manifest that names no tier is
+/// recorded on `auto`, explicitly.
+///
+/// This is the one creation path with no template behind it — `serve` and the
+/// desktop app both read a `companies/*/company.toml`, and every shipped preset
+/// declares `mode`. So this is where the "new companies get `auto`" half of
+/// #605 is actually delivered.
+///
+/// Asserting `auto` is also what pins the change as *doing something*: the serde
+/// default is still `supervised`, deliberately (see `Policy::mode`), so a
+/// regression that dropped the provisioning write would record `supervised`
+/// here and fail rather than quietly reverting the feature.
+#[tokio::test]
+async fn a_provisioned_company_with_no_stated_tier_is_recorded_on_auto() {
+    let home_dir = home();
+    let state = platform_state(home_dir.path(), None);
+    let app = router(state.clone());
+
+    let response = app
+        .oneshot(provision_req(
+            Some(PLATFORM_SECRET),
+            "[company]\nname = \"Acme\"\n",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    assert_eq!(
+        recorded_mode(&state, "acme").await,
+        crate::company::PROVISIONED_POLICY_MODE,
+        "a manifest that states no tier must be recorded on the provisioning \
+         default, explicitly — not left to the serde default"
+    );
+    assert_ne!(
+        crate::company::PROVISIONED_POLICY_MODE,
+        crate::company::Policy::default().mode,
+        "if these ever coincide this test proves nothing — it would pass with \
+         the provisioning write deleted"
+    );
+}
+
+/// ...and a manifest that *does* state a tier keeps it, whichever tier it is.
+///
+/// **Preserve, never widen**, which is the property the whole of #605 turns on.
+/// Walked over `POLICY_MODES` rather than spot-checked, so a fifth tier cannot
+/// silently escape the guarantee the way `auto` escaped the prose tier lists in
+/// #660: the day someone adds one, this covers it without being edited.
+///
+/// `supervised` is the sharp case and the reason this is a walk and not a single
+/// `readonly` assertion — it is the value the serde default *also* produces, so
+/// a broken "did the author declare a mode?" check is invisible on every other
+/// tier and caught only here.
+#[tokio::test]
+async fn a_provisioned_company_keeps_whatever_tier_it_states() {
+    let home_dir = home();
+    let state = platform_state(home_dir.path(), None);
+    let app = router(state.clone());
+
+    let mut checked = 0;
+    for mode in crate::company::POLICY_MODES {
+        let name = format!("Acme {mode}");
+        let manifest = format!("[company]\nname = \"{name}\"\n[policy]\nmode = \"{mode}\"\n");
+        let response = app
+            .clone()
+            .oneshot(provision_req(Some(PLATFORM_SECRET), &manifest))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "provisioning `{mode}` failed"
+        );
+
+        let id = json_body(response).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            recorded_mode(&state, &id).await,
+            *mode,
+            "`{mode}` was stated in the manifest and must survive provisioning \
+             untouched"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked,
+        crate::company::POLICY_MODES.len(),
+        "the walk skipped a tier"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Host-wide auth mode override
+// ---------------------------------------------------------------------------
+
+/// A host-wide sign-in override set before provisioning (by setup, or flipped
+/// live afterward) must reach a company provisioned *after* the change, the
+/// same way it reaches every company built at boot — see
+/// `AppState::auth_mode_override`. Provisioning built the runtime without
+/// threading it through, so an operator who locked the host to `email` after
+/// setup still got a provisioned tenant honoring its own manifest mode.
+#[tokio::test]
+async fn a_host_wide_auth_override_reaches_a_company_provisioned_after_it_is_set() {
+    let home_dir = home();
+    let state = platform_state(home_dir.path(), None);
+    state.set_auth_mode_override(Some(AuthMode::Email));
+    let app = router(state.clone());
+
+    let manifest = "[company]\nname = \"Acme\"\n[users]\nmode = \"wallet\"\n";
+    let response = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), manifest))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company is registered");
+    assert_eq!(
+        runtime.auth_mode(),
+        AuthMode::Email,
+        "the host-wide override set before provisioning must beat the \
+         manifest's own mode, exactly as it does for a company built at boot"
+    );
 }

@@ -37,7 +37,10 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::stream::TryStreamExt;
 use mongodb::bson::{Document, doc};
-use mongodb::options::{FindOneAndUpdateOptions, IndexOptions, ReturnDocument, UpdateOptions};
+use mongodb::options::{
+    CollectionOptions, FindOneAndUpdateOptions, IndexOptions, ReturnDocument, UpdateOptions,
+    WriteConcern,
+};
 use mongodb::{Client, Collection, Database, IndexModel};
 use tokio::sync::broadcast;
 
@@ -110,6 +113,107 @@ fn get_i64(doc: &Document, key: &str) -> Result<i64> {
         .map_err(|e| mongo_err(format!("missing field {key}: {e}")))
 }
 
+/// A unique index restricted to the documents that carry `present` at all
+/// (issue #697).
+///
+/// MongoDB is the one backend with no transaction to decide a first publish
+/// under, so the uniqueness of a file's path has to be the database's own
+/// invariant rather than a read followed by a write.
+///
+/// PARTIAL, and that is what makes it safe to add to a live tenant. A plain
+/// unique index is built over every existing document, so a company that
+/// already lost this race — carrying the duplicate pair issue #697 is about —
+/// would fail index creation, and that failure happens during
+/// [`MongoStore::ensure_indexes`], which means the store's startup goes down
+/// for that tenant. Restricted to documents that *have* the field, the index
+/// covers everything this code writes from now on and ignores history it cannot
+/// repair. Legacy duplicates keep being caught one level up, where
+/// `resolve_file` already answers them with `Conflict`.
+///
+/// # `present` is a runtime value, not a literal
+///
+/// `doc! {present: ...}` uses the **value** of `present`, not the string
+/// `"present"`. The `doc!`/`bson!` key arms end at
+/// `$object.insert::<_, Bson>(($($key)+), $value)` — the accumulated key tokens
+/// are passed to `insert` as an *expression*, and `insert<KT: Into<String>>`
+/// takes this `&str` by value. There is no `stringify!` anywhere on that path;
+/// the macro only treats a key as a literal when one is written literally.
+///
+/// This is worth saying out loud because the failure it would cause is
+/// invisible: a partial filter keyed on a field no document has would match
+/// nothing, the index would be built over an empty set, and it would reject no
+/// insert — silently removing the guarantee this function exists to provide,
+/// while every test that does not actually race still passed.
+/// `the_partial_filter_is_keyed_on_the_field_not_the_parameter_name` pins it.
+fn unique_partial(keys: Document, present: &str) -> IndexModel {
+    IndexModel::builder()
+        .keys(keys)
+        .options(
+            IndexOptions::builder()
+                .unique(true)
+                .partial_filter_expression(doc! {present: {"$exists": true}})
+                .build(),
+        )
+        .build()
+}
+
+/// The uniqueness key for a **file's** path inside one company (issue #697).
+///
+/// Stored beside the node document so the partial unique index in
+/// [`MongoStore::ensure_indexes`] can enforce "one file per path" as a database
+/// invariant. That is what lets a first publish be a real compare-and-swap on
+/// this backend: fs and SQLite decide the race under a lock and a transaction
+/// respectively, and MongoDB has neither across two documents, so the insert
+/// either violates the index or it does not.
+///
+/// Files only. Folders carry [`folder_path_key`] in a separate field instead
+/// (issue #759), so the two guards never make a folder and a file contend for
+/// one name. The key encoding is shared — see [`path_key`].
+fn file_path_key(parent_id: Option<&str>, name: &str) -> String {
+    path_key(parent_id, name)
+}
+
+/// The uniqueness key for a **folder's** path inside one company (issue #759).
+///
+/// The same `{parent}\0{name}` string as [`file_path_key`], stored in a
+/// **different field** (`folder_path_key`) behind its own partial unique index.
+/// Two fields rather than one shared key on purpose: a folder and a file are
+/// still allowed to share a name, exactly as they were before either guard
+/// existed. This is a race fix, not a new tree rule, and one key would quietly
+/// make it the latter.
+///
+/// Stamped only by [`adopt_or_create_folder`], never by plain `create` — so the
+/// console's own folder creation is unaffected and a legacy tenant carrying
+/// duplicates keeps booting (the index is partial; see [`unique_partial`]).
+///
+/// [`adopt_or_create_folder`]: crate::ports::workspace::WorkspaceStore::adopt_or_create_folder
+fn folder_path_key(parent_id: Option<&str>, name: &str) -> String {
+    path_key(parent_id, name)
+}
+
+/// The shared `{parent}\0{name}` encoding behind both path keys.
+///
+/// NUL is the separator because [`reject_unsafe_name`](crate::store::fs_ops)
+/// keeps it out of every node name, so no name can forge a different pair's key.
+/// The root is the empty string; a node parented at the root and one parented
+/// under a folder therefore never collide.
+fn path_key(parent_id: Option<&str>, name: &str) -> String {
+    format!("{}\u{0}{}", parent_id.unwrap_or(""), name)
+}
+
+/// The key a node should carry, or `None` when it is not a file.
+fn node_path_key(node: &crate::ports::workspace::WorkspaceNode) -> Option<String> {
+    (node.kind == crate::ports::workspace::NodeKind::File)
+        .then(|| file_path_key(node.parent_id.as_deref(), &node.name))
+}
+
+/// The runtime journal's collection: one document per record (issue #726).
+const JOURNAL: &str = "journal";
+
+/// One document per company recording that its filesystem journal has been
+/// imported — the gate that makes the import happen exactly once.
+const JOURNAL_IMPORTS: &str = "journal_imports";
+
 /// A single MongoDB database implementing all five storage ports.
 #[derive(Clone)]
 pub struct MongoStore {
@@ -131,6 +235,21 @@ impl MongoStore {
             senders: Arc::new(StdMutex::new(HashMap::new())),
         };
         store.ensure_indexes().await?;
+        // Reclaim workspace payloads whose node document never landed (issue
+        // #553). Best-effort by design: the cost of skipping it is disk that is
+        // already unreachable, and the cost of failing boot over it would be a
+        // company that will not start. See `sweep_orphan_blobs`.
+        match store.sweep_orphan_blobs().await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(
+                removed,
+                "reclaimed orphaned workspace blobs left by an interrupted write"
+            ),
+            Err(err) => tracing::warn!(
+                error = %err,
+                "could not sweep orphaned workspace blobs; they remain until the next boot"
+            ),
+        }
         Ok(store)
     }
 
@@ -146,7 +265,8 @@ impl MongoStore {
         // Not every index can be unique: a user holds many sessions, and an
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
-        let plans: [(&str, IndexModel); 30] = [
+        // See `unique_partial`.
+        let plans: [(&str, IndexModel); 32] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -163,6 +283,23 @@ impl MongoStore {
             (
                 "workspace_nodes",
                 unique(doc! {"company_id": 1, "node_id": 1}),
+            ),
+            // One file per path. This is the compare-and-swap a first publish
+            // wins or loses (issue #697); see `file_path_key`.
+            (
+                "workspace_nodes",
+                unique_partial(doc! {"company_id": 1, "file_path_key": 1}, "file_path_key"),
+            ),
+            // One folder per path, for the folders the publish walk claims
+            // (issue #759). A separate field from the file key on purpose; see
+            // `folder_path_key`. Partial for the same boot-safety reason: a
+            // tenant that already lost this race must keep starting.
+            (
+                "workspace_nodes",
+                unique_partial(
+                    doc! {"company_id": 1, "folder_path_key": 1},
+                    "folder_path_key",
+                ),
             ),
             ("users", unique(doc! {"company_id": 1, "user_id": 1})),
             // Enforces one account per address per company, and backs the login
@@ -232,11 +369,80 @@ impl MongoStore {
             ))
             .await
             .map_err(mongo_err)?;
+        // Issue #596: one durable per-node output snapshot per run. The unique
+        // `(company_id, run_id)` index makes the upsert last-write-wins per run;
+        // the recency index backs the newest-N prune. Created outside the fixed
+        // array above so adding it does not disturb that array's length.
+        self.collection("run_outputs")
+            .create_index(unique(doc! {"company_id": 1, "run_id": 1}))
+            .await
+            .map_err(mongo_err)?;
+        self.collection("run_outputs")
+            .create_index(nonunique(doc! {"company_id": 1, "at_ms": -1}))
+            .await
+            .map_err(mongo_err)?;
+        // Issue #726: the runtime journal. `(company_id, seq)` is unique because
+        // two records sharing a sequence would order arbitrarily on replay, and
+        // an at-most-once key replayed before the resolution that consumed it is
+        // the failure the journal exists to prevent. The import receipt is one
+        // document per company. Created outside the fixed array above so adding
+        // them does not disturb its length.
+        self.collection(JOURNAL)
+            .create_index(unique(doc! {"company_id": 1, "seq": 1}))
+            .await
+            .map_err(mongo_err)?;
+        self.collection(JOURNAL_IMPORTS)
+            .create_index(unique(doc! {"company_id": 1}))
+            .await
+            .map_err(mongo_err)?;
+        // Issue #749: durable notifications. The recency index backs the
+        // newest-first feed `NotificationStore::list` returns; the per-person
+        // read marker is unique on `(company_id, user_id, notification_id)` so a
+        // re-mark is a no-op `E11000` and read stays a latch. Created outside the
+        // fixed array above so adding them does not disturb its length.
+        self.collection("notifications")
+            .create_index(nonunique(
+                doc! {"company_id": 1, "created_ms": -1, "id": -1},
+            ))
+            .await
+            .map_err(mongo_err)?;
+        // Unique per (company_id, id): makes `append` idempotent — a duplicate
+        // id within a company is rejected, matching the sqlite primary key.
+        self.collection("notifications")
+            .create_index(unique(doc! {"company_id": 1, "id": 1}))
+            .await
+            .map_err(mongo_err)?;
+        self.collection("notification_reads")
+            .create_index(unique(
+                doc! {"company_id": 1, "user_id": 1, "notification_id": 1},
+            ))
+            .await
+            .map_err(mongo_err)?;
         Ok(())
     }
 
     fn collection(&self, name: &str) -> Collection<Document> {
         self.db.collection::<Document>(name)
+    }
+
+    /// A collection handle whose writes are acknowledged only once the server
+    /// has committed them to its on-disk journal (`j:true`).
+    ///
+    /// Scoped to the runtime-journal collections rather than set database-wide,
+    /// and within them to the records that ask for it
+    /// ([`Durability::Host`](crate::ports::journal::Durability::Host)), because
+    /// it is bought for one specific contract and costs a disk flush per write:
+    /// the at-most-once guarantee is that an effect's key is durable *before* the
+    /// side effect runs, and the default acknowledgement returns as soon as the
+    /// primary has the write in memory — which a primary crash in the wrong
+    /// millisecond loses, re-arming an effect that already fired.
+    fn journaled(&self, name: &str) -> Collection<Document> {
+        self.db.collection_with_options::<Document>(
+            name,
+            CollectionOptions::builder()
+                .write_concern(WriteConcern::builder().journal(true).build())
+                .build(),
+        )
     }
 
     /// Atomically allocates the next 0-based sequence for `(company, kind)`.
@@ -355,6 +561,8 @@ impl CompanyStore for MongoStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_policy: overlay.policy,
+            overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
@@ -463,6 +671,39 @@ impl EventLog for MongoStore {
                 "seq": {"$gte": seq.value() as i64},
             })
             .sort(doc! {"seq": 1});
+        match find_limit(limit) {
+            FindLimit::Empty => return Ok(Vec::new()),
+            FindLimit::Unlimited => {}
+            FindLimit::AtMost(n) => find = find.limit(n),
+        }
+        let mut cursor = find.await.map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(StoredEvent {
+                seq: EventSeq::new(get_i64(&doc, "seq")? as u64),
+                company: id.clone(),
+                event: serde_json::from_str(&get_str(&doc, "event_json")?)?,
+                at_millis: get_i64(&doc, "at_ms")? as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn read_before(
+        &self,
+        id: &CompanyId,
+        before: Option<EventSeq>,
+        limit: usize,
+    ) -> Result<Vec<StoredEvent>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let events = self.collection("events");
+        let mut filter = doc! { "company_id": id.as_ref() };
+        if let Some(cursor) = before {
+            filter.insert("seq", doc! { "$lt": cursor.value() as i64 });
+        }
+        let mut find = events.find(filter).sort(doc! { "seq": -1 });
         match find_limit(limit) {
             FindLimit::Empty => return Ok(Vec::new()),
             FindLimit::Unlimited => {}
@@ -1117,6 +1358,41 @@ impl crate::ports::users::UserStore for MongoStore {
         Ok(())
     }
 
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool> {
+        let found = self
+            .collection("user_invites")
+            .find_one(doc! {"company_id": company.as_ref(), "invite_id": id})
+            .await
+            .map_err(mongo_err)?;
+        let Some(found) = found else {
+            return Ok(false);
+        };
+        let current = get_str(&found, "invite_json")?;
+        let mut invite: InviteRecord = serde_json::from_str(&current)?;
+        invite.notified_at_millis = Some(at_millis);
+        // No `upsert` option, and the filter pins the document we just read: a
+        // revocation that lands between the two calls leaves nothing to match,
+        // so the stamp becomes a no-op instead of resurrecting the row.
+        let res = self
+            .collection("user_invites")
+            .update_one(
+                doc! {
+                    "company_id": company.as_ref(),
+                    "invite_id": id,
+                    "invite_json": &current,
+                },
+                doc! {"$set": {"invite_json": serde_json::to_string(&invite)?}},
+            )
+            .await
+            .map_err(mongo_err)?;
+        Ok(res.matched_count > 0)
+    }
+
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let res = self
             .collection("user_invites")
@@ -1580,6 +1856,77 @@ impl crate::ports::workflow_revisions::WorkflowRevisionStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRunOutputStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
+    async fn put_run_output(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::run_output::WorkflowRunOutputRecord,
+    ) -> Result<()> {
+        use crate::ports::run_output::MAX_RUN_OUTPUTS_PER_COMPANY;
+        let coll = self.collection("run_outputs");
+        // Upsert: last-write-wins per `(company, run_id)`, so a re-run overwrites
+        // rather than stacking. The unique index is what makes the filter a key.
+        coll.update_one(
+            doc! {"company_id": company.as_ref(), "run_id": &record.run_id},
+            doc! {"$set": {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "workflow_id": &record.workflow_id,
+                "at_ms": record.at_millis as i64,
+                "output_json": serde_json::to_string(record)?,
+            }},
+        )
+        .with_options(UpdateOptions::builder().upsert(true).build())
+        .await
+        .map_err(mongo_err)?;
+
+        // Prune to the cap: collect this company's run ids newest-first and delete
+        // everything past `MAX`. Two statements, like the revision prune — Mongo
+        // has no "delete all but the newest N" operator; the recency index keeps
+        // the read cheap.
+        let mut cursor = coll
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"at_ms": -1, "run_id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut ids: Vec<String> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            ids.push(get_str(&doc, "run_id")?);
+        }
+        if ids.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
+            let stale: Vec<&String> = ids.iter().skip(MAX_RUN_OUTPUTS_PER_COMPANY).collect();
+            coll.delete_many(doc! {
+                "company_id": company.as_ref(),
+                "run_id": {"$in": stale},
+            })
+            .await
+            .map_err(mongo_err)?;
+        }
+        Ok(())
+    }
+
+    async fn get_run_output(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Option<crate::ports::run_output::WorkflowRunOutputRecord>> {
+        let found = self
+            .collection("run_outputs")
+            .find_one(doc! {"company_id": company.as_ref(), "run_id": run_id})
+            .await
+            .map_err(mongo_err)?;
+        match found {
+            Some(doc) => Ok(Some(serde_json::from_str(&get_str(&doc, "output_json")?)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -1821,6 +2168,163 @@ impl crate::ports::schedule_fires::ScheduleFireStore for MongoStore {
             .map_err(mongo_err)?;
         Ok(result.deleted_count as usize)
     }
+
+    async fn delete_schedule_fires(&self, company: &CompanyId, schedule_id: &str) -> Result<usize> {
+        // Every row for one schedule, whatever its minute — the delete-time
+        // purge (#708). A never-fired id matches nothing, so `deleted_count`
+        // is 0.
+        let result = self
+            .collection("schedule_fires")
+            .delete_many(doc! {
+                "company_id": company.as_ref(),
+                "schedule_id": schedule_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count as usize)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JournalStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::journal::JournalStore for MongoStore {
+    /// One journaled `insert_one` per record, sequenced by the same atomic
+    /// `counters` allocator [`EventLog`] uses.
+    ///
+    /// A document insert is atomic server-side, so the torn/merged-line class
+    /// the filesystem backend had to be fixed for (#386) cannot arise here at
+    /// all. The seq comes from the server rather than from a read-then-write, so
+    /// two hosts of one tenant overlapping across a rolling deploy interleave
+    /// without colliding — the same physics as `O_APPEND`, and the reason a
+    /// cross-process lock is not the missing piece.
+    ///
+    /// Fail-closed: an errored or timed-out insert returns `Err` before the
+    /// caller runs the side effect. The residual case — a timeout on a write the
+    /// server did commit — leaves a committed key with no effect, which is the
+    /// at-most-once contract's documented safe direction.
+    ///
+    /// Both durability levels are honoured (issue #392):
+    /// [`Durability::Host`](crate::ports::journal::Durability::Host) writes with
+    /// `j:true`, so the server has committed the insert to its own on-disk
+    /// journal before it acknowledges; `Process` takes the default
+    /// acknowledgement, which returns once the primary holds the write in
+    /// memory. Flattening these together would either tax the journal's
+    /// highest-volume records with a disk flush each, or drop the guarantee that
+    /// keeps an already-fired effect from firing again after a primary crash.
+    async fn append_journal(
+        &self,
+        company: &CompanyId,
+        line: &str,
+        durability: crate::ports::journal::Durability,
+    ) -> Result<()> {
+        use crate::ports::journal::Durability;
+
+        let seq = self.next_seq(company, JOURNAL).await?;
+        let collection = match durability {
+            Durability::Host => self.journaled(JOURNAL),
+            Durability::Process => self.collection(JOURNAL),
+        };
+        collection
+            .insert_one(doc! {
+                "company_id": company.as_ref(),
+                "seq": seq as i64,
+                "line": line,
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
+
+    /// One ordered scan of this company's records, cursor-batched by the driver.
+    ///
+    /// Deliberately unbounded, and **not** a capped collection: capping would
+    /// silently drop the oldest records, and the oldest records are exactly the
+    /// at-most-once keys an effect from months ago committed. Un-committing one
+    /// re-arms that effect. Bounding the journal is a retention question with a
+    /// correctness argument attached (#575/#275 territory), not something a
+    /// storage-shape default gets to decide.
+    async fn read_journal(&self, company: &CompanyId) -> Result<Vec<String>> {
+        let mut cursor = self
+            .collection(JOURNAL)
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"seq": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(get_str(&doc, "line")?);
+        }
+        Ok(out)
+    }
+
+    async fn journal_imported(&self, company: &CompanyId) -> Result<bool> {
+        Ok(self
+            .collection(JOURNAL_IMPORTS)
+            .find_one(doc! {"company_id": company.as_ref()})
+            .await
+            .map_err(mongo_err)?
+            .is_some())
+    }
+
+    /// Clear, copy, receipt — in that order, and the order carries the whole
+    /// safety argument.
+    ///
+    /// MongoDB gives no transaction across three collections without a replica
+    /// set, so this cannot be atomic the way the sqlite backend's import is.
+    /// It does not need to be: the receipt is written **last**, so an import
+    /// interrupted anywhere leaves the gate open and the next boot re-runs the
+    /// clear-and-copy from the top. What must never happen is a *partial* copy
+    /// behind a *closed* gate — a journal missing its tail is a set of
+    /// at-most-once keys that quietly went missing — and writing the receipt
+    /// last is what makes that unreachable.
+    ///
+    /// The copy is one **ordered** `insert_many`, so the records land in the
+    /// order they were read and the sequence numbers mean what they say.
+    async fn complete_import(&self, company: &CompanyId, lines: Vec<String>) -> Result<()> {
+        let journal = self.journaled(JOURNAL);
+        journal
+            .delete_many(doc! {"company_id": company.as_ref()})
+            .await
+            .map_err(mongo_err)?;
+        if !lines.is_empty() {
+            let docs: Vec<Document> = lines
+                .iter()
+                .enumerate()
+                .map(|(seq, line)| {
+                    doc! {
+                        "company_id": company.as_ref(),
+                        "seq": seq as i64,
+                        "line": line.as_str(),
+                    }
+                })
+                .collect();
+            journal.insert_many(docs).await.map_err(mongo_err)?;
+        }
+        // The counter has to move too, or the first append after an import would
+        // hand out seq 0 and collide with the copy's first row on the unique
+        // index. `$max` rather than `$set`, so a counter that is somehow already
+        // ahead is never wound back.
+        self.collection("counters")
+            .update_one(
+                doc! {"_id": format!("{}:{JOURNAL}", company.as_ref())},
+                doc! {"$max": {"next": lines.len() as i64}},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        self.journaled(JOURNAL_IMPORTS)
+            .update_one(
+                doc! {"company_id": company.as_ref()},
+                doc! {"$set": {"at_ms": now_millis() as i64, "lines": lines.len() as i64}},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1926,10 +2430,425 @@ impl crate::ports::skills_state::SkillStateStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// ReadStateStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::read_state::ReadStateStore for MongoStore {
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::read_state::ChannelRead>> {
+        let mut cursor = self
+            .collection("channel_read_state")
+            .find(doc! {"company_id": company.as_ref(), "user_id": user})
+            .sort(doc! {"channel_id": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(d) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(crate::ports::read_state::ChannelRead {
+                channel_id: get_str(&d, "channel_id")?,
+                last_read_at: d.get_i64("last_read_ms").unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn mark(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        channel_id: &str,
+        at: i64,
+    ) -> Result<crate::ports::read_state::ChannelRead> {
+        let key = doc! {
+            "company_id": company.as_ref(),
+            "user_id": user,
+            "channel_id": channel_id,
+        };
+        // `$max` rather than `$set`, for the monotonicity the port promises —
+        // and on an upsert it seeds the field, so no `$setOnInsert` twin (which
+        // Mongo would reject as a conflicting path anyway).
+        self.collection("channel_read_state")
+            .update_one(key.clone(), doc! {"$max": {"last_read_ms": at}})
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        let settled = self
+            .collection("channel_read_state")
+            .find_one(key)
+            .await
+            .map_err(mongo_err)?
+            .and_then(|d| d.get_i64("last_read_ms").ok())
+            .unwrap_or(at);
+        Ok(crate::ports::read_state::ChannelRead {
+            channel_id: channel_id.to_string(),
+            last_read_at: settled,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NotificationStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::notifications::NotificationStore for MongoStore {
+    async fn append(
+        &self,
+        company: &CompanyId,
+        notification: &crate::ports::notifications::Notification,
+    ) -> Result<()> {
+        // Idempotent by id (first write wins): `$setOnInsert` seeds the record
+        // only when it does not yet exist, so a retried or replayed append is a
+        // no-op rather than a duplicate. The unique (company_id, id) index in
+        // `ensure_indexes` is the backstop against a concurrent double insert.
+        // All three backends agree: no duplicate id within a company.
+        self.collection("notifications")
+            .update_one(
+                doc! {"company_id": company.as_ref(), "id": notification.id.as_str()},
+                doc! {"$setOnInsert": {
+                    "kind": notification.kind.as_str(),
+                    "subject_kind": notification.subject.kind.as_str(),
+                    "subject_id": notification.subject.id.as_str(),
+                    "title": notification.title.as_str(),
+                    "created_ms": notification.created_at as i64,
+                }},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::notifications::NotificationView>> {
+        // This person's read markers first, into an id → read_ms map.
+        let mut reads: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut read_cursor = self
+            .collection("notification_reads")
+            .find(doc! {"company_id": company.as_ref(), "user_id": user})
+            .await
+            .map_err(mongo_err)?;
+        while let Some(d) = read_cursor.try_next().await.map_err(mongo_err)? {
+            reads.insert(
+                get_str(&d, "notification_id")?,
+                d.get_i64("read_ms").unwrap_or_default(),
+            );
+        }
+        // The records, newest first; the sort is the trait's contract.
+        let mut cursor = self
+            .collection("notifications")
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"created_ms": -1, "id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(d) = cursor.try_next().await.map_err(mongo_err)? {
+            let id = get_str(&d, "id")?;
+            let subject_kind = get_str(&d, "subject_kind")?;
+            let subject_kind = crate::ports::notifications::SubjectKind::from_token(&subject_kind)
+                .ok_or_else(|| {
+                    crate::error::OpenCompanyError::Store(format!(
+                        "notification {id} has an unknown subject kind {subject_kind:?}"
+                    ))
+                })?;
+            let read_at = reads.get(&id).map(|v| *v as u64);
+            out.push(crate::ports::notifications::NotificationView {
+                notification: crate::ports::notifications::Notification {
+                    id,
+                    kind: get_str(&d, "kind")?,
+                    subject: crate::ports::notifications::Subject {
+                        kind: subject_kind,
+                        id: get_str(&d, "subject_id")?,
+                    },
+                    created_at: d.get_i64("created_ms").unwrap_or_default() as u64,
+                    title: get_str(&d, "title")?,
+                },
+                read_at,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn mark_read(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        ids: Option<&[String]>,
+    ) -> Result<u64> {
+        let now = crate::ports::now_millis() as i64;
+        // Which notifications to mark: the named ids that actually exist in this
+        // company, or every notification when `None`.
+        let targets: Vec<String> = match ids {
+            Some(ids) => {
+                let mut present = Vec::new();
+                for id in ids {
+                    let found = self
+                        .collection("notifications")
+                        .find_one(doc! {"company_id": company.as_ref(), "id": id.as_str()})
+                        .await
+                        .map_err(mongo_err)?;
+                    if found.is_some() {
+                        present.push(id.clone());
+                    }
+                }
+                present
+            }
+            None => {
+                let mut cursor = self
+                    .collection("notifications")
+                    .find(doc! {"company_id": company.as_ref()})
+                    .await
+                    .map_err(mongo_err)?;
+                let mut all = Vec::new();
+                while let Some(d) = cursor.try_next().await.map_err(mongo_err)? {
+                    all.push(get_str(&d, "id")?);
+                }
+                all
+            }
+        };
+        for id in &targets {
+            // `$setOnInsert` is the latch: it seeds `read_ms` only when the
+            // marker is first created, so a re-mark leaves the original instant.
+            self.collection("notification_reads")
+                .update_one(
+                    doc! {
+                        "company_id": company.as_ref(),
+                        "user_id": user,
+                        "notification_id": id.as_str(),
+                    },
+                    doc! {"$setOnInsert": {"read_ms": now}},
+                )
+                .with_options(UpdateOptions::builder().upsert(true).build())
+                .await
+                .map_err(mongo_err)?;
+        }
+        // Still-unread count for this person, derived from the same projection
+        // `list` uses so the two never disagree. Fully qualified because
+        // `MongoStore` implements several ports that each expose a `list`.
+        let unread = crate::ports::notifications::NotificationStore::list(self, company, user)
+            .await?
+            .iter()
+            .filter(|v| v.read_at.is_none())
+            .count() as u64;
+        Ok(unread)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
+/// The GridFS bucket every workspace payload lives in.
+///
+/// One bucket for the whole database rather than one per company: GridFS
+/// buckets are a pair of collections, and a per-company bucket would mint two
+/// collections per tenant in the shared-database mode this backend exists to
+/// serve. Isolation is where it is everywhere else in this file — a
+/// `company_id` on every document and a filter on every query — see
+/// [`MongoStore::blob_filter`].
+const BLOB_BUCKET: &str = "workspace_blobs";
+
+/// How long a blob must have existed before [`MongoStore::sweep_orphan_blobs`]
+/// will treat "no node document" as *abandoned* rather than *in flight*
+/// (issue #664).
+///
+/// The window the sweep must not delete into is between `put_blob` returning
+/// and the `workspace_nodes` insert landing — normally milliseconds, but a
+/// concurrent boot only has to land inside it once to destroy a live upload,
+/// and the damage is permanent: a node whose download 404s and whose `size`
+/// still counts against the quota.
+///
+/// An hour is far longer than that window and deliberately so. The cost of
+/// being generous is bounded and dull — a genuinely abandoned blob occupies
+/// disk until the first boot after it becomes old enough, which may be much
+/// later on a long-lived deployment — while the cost of being tight is
+/// destroying a tenant's upload. The asymmetry is the whole argument, so do not
+/// tune this down without one.
+const ORPHAN_BLOB_MIN_AGE_MS: i64 = 60 * 60 * 1000;
+
 impl MongoStore {
+    /// The workspace payload bucket.
+    fn blobs(&self) -> mongodb::gridfs::GridFsBucket {
+        self.db.gridfs_bucket(
+            mongodb::options::GridFsBucketOptions::builder()
+                .bucket_name(BLOB_BUCKET.to_string())
+                .build(),
+        )
+    }
+
+    /// The tenancy-scoped filter naming exactly one node's payload.
+    ///
+    /// **Both keys, every time.** A filter on `node_id` alone would be a
+    /// cross-tenant read the moment two companies in one database minted the
+    /// same node id — and node ids come from a shared generator, so that is a
+    /// collision away rather than an attack away. Every read, every delete and
+    /// the boot sweep go through this function so there is no call site that
+    /// could have forgotten the company half.
+    fn blob_filter(company: &CompanyId, node_id: &str) -> Document {
+        doc! {
+            "metadata.company_id": company.as_ref(),
+            "metadata.node_id": node_id,
+        }
+    }
+
+    /// Uploads `bytes` as this node's payload and returns nothing.
+    ///
+    /// The blob is written **before** the node document that names it, on both
+    /// the create and the replace path. See
+    /// [`create_binary`](crate::ports::workspace::WorkspaceStore::create_binary)
+    /// on this type for why that direction.
+    async fn put_blob(
+        &self,
+        company: &CompanyId,
+        node_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        use futures::io::AsyncWriteExt;
+        let mut upload = self
+            .blobs()
+            .open_upload_stream(filename)
+            .metadata(doc! {
+                "company_id": company.as_ref(),
+                "node_id": node_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        upload
+            .write_all(bytes)
+            .await
+            .map_err(|e| mongo_err(format!("writing a workspace blob failed: {e}")))?;
+        // `close` is what commits the final chunk and the files-collection
+        // document. Without it the upload is a partial write that no reader can
+        // see — so its failure is the write's failure.
+        upload
+            .close()
+            .await
+            .map_err(|e| mongo_err(format!("closing a workspace blob failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Removes every payload registered to `node_id`, except optionally the one
+    /// just written.
+    ///
+    /// `keep` exists for the replace path: the new blob is uploaded before the
+    /// node document is updated, so at that moment the filter matches both
+    /// generations and the older one is the one to drop.
+    async fn drop_blobs(
+        &self,
+        company: &CompanyId,
+        node_id: &str,
+        keep: Option<&mongodb::bson::Bson>,
+    ) -> Result<()> {
+        let bucket = self.blobs();
+        let mut cursor = bucket
+            .find(Self::blob_filter(company, node_id))
+            .await
+            .map_err(mongo_err)?;
+        while let Some(file) = cursor.try_next().await.map_err(mongo_err)? {
+            if keep == Some(&file.id) {
+                continue;
+            }
+            bucket.delete(file.id).await.map_err(mongo_err)?;
+        }
+        Ok(())
+    }
+
+    /// Deletes blobs whose node document is gone (issue #553).
+    ///
+    /// The crash window this closes is the one the write ordering deliberately
+    /// leaves open: a payload uploaded, then the process dies before the node
+    /// document lands. That leaves a blob nothing references — invisible to
+    /// every reader, but occupying the tenant's quota forever. The opposite
+    /// ordering would have left a node whose download 404s, which is worse, so
+    /// this sweep is the price of choosing the survivable direction.
+    ///
+    /// Runs at construction, where it is cheap (one scan of the files
+    /// collection against one projection of the node ids) and where a partial
+    /// failure is safe: a sweep that cannot complete is logged and the store is
+    /// returned anyway, because refusing to open a company's storage over
+    /// reclaimable disk would trade an invisible cost for a total outage.
+    ///
+    /// ## Only blobs older than [`ORPHAN_BLOB_MIN_AGE_MS`] (issue #664)
+    ///
+    /// "No node document" describes an abandoned blob **and** a blob whose
+    /// writer is still running, and the two are indistinguishable by reference
+    /// alone. Without an age bound this sweep deletes live uploads: a second
+    /// process — a rolling deploy, a restarted replica, another tenant's
+    /// container on a shared database — boots between a peer's `put_blob` and
+    /// its node insert, sees a blob with no node, and reclaims it. The peer's
+    /// insert then lands, and the company keeps a node whose download 404s
+    /// forever while its recorded `size` still counts against `tree_quota_gb`.
+    /// Neither half self-heals, because this sweep only ever deletes blobs
+    /// without nodes and never nodes without blobs.
+    ///
+    /// That is the failure the write ordering exists to avoid, reintroduced by
+    /// the thing meant to clean up after it — and the *shared-single-DB* mode
+    /// makes it cross-tenant, since this is the one query in this backend that
+    /// carries no `company_id` (see the multi-tenancy note at the top of this
+    /// module). An age bound closes both: an in-flight upload is young, an
+    /// abandoned one is not, and the filter runs server-side so a young blob is
+    /// never even read.
+    ///
+    /// **Not fixed by reordering the writes.** Node-first would replace an
+    /// invisible orphan with a node whose bytes are absent — the outcome
+    /// `fs_ops::create_binary` rejects in as many words ("only one of those is
+    /// survivable"). The ordering is right; the sweep was wrong.
+    async fn sweep_orphan_blobs(&self) -> Result<u64> {
+        let live: std::collections::HashSet<(String, String)> = {
+            let mut cursor = self
+                .collection("workspace_nodes")
+                .find(doc! {})
+                .await
+                .map_err(mongo_err)?;
+            let mut out = std::collections::HashSet::new();
+            while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+                if let (Ok(company), Ok(node)) = (doc.get_str("company_id"), doc.get_str("node_id"))
+                {
+                    out.insert((company.to_string(), node.to_string()));
+                }
+            }
+            out
+        };
+        let bucket = self.blobs();
+        // Server-side, so a blob younger than the bound is never even read —
+        // and so the bound cannot be defeated by a `continue` added later to
+        // the loop below. `uploadDate` is GridFS's own field on the files
+        // document, written when the upload completes.
+        let cutoff = mongodb::bson::DateTime::from_millis(
+            (now_millis() as i64).saturating_sub(ORPHAN_BLOB_MIN_AGE_MS),
+        );
+        let mut cursor = bucket
+            .find(doc! { "uploadDate": { "$lt": cutoff } })
+            .await
+            .map_err(mongo_err)?;
+        let mut removed = 0;
+        while let Some(file) = cursor.try_next().await.map_err(mongo_err)? {
+            let key = file.metadata.as_ref().and_then(|m| {
+                Some((
+                    m.get_str("company_id").ok()?.to_string(),
+                    m.get_str("node_id").ok()?.to_string(),
+                ))
+            });
+            // A blob with no usable metadata cannot be matched to a node and is
+            // therefore an orphan by definition — it predates this scheme or was
+            // written by something that is not this store.
+            let orphan = key.map(|k| !live.contains(&k)).unwrap_or(true);
+            if orphan {
+                bucket.delete(file.id).await.map_err(mongo_err)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Loads every workspace node for a company into an id-keyed map.
     async fn workspace_nodes(
         &self,
@@ -1970,10 +2889,18 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             .await
             .map_err(mongo_err)?;
         match doc {
-            Some(doc) => Ok(Some((
-                serde_json::from_str(&get_str(&doc, "node_json")?)?,
-                get_str(&doc, "content")?,
-            ))),
+            Some(doc) => {
+                let node: crate::ports::workspace::WorkspaceNode =
+                    serde_json::from_str(&get_str(&doc, "node_json")?)?;
+                // A binary node reads as an empty body, like a folder — the port
+                // contract that keeps every prose-shaped caller correct.
+                let content = if node.is_binary() {
+                    String::new()
+                } else {
+                    get_str(&doc, "content")?
+                };
+                Ok(Some((node, content)))
+            }
             None => Ok(None),
         }
     }
@@ -2001,6 +2928,11 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         if node.kind != NodeKind::File {
             return Err(OpenCompanyError::InvalidRequest(
                 "cannot write content to a folder".to_string(),
+            ));
+        }
+        if let Some(mime) = node.mime.clone() {
+            return Err(OpenCompanyError::InvalidRequest(
+                crate::ports::workspace::binary_write_refusal(&node.name, &mime),
             ));
         }
         node.updated_at_millis = now_millis();
@@ -2050,17 +2982,279 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                 }
             }
         }
+        let mut document = doc! {
+            "company_id": company.as_ref(),
+            "node_id": &node.id,
+            "node_json": serde_json::to_string(node)?,
+            "content": content.unwrap_or(""),
+            "updated_ms": node.updated_at_millis as i64,
+        };
+        // Issue #697: claims this file's path against the partial unique index.
+        if let Some(key) = node_path_key(node) {
+            document.insert("file_path_key", key);
+        }
         self.collection("workspace_nodes")
-            .insert_one(doc! {
-                "company_id": company.as_ref(),
-                "node_id": &node.id,
-                "node_json": serde_json::to_string(node)?,
-                "content": content.unwrap_or(""),
-                "updated_ms": node.updated_at_millis as i64,
-            })
+            .insert_one(document)
             .await
             .map_err(mongo_err)?;
         Ok(())
+    }
+
+    /// Find-then-insert, with the **partial unique index deciding the race**
+    /// and a re-read adopting the winner when it loses (issue #759).
+    ///
+    /// This is the only backend that cannot serialize a read-then-insert: there
+    /// is no per-company lock and no transaction it can require of its
+    /// deployment, so a find that says "free" is a statement about an instant
+    /// and the insert acts on it later. The answer is the one issue #697 already
+    /// established for files — let the database hold the line — applied to a
+    /// second field.
+    ///
+    /// The re-read is what makes the loser *adopt* rather than fail. That is the
+    /// whole difference from `swap_files`: two publishers wanting one folder want
+    /// the same thing, so the one the index refuses must come back, find the
+    /// winner's folder and use it.
+    ///
+    /// The retry is bounded. Each pass either adopts, inserts, or loses to a
+    /// duplicate key — and a duplicate key means a competing folder now exists,
+    /// which the next find must see. More than a couple of passes therefore
+    /// means something is deleting folders as fast as they are created, and
+    /// looping forever on that would hang a publish rather than fail it.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        use crate::ports::workspace::{FolderClaim, NodeKind, existing_folder_claim, new_folder};
+        /// Enough to absorb a burst of concurrent claimers; see the doc above
+        /// for why an unbounded loop would be worse than a refusal.
+        const ATTEMPTS: usize = 8;
+
+        for _ in 0..ATTEMPTS {
+            let nodes = self.workspace_nodes(company).await?;
+            if let Some(parent) = parent {
+                match nodes.get(parent) {
+                    Some(p) if p.kind == NodeKind::Folder => {}
+                    Some(_) => {
+                        return Err(OpenCompanyError::InvalidRequest(
+                            "parent is not a folder".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(OpenCompanyError::InvalidRequest(
+                            "parent folder does not exist".to_string(),
+                        ));
+                    }
+                }
+            }
+            if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+                return Ok(FolderClaim::Adopted(existing));
+            }
+            let node = new_folder(name, parent, origin.clone());
+            let mut document = doc! {
+                "company_id": company.as_ref(),
+                "node_id": &node.id,
+                "node_json": serde_json::to_string(&node)?,
+                "content": "",
+                "updated_ms": node.updated_at_millis as i64,
+            };
+            document.insert("folder_path_key", folder_path_key(parent, name));
+            match self
+                .collection("workspace_nodes")
+                .insert_one(document)
+                .await
+            {
+                Ok(_) => return Ok(FolderClaim::Created(node)),
+                // Somebody else claimed the path between the find and the
+                // insert. Nothing was written — this backend's create is one
+                // document — so the next pass simply adopts their folder.
+                Err(err) if is_duplicate_key(&err) => continue,
+                Err(err) => return Err(mongo_err(err)),
+            }
+        }
+        Err(OpenCompanyError::Conflict(format!(
+            "the folder `{name}` could not be claimed after {ATTEMPTS} attempts; something is \
+             creating and removing it concurrently"
+        )))
+    }
+
+    /// GridFS — the only backend where the payload cannot ride in the record.
+    ///
+    /// A BSON document caps at 16 MB, and the artifacts this issue exists for
+    /// are generated images and video that routinely exceed it, so the bytes go
+    /// into a bucket and the node document keeps only the metadata.
+    ///
+    /// # Blob first, document second
+    ///
+    /// The two writes cannot be made atomic without a transaction this backend
+    /// does not require of its deployment, so the ordering is chosen by which
+    /// failure is survivable. A crash between them leaves a blob with no node:
+    /// invisible to every reader, costing disk until
+    /// [`sweep_orphan_blobs`](MongoStore::sweep_orphan_blobs) runs at the next
+    /// boot. The reverse would leave a node the tree shows and the download
+    /// 404s on — a file the operator can see and cannot fetch, with nothing to
+    /// repair it. Deletion runs the mirror image (document first, blob second)
+    /// for the same reason.
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &crate::ports::workspace::WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
+        use crate::ports::workspace::NodeKind;
+        let node = crate::ports::workspace::stamped_binary(node, bytes)?;
+        let nodes = self.workspace_nodes(company).await?;
+        if nodes.contains_key(&node.id) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "workspace node {} already exists",
+                node.id
+            )));
+        }
+        if let Some(parent) = &node.parent_id {
+            match nodes.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        self.put_blob(company, &node.id, &node.name, bytes).await?;
+        let mut document = doc! {
+            "company_id": company.as_ref(),
+            "node_id": &node.id,
+            "node_json": serde_json::to_string(&node)?,
+            "content": "",
+            "updated_ms": node.updated_at_millis as i64,
+        };
+        // Issue #697, as above.
+        if let Some(key) = node_path_key(&node) {
+            document.insert("file_path_key", key);
+        }
+        self.collection("workspace_nodes")
+            .insert_one(document)
+            .await
+            .map_err(mongo_err)?;
+        // The stamped node, so the digest a caller records can only have come
+        // from the store (issue #668).
+        Ok(node)
+    }
+
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
+        let doc = self
+            .collection("workspace_nodes")
+            .find_one(doc! {"company_id": company.as_ref(), "node_id": id})
+            .await
+            .map_err(mongo_err)?;
+        let Some(doc) = doc else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {id}"
+            )));
+        };
+        let mut node: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&get_str(&doc, "node_json")?)?;
+        crate::ports::workspace::rebind_binary(&mut node, bytes, mime, author)?;
+        // New blob, then the document, then the old blob — the same "a reader
+        // never sees a node without its bytes" ordering as the create path. The
+        // worst crash outcome is a superseded blob left behind for the boot
+        // sweep.
+        let superseded: Vec<mongodb::bson::Bson> = {
+            let mut cursor = self
+                .blobs()
+                .find(Self::blob_filter(company, id))
+                .await
+                .map_err(mongo_err)?;
+            let mut ids = Vec::new();
+            while let Some(file) = cursor.try_next().await.map_err(mongo_err)? {
+                ids.push(file.id);
+            }
+            ids
+        };
+        self.put_blob(company, id, &node.name, bytes).await?;
+        self.collection("workspace_nodes")
+            .update_one(
+                doc! {"company_id": company.as_ref(), "node_id": id},
+                doc! {"$set": {
+                    "node_json": serde_json::to_string(&node)?,
+                    "content": "",
+                    "updated_ms": node.updated_at_millis as i64,
+                }},
+            )
+            .await
+            .map_err(mongo_err)?;
+        let bucket = self.blobs();
+        for old in superseded {
+            bucket.delete(old).await.map_err(mongo_err)?;
+        }
+        Ok(node)
+    }
+
+    /// Streams straight out of GridFS — a video is never resident, which is the
+    /// reason this backend needed a bucket rather than a bigger field.
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        let Some(doc) = self
+            .collection("workspace_nodes")
+            .find_one(doc! {"company_id": company.as_ref(), "node_id": id})
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Ok(None);
+        };
+        let node: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&get_str(&doc, "node_json")?)?;
+        if !node.is_binary() {
+            return Ok(None);
+        }
+        let bucket = self.blobs();
+        // Located by the tenancy-scoped metadata filter rather than by an id
+        // carried on the node document: the bucket is shared across companies,
+        // so the company half of the filter is the isolation boundary and must
+        // be applied by the query that finds the file, not checked afterwards.
+        let Some(file) = bucket
+            .find_one(Self::blob_filter(company, id))
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Ok(None);
+        };
+        let stream = bucket
+            .open_download_stream(file.id)
+            .await
+            .map_err(mongo_err)?;
+        use tokio_util::compat::FuturesAsyncReadCompatExt;
+        let reader = tokio_util::io::ReaderStream::new(stream.compat());
+        Ok(Some((
+            node,
+            Box::pin(futures::StreamExt::map(reader, |chunk| {
+                chunk.map_err(|e| {
+                    OpenCompanyError::Store(format!("reading a workspace blob failed: {e}"))
+                })
+            })),
+        )))
     }
 
     async fn rename_move(
@@ -2098,17 +3292,235 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             node.parent_id = parent.map(str::to_string);
         }
         node.updated_at_millis = now_millis();
+        // A rename or a reparent moves the file to a different path, so its
+        // claim has to move with it (issue #697) or the index would keep
+        // guarding the path it left and ignore the one it took.
+        let mut set = doc! {
+            "node_json": serde_json::to_string(&node)?,
+            "updated_ms": node.updated_at_millis as i64,
+        };
+        let mut unset = Document::new();
+        match node_path_key(&node) {
+            Some(key) => {
+                set.insert("file_path_key", key);
+            }
+            None => {
+                unset.insert("file_path_key", "");
+            }
+        }
+        // A moved folder **drops** its claim rather than carrying it (issue
+        // #759). The claim exists to decide a race between two publishers on the
+        // publish walk; an operator who moved the folder by hand has taken it
+        // out of that walk's reach, and a key that travelled with it would keep
+        // guarding the path it left — refusing that path to every later publish
+        // forever, which is the very outage this primitive exists to prevent.
+        // Demoting to unguarded is what every console-made folder already is.
+        if node.kind == NodeKind::Folder {
+            unset.insert("folder_path_key", "");
+        }
+        let mut update = doc! {"$set": set};
+        if !unset.is_empty() {
+            update.insert("$unset", unset);
+        }
         self.collection("workspace_nodes")
+            .update_one(doc! {"company_id": company.as_ref(), "node_id": id}, update)
+            .await
+            .map_err(mongo_err)?;
+        Ok(node)
+    }
+
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: Option<&str>,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<crate::ports::workspace::WorkspaceNode>> {
+        use crate::ports::workspace::NodeKind;
+
+        let nodes = self.collection("workspace_nodes");
+        let Some(staged_doc) = nodes
+            .find_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": replacement_id,
+            })
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {replacement_id}"
+            )));
+        };
+        let staged_json = get_str(&staged_doc, "node_json")?.to_string();
+        let replacement: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&staged_json)?;
+        if replacement.kind != NodeKind::File {
+            return Err(OpenCompanyError::InvalidRequest(
+                "only files can be promoted from a staging path".to_string(),
+            ));
+        }
+
+        let expected_doc = match expected_id {
+            Some(id) => nodes
+                .find_one(doc! {
+                    "company_id": company.as_ref(),
+                    "node_id": id,
+                })
+                .await
+                .map_err(mongo_err)?,
+            None => None,
+        };
+        let expected = expected_doc
+            .as_ref()
+            .map(
+                |document| -> Result<crate::ports::workspace::WorkspaceNode> {
+                    let json = get_str(document, "node_json")?;
+                    Ok(serde_json::from_str(&json)?)
+                },
+            )
+            .transpose()?;
+        // Only the replace arm can be decided by reading. The create arm is
+        // decided below, by the unique index, because a read here would be a
+        // check with a window after it.
+        let still_current = expected_id.is_none()
+            || expected.as_ref().is_some_and(|node| {
+                node.kind == NodeKind::File
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            });
+
+        // Detach the private staging document before changing the expected
+        // document's id: `(company_id, node_id)` is unique. The GridFS payload
+        // deliberately stays in place, already keyed by `replacement_id`.
+        // A crash here leaves the old deliverable intact and, at worst, an
+        // orphan the boot sweep reclaims.
+        let detached = nodes
+            .delete_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": replacement_id,
+                "node_json": &staged_json,
+            })
+            .await
+            .map_err(mongo_err)?;
+        if detached.deleted_count != 1 {
+            return Err(OpenCompanyError::Conflict(
+                "the staged workspace replacement changed before it could be promoted".to_string(),
+            ));
+        }
+
+        if !still_current {
+            self.drop_blobs(company, replacement_id, None).await?;
+            return Ok(None);
+        }
+
+        let mut promoted = replacement.clone();
+        promoted.name = name.to_string();
+        promoted.updated_at_millis = now_millis();
+
+        // Issue #697, the first-publish arm. The staged document has just been
+        // detached, so re-inserting it under the final name is the whole
+        // operation — and the partial unique index on `file_path_key` is what
+        // decides it. Two publishers reaching here concurrently both attempt
+        // the insert; exactly one satisfies the index and the other is refused
+        // by the server, which is the only place this backend can hold that
+        // line without a transaction.
+        if expected_id.is_none() {
+            let staged_content = staged_doc
+                .get("content")
+                .cloned()
+                .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
+            let mut document = doc! {
+                "company_id": company.as_ref(),
+                "node_id": replacement_id,
+                "node_json": serde_json::to_string(&promoted)?,
+                "content": staged_content,
+                "updated_ms": promoted.updated_at_millis as i64,
+            };
+            document.insert(
+                "file_path_key",
+                file_path_key(promoted.parent_id.as_deref(), &promoted.name),
+            );
+            return match nodes.insert_one(document).await {
+                Ok(_) => Ok(Some(promoted)),
+                Err(err) if is_duplicate_key(&err) => {
+                    // Lost the race: somebody else holds this path. The staged
+                    // node is already detached, so only its payload remains to
+                    // reclaim — the same cleanup the replace arm owes. A
+                    // cleanup failure must not turn the clean loss into a
+                    // reported publish failure: the compare-and-swap already
+                    // lost, and the boot orphan sweep finishes this later.
+                    if let Err(err) = self.drop_blobs(company, replacement_id, None).await {
+                        tracing::warn!(
+                            company = %company,
+                            node_id = %replacement_id,
+                            error = %err,
+                            "workspace first publish lost the race but staged GridFS payload \
+                             cleanup was deferred"
+                        );
+                    }
+                    Ok(None)
+                }
+                Err(err) => Err(mongo_err(err)),
+            };
+        }
+
+        let expected_doc = expected_doc.expect("still_current requires an expected document");
+        let expected_json = get_str(&expected_doc, "node_json")?.to_string();
+        let expected_content = expected_doc
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
+        let staged_content = staged_doc
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
+
+        // One document update is the compare-and-swap. Including the complete
+        // old JSON and content makes an in-place writer count as a competing
+        // revision even if two timestamps happen to share a millisecond.
+        let swapped = nodes
             .update_one(
-                doc! {"company_id": company.as_ref(), "node_id": id},
+                doc! {
+                    "company_id": company.as_ref(),
+                    "node_id": expected_id,
+                    "node_json": &expected_json,
+                    "content": expected_content,
+                },
                 doc! {"$set": {
-                    "node_json": serde_json::to_string(&node)?,
-                    "updated_ms": node.updated_at_millis as i64,
+                    "node_id": replacement_id,
+                    "node_json": serde_json::to_string(&promoted)?,
+                    "content": staged_content,
+                    "updated_ms": promoted.updated_at_millis as i64,
+                    // The promoted node now holds the path, so it takes the
+                    // claim with it (issue #697). The superseded document is
+                    // this same document, so there is no stale key left behind.
+                    "file_path_key": file_path_key(
+                        promoted.parent_id.as_deref(),
+                        &promoted.name,
+                    ),
                 }},
             )
             .await
             .map_err(mongo_err)?;
-        Ok(node)
+        if swapped.matched_count == 0 {
+            self.drop_blobs(company, replacement_id, None).await?;
+            return Ok(None);
+        }
+
+        // The new document already points at durable replacement bytes. Old
+        // bytes are now unreachable; a cleanup failure must not turn a
+        // successful atomic swap into a reported publish failure, because the
+        // boot orphan sweep can safely finish this work later.
+        let superseded = expected_id.expect("the replace arm has an expected id");
+        if let Err(err) = self.drop_blobs(company, superseded, None).await {
+            tracing::warn!(
+                company = %company,
+                node_id = %superseded,
+                error = %err,
+                "workspace file swap succeeded but old GridFS payload cleanup was deferred"
+            );
+        }
+        Ok(Some(promoted))
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
@@ -2119,10 +3531,16 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         let mut to_remove = mongo_workspace_descendants(&nodes, id);
         to_remove.insert(id.to_string());
         let ids: Vec<&String> = to_remove.iter().collect();
+        // Documents first, blobs second — the mirror of the write ordering. A
+        // crash between them leaves a payload with no node, which the boot
+        // sweep reclaims; the reverse would leave a node whose download 404s.
         self.collection("workspace_nodes")
-            .delete_many(doc! {"company_id": company.as_ref(), "node_id": {"$in": ids}})
+            .delete_many(doc! {"company_id": company.as_ref(), "node_id": {"$in": &ids}})
             .await
             .map_err(mongo_err)?;
+        for node_id in &to_remove {
+            self.drop_blobs(company, node_id, None).await?;
+        }
         Ok(true)
     }
 
@@ -2189,6 +3607,218 @@ mod test {
     fn required() -> bool {
         std::env::var("OPENCOMPANY_TEST_MONGODB_REQUIRED")
             .is_ok_and(|value| !value.is_empty() && value != "0")
+    }
+
+    /// Issue #697. The partial filter must be keyed on the **field name passed
+    /// in**, never on the literal `"present"` — the parameter's own name.
+    ///
+    /// Raised in review of #733 as a HIGH finding: that `doc!` stringifies
+    /// identifier keys, so `doc! {present: ...}` would build
+    /// `{"present": {"$exists": true}}`, a filter no document matches. The
+    /// index would then be built over an empty set and reject no insert,
+    /// silently removing the one-file-per-path guarantee on this backend.
+    ///
+    /// It does not: the `bson!` key arms end at
+    /// `insert::<_, Bson>(($($key)+), $value)`, passing the key tokens as an
+    /// expression rather than through `stringify!`. But that is an argument
+    /// about a macro's expansion, and the cost of being wrong is a guard that
+    /// looks present and enforces nothing — so this asserts the built artifact
+    /// instead of the reasoning.
+    ///
+    /// Needs no server: it inspects the `IndexModel` this code constructs, so
+    /// it runs on the `mongodb` feature alone and cannot pass vacuously the way
+    /// the URI-gated tests can.
+    #[test]
+    fn the_partial_filter_is_keyed_on_the_field_not_the_parameter_name() {
+        let model = unique_partial(doc! {"company_id": 1, "file_path_key": 1}, "file_path_key");
+        let filter = model
+            .options
+            .as_ref()
+            .and_then(|options| options.partial_filter_expression.as_ref())
+            .expect("the index is partial");
+
+        assert!(
+            filter.contains_key("file_path_key"),
+            "the filter must name the field it guards: {filter:?}"
+        );
+        assert!(
+            !filter.contains_key("present"),
+            "a filter keyed on the parameter's own name would match no document, so the \
+             index would be built over an empty set and reject nothing: {filter:?}"
+        );
+        assert_eq!(
+            filter.get_document("file_path_key").expect("the condition"),
+            &doc! {"$exists": true},
+            "and the condition is existence of that field: {filter:?}"
+        );
+        assert!(
+            model
+                .options
+                .as_ref()
+                .and_then(|options| options.unique)
+                .unwrap_or(false),
+            "a partial filter without uniqueness would guard nothing at all"
+        );
+    }
+
+    /// Issue #759's index, asserted the same way and for the same reason.
+    ///
+    /// The folder guard is a second `unique_partial`, and a partial filter that
+    /// named the wrong field would be the identical silent failure: an index
+    /// built over an empty set, rejecting nothing, while every sequential test
+    /// still passed. Asserting the constructed `IndexModel` catches that with no
+    /// server, so it cannot pass vacuously.
+    ///
+    /// It also pins the field **name**: the folder key must be its own field,
+    /// not `file_path_key`. Sharing one field would make a folder and a file
+    /// contend for a single name — a new tree rule this change explicitly does
+    /// not introduce.
+    #[test]
+    fn the_folder_claim_index_is_partial_unique_on_its_own_field() {
+        let model = unique_partial(
+            doc! {"company_id": 1, "folder_path_key": 1},
+            "folder_path_key",
+        );
+        let filter = model
+            .options
+            .as_ref()
+            .and_then(|options| options.partial_filter_expression.as_ref())
+            .expect("the index is partial");
+
+        assert!(
+            filter.contains_key("folder_path_key"),
+            "the filter must name the field it guards: {filter:?}"
+        );
+        assert!(
+            !filter.contains_key("file_path_key"),
+            "the folder guard must not key on the file field, or a folder and a note would \
+             contend for one name: {filter:?}"
+        );
+        assert_eq!(
+            filter
+                .get_document("folder_path_key")
+                .expect("the condition"),
+            &doc! {"$exists": true},
+        );
+        assert!(
+            model
+                .options
+                .as_ref()
+                .and_then(|options| options.unique)
+                .unwrap_or(false),
+            "a partial filter without uniqueness would guard nothing at all"
+        );
+        // The two keys share an encoding, which is what lets one `path_key`
+        // serve both — pinned so a future edit cannot make them silently differ.
+        assert_eq!(
+            folder_path_key(Some("p"), "task-42"),
+            file_path_key(Some("p"), "task-42")
+        );
+    }
+
+    /// Issue #759, the subtle half: a folder that is **moved** drops its claim.
+    ///
+    /// `rename_move` has to `$unset` `folder_path_key`, and a missing unset is
+    /// invisible until somebody needs the vacated path again. The moved
+    /// document would keep guarding the path it left, so the next publish that
+    /// wanted `Agents/cmo/task-42/` would be refused by an index entry
+    /// describing a folder that is no longer there — the permanent outage this
+    /// primitive exists to prevent, reintroduced by the fix itself.
+    ///
+    /// Asserted by reclaiming the old path and checking a *new* folder was
+    /// minted there, rather than by reading the document: the claim is only
+    /// worth what the next claimer observes.
+    #[tokio::test]
+    async fn a_moved_folder_releases_its_claim_on_the_path_it_left() {
+        use crate::ports::workspace::WorkspaceStore;
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("mover");
+        let origin = crate::ports::workspace::WorkspaceOrigin::Seed;
+
+        let parent = s
+            .adopt_or_create_folder(&company, None, "Agents", origin.clone())
+            .await
+            .expect("the root")
+            .into_node()
+            .id;
+        let moved = s
+            .adopt_or_create_folder(&company, Some(&parent), "task-42", origin.clone())
+            .await
+            .expect("the folder")
+            .into_node()
+            .id;
+
+        // The operator renames it out of the way.
+        s.rename_move(&company, &moved, Some("task-42-archived"), None)
+            .await
+            .expect("rename to the workspace root");
+
+        // The vacated path must be claimable again, by a genuinely new folder.
+        let reclaimed = s
+            .adopt_or_create_folder(&company, Some(&parent), "task-42", origin)
+            .await
+            .expect("the path the moved folder left must be free");
+        assert!(
+            reclaimed.was_created(),
+            "a stale claim would have made this adopt a folder that is not there"
+        );
+        assert_ne!(reclaimed.node().id, moved);
+
+        drop_db(&s).await;
+    }
+
+    /// **Issue #392 through the port**: the host-durable append asks the server
+    /// for `j:true`, and the process-durable one does not.
+    ///
+    /// `assert_journal_store` cannot catch this — a backend that ignored the
+    /// `Durability` argument stores and orders every record identically and
+    /// passes the whole suite, silently dropping the guarantee that keeps an
+    /// already-fired effect from firing again after a primary crash. So the
+    /// constructed handles are asserted directly, the same way
+    /// `the_partial_filter_is_keyed_on_the_field_not_the_parameter_name` asserts
+    /// a built `IndexModel` rather than the reasoning behind it.
+    ///
+    /// Needs no server: `Client::with_options` resolves lazily and
+    /// `collection_with_options` builds a handle locally, so this runs on the
+    /// `mongodb` feature alone and cannot pass vacuously the way the URI-gated
+    /// tests can. (It is a `tokio::test` only because the driver's constructor
+    /// spawns a cleanup task, not because anything here awaits the network.)
+    #[tokio::test]
+    async fn only_the_host_durable_journal_write_asks_for_j_true() {
+        // A client handle, not a connection: `with_options` resolves lazily and
+        // never touches the network, so this stays a pure shape assertion.
+        let client = Client::with_options(
+            mongodb::options::ClientOptions::builder()
+                .hosts(vec![mongodb::options::ServerAddress::Tcp {
+                    host: "localhost".into(),
+                    port: Some(27017),
+                }])
+                .build(),
+        )
+        .expect("build a client handle");
+        let store = MongoStore {
+            db: client.database("oc_test_shape"),
+            senders: Arc::new(StdMutex::new(HashMap::new())),
+        };
+
+        let host = store.journaled(JOURNAL);
+        assert_eq!(
+            host.write_concern().and_then(|concern| concern.journal),
+            Some(true),
+            "a host-durable record must be committed to the server's journal \
+             before the insert is acknowledged"
+        );
+
+        let process = store.collection(JOURNAL);
+        assert!(
+            process
+                .write_concern()
+                .and_then(|concern| concern.journal)
+                .is_none(),
+            "the process-durable level must NOT pay a disk flush: these are the \
+             journal's highest-volume records, and losing one makes the runtime \
+             re-ask rather than re-fire"
+        );
     }
 
     /// The URI with any `user:password@` replaced by `***@`, for the panic
@@ -2293,6 +3923,205 @@ mod test {
         let _ = store.db.drop().await;
     }
 
+    /// Ages every staged blob past [`ORPHAN_BLOB_MIN_AGE_MS`] (issue #664).
+    ///
+    /// The sweep only reclaims blobs old enough to be abandoned, so a test that
+    /// uploads bytes and reboots in the same millisecond is staging an
+    /// *in-flight* upload, not an orphaned one. Rewriting `uploadDate` is how a
+    /// test says "and then an hour passed" without sleeping for one.
+    async fn age_blobs_past_the_sweep_threshold(store: &MongoStore) {
+        let old = mongodb::bson::DateTime::from_millis(
+            now_millis() as i64 - ORPHAN_BLOB_MIN_AGE_MS - 60_000,
+        );
+        store
+            .db
+            .collection::<Document>(&format!("{BLOB_BUCKET}.files"))
+            .update_many(doc! {}, doc! { "$set": { "uploadDate": old } })
+            .await
+            .expect("backdate staged blobs");
+    }
+
+    /// The boot sweep reclaims a payload whose node document never landed.
+    ///
+    /// This is the crash the write ordering deliberately allows: blob first,
+    /// document second, so an interrupted `create_binary` leaves bytes nothing
+    /// references. Seeded here directly — uploading to the bucket without ever
+    /// inserting the node — because that is precisely the state a crash between
+    /// the two writes produces, and it is not reachable through the port.
+    ///
+    /// The node-backed blob beside it is the half that must be left alone: a
+    /// sweep that reclaimed live payloads would be far worse than the leak it
+    /// fixes.
+    #[tokio::test]
+    async fn the_boot_sweep_reclaims_orphaned_blobs_and_spares_live_ones() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("sweep-co");
+
+        // A live binary node, written through the port.
+        let node = crate::ports::workspace::WorkspaceNode {
+            id: "keep".to_string(),
+            name: "keep.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+        crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &node, b"live-bytes")
+            .await
+            .unwrap();
+
+        // …and a dangling one: the bytes of an interrupted create.
+        s.put_blob(&company, "vanished", "ghost.png", b"orphan-bytes")
+            .await
+            .unwrap();
+        // A blob with no metadata at all — a shape this store never writes, and
+        // therefore unmatchable to any node, so it is an orphan by definition.
+        {
+            use futures::io::AsyncWriteExt;
+            let mut up = s
+                .blobs()
+                .open_upload_stream("nometa.bin")
+                .await
+                .expect("upload");
+            up.write_all(b"no-metadata").await.unwrap();
+            up.close().await.unwrap();
+        }
+
+        let before = s.blobs().find(doc! {}).await.unwrap();
+        assert_eq!(
+            before.try_collect::<Vec<_>>().await.unwrap().len(),
+            3,
+            "two orphans and one live payload are staged"
+        );
+
+        // The orphans have to be *old* to be orphans (issue #664). Staged
+        // seconds ago they are indistinguishable from a peer's in-flight
+        // upload, and the sweep now spares them for that reason — see
+        // `a_recent_orphan_is_left_alone_because_it_may_be_an_in_flight_upload`.
+        age_blobs_past_the_sweep_threshold(&s).await;
+
+        // Constructing a store over the same database runs the sweep.
+        let rebooted = MongoStore::from_database(s.db.clone()).await.unwrap();
+
+        let files = rebooted
+            .blobs()
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1, "both orphans are reclaimed");
+        assert_eq!(files[0].filename.as_deref(), Some("keep.png"));
+
+        // The live node still serves its bytes — the sweep did not touch it.
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&rebooted, &company, "keep")
+                .await
+                .unwrap()
+                .expect("the live payload survives the sweep");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, b"live-bytes".to_vec());
+
+        drop_db(&s).await;
+    }
+
+    /// Issue #664: the boot sweep must not delete a concurrent writer's upload.
+    ///
+    /// The state staged here is not a crash — it is the perfectly ordinary
+    /// instant *inside* a healthy `create_binary`, after `put_blob` has
+    /// returned and before the node insert lands. A second process booting then
+    /// (a rolling deploy, a restarted replica, another tenant's container on a
+    /// shared database) sees a blob with no node and, before this fix, reclaimed
+    /// it. The writer's insert would then land on top, leaving a node whose
+    /// download 404s forever and whose `size` still counts against the quota —
+    /// unreclaimable, because the sweep only deletes blobs without nodes and
+    /// never nodes without blobs.
+    ///
+    /// Deliberately *not* backdated: recency is the whole signal.
+    #[tokio::test]
+    async fn a_recent_orphan_is_left_alone_because_it_may_be_an_in_flight_upload() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("inflight-co");
+
+        // Exactly what a concurrent `create_binary` has written so far.
+        s.put_blob(&company, "arriving", "arriving.png", b"in-flight-bytes")
+            .await
+            .unwrap();
+
+        // A second process boots against the same database and sweeps.
+        let rebooted = MongoStore::from_database(s.db.clone()).await.unwrap();
+
+        let files = rebooted
+            .blobs()
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            files.len(),
+            1,
+            "a blob younger than the threshold is an upload in progress, not an orphan"
+        );
+        assert_eq!(files[0].filename.as_deref(), Some("arriving.png"));
+
+        // And the writer's insert, landing after the sweep, yields a node whose
+        // bytes are actually there — the whole point.
+        let node = crate::ports::workspace::WorkspaceNode {
+            id: "arriving".to_string(),
+            name: "arriving.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+        rebooted
+            .collection("workspace_nodes")
+            .insert_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": &node.id,
+                "node_json": serde_json::to_string(&node).unwrap(),
+                "content": "",
+                "updated_ms": node.updated_at_millis as i64,
+            })
+            .await
+            .unwrap();
+
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&rebooted, &company, "arriving")
+                .await
+                .unwrap()
+                .expect("the upload that was in flight during the sweep still has its bytes");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, b"in-flight-bytes".to_vec());
+
+        drop_db(&s).await;
+    }
+
     /// Shared-single-DB namespacing: two tenants registering the same template
     /// name land distinct namespaced ids in one database, so the `companies`
     /// unique index never conflicts, and the `owners` rows carry the right
@@ -2326,6 +4155,8 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             };
@@ -2401,6 +4232,13 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_event_read_before() {
+        let Some(s) = store().await else { return };
+        conformance::assert_event_read_before(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
     async fn conformance_event_retention() {
         let Some(s) = store().await else { return };
         conformance::assert_event_retention(s.clone()).await;
@@ -2440,6 +4278,20 @@ mod test {
     async fn conformance_context_chunk_stamps() {
         let Some(s) = store().await else { return };
         conformance::assert_context_chunk_stamps(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_journal_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_import() {
+        let Some(s) = store().await else { return };
+        conformance::assert_journal_import(s.clone()).await;
         drop_db(&s).await;
     }
 
@@ -2493,9 +4345,122 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_read_state_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_read_state_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_notification_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_notification_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
     async fn conformance_workspace_store() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// The reason issue #553 could not defer the Mongo backend: hosted tenants
+    /// run MongoDB, and this is the only lane where the GridFS path — and the
+    /// 17 MiB case that proves the 16 MB BSON document cap is not in play —
+    /// actually executes.
+    #[tokio::test]
+    async fn conformance_workspace_binary_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_binary_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// Issue #759. The only lane where the folder-claim primitive's contention
+    /// case runs against the partial unique index that actually decides it —
+    /// this backend has neither a lock nor a transaction to fall back on.
+    #[tokio::test]
+    async fn conformance_workspace_folder_claims() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_folder_claims(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// Issue #887's no-torn-read contract, on the other backend hosted tenants
+    /// run. A document replace is atomic, so this passed before the `fs` fix
+    /// and passes after — the contract is the port's, not one backend's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn conformance_workspace_read_never_tears() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_read_never_tears(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// The sqlite pin's mirror, on the other backend hosted tenants run
+    /// (issue #700).
+    ///
+    /// Both are needed: the guard exists because a backend accepts a node name
+    /// carrying a path separator, and "accepts it" is a fact about each backend
+    /// rather than about the port. A folder holding only such a child has no
+    /// renderable path to it, reads as empty by every path-shaped measure, and
+    /// would still lose it to the port's recursive `delete` (issue #671) — so
+    /// the sweep must leave that folder standing here too.
+    #[tokio::test]
+    async fn workspace_sweep_keeps_a_folder_whose_only_child_has_no_renderable_path() {
+        use crate::company::workspace_sweep::sweep_empty_agent_folders;
+        use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("acme");
+        let node = |id: &str, name: &str, kind, parent: Option<&str>| WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            parent_id: parent.map(str::to_string),
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Seed,
+            updated_by: WorkspaceOrigin::Seed,
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+
+        for (id, name, kind, parent, body) in [
+            ("root", "Agents", NodeKind::Folder, None, None),
+            ("ghost", "ceo", NodeKind::Folder, Some("root"), None),
+            ("empty", "cto", NodeKind::Folder, Some("root"), None),
+            (
+                "hidden",
+                "q/r.md",
+                NodeKind::File,
+                Some("ghost"),
+                Some("# quarterly"),
+            ),
+        ] {
+            WorkspaceStore::create(s.as_ref(), &company, &node(id, name, kind, parent), body)
+                .await
+                .expect("mongodb accepts these names — that is why the guard exists");
+        }
+
+        let removed = sweep_empty_agent_folders(s.as_ref(), &company, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            removed.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["empty"],
+            "only the genuinely empty folder may go"
+        );
+        let ids: Vec<String> = WorkspaceStore::tree(s.as_ref(), &company)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert!(
+            ids.contains(&"ghost".to_string()) && ids.contains(&"hidden".to_string()),
+            "the folder and its unaddressable child must both survive, got {ids:?}"
+        );
         drop_db(&s).await;
     }
 

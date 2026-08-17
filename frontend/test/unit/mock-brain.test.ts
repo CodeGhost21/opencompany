@@ -121,6 +121,38 @@ describe("the mock inference backend", () => {
     });
   });
 
+  it("classifies without burning the directive the same message carries", async () => {
+    // Issue #678. A triage escalation is handed the operator's RAW message, so
+    // it carries whatever directive that message carried — and `servedDirectives`
+    // is per-process, so serving it here would leave the agent's own turn with a
+    // plain text reply and no tool call. That is not hypothetical: it took the
+    // live-brain MCP spec red, with the tool call logged once, for the
+    // classification.
+    const directive = `__MOCK_TOOL_CALL__ ${JSON.stringify({
+      name: "mcp_call_tool",
+      arguments: { server: "simple", tool: "echo", arguments: { text: "burned?" } },
+    })}`;
+
+    const classification = await chat([
+      { role: "system", content: "You classify one message an operator sent to their company's chat." },
+      { role: "user", content: directive },
+    ]);
+    expect(
+      classification.choices[0].message.tool_calls,
+      "a classification must never be answered with a tool call",
+    ).toBeUndefined();
+    expect(classification.choices[0].message.content).toBe("chatter");
+
+    // The turn that follows must still get its tool call — the whole point.
+    const turn = await chat([
+      { role: "system", content: "You are the CEO of Acme." },
+      { role: "user", content: directive },
+    ]);
+    const call = turn.choices[0].message.tool_calls?.[0];
+    expect(call, "the directive must survive the classification").toBeDefined();
+    expect(call.function.name).toBe("mcp_call_tool");
+  });
+
   it("serves a directive once, then answers with the tool's own output", async () => {
     // The transcript the harness resends after the tool ran. The directive is
     // still in it; firing again would open a second card per message forever.

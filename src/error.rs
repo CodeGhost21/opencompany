@@ -124,6 +124,26 @@ pub enum OpenCompanyError {
     #[error("budget exceeded: {0}")]
     BudgetExceeded(String),
 
+    /// A workspace write would exceed the per-file cap or the company's tree
+    /// quota (issue #553). Refused before anything is stored, so the tree is
+    /// exactly as it was.
+    #[error("{0}")]
+    WorkspaceQuota(String),
+
+    /// A workflow run was refused because the company is already at its
+    /// configured ceiling of concurrent in-flight runs (issue #401).
+    ///
+    /// Raised before the run is registered or spawned, so nothing is journaled
+    /// and no run id is minted — the caller gets a `429` with no run to follow.
+    /// The message is actionable because the operator has three real levers.
+    #[error(
+        "this company is already running its maximum of {limit} workflow runs at once; wait for one to finish, stop one from the runs view (POST …/workflows/runs/{{id}}/cancel), or raise `[workflows].max_in_flight_runs`"
+    )]
+    WorkflowRunLimit {
+        /// The configured ceiling that was hit.
+        limit: usize,
+    },
+
     /// An operation conflicts with the company's lifecycle state (e.g. the
     /// company is paused or archived).
     #[error("company is {0}")]
@@ -191,6 +211,36 @@ pub enum OpenCompanyError {
     #[error("tinyhumans error ({code}): {message}")]
     TinyHumans {
         /// A stable, machine-readable failure token.
+        code: String,
+        /// A human-readable description of the failure.
+        message: String,
+    },
+
+    /// A Chargebee Billing API failure, or a tool argument this crate rejected
+    /// before making the call (issue #788).
+    ///
+    /// Carries `status` alongside `code` because Chargebee reports business
+    /// outcomes — a customer that does not exist, a currency the site has not
+    /// enabled — as 4xx responses whose JSON body names the real problem. The
+    /// agent needs that body, not the status, so both are preserved; a locally
+    /// rejected argument uses `status: 0` and `code: invalid_arguments`.
+    #[error("chargebee error ({code}): {message}")]
+    Chargebee {
+        /// The HTTP status, or `0` when the failure never reached the network.
+        status: u16,
+        /// Chargebee's `api_error_code`, or a local token.
+        code: String,
+        /// A human-readable description of the failure.
+        message: String,
+    },
+
+    /// A PayPal REST API failure, or an argument rejected before the call
+    /// (issue #789).
+    #[error("paypal error ({code}): {message}")]
+    Paypal {
+        /// The HTTP status, or `0` when the failure never reached the network.
+        status: u16,
+        /// PayPal's `name`/`error` token, or a local one.
         code: String,
         /// A human-readable description of the failure.
         message: String,
@@ -265,6 +315,8 @@ impl OpenCompanyError {
             Self::McpServerNotFound(_) => "mcp_server_not_found".to_string(),
             Self::ToolNotGranted(_) => "tool_not_granted".to_string(),
             Self::BudgetExceeded(_) => "budget_exceeded".to_string(),
+            Self::WorkspaceQuota(_) => "workspace_quota_exceeded".to_string(),
+            Self::WorkflowRunLimit { .. } => "workflow_run_limit".to_string(),
             Self::LifecycleConflict(_) => "lifecycle_conflict".to_string(),
             Self::EmergencyStop(_) => "emergency_stop".to_string(),
             Self::Conflict(_) => "conflict".to_string(),
@@ -274,6 +326,8 @@ impl OpenCompanyError {
             Self::Orchestration { code, .. } => code.clone(),
             Self::Tinyplace { code, .. } => format!("tinyplace_{code}"),
             Self::TinyHumans { code, .. } => format!("tinyhumans_{code}"),
+            Self::Chargebee { code, .. } => format!("chargebee_{code}"),
+            Self::Paypal { code, .. } => format!("paypal_{code}"),
             Self::BackgroundTask(_) => "background_task".to_string(),
             Self::Unimplemented(_) => "unimplemented".to_string(),
             #[cfg(feature = "openhuman")]

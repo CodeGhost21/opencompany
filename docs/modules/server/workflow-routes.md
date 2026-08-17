@@ -211,6 +211,45 @@ curl -X POST "$HOST/api/v1/company/workflows/weekly_digest/run" \
 }
 ```
 
+### A run that stopped for a person (issues #881, #880)
+
+When a tool call inside an agent node's turn is parked for approval, the node
+produces no deliverable and its branch stops. The run still answers `200` — a
+step waiting on a person is not a failure — and says so structurally:
+
+```jsonc
+{
+  "output": null,
+  "pendingApprovals": ["spec"],
+  "deliveries": [],
+  "nodes": [ { "nodeId": "spec", "status": "blocked", "elapsedMs": 42000 } ],
+  "blockedNodes": [
+    { "nodeId": "spec", "tools": ["publish_artifact"], "approvalIds": ["appr-1"] }
+  ],
+  "approvals": [
+    { "nodeId": "spec", "tool": "publish_artifact",
+      "outcome": "parked", "approvalId": "appr-1" }
+  ]
+}
+```
+
+`blockedNodes` and `approvals` are omitted entirely when empty, so a run that
+blocked on nobody is byte-unchanged. Both also ride the `WorkflowRunFinished`
+journal event, `GET …/workflows/runs` (where each blocked node's chip is
+relabelled from the `error` the engine reported) and the SSE
+`workflow_run_finished` frame — one shape on all four surfaces.
+
+`approvals` is a **receipt of what the run parked**, not a live count of what is
+outstanding: nothing flips a row when the operator approves. Its `outcome` is
+`parked`, `parkFailed` (the store refused the write, or no approvals queue is
+wired — **nobody will be asked about that call**) or `discarded` (the turn gated
+more calls than the per-turn cap allows; the drain drops the excess, so such a
+row carries no `tool`).
+
+**Approving does not continue the run.** An agent node is not re-enterable, so
+the operator decides the card and runs the workflow again. See
+[`workflow-vocabulary.md`](../../spec/runtime/workflow-vocabulary.md) for why.
+
 Swap `{ "kind": "owner" }` for `{ "kind": "email", "target": "ada@example.com" }`
 and a recipient who has never written in comes back as
 `"status": "skipped"` with the reason, having sent nothing:
@@ -259,3 +298,51 @@ routes finish the loop:
 
 The full contract — the deliverable choice, the builder pass, and the
 review-before-creation gate — is [workflow-build.md](../../spec/runtime/workflow-build.md).
+
+## Drafting a workflow from a description (issue #753)
+
+`POST …/workflows/draft-from-description` is the New-workflow dialog's copilot: it
+turns a sentence into a graph the create form loads, so an operator can start
+from a description instead of a blank form. It is the same engine as the #580
+card builder (`draft_workflow_from_description` in `src/harness/workflow_build.rs`)
+with the board card removed — the company evidence, the one tool-less model call,
+and the host's authority over the id, the display name, the approval gating and
+the node-kind vocabulary are identical. The one extra it grounds the model in is
+the company's **granted tool slugs** (`workflow_callable_tool_slugs`), because a
+typed description is far likelier to want a `tool_call` step than a card is.
+
+**It never persists.** The draft is validated exactly as `POST …/workflows`
+would (`courtesy_validate_draft`), handed back, and hydrated into the create
+form; the operator reviews and edits it there and presses Create, which is still
+the only call that saves a graph. So a bad draft costs a review, not a rollback,
+and the review-before-creation discipline the card builder keeps is preserved
+without a board card.
+
+Like the cron preview, it answers **200 in both model-answer cases** — a drafted
+graph, or an honest "this is better done once" — keyed by `automatable`:
+
+```bash
+curl -X POST "$HOST/api/v1/company/workflows/draft-from-description" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' \
+     -d '{"description":"Every Monday, have the writer draft the weekly digest and email the team."}'
+```
+
+```jsonc
+{ "automatable": true,
+  "summary": "Draft and email the weekly digest every Monday",
+  "workflow": { "id": "weekly-digest", "name": "Weekly digest", "nodes": [ … ], "edges": [ … ] } }
+```
+
+```jsonc
+{ "automatable": false,
+  "reason": "this is better done once than built into a workflow: it names a one-time cleanup" }
+```
+
+An empty description is a `400`. A build with no embedded brain classifies the
+gap the way the run route does — `not_wired` (404), `restart_required` or
+`inference_required` (409) — so the console points the operator at the same next
+step (a restart, or configuring inference in Settings) rather than a bare
+failure. The spend is metered like a card pass, under a freshly minted id and a
+`workflow:copilot` sentinel agent; there is no `RunStore` row, because a
+synchronous request is not a card's attempt at its own work.

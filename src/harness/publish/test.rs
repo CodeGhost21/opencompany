@@ -189,80 +189,224 @@ fn text_at_or_under_the_cap_is_stored_whole() {
     let dir = workspace(&[("big.txt", body.as_bytes())]);
     let captured =
         capture_body(&dir.path().join("big.txt"), "big.txt", ArtifactKind::Text).unwrap();
-    assert!(
-        !captured.is_reference,
-        "exactly at the cap must still inline"
+    assert_eq!(
+        captured,
+        PublishPayload::Text(body),
+        "exactly at the cap must still be stored as prose"
     );
-    assert_eq!(captured.body.len(), MAX_ARTIFACT_BODY_BYTES);
-    assert_eq!(captured.forced_kind, None);
+    assert_eq!(captured.forced_kind(ArtifactKind::Text), ArtifactKind::Text);
 }
 
-/// One byte over the cap flips to a reference. The boundary is asserted from
-/// both sides because an off-by-one here silently truncates a deliverable.
+/// One byte over the cap is stored as **bytes**, not as a reference.
+///
+/// Issue #553 removed the reference branch entirely: the workspace tree can
+/// hold bytes on every backend, so there is nothing for a fallback to fall back
+/// to. The boundary is asserted from both sides because an off-by-one here
+/// changes how a deliverable is stored.
 #[test]
-fn one_byte_over_the_cap_becomes_a_reference() {
+fn one_byte_over_the_cap_is_stored_as_bytes() {
     let body = "x".repeat(MAX_ARTIFACT_BODY_BYTES + 1);
     let dir = workspace(&[("big.txt", body.as_bytes())]);
     let captured =
         capture_body(&dir.path().join("big.txt"), "big.txt", ArtifactKind::Text).unwrap();
-    assert!(captured.is_reference);
+    match &captured {
+        PublishPayload::Bytes { bytes, mime } => {
+            assert_eq!(
+                bytes.len(),
+                MAX_ARTIFACT_BODY_BYTES + 1,
+                "the whole file is carried, not a slice of it"
+            );
+            assert_eq!(mime, "text/plain");
+        }
+        other => panic!("expected bytes, got {other:?}"),
+    }
     assert_eq!(
-        captured.forced_kind,
-        Some(ArtifactKind::File),
-        "a reference must not be filed under a kind the console renders as prose"
-    );
-    assert!(captured.body.contains("path: big.txt"), "{}", captured.body);
-    assert!(
-        captured
-            .body
-            .contains(&format!("bytes: {}", MAX_ARTIFACT_BODY_BYTES + 1)),
-        "{}",
-        captured.body
-    );
-    assert!(captured.body.contains("sha256: "), "{}", captured.body);
-    // Never silently-truncated content presented as complete.
-    assert!(
-        !captured.body.contains(&"x".repeat(100)),
-        "the reference must not carry a slice of the content"
+        captured.forced_kind(ArtifactKind::Text),
+        ArtifactKind::File,
+        "bytes must not be filed under a kind the console renders as prose"
     );
 }
 
 #[test]
-fn a_non_utf8_file_becomes_a_reference_whatever_its_size() {
-    let dir = workspace(&[("logo.png", &[0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe])]);
+fn a_non_utf8_file_is_stored_as_bytes_whatever_its_size() {
+    let png = [0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe];
+    let dir = workspace(&[("logo.png", &png)]);
     let captured = capture_body(
         &dir.path().join("logo.png"),
         "logo.png",
         ArtifactKind::Image,
     )
     .unwrap();
-    assert!(captured.is_reference);
     assert_eq!(
-        captured.forced_kind,
-        Some(ArtifactKind::Image),
-        "an image reference stays an image so the console picks the right renderer"
+        captured,
+        PublishPayload::Bytes {
+            bytes: png.to_vec(),
+            mime: "image/png".to_string(),
+        }
     );
-    assert!(captured.body.contains("not UTF-8"), "{}", captured.body);
+    assert_eq!(
+        captured.forced_kind(ArtifactKind::Image),
+        ArtifactKind::Image,
+        "an image stays an image so the console picks the right renderer"
+    );
 }
 
-/// The digest is of the bytes, so two publishes of the same content agree and a
-/// changed file does not.
+/// The payoff of #553, stated as a test: **no publish can produce a reference
+/// record any more.** The branch that emitted "the file lives in the agent's
+/// own sandbox … the payload unreachable" is gone, so a paid image generation
+/// cannot become a dangling digest pointing into a directory that gets wiped.
+///
+/// Asserted over every shape that used to take that branch — over-cap text,
+/// non-UTF-8 bytes, and an empty file — because the guarantee is "none of
+/// them", not "not the one I happened to check".
 #[test]
-fn the_reference_digest_tracks_the_bytes() {
-    let dir = workspace(&[("a.bin", &[0xff, 0x00]), ("b.bin", &[0xff, 0x00])]);
-    let a = capture_body(&dir.path().join("a.bin"), "a.bin", ArtifactKind::File).unwrap();
-    let b = capture_body(&dir.path().join("b.bin"), "b.bin", ArtifactKind::File).unwrap();
-    let sha = |body: &str| {
-        body.lines()
-            .find_map(|l| l.strip_prefix("sha256: "))
-            .unwrap()
-            .to_string()
-    };
-    assert_eq!(sha(&a.body), sha(&b.body));
+fn no_publish_can_produce_a_reference_record() {
+    let over_cap = "x".repeat(MAX_ARTIFACT_BODY_BYTES + 1);
+    let dir = workspace(&[
+        ("big.txt", over_cap.as_bytes()),
+        ("logo.png", &[0x89, 0xff, 0xfe]),
+        ("empty.bin", &[]),
+        ("small.md", b"# fine"),
+    ]);
+    for name in ["big.txt", "logo.png", "empty.bin", "small.md"] {
+        let captured = capture_body(
+            &dir.path().join(name),
+            name,
+            kind_for_extension(Path::new(name)),
+        )
+        .unwrap();
+        let recorded = captured.artifact_body();
+        assert!(
+            !recorded.contains("sandbox"),
+            "{name} still points at the sandbox: {recorded}"
+        );
+        assert!(
+            !recorded.contains("unreachable"),
+            "{name} still claims its payload is unreachable: {recorded}"
+        );
+        assert!(
+            !recorded.contains("sha256"),
+            "{name} hashes on the publish path; the store computes the digest once: {recorded}"
+        );
+    }
+}
 
-    std::fs::write(dir.path().join("b.bin"), [0xff, 0x01]).unwrap();
-    let changed = capture_body(&dir.path().join("b.bin"), "b.bin", ArtifactKind::File).unwrap();
-    assert_ne!(sha(&a.body), sha(&changed.body));
+/// A binary version records a pointer, not the bytes — issue #187's rule. The
+/// artifact chain stays the version history and the workspace node holds the
+/// content.
+#[test]
+fn a_binary_version_records_a_description_and_not_the_bytes() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 4096],
+        mime: "image/png".to_string(),
+    };
+    let body = payload.artifact_body();
+    assert!(body.contains("image/png"), "{body}");
+    assert!(body.contains("4096 bytes"), "{body}");
+    assert!(body.contains("company workspace"), "{body}");
+}
+
+/// Issue #663. The body composed **before** the store is asked must not assert
+/// that the file is there — that claim was unconditional, and it survived a
+/// workspace refusal, leaving the record promising a file that does not exist.
+#[test]
+fn a_pending_binary_version_does_not_claim_the_file_is_stored() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 16],
+        mime: "image/png".to_string(),
+    };
+    let body = payload.artifact_body_for(PayloadStorage::Pending);
+    assert!(
+        !body.contains("stored as a file"),
+        "nothing has been stored yet: {body}"
+    );
+    assert!(
+        !body.contains("Open it there"),
+        "and the operator must not be sent to look for it: {body}"
+    );
+}
+
+/// Issue #668. A stored version carries the digest **the store** computed, which
+/// is what lets a reader tell two versions apart and see whether a re-publish
+/// changed anything.
+#[test]
+fn a_stored_binary_version_records_the_stores_digest() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 16],
+        mime: "image/png".to_string(),
+    };
+    let body = payload.artifact_body_for(PayloadStorage::Stored {
+        sha256: Some("abc123"),
+    });
+    assert!(body.contains("sha256 abc123"), "{body}");
+    assert!(body.contains("stored as a file"), "{body}");
+}
+
+/// The defect #668 describes in one assertion: two versions of one binary that
+/// coincide in mime and length used to be **literally equal strings**, so the
+/// history could not say which was which. The digest is what separates them.
+#[test]
+fn two_binary_versions_of_the_same_length_differ_by_their_digest() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 120_000],
+        mime: "image/png".to_string(),
+    };
+    let v1 = payload.artifact_body_for(PayloadStorage::Stored {
+        sha256: Some("1111111111111111"),
+    });
+    let v2 = payload.artifact_body_for(PayloadStorage::Stored {
+        sha256: Some("2222222222222222"),
+    });
+    assert_ne!(
+        v1, v2,
+        "two versions of one deliverable must not be the same sentence"
+    );
+
+    // The control: without a digest they collapse back into one string, which
+    // is exactly the state this issue is about.
+    let bare = payload.artifact_body_for(PayloadStorage::Stored { sha256: None });
+    assert_eq!(
+        bare,
+        payload.artifact_body_for(PayloadStorage::Stored { sha256: None }),
+        "the no-digest body is the indistinguishable case, and it says so"
+    );
+    assert!(
+        bare.contains("no digest recorded"),
+        "a backend that recorded none must say so rather than imply identity: {bare}"
+    );
+}
+
+/// Issue #663's other half: when the workspace refuses the file, the record
+/// withdraws the claim instead of leaving it standing.
+///
+/// It must also NOT carry the store's error text — a version body is permanent
+/// and a backend error can name host paths.
+#[test]
+fn a_refused_binary_version_withdraws_the_storage_claim() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 16],
+        mime: "image/png".to_string(),
+    };
+    let body = payload.artifact_body_for(PayloadStorage::Refused);
+    assert!(body.contains("NOT stored"), "{body}");
+    assert!(
+        !body.contains("Open it there"),
+        "the operator must not be sent to a file that is not there: {body}"
+    );
+}
+
+/// Prose is unaffected by any of this: for text the version IS the content, so
+/// it is complete whatever the tree did.
+#[test]
+fn a_prose_version_is_its_content_whatever_the_store_did() {
+    let payload = PublishPayload::Text("# Spec".to_string());
+    for storage in [
+        PayloadStorage::Pending,
+        PayloadStorage::Stored { sha256: None },
+        PayloadStorage::Refused,
+    ] {
+        assert_eq!(payload.artifact_body_for(storage), "# Spec");
+    }
 }
 
 // ── The tool ──────────────────────────────────────────────────────────────
@@ -280,7 +424,10 @@ async fn publishing_stages_the_file_and_reports_what_was_captured() {
     assert_eq!(staged.len(), 1);
     assert_eq!(staged[0].source, "specs/launch.md");
     assert_eq!(staged[0].kind, ArtifactKind::Markdown);
-    assert_eq!(staged[0].body, "# Spec\nShip it.");
+    assert_eq!(
+        staged[0].payload,
+        PublishPayload::Text("# Spec\nShip it.".to_string())
+    );
     // Title defaults to the file name, not the whole path.
     assert_eq!(staged[0].title, "launch.md");
     assert_eq!(staged[0].note, None);
@@ -348,7 +495,10 @@ async fn the_body_is_captured_at_publish_time_not_at_drain_time() {
     std::fs::write(dir.path().join("spec.md"), b"# clobbered afterwards").unwrap();
 
     let staged = queue.drain();
-    assert_eq!(staged[0].body, "# The version I published");
+    assert_eq!(
+        staged[0].payload,
+        PublishPayload::Text("# The version I published".to_string())
+    );
 }
 
 #[tokio::test]
@@ -390,7 +540,7 @@ fn the_queue_drains_fifo_and_empties() {
         title: source.to_string(),
         kind: ArtifactKind::Text,
         note: None,
-        body: "b".to_string(),
+        payload: PublishPayload::Text("b".to_string()),
     };
     queue.push(publish("a.md"));
     queue.push(publish("b.md"));
@@ -421,7 +571,7 @@ fn clear_drops_what_a_prior_turn_staged() {
         title: "leftover".to_string(),
         kind: ArtifactKind::Text,
         note: None,
-        body: "b".to_string(),
+        payload: PublishPayload::Text("b".to_string()),
     });
     queue.clear();
     assert_eq!(queue.queued(), 0);
@@ -538,6 +688,40 @@ fn the_scan_ignores_what_the_runtime_itself_writes() {
     );
 
     // The agent's actual file is still seen, so the exclusions did not blind it.
+    std::fs::write(dir.path().join("spec.md"), b"one, revised").unwrap();
+    assert_eq!(before.changed_since(dir.path()).files, ["spec.md"]);
+}
+
+/// **A checked-out repository is not unpublished work** (issue #245).
+///
+/// `repo_checkout` clones a bound repository into `workspace/repos/<key>`, and a
+/// large repository is thousands of files that all appear "new" the moment the
+/// tool runs. Without the skip, the nudge would fire after every checkout,
+/// asking an agent whether somebody else's source — and a spilled pull-request
+/// diff — is a deliverable it meant to publish. Same permanent false positive
+/// the runtime-bookkeeping exclusions prevent, from the other direction.
+#[test]
+fn the_scan_ignores_a_checked_out_repository() {
+    let dir = workspace(&[("spec.md", b"one")]);
+    let before = WorkspaceSnapshot::take(dir.path());
+
+    for path in [
+        "repos/acme-widgets-000000000000/README.md",
+        "repos/acme-widgets-000000000000/src/lib.rs",
+        "repos/acme-widgets-000000000000/.git/config",
+        "repos/acme-widgets-000000000000.pr-7.diff",
+    ] {
+        let full = dir.path().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, b"third-party content").unwrap();
+    }
+
+    assert!(
+        before.changed_since(dir.path()).files.is_empty(),
+        "a checkout must never look like unpublished agent work"
+    );
+
+    // The agent's actual file is still seen, so the exclusion did not blind it.
     std::fs::write(dir.path().join("spec.md"), b"one, revised").unwrap();
     assert_eq!(before.changed_since(dir.path()).files, ["spec.md"]);
 }
@@ -763,7 +947,7 @@ fn claiming_clears_whatever_a_previous_caller_left_staged() {
         title: "stale".to_string(),
         kind: ArtifactKind::Text,
         note: None,
-        body: "old".to_string(),
+        payload: PublishPayload::Text("old".to_string()),
     });
     drop(claim);
 
@@ -815,7 +999,7 @@ fn a_minted_card_is_titled_from_what_was_published() {
         title: title.to_string(),
         kind: ArtifactKind::Markdown,
         note: None,
-        body: "body".to_string(),
+        payload: PublishPayload::Text("body".to_string()),
     };
 
     assert_eq!(
@@ -848,7 +1032,7 @@ fn a_minted_card_explains_why_it_exists() {
             title: "Launch spec".to_string(),
             kind: ArtifactKind::Markdown,
             note: None,
-            body: "body".to_string(),
+            payload: PublishPayload::Text("body".to_string()),
         }],
     );
     assert!(note.contains("ceo"), "{note}");

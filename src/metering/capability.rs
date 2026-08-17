@@ -192,10 +192,18 @@ impl CapabilityPlan {
 /// * `pro` — `shell` + `code` + `web` at 1M tokens/day.
 /// * `unlimited` — every gateable namespace at `u64::MAX` (effectively
 ///   uncapped), including the real-money `media` tier (issue #109), the
-///   per-tenant `composio` tier (issue #110) and the metered `search` tier
-///   (issue #238). Those three are absent from `free` / `starter` / `pro`, so
-///   those tiers deny them outright unless the manifest opts in with an explicit
-///   `token_budgets = { media = N }` / `{ composio = N }` / `{ search = N }`.
+///   per-tenant `composio` tier (issue #110), the metered `search` tier
+///   (issue #238) and the bound-repository `repo` tier (issue #245). Those four
+///   are absent from `free` / `starter` / `pro`, so those tiers deny them
+///   outright unless the manifest opts in with an explicit
+///   `token_budgets = { media = N }` / `{ composio = N }` / `{ search = N }` /
+///   `{ repo = N }`.
+///
+/// A `repo` token budget behaves like the `search` one below, and for a related
+/// reason: a checkout costs disk and network rather than tokens, so shedding it
+/// on token spend is a blunt cross-subsidy gate. The real ceiling on a checkout
+/// is the company's `[workspace].tree_quota_gb`, enforced as a refusal before
+/// the clone.
 ///
 /// Note what a `search` *token* budget does and does not do: it sheds the tool
 /// once the company's period **token** spend crosses the threshold, which is a
@@ -221,6 +229,7 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
             ("media", u64::MAX),
             ("composio", u64::MAX),
             ("search", u64::MAX),
+            ("repo", u64::MAX),
         ],
         _ => return None,
     };
@@ -250,17 +259,25 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
 /// to a teammate. Excluding it would leave a company able to plan indefinitely
 /// after crossing the tier ceiling that is supposed to have stopped it.
 ///
-/// [`SampleKind::SetupCall`] is counted for the same reason, and the exposure is
-/// smaller: a company runs setup once. It is included so the ceiling covers
-/// every completion billed to the tenant, rather than only the ones that happen
-/// to belong to a teammate.
+/// [`SampleKind::TriageCall`] is counted for the identical reason (issue #678),
+/// and the leak it closes is larger: triage escalations are driven by *chat
+/// volume*, so a company left able to classify indefinitely past its ceiling
+/// would keep paying per operator message with nothing to stop it.
+///
+/// [`SampleKind::SetupCall`] is counted too, and its exposure is the smallest of
+/// the three: a company runs first-run setup once. It is included so the ceiling
+/// covers every completion billed to the tenant rather than only the ones that
+/// happen to belong to a teammate.
 pub fn tokens_in(samples: &[UsageSample]) -> u64 {
     samples
         .iter()
         .filter(|s| {
             matches!(
                 s.kind,
-                SampleKind::Inference | SampleKind::PlanningCall | SampleKind::SetupCall
+                SampleKind::Inference
+                    | SampleKind::PlanningCall
+                    | SampleKind::TriageCall
+                    | SampleKind::SetupCall
             )
         })
         .map(|s| s.input_tokens.saturating_add(s.output_tokens))

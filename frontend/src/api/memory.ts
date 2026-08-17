@@ -72,12 +72,18 @@ export interface MemoryStats {
 /** The kinds in display order, for filters and the add form. */
 export const MEMORY_KINDS: MemoryKind[] = ["fact", "preference", "person", "project", "reference"];
 
-/** Per-kind badge styling. */
+/**
+ * Per-kind badge styling — identity, not state.
+ *
+ * The identity palette (`--tone-*`): a memory's kind says what sort of thing
+ * it is, never how it is doing. `reference` stays neutral on purpose, as the
+ * kind with nothing to distinguish.
+ */
 export const KIND_STYLES: Record<MemoryKind, string> = {
-  fact: "border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-400",
-  preference: "border-violet-500/30 bg-violet-500/10 text-violet-600 dark:text-violet-400",
-  person: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  project: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+  fact: "border-tone-2/30 bg-tone-2/10 text-tone-2-text",
+  preference: "border-tone-1/30 bg-tone-1/10 text-tone-1-text",
+  person: "border-tone-4/30 bg-tone-4/10 text-tone-4-text",
+  project: "border-tone-3/30 bg-tone-3/10 text-tone-3-text",
   reference: "border-border bg-muted text-muted-foreground",
 };
 
@@ -93,8 +99,11 @@ export const ORIGIN_LABELS: Record<MemoryOrigin, string> = {
 
 /** Per-origin badge styling for the read-only context rows. */
 export const ORIGIN_STYLES: Record<Exclude<MemoryOrigin, "fact">, string> = {
-  "agent-memory": "border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400",
-  "task-outcome": "border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400",
+  "agent-memory": "border-tone-3/30 bg-tone-3/10 text-tone-3-text",
+  // Identity, not status. A task-outcome memory records what happened; it is
+  // not itself a failure, which is what the rose it used to wear implied of
+  // every one of them.
+  "task-outcome": "border-tone-5/30 bg-tone-5/10 text-tone-5-text",
 };
 
 /** The company's durable facts, newest-first, optionally filtered server-side. */

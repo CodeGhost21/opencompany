@@ -38,6 +38,8 @@ event vocabulary those traits carry moved to [`events.md`](events.md)
 | `InboxStore` | [ports-console.md](ports-console.md#inboxstore) | per-teammate email inboxes |
 | `RunStore` | [ports-runs.md](ports-runs.md#runstore) | one attempt at a task, and its trace |
 | `WorkflowRevisionStore` | [`src/ports/workflow_revisions.rs`](../../../src/ports/workflow_revisions.rs) | a bounded per-workflow edit-history ring for rollback (issue #274) |
+| `JournalStore` | [journal.md](journal.md) | the runtime journal's durable sink: at-most-once effect keys, parked approvals, grants, cycle brackets (issue #726) |
+| `ScheduleFireStore` | [`src/ports/schedule_fires.rs`](../../../src/ports/schedule_fires.rs) | durable per-`(company, schedule, minute)` fire claims: at-most-once firing across replicas and restarts, purged per schedule on workflow delete (issues #241, #708) |
 
 ## Assembly
 
@@ -76,6 +78,8 @@ the multi-tenant platform case with the same type.
 | `TaskStore`, `WorkspaceStore`, `FactStore`, `UsageMeter`, `SkillStateStore`, `InboxStore` | fs bundle | sqlite, mongodb |
 | `UserStore`, `SessionStore`, `LoginCodeStore` | fs bundle | sqlite, mongodb |
 | `ArtifactStore`, `RunStore`, `WorkflowRevisionStore` | fs bundle (JSONL) | sqlite, mongodb |
+| `JournalStore` | fs bundle (`journal.jsonl`) | sqlite, mongodb |
+| `ScheduleFireStore` | fs bundle (`O_EXCL` marker files, single-node) | sqlite, mongodb (the hosted arbiter) |
 
 ### `WorkflowRevisionStore` (issue #274)
 

@@ -28,23 +28,49 @@
 //!   before the request and exactly one priced `SearchCall` usage sample is
 //!   recorded after it completes.
 //! * **Company workspace** (issue #237, [`workspace_tools`](crate::harness::workspace_tools)):
-//!   `workspace_list` / `workspace_read` over the operator's shared note tree,
-//!   granted under the ordinary namespace rule (`*` confers them) and hit live
-//!   per call so there is no snapshot to go stale. `workspace_write` is added
-//!   only under an **explicit** `workspace` / `workspace.write` grant — a bare
-//!   `*` does not confer it — and is guarded by a required compare-and-swap
-//!   revision token. Unlike the file tools these are scoped by the store, not
-//!   the filesystem: every call resolves through one company-scoped `tree()`
-//!   read, so no host path is ever built from agent input.
-//! * **Delegation is orchestrator-only.** `query_company` / `spawn_task` /
-//!   `delegate_to_desk` (and the other orchestrator roster/workflow tools) are
-//!   wired only when `is_orchestrator`; a **dispatched** desk/roster agent never
-//!   gets them. That is the depth cap = 1 / "no re-delegation in v1" invariant
-//!   (issue #178). The dispatched belt is thus a curated, metered derivative of
-//!   an OpenHuman agent — the exec subset above plus intrinsic memory / file /
-//!   MCP / skill tools, and nothing more. Both halves (the exact dispatched set,
-//!   and the orchestrator-vs-dispatched delegation contrast) are pinned by the
-//!   contract tests in this module's `tests` submodule.
+//!   `workspace_list` / `workspace_search` / `workspace_read` over the
+//!   operator's shared note tree, granted under the ordinary namespace rule
+//!   (`*` confers all three) and hit live per call so there is no snapshot to
+//!   go stale. `workspace_search` (issue #607) rides this READ grant and not
+//!   the metered `search` one: it reads exactly what `workspace_read` already
+//!   grants, so requiring a billed backend credential for it would price the
+//!   cheap discovery path above the list-then-read crawl it replaces.
+//!   `workspace_create` / `workspace_write` and, since issue #671,
+//!   `workspace_rename` / `workspace_delete` are added only under an
+//!   **explicit** `workspace` / `workspace.write` grant — a bare `*` does not
+//!   confer them. `workspace_write` and `workspace_delete` are each guarded by
+//!   a required compare-and-swap revision token, and the lifecycle pair reaches
+//!   only `Agents/<agent id>/`. Unlike the file tools these are scoped by the
+//!   store, not the filesystem: every call resolves through one company-scoped
+//!   `tree()` read, so no host path is ever built from agent input.
+//! * **Delegation authority is orchestrator-only; delegation itself is
+//!   opt-in per member.** `query_company`, `run_workflow`, `create_workflow`,
+//!   `add_agent`, `assign_task` and `review_task` are wired only when
+//!   `is_orchestrator` — they are the company's *authority* (who owns a card,
+//!   what passes review, who is on the roster) and no desk agent gets them.
+//!
+//!   The two **hand-off** tools, `spawn_task` and `delegate_to_desk`, are also
+//!   wired onto a desk agent whose manifest entry names a
+//!   [`delegates_to`](crate::company::Agent::delegates_to) allowlist (issue
+//!   #176), narrowed to those desks. A member that names none — every agent of
+//!   every manifest written before this — carries no delegation tool at all,
+//!   which is #178's original depth cap = 1 invariant, now the default rather
+//!   than the only possibility.
+//!
+//!   Recursion is bounded **dynamically**, not by which tools were wired: belts
+//!   are cached per roster and rebuilt rarely, so the tool cannot be withheld
+//!   from the one turn that happens to be running too deep. `[tools]
+//!   .max_delegation_depth` is enforced at the tool boundary by
+//!   [`DelegationQueue::push_within_cap`](crate::harness::orchestrator::DelegationQueue::push_within_cap)
+//!   against the live scope chain, and a hand-off that would loop or leave the
+//!   member's allowlist is refused there too.
+//!
+//!   The dispatched belt is otherwise a curated, metered derivative of an
+//!   OpenHuman agent — the exec subset above plus intrinsic memory / file / MCP
+//!   / skill tools, and nothing more. All three halves (the exact dispatched
+//!   set with and without an allowlist, and the orchestrator-vs-member
+//!   authority contrast) are pinned by the contract tests in this module's
+//!   `tests` submodule.
 //! * **Workflows/skills** start empty. Parsing enabled `SKILL.md` bodies via
 //!   `openhuman::skills::ops_parse` depends on WS1's skill parsing; the seam is
 //!   the `.workflows(...)` setter.
@@ -144,20 +170,14 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// This is what makes the agent answer *as* the CEO of Acme rather than falling
 /// back to openhuman's own assistant identity — the harness passes it as the
 /// archetype body with the default identity section omitted.
+///
+/// Delegates to [`crate::company::prompt::persona_prompt`], which is compiled in
+/// every build. Kept as a re-export rather than inlined at the call sites so the
+/// harness's existing callers and tests keep one name for "the persona", and so
+/// the composition rules (including the operator's inline `prompt`) are exercised
+/// by the default-build test suite rather than only where this module links.
 pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
-    let mut prompt = format!(
-        "You are the {role} at {company}. Speak in the first person as this role.",
-        role = agent.role,
-        company = company_name,
-    );
-    if let Some(description) = agent.description.as_deref() {
-        let description = description.trim();
-        if !description.is_empty() {
-            prompt.push(' ');
-            prompt.push_str(description);
-        }
-    }
-    prompt
+    crate::company::prompt::persona_prompt(company_name, agent)
 }
 
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
@@ -166,6 +186,12 @@ pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
 /// is wired to a skills source (a [`SkillStateStore`](crate::ports::SkillStateStore)
 /// and/or a source directory), the agent's effective skill set is materialized
 /// and surfaced as three read tools plus a persona-prompt catalogue.
+///
+/// `routed_context` are this agent's workspace documents, already selected by
+/// [`context_routing`](crate::company::context_routing) and read out of the
+/// store by the async caller. Passed in rather than fetched here for the same
+/// reason `skill_deltas` is: this function is synchronous and runs on every
+/// roster rebuild, while the `WorkspaceStore` is async.
 ///
 /// `is_orchestrator` marks the company's orchestrator agent (issue #53): it
 /// additionally receives the delegating-orchestrator persona brief and the
@@ -183,6 +209,7 @@ pub fn build_agent(
     deps: &HarnessDeps,
     grants: &[String],
     skill_deltas: &[SkillState],
+    routed_context: &[(String, String)],
     is_orchestrator: bool,
 ) -> crate::Result<Agent> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
@@ -295,12 +322,22 @@ pub fn build_agent(
         // isolated), so those handles are built only under `wants_shell`.
         if wants_shell {
             let runtime = toolbelt::native_runtime();
-            // Fail closed: `workspace_audit` returns `None` if the per-workspace
-            // audit logger cannot be initialized, and `shell_tools` then withholds
+            // Fail closed: `shell_audit` returns `None` if the per-agent audit
+            // logger cannot be initialized, and `shell_tools` then withholds
             // the shell namespace entirely rather than register an unaudited
             // `ShellTool`. A granted agent silently loses shell here — the
-            // error-level log in `workspace_audit` surfaces why.
-            let audit = toolbelt::workspace_audit(&workspace);
+            // error-level log in `shell_audit` surfaces why.
+            //
+            // The sink is HOST-owned and lives outside the workspace (issue
+            // #775): `companies/<slug>/audit/<agent>/`, resolved from the
+            // explicitly-threaded `audit_root` rather than from the workspace's
+            // parent. Inside the workspace it was a policy-permitted write
+            // target for the agent's own file tools.
+            let audit = toolbelt::shell_audit(&agent_audit_dir(
+                &deps.audit_root,
+                company,
+                &manifest_agent.id,
+            ));
             tools.extend(toolbelt::shell_tools(
                 exec_security.clone(),
                 runtime,
@@ -362,12 +399,16 @@ pub fn build_agent(
     //     `media`, the catch-all `*` does NOT grant it, so a broadly-permissioned
     //     company never accidentally hands its agents a live account-reaching
     //     surface; it must opt in by name.
-    //  2. a resolved per-tenant token on the deps (`deps.composio`), read from the
-    //     company secret store by `HarnessPool::ensure` — never an env/platform
-    //     key. The backend derives the Composio entity from THIS token, so it is
-    //     the entire tenant-isolation lever.
+    //  2. a resolved credential on the deps (`deps.composio`), produced by
+    //     `HarnessPool::ensure` through `composio::resolve_credential` — the BYO
+    //     `composio/token` override, else the company's own TinyHumans key, else
+    //     this instance's platform identity (issue #586). The backend derives the
+    //     Composio entity from whichever tier answered, so this resolution is the
+    //     entire tenant-isolation lever. It is NOT "a stored token": on a hosted
+    //     tenant nobody pastes one and the platform identity is what wires the
+    //     tools (issue #886).
     //
-    // Granted-but-tokenless wires nothing and warns (fail-closed). The
+    // Granted-but-credential-less wires nothing and warns (fail-closed). The
     // `authorize` / `execute` tools additionally park for operator approval via
     // the `ApprovalPolicy`. Gated on the `composio` feature; the default/
     // `openhuman` build never compiles this.
@@ -389,7 +430,57 @@ pub fn build_agent(
             None => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
-                "[build] agent explicitly grants `composio` but no per-tenant Composio token is configured; composio tools NOT wired (fail-closed)"
+                // Issue #886: the gate is `deps.composio.is_none()`, which is a
+                // *resolver* outcome over three tiers (BYO `composio/token`,
+                // the company's TinyHumans key, this instance's platform
+                // identity) — not "no token is stored". Naming the stored token
+                // sent operators to paste one they did not need.
+                "[build] agent explicitly grants `composio` but no Composio credential could be resolved for this company; composio tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
+    // Issue #788: Chargebee billing. Same fail-closed shape as `composio`
+    // above, and for a sharper reason — these tools send invoices to a real
+    // business's real customers. Two conditions, both required:
+    //
+    //  1. an **EXPLICIT** `chargebee` grant. The catch-all `*` does NOT confer
+    //     it, following the media/composio/search precedent.
+    //  2. a resolved per-company connection on the deps (`deps.chargebee`),
+    //     read from THAT company's secret store by the runtime builder.
+    //
+    // A grant with no credential wires nothing and warns: an agent told it can
+    // bill, that silently cannot, is better than one billing through somebody
+    // else's Chargebee site.
+    #[cfg(feature = "chargebee")]
+    if crate::company::grants_chargebee_explicit(grants) {
+        match &deps.chargebee {
+            Some(config) => {
+                tools.extend(crate::harness::chargebee::chargebee_tools(config));
+            }
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `chargebee` but no per-company Chargebee \
+                 credentials are configured; billing tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
+    // Issue #789: PayPal wallet reads. Same fail-closed shape as `chargebee`
+    // above — an explicit `paypal` grant AND a resolved per-company credential.
+    // Both tools are read-only, so nothing here can move money; the grant is
+    // still opt-in by name because a wallet balance is a business's private
+    // figure, not something a `*` wildcard should hand out.
+    #[cfg(feature = "paypal")]
+    if crate::company::grants_paypal_explicit(grants) {
+        match &deps.paypal {
+            Some(config) => tools.extend(crate::harness::paypal::paypal_tools(config)),
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `paypal` but no per-company PayPal credentials \
+                 are configured; wallet tools NOT wired (fail-closed)"
             ),
         }
     }
@@ -430,6 +521,146 @@ pub fn build_agent(
         }
     }
 
+    // Bound repositories (issue #245, agent half) — `repo_checkout` / `repo_pr`
+    // over the company's own mirrored source. FOUR hard gates, and none of them
+    // is redundant:
+    //
+    //  1. an **EXPLICIT** `repo` grant (`grants_repo_explicit`) — the catch-all
+    //     `*` does NOT confer it, following `media` / `composio` / `search`.
+    //     Sharper here than for any of them: a checkout puts a third party's
+    //     source inside a sandbox the same agent may hold `shell` over, so a
+    //     wildcard set for file and shell tools must not carry it in.
+    //  2. a wired manager (`deps.repos`), which is a filesystem-home property —
+    //     a runtime assembled without one has no mirror cache at all.
+    //  3. at least one **binding**. A granted, wired, but unbound company has
+    //     nothing for either tool to resolve against, so every call would be a
+    //     refusal listing an empty set. Wiring nothing and warning is the
+    //     honest state, and it is what the console's "granted but nothing
+    //     bound" notice is telling the operator to fix.
+    //  4. a secret backend that does **not** keep the credential as plaintext on
+    //     this container's disk (issue #752). `RuntimeBuilder::build` refuses to
+    //     bring a repo-granted company up at all on `fs`/`sqlite`, so in a
+    //     normal boot this arm is unreachable — and it is here for the case that
+    //     is not a boot. A teammate added through the console lands in
+    //     `overlay_agents` on a **live** runtime; `HarnessPool::ensure` rebuilds
+    //     that agent's belt on the next turn without going back through
+    //     `build`, so the boot check never sees it. Without this arm, adding an
+    //     agent that names `repo` would hand it a checkout tool over a
+    //     credential sitting in a file the same agent can `cat`.
+    //
+    // NOT feature-gated, like `search` and unlike `media` / `composio`: the
+    // mirror and the git runner are always compiled, and with no forge client
+    // `repo_pr` degrades through `RepoManager::pull_request`'s honest
+    // `Unimplemented` answer rather than through a build that omits the tool.
+    // Hiding an agent-reachable surface behind a feature no CI job compiles is
+    // how #288 / #281 / #297 each happened.
+    if crate::company::grants_repo_explicit(grants) {
+        match (&deps.repos, deps.repo_bindings.is_empty()) {
+            // Gate 4 first: on a plaintext backend there is no shape of this
+            // that is safe to wire, so the binding count does not get a vote.
+            (Some(repos), _) if repos.secrets_are_plaintext_on_disk() => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo` but this host keeps secrets on its own \
+                 filesystem, where the credential is readable by the shell; repo tools NOT wired \
+                 (fail-closed, issue #752) — set OPENCOMPANY_STORAGE=mongodb or drop the `repo` \
+                 grant"
+            ),
+            (Some(repos), false) => {
+                tools.extend(crate::harness::repo::repo_tools(
+                    crate::harness::repo::RepoToolContext {
+                        repos: repos.clone(),
+                        bindings: deps.repo_bindings.clone().into(),
+                        workspace: workspace.clone(),
+                        ledger: deps.checkouts.clone(),
+                        agent: manifest_agent.id.clone(),
+                        approvals: deps.approval_requests.clone(),
+                    },
+                ));
+            }
+            (Some(_), true) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo` but this company has bound no \
+                 repositories; repo tools NOT wired (fail-closed)"
+            ),
+            (None, _) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo` but no repository cache is configured on \
+                 this host; repo tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
+    // Repository WRITE tier (issues #734, #735). A distinct, tighter grant than
+    // the read `repo` above: `grants_repo_write_explicit` matches ONLY the exact
+    // `repo.write`, so a bare `repo` (which every read-tier company writes) and
+    // the catch-all `*` confer nothing here — a company that asked for agents
+    // reading code does not silently get agents pushing it.
+    //
+    // FOUR gates, all fail-closed, and the fourth is the one #734 added: an
+    // explicit `repo.write` grant, a wired manager, at least one binding, AND a
+    // bound credential that can actually push (`can_push == Some(true)`; `None` —
+    // unprobed or pre-field — reads as cannot-push). Missing any one wires
+    // `repo_publish` NOT AT ALL and says which, rather than offering a publish
+    // that would fail at push time on a read-only credential.
+    //
+    // Like the read tier, NOT feature-gated: the mirror and git runner are always
+    // compiled, and `repo_publish`'s push waits on an operator approval the
+    // runtime performs, so there is no forge client to gate the tool behind.
+    if crate::company::grants_repo_write_explicit(grants) {
+        let push_capable = deps
+            .repo_bindings
+            .iter()
+            .any(|binding| binding.can_push == Some(true));
+        match (&deps.repos, deps.repo_bindings.is_empty(), push_capable) {
+            // Gate 4 (issue #752), first and unconditional as in the read tier
+            // above: on a plaintext backend the credential is readable by the
+            // agent shell, and `repo_publish` uses it host-side to push, so no
+            // shape of it is safe to wire — the write path is if anything more
+            // exposed than the read one, never less.
+            (Some(repos), _, _) if repos.secrets_are_plaintext_on_disk() => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but this host keeps secrets on its \
+                 own filesystem, where the credential is readable by the shell; repo_publish NOT \
+                 wired (fail-closed, issue #752) — set OPENCOMPANY_STORAGE=mongodb or drop the \
+                 `repo.write` grant"
+            ),
+            (Some(repos), false, true) => {
+                tools.push(crate::harness::repo::repo_publish_tool(
+                    crate::harness::repo::RepoToolContext {
+                        repos: repos.clone(),
+                        bindings: deps.repo_bindings.clone().into(),
+                        workspace: workspace.clone(),
+                        ledger: deps.checkouts.clone(),
+                        agent: manifest_agent.id.clone(),
+                        approvals: deps.approval_requests.clone(),
+                    },
+                ));
+            }
+            (None, _, _) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but no repository cache is configured \
+                 on this host; repo_publish NOT wired (fail-closed)"
+            ),
+            (Some(_), true, _) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but this company has bound no \
+                 repositories; repo_publish NOT wired (fail-closed)"
+            ),
+            (Some(_), false, false) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but no bound repository has a \
+                 push-capable credential; repo_publish NOT wired (fail-closed)"
+            ),
+        }
+    }
+
     // Company workspace (issues #237, #551) — live read (and optionally
     // create/write) tools over the shared note tree, so an agent can ground an
     // answer in the company's own `Standards/` / `Playbooks/` instead of
@@ -440,28 +671,35 @@ pub fn build_agent(
     //  1. READS follow the ordinary namespace rule, so a catch-all `*` confers
     //     them — the whole point of #237 is that shared guidance should be
     //     reachable by default.
-    //  2. CREATE + WRITE need an **EXPLICIT** `workspace` (or
-    //     `workspace.write`) grant (`grants_workspace_write_explicit`); `*`
+    //  2. CREATE + WRITE + RENAME + DELETE need an **EXPLICIT** `workspace`
+    //     (or `workspace.write`) grant (`grants_workspace_write_explicit`); `*`
     //     does NOT confer them, mirroring the media/composio precedent, because
-    //     they mutate a tree every other agent then trusts. Both ride the one
-    //     flag: overwriting an existing standard is strictly more destructive
-    //     than adding a note beside it, so a grant that permits the first has
-    //     already permitted the second.
+    //     they mutate a tree every other agent then trusts. All four ride the
+    //     one flag: overwriting an existing standard is strictly more
+    //     destructive than adding a note beside it, and strictly more
+    //     destructive than removing or moving something inside the agent's own
+    //     folder — so a grant that permits the first has already permitted the
+    //     rest, and issue #671 deliberately added no fifth grant name.
     //
     // Unwired-store is fail-closed: with no `deps.workspace` no tool is built
     // and the agent behaves exactly as it did before this cell.
     //
-    // Note what does and does not contain a write here, now that create is
-    // agent-reachable (#551). It is NOT intra-company isolation — an agent may
-    // create and overwrite anywhere in its company's tree, by design. What
-    // holds is: company tenancy (the store is pinned to one `CompanyId` at
-    // build time, and every tool resolves inside a single company-scoped tree
-    // read); the explicit grant above; the write tool's required
-    // `expected_updated_at` CAS token; policy parking, since `workspace_write`
-    // and `workspace_create` are both `Reach::Consequence` and never grantable
-    // standing (`policy::consequence`); and authorship, since every node
-    // records who created it and who last wrote it (#326). Rename and delete
-    // remain operator-only — they are not on this surface at all.
+    // Note what does and does not contain a write here, now that create
+    // (#551) and the lifecycle pair (#671) are agent-reachable. It is NOT
+    // intra-company isolation — an agent may create and overwrite anywhere in
+    // its company's tree, by design. What holds is: company tenancy (the store
+    // is pinned to one `CompanyId` at build time, and every tool resolves
+    // inside a single company-scoped tree read); the explicit grant above; the
+    // required `expected_updated_at` CAS token on `workspace_write` and
+    // `workspace_delete`; policy parking, since all four mutations are
+    // `Reach::Consequence` and never grantable standing
+    // (`policy::consequence`); and authorship, since every node records who
+    // created it and who last wrote it (#326).
+    //
+    // Rename and delete additionally reach only `Agents/<agent id>/`. Read that
+    // as a division of labour, not as a security boundary: the same grant
+    // already confers unconfined overwrite, which is the broader power. See the
+    // `workspace_tools::lifecycle` module docs.
     //
     // Not mapped in `toolbelt::namespace_of`, so these stay intrinsic to the
     // capability filter (the `file_tools` precedent): the reads are free and
@@ -491,7 +729,16 @@ pub fn build_agent(
 
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
+    // Includes the operator's inline `prompt`, appended to the generated framing.
     let mut persona = persona_prompt(company_name, manifest_agent);
+
+    // The agent's checked-in briefing documents, placed here — before every
+    // tool brief and before the routed workspace documents — because they are
+    // the most static material in the prompt after the persona itself. The
+    // prompt prefix is what a provider cache reuses across turns, so ordering
+    // static-before-volatile is what keeps an operator editing a workspace note
+    // from invalidating the briefing behind it.
+    persona.push_str(&crate::company::prompt::bundle_section(manifest_agent));
 
     // A short, STATIC brief — never a tree snapshot. A snapshot baked into the
     // system prompt would be stale the moment the operator edits a note, which
@@ -552,11 +799,21 @@ pub fn build_agent(
         // `OcMcpCallTool` replaces upstream's `McpCallTool`: same name/schema,
         // but it classifies + scrubs failures, rewrites the agent-facing text,
         // and records each failure on the shared queue the brain drains.
+        // The metering handle lets `mcp_call_tool` record an `OauthCall` usage
+        // sample per completed call, so a company routing its real work through
+        // MCP stops reading as zero in the Usage view's calls-by-provider chart
+        // and `connections` KPI (issue #698). A `None` meter leaves metering
+        // off, exactly as on the Composio path.
         tools.push(Box::new(OcMcpCallTool::new(
             registry,
             mcp_security,
             secrets,
             deps.mcp_failures.clone(),
+            crate::harness::mcp::McpMetering {
+                company: company.clone(),
+                agent: manifest_agent.id.clone(),
+                meter: deps.meter.clone(),
+            },
         )));
         // Stale-memory mitigation: direct the agent to answer capability
         // questions from a live `mcp_list_servers` call, never from memory.
@@ -588,6 +845,10 @@ pub fn build_agent(
             // The company store, for the `add_agent` tool to persist overlay
             // teammates through the same path the console `POST .../team` uses.
             deps.store.clone(),
+            // Issue #661 (M7): the same revision store the console's workflow
+            // PUT/DELETE routes write through, so an agent edit is undoable and
+            // an agent delete cascades the history on identical terms.
+            deps.workflow_revisions.clone(),
             // Issue #339: the shared queue `run_workflow` / `create_workflow`
             // stage onto, so a dispatched card can link to the workflow its
             // attempt built or ran. Orchestrator-only, like the tools.
@@ -596,8 +857,51 @@ pub fn build_agent(
             // the `read_run_output` companion reads back, so a clipped preview
             // is reachable within the turn. Orchestrator-only, like the tools.
             deps.run_outputs.clone(),
+            // Issue #619: who is minting, and how wide they are. `add_agent`
+            // bounds the teammate it mints by this agent's own scope — #661
+            // clamped to the *company* grant, which still lets a narrowly
+            // scoped agent mint a teammate holding everything the company
+            // holds — and names this agent in the mint log.
+            manifest_agent.id.clone(),
+            manifest_agent.tools.clone(),
+            grants.to_vec(),
         ));
     }
+    // Recursive desk delegation (issue #176): a NON-orchestrator agent whose
+    // manifest entry names a `delegates_to` allowlist gets exactly the two
+    // hand-off tools — `spawn_task` and a `delegate_to_desk` narrowed to that
+    // allowlist — and nothing else from the orchestrator's set. It is what lets
+    // a desk lead pull in a specialist for one slice instead of handing the
+    // whole thing back to the CEO.
+    //
+    // `else if` rather than a second `if`: the orchestrator already has both
+    // tools from `orchestrator_tools` above, and wiring a second, narrowed
+    // `delegate_to_desk` beside its unrestricted one would put two tools with
+    // the same name on one belt.
+    //
+    // An empty allowlist wires nothing, which is the pre-#176 belt exactly — so
+    // this whole block is inert for every manifest that has not opted in.
+    else if !manifest_agent.delegates_to.is_empty() {
+        persona.push_str(&orchestrator::member_delegation_brief(
+            &manifest_agent.delegates_to,
+        ));
+        tools.extend(orchestrator::member_delegation_tools(
+            &deps.delegations,
+            company.clone(),
+            deps.store.clone(),
+            orchestrator::MemberScope {
+                member: manifest_agent.id.clone(),
+                delegates_to: manifest_agent.delegates_to.clone(),
+            },
+        ));
+    }
+
+    // The routed workspace documents go LAST, after every tool brief. They are
+    // the most volatile thing in the prompt — an operator editing a note between
+    // two turns moves them — and the prompt prefix is what a provider cache
+    // reuses across turns, so putting them anywhere earlier would invalidate
+    // every brief behind them on an edit that changed none of those briefs.
+    persona.push_str(&crate::company::prompt::context_section(routed_context));
 
     let prompt_builder = SystemPromptBuilder::for_subagent(
         persona, /* omit_identity */ true, /* omit_safety_preamble */ false,
@@ -720,6 +1024,24 @@ pub fn agent_workspace(root: &Path, company: &CompanyId, agent_id: &str) -> Path
     root.join(company.as_ref()).join(agent_id).join("workspace")
 }
 
+/// One agent's shell audit sink directory, resolved from the instance data root:
+/// `{audit_root}/companies/{company}/audit/{agent}` (issue #775).
+///
+/// A thin adapter over
+/// [`DataLayout::agent_audit_dir`](crate::store::DataLayout::agent_audit_dir) so
+/// the harness names the layout through the layout type instead of transcribing
+/// the path — the same reason [`agent_workspace`] exists.
+///
+/// `audit_root` is [`HarnessDeps::audit_root`](crate::harness::HarnessDeps),
+/// **not** the workspace root: the sink must not land inside the agent workspace,
+/// which is also the `workspace_only` policy root the file tools sandbox to.
+///
+/// Naming only — this never touches the disk.
+/// [`toolbelt::shell_audit`](crate::harness::toolbelt::shell_audit) creates it.
+pub fn agent_audit_dir(audit_root: &Path, company: &CompanyId, agent_id: &str) -> PathBuf {
+    crate::store::DataLayout::new(audit_root).agent_audit_dir(company.as_ref(), agent_id)
+}
+
 /// Create one agent's sandbox directory, returning the path
 /// [`agent_workspace`] names. Idempotent.
 ///
@@ -768,7 +1090,7 @@ pub fn ensure_agent_workspace(
 /// A [`SecurityPolicy`] that sandboxes an agent's file tools to `workspace` and
 /// nowhere else: `workspace_only` with both the workspace and the tool action
 /// root pinned to the agent's own directory.
-fn workspace_security(workspace: &Path) -> SecurityPolicy {
+pub(crate) fn workspace_security(workspace: &Path) -> SecurityPolicy {
     let dir: PathBuf = workspace.to_path_buf();
     SecurityPolicy {
         workspace_dir: dir.clone(),
@@ -781,7 +1103,7 @@ fn workspace_security(workspace: &Path) -> SecurityPolicy {
 /// The file tools granted under the `files`/`docs` namespace, each sandboxed to
 /// the agent's `workspace` by a shared [`workspace_security`] policy: read,
 /// write, edit, list, grep, and glob within the workspace only.
-fn file_tools(workspace: &Path) -> Vec<Box<dyn Tool>> {
+pub(crate) fn file_tools(workspace: &Path) -> Vec<Box<dyn Tool>> {
     let security = Arc::new(workspace_security(workspace));
     vec![
         Box::new(FileReadTool::new(security.clone())),
@@ -1061,7 +1383,13 @@ mod tests {
             description: description.map(str::to_string),
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         }
     }
 
@@ -1161,7 +1489,13 @@ mod tests {
     /// Minimal `HarnessDeps` for building a single agent: offline mock provider,
     /// no-op stores, no meter/skills/mcp/media/composio, `AllowAll` capability
     /// filter (identity). Workspace lands under a caller-owned tempdir.
-    fn pin_deps(workspace_root: std::path::PathBuf) -> HarnessDeps {
+    fn pin_deps(root: std::path::PathBuf) -> HarnessDeps {
+        // Two DISTINCT roots under one caller-owned tempdir, mirroring
+        // production (`<home>/harness` beside `<home>/companies`). Reusing one
+        // root here would let a test pass while the audit sink sat inside the
+        // workspace tree — the exact defect issue #775 fixed.
+        let workspace_root = root.join("harness");
+        let audit_root = root;
         HarnessDeps {
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
@@ -1169,12 +1503,14 @@ mod tests {
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,
+            audit_root,
             model_override: None,
             tasks: None,
             artifacts: None,
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -1184,6 +1520,8 @@ mod tests {
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -1192,6 +1530,10 @@ mod tests {
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -1203,12 +1545,26 @@ mod tests {
             // tools are never built and the pinned belt below is the
             // pre-#237 belt exactly.
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 
     /// Build one agent under `grants` and return its live tool names, sorted, so
     /// a snapshot compares byte-stably against a literal.
     fn built_tool_names(grants: &[&str], is_orchestrator: bool) -> Vec<String> {
+        built_tool_names_delegating(grants, is_orchestrator, &[])
+    }
+
+    /// [`built_tool_names`] with a `delegates_to` allowlist on the agent (issue
+    /// #176) — the only difference between a member that may re-delegate and one
+    /// that may not.
+    fn built_tool_names_delegating(
+        grants: &[&str],
+        is_orchestrator: bool,
+        delegates_to: &[&str],
+    ) -> Vec<String> {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = pin_deps(dir.path().to_path_buf());
         let manifest_agent = ManifestAgent {
@@ -1217,7 +1573,13 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: delegates_to.iter().map(|d| d.to_string()).collect(),
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1228,6 +1590,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             is_orchestrator,
         )
@@ -1255,7 +1618,13 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1266,6 +1635,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
@@ -1289,7 +1659,13 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1300,6 +1676,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
@@ -1321,7 +1698,13 @@ mod tests {
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1332,6 +1715,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
@@ -1430,6 +1814,295 @@ mod tests {
         );
     }
 
+    // --- Bound-repository wiring gates (issue #245, agent half) -------------
+
+    /// Build one agent under `grants` with a repository manager **and** one
+    /// binding wired, and return its live tool names. Mirrors
+    /// [`built_tool_names`], differing only in `deps.repos` /
+    /// `deps.repo_bindings` — so the difference between the two is exactly
+    /// "the operator bound something", which is two of the four gate states.
+    fn built_tool_names_with_repos(grants: &[&str], bindings: usize) -> Vec<String> {
+        built_tool_names_with_repos_cap(grants, bindings, false)
+    }
+
+    /// [`built_tool_names_with_repos`], with control over whether the bound
+    /// credentials read as push-capable (issue #735) — one of the two gates the
+    /// write tier adds beyond #245's three. `false` matches every read-tier
+    /// caller (`can_push: None`); the secret backend stays the safe Mongodb, so a
+    /// push-capability assertion never passes for the #752 reason instead.
+    fn built_tool_names_with_repos_cap(
+        grants: &[&str],
+        bindings: usize,
+        push_capable: bool,
+    ) -> Vec<String> {
+        built_tool_names_with_repos_on_cap(
+            grants,
+            bindings,
+            push_capable,
+            crate::store::StorageKind::Mongodb,
+        )
+    }
+
+    /// [`built_tool_names_with_repos`], with the secret backend spelled out —
+    /// the other added gate (issue #752). Mongodb is what the plain helper
+    /// passes, because a host that cannot hold a repository credential safely
+    /// cannot reach the other gates at all, and every assertion about them would
+    /// otherwise be passing for the #752 reason instead of its own.
+    fn built_tool_names_with_repos_on(
+        grants: &[&str],
+        bindings: usize,
+        storage_kind: crate::store::StorageKind,
+    ) -> Vec<String> {
+        built_tool_names_with_repos_on_cap(grants, bindings, false, storage_kind)
+    }
+
+    /// The full repository-wiring fixture: both the push-capability (#735) and
+    /// the secret-backend (#752) gates spelled out. The three wrappers above each
+    /// default the axis they do not vary.
+    fn built_tool_names_with_repos_on_cap(
+        grants: &[&str],
+        bindings: usize,
+        push_capable: bool,
+        storage_kind: crate::store::StorageKind,
+    ) -> Vec<String> {
+        use crate::runtime::repo_manager::types::RepoBinding;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.repos = Some(std::sync::Arc::new(
+            crate::runtime::RepoManager::new(
+                CompanyId::new("acme"),
+                dir.path().join("repos"),
+                std::sync::Arc::new(crate::store::FsSecretStore::new(dir.path())),
+            )
+            .with_storage_kind(storage_kind),
+        ));
+        deps.repo_bindings = (0..bindings)
+            .map(|n| RepoBinding {
+                key: format!("acme-widgets-{n:012}"),
+                url: "https://github.com/acme/widgets".to_string(),
+                owner: "acme".to_string(),
+                repo: "widgets".to_string(),
+                branches: vec!["main".to_string()],
+                token_fingerprint: "0f1e2d3c4b5a".to_string(),
+                last_fetched_millis: None,
+                size_bytes: 0,
+                bound_at_millis: 1,
+                can_push: if push_capable { Some(true) } else { None },
+            })
+            .collect();
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            // Issue #176: this repo-tools fixture predates `delegates_to` and is
+            // only compiled under the gated feature combo, so neither this
+            // branch's CI nor #245's could see the other's half.
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// The four gate states of the repository surface (issue #245), in one
+    /// table.
+    ///
+    /// The load-bearing row is the first, and it is load-bearing more sharply
+    /// here than for `media` / `composio` / `search`: a checkout puts a third
+    /// party's source inside a sandbox the same agent may hold `shell` over, so
+    /// it can never ride in on the wildcard a company set for its file tools.
+    ///
+    /// The last row is the one a reader is most likely to think redundant. A
+    /// granted, wired, but **unbound** company has nothing for either tool to
+    /// resolve against, so every call would be a refusal listing an empty set —
+    /// wiring nothing is the honest state, and it is what the console's
+    /// "granted but nothing bound" notice exists to tell the operator to fix.
+    #[test]
+    fn repo_tools_are_wired_only_by_explicit_grant_a_manager_and_a_binding() {
+        let pair = ["repo_checkout".to_string(), "repo_pr".to_string()];
+
+        // `*` + manager + binding → absent. The wildcard never confers this.
+        let wildcard = built_tool_names_with_repos(&["*"], 1);
+        for tool in &pair {
+            assert!(
+                !wildcard.contains(tool),
+                "a bare `*` must NOT confer the repository family: {wildcard:?}"
+            );
+        }
+
+        // explicit `repo` + manager + binding → both present.
+        let granted = built_tool_names_with_repos(&["repo"], 1);
+        for tool in &pair {
+            assert!(
+                granted.contains(tool),
+                "an explicit `repo` grant with a binding must wire {tool}: {granted:?}"
+            );
+        }
+        // The sub-grant form works the same way `media.*` / `composio.*` do.
+        let sub_granted = built_tool_names_with_repos(&["repo.checkout"], 1);
+        for tool in &pair {
+            assert!(sub_granted.contains(tool), "{sub_granted:?}");
+        }
+
+        // explicit `repo`, NO manager → absent, fail-closed.
+        let unwired = built_tool_names(&["repo"], false);
+        for tool in &pair {
+            assert!(
+                !unwired.contains(tool),
+                "a repo grant with no repository cache must wire nothing: {unwired:?}"
+            );
+        }
+
+        // explicit `repo` + manager, NO binding → absent, fail-closed.
+        let unbound = built_tool_names_with_repos(&["repo"], 0);
+        for tool in &pair {
+            assert!(
+                !unbound.contains(tool),
+                "a repo grant with nothing bound must wire nothing: {unbound:?}"
+            );
+        }
+        // …and the rest of the belt is untouched in every refused state, so the
+        // gate withholds a family rather than breaking the agent.
+        assert_eq!(
+            unbound,
+            built_tool_names(&["repo"], false),
+            "the unbound state must differ from the unwired state by nothing"
+        );
+
+        // Gate 4 (issue #752): explicit `repo` + manager + binding, on a host
+        // whose secrets are plaintext on its own disk → absent. This is the
+        // console-added-teammate path, which never goes back through the boot
+        // check. The binding exists, so nothing but the backend is refusing.
+        for kind in [
+            crate::store::StorageKind::Fs,
+            crate::store::StorageKind::Sqlite,
+        ] {
+            let plaintext = built_tool_names_with_repos_on(&["repo"], 1, kind);
+            for tool in &pair {
+                assert!(
+                    !plaintext.contains(tool),
+                    "a repo grant on {} must wire nothing: {plaintext:?}",
+                    kind.as_str()
+                );
+            }
+            // Again, a withheld family and not a broken agent.
+            assert_eq!(
+                plaintext,
+                built_tool_names(&["repo"], false),
+                "the {} state must differ from the unwired state by nothing",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// Granting `repo` must not quietly hand over anything *else*: the bound
+    /// `["repo"]` belt is the ungranted belt plus exactly the two tools.
+    #[test]
+    fn the_repo_grant_adds_exactly_two_tools() {
+        let mut baseline = built_tool_names(&[], false);
+        let granted = built_tool_names_with_repos(&["repo"], 1);
+        baseline.push("repo_checkout".to_string());
+        baseline.push("repo_pr".to_string());
+        baseline.sort();
+        assert_eq!(granted, baseline, "the `repo` grant widened the belt");
+    }
+
+    /// The repository *write* tier (issue #734) wires NO tool of its own yet —
+    /// `repo_publish` lands in #735. Granting `repo.write` confers the read pair
+    /// (write implies read, since `repo.write` matches the read predicate's
+    /// `repo.` prefix) and nothing more, whatever the bound credential's push
+    /// capability. This pins "#734 wires nothing": if a later change wires a
+    /// write tool without the push-capability gate, the exact-set assertion here
+    /// breaks rather than shipping an ungated push surface. The bindings the
+    /// helper builds carry `can_push: None`, so the write tier fails closed
+    /// (warns) — and still adds no tool.
+    #[test]
+    fn repo_write_grant_wires_no_tool_beyond_the_read_pair() {
+        let mut baseline = built_tool_names(&[], false);
+        baseline.push("repo_checkout".to_string());
+        baseline.push("repo_pr".to_string());
+        baseline.sort();
+
+        let write_granted = built_tool_names_with_repos(&["repo.write"], 1);
+        assert_eq!(
+            write_granted, baseline,
+            "repo.write with a non-push-capable credential wires only the read pair"
+        );
+    }
+
+    /// The write tier's fourth gate (issue #735): `repo_publish` is wired only
+    /// with `repo.write` **and** a push-capable credential, and never by the read
+    /// `repo` grant. The non-push-capable half is
+    /// `repo_write_grant_wires_no_tool_beyond_the_read_pair` above.
+    #[test]
+    fn repo_write_with_a_push_capable_credential_wires_repo_publish() {
+        let publish = "repo_publish".to_string();
+
+        // repo.write + a push-capable credential → repo_publish joins the belt,
+        // and the read pair is still there (write implies read).
+        let pushable = built_tool_names_with_repos_cap(&["repo.write"], 1, true);
+        assert!(
+            pushable.contains(&publish),
+            "a push-capable `repo.write` must wire repo_publish: {pushable:?}"
+        );
+        assert!(
+            pushable.contains(&"repo_checkout".to_string())
+                && pushable.contains(&"repo_pr".to_string()),
+            "the read pair must still be wired: {pushable:?}"
+        );
+
+        // repo.write but a read-only credential → fail-closed, no publish.
+        let read_only = built_tool_names_with_repos_cap(&["repo.write"], 1, false);
+        assert!(
+            !read_only.contains(&publish),
+            "a read-only credential must not wire repo_publish: {read_only:?}"
+        );
+
+        // A bare `repo` never confers it, push-capable credential or not.
+        let bare = built_tool_names_with_repos_cap(&["repo"], 1, true);
+        assert!(
+            !bare.contains(&publish),
+            "bare `repo` (the read tier) must never wire repo_publish: {bare:?}"
+        );
+
+        // Gate 4 (issue #752): even a push-capable `repo.write` wires nothing on a
+        // plaintext secret backend — repo_publish uses the credential host-side, so
+        // it is refused exactly like the read tools are on such a host.
+        for kind in [
+            crate::store::StorageKind::Fs,
+            crate::store::StorageKind::Sqlite,
+        ] {
+            let plaintext = built_tool_names_with_repos_on_cap(&["repo.write"], 1, true, kind);
+            assert!(
+                !plaintext.contains(&publish),
+                "a push-capable `repo.write` on {} must not wire repo_publish: {plaintext:?}",
+                kind.as_str()
+            );
+        }
+    }
+
     /// Granting `search` must not quietly hand over anything *else*: the
     /// credentialed `["search"]` belt is the ungranted belt plus exactly one
     /// tool. A namespace that widens the belt beyond its own family is how a
@@ -1453,7 +2126,14 @@ mod tests {
     fn workspace_tools_are_wired_by_grant_and_store_presence() {
         // No store wired → fail closed, nothing built, whatever the grant.
         let unwired = built_tool_names(&["workspace"], false);
-        for tool in ["workspace_list", "workspace_read", "workspace_write"] {
+        for tool in [
+            "workspace_list",
+            "workspace_read",
+            "workspace_search",
+            "workspace_write",
+            "workspace_rename",
+            "workspace_delete",
+        ] {
             assert!(
                 !unwired.contains(&tool.to_string()),
                 "no store must mean no `{tool}`: {unwired:?}"
@@ -1470,21 +2150,45 @@ mod tests {
             wildcard.contains(&"workspace_read".to_string()),
             "{wildcard:?}"
         );
+        // Issue #607: search is a read and rides the read side of the gate. It
+        // reads exactly what `workspace_read` already grants, and it is the
+        // cheap path — behind the write grant it would be missing from every
+        // default agent, leaving them on the list-then-read crawl.
         assert!(
-            !wildcard.contains(&"workspace_write".to_string()),
-            "a bare `*` must NOT confer workspace writes: {wildcard:?}"
+            wildcard.contains(&"workspace_search".to_string()),
+            "a bare `*` must confer workspace search: {wildcard:?}"
         );
+        for tool in ["workspace_write", "workspace_rename", "workspace_delete"] {
+            assert!(
+                !wildcard.contains(&tool.to_string()),
+                "a bare `*` must NOT confer `{tool}`: {wildcard:?}"
+            );
+        }
 
-        // Explicit `workspace` → reads + write.
+        // Explicit `workspace` → reads + all four mutations. The lifecycle pair
+        // (issue #671) rides this grant rather than a new one: it reaches only
+        // the agent's own folder, which is narrower than the unconfined
+        // overwrite the same grant already confers.
         let explicit = built_tool_names_with_workspace(&["workspace"]);
-        assert!(
-            explicit.contains(&"workspace_write".to_string()),
-            "{explicit:?}"
-        );
+        for tool in [
+            "workspace_create",
+            "workspace_write",
+            "workspace_rename",
+            "workspace_delete",
+        ] {
+            assert!(explicit.contains(&tool.to_string()), "{tool}: {explicit:?}");
+        }
 
         // No workspace grant at all → nothing, even with a store wired.
         let ungranted = built_tool_names_with_workspace(&["web.*"]);
-        for tool in ["workspace_list", "workspace_read", "workspace_write"] {
+        for tool in [
+            "workspace_list",
+            "workspace_read",
+            "workspace_search",
+            "workspace_write",
+            "workspace_rename",
+            "workspace_delete",
+        ] {
             assert!(
                 !ungranted.contains(&tool.to_string()),
                 "an unrelated grant must not confer `{tool}`: {ungranted:?}"
@@ -1504,15 +2208,53 @@ mod tests {
             read_grant.contains(&"workspace_read".to_string()),
             "{read_grant:?}"
         );
-        assert!(
-            !read_grant.contains(&"workspace_write".to_string()),
-            "`workspace.read` must not confer writes: {read_grant:?}"
-        );
+        for tool in ["workspace_write", "workspace_rename", "workspace_delete"] {
+            assert!(
+                !read_grant.contains(&tool.to_string()),
+                "`workspace.read` must not confer `{tool}`: {read_grant:?}"
+            );
+        }
 
         let write_grant = built_tool_names_with_workspace(&["workspace.write"]);
+        for tool in ["workspace_write", "workspace_rename", "workspace_delete"] {
+            assert!(
+                write_grant.contains(&tool.to_string()),
+                "{tool}: {write_grant:?}"
+            );
+        }
+    }
+
+    /// `workspace_search` rides the `workspace` READ grant and NEVER the
+    /// metered `search` grant (issue #607).
+    ///
+    /// The names invite the wrong wiring, and the wrong wiring would defeat the
+    /// issue: `search` is the paid external-credential grant that carries
+    /// `web_search`, and putting workspace search behind it would mean an agent
+    /// needs a billed backend credential to read its own company's notes — the
+    /// crawl stays, and now it stays for a reason nobody would guess from the
+    /// tool's description. Search reads exactly what `workspace_read` already
+    /// grants, so it costs the operator no additional decision.
+    #[test]
+    fn workspace_search_rides_the_workspace_grant_and_not_the_metered_search_grant() {
+        // The `search` grant alone confers `web_search` — and nothing from the
+        // workspace family, which is not granted here at all.
+        let metered = built_tool_names_with_search(&["search"]);
+        assert!(metered.contains(&"web_search".to_string()), "{metered:?}");
         assert!(
-            write_grant.contains(&"workspace_write".to_string()),
-            "{write_grant:?}"
+            !metered.contains(&"workspace_search".to_string()),
+            "the metered `search` grant must not confer workspace search: {metered:?}"
+        );
+
+        // …and the workspace read grant confers workspace search without
+        // conferring the billed one.
+        let workspace = built_tool_names_with_workspace(&["workspace.read"]);
+        assert!(
+            workspace.contains(&"workspace_search".to_string()),
+            "`workspace.read` must confer workspace search: {workspace:?}"
+        );
+        assert!(
+            !workspace.contains(&"web_search".to_string()),
+            "reading company notes must not require a billed search credential: {workspace:?}"
         );
     }
 
@@ -1571,13 +2313,27 @@ mod tests {
         assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
     }
 
-    /// (b) The depth-cap = 1 invariant (issue #178): a dispatched desk agent
-    /// must NEVER receive the orchestrator's delegation tools, while the
-    /// orchestrator agent MUST. Building both from the same grant and contrasting
-    /// them is the registration check that a dispatched turn cannot re-delegate.
+    /// (b) The **default** depth cap (issues #178, #176): a dispatched desk
+    /// agent that named no `delegates_to` must NEVER receive a delegation tool,
+    /// while the orchestrator agent MUST. Building both from the same grant and
+    /// contrasting them is the registration check that an ordinary dispatched
+    /// turn cannot re-delegate.
+    ///
+    /// #176 made this the default rather than the only possibility — the
+    /// opt-in case is pinned by
+    /// [`a_member_with_delegates_to_gets_exactly_the_two_hand_off_tools`], and
+    /// the belt above is unchanged for every agent that does not opt in.
     #[test]
     fn dispatched_agent_has_no_delegation_tools_but_orchestrator_does() {
-        let delegation = ["query_company", "spawn_task", "delegate_to_desk"];
+        let delegation = [
+            "query_company",
+            "spawn_task",
+            "delegate_to_desk",
+            // Issue #884: the new hand-off is opt-in on exactly the same terms —
+            // an ordinary dispatched agent must not silently gain the ability to
+            // run somebody else's turn.
+            "delegate_to_teammate",
+        ];
 
         let dispatched = built_tool_names(&["*"], false);
         for tool in delegation {
@@ -1594,6 +2350,82 @@ mod tests {
                 "orchestrator agent MUST receive delegation tool `{tool}`: {orchestrator:?}"
             );
         }
+    }
+
+    /// (b2) Issue #176: a member the manifest opted in with `delegates_to` gets
+    /// **exactly the hand-off tools** more than it had — `spawn_task`,
+    /// `delegate_to_desk`, and (issue #884) `delegate_to_teammate` — and not one
+    /// tool of the orchestrator's authority.
+    ///
+    /// Expressed as a delta against the un-opted-in belt rather than as a second
+    /// flat literal, so the feature-aware snapshot above stays the single place
+    /// the dispatched belt is written down. What this pins is the thing #176
+    /// could get wrong: reaching for `orchestrator_tools` and handing a desk
+    /// lead `add_agent`, `assign_task` and `review_task` along with the hand-off
+    /// it actually needs.
+    #[test]
+    fn a_member_with_delegates_to_gets_exactly_the_two_hand_off_tools() {
+        let plain = built_tool_names(&["*"], false);
+        let delegating = built_tool_names_delegating(&["*"], false, &["research"]);
+
+        let added: Vec<&String> = delegating.iter().filter(|t| !plain.contains(t)).collect();
+        assert_eq!(
+            added,
+            vec!["delegate_to_desk", "delegate_to_teammate", "spawn_task"],
+            "a delegating member's belt must differ from the plain one by exactly the \
+             hand-off tools: {delegating:?}"
+        );
+        assert!(
+            plain.iter().all(|t| delegating.contains(t)),
+            "opting in must ADD tools, never remove any: {delegating:?}"
+        );
+        for authority in [
+            "query_company",
+            "assign_task",
+            "review_task",
+            "add_agent",
+            "run_workflow",
+            "create_workflow",
+            "read_run_output",
+        ] {
+            assert!(
+                !delegating.contains(&authority.to_string()),
+                "a desk member must NOT receive orchestrator authority `{authority}`: \
+                 {delegating:?}"
+            );
+        }
+    }
+
+    /// (b3) Issue #176: the wiring is inert for an agent that named no
+    /// allowlist, and the orchestrator's own belt is untouched by the feature.
+    ///
+    /// The empty-allowlist half is what makes #176 a no-op for every manifest
+    /// written before it; the orchestrator half is what proves the `else if`
+    /// really is exclusive, since a second narrowed `delegate_to_desk` beside
+    /// the orchestrator's unrestricted one would put two tools of the same name
+    /// on one belt.
+    #[test]
+    fn an_empty_allowlist_wires_nothing_and_the_orchestrator_belt_is_unchanged() {
+        assert_eq!(
+            built_tool_names_delegating(&["*"], false, &[]),
+            built_tool_names(&["*"], false),
+            "an empty `delegates_to` must produce the pre-#176 belt byte-for-byte"
+        );
+
+        let orchestrator = built_tool_names(&["*"], true);
+        assert_eq!(
+            built_tool_names_delegating(&["*"], true, &["research"]),
+            orchestrator,
+            "an orchestrator's belt must not change when it also names `delegates_to`"
+        );
+        assert_eq!(
+            orchestrator
+                .iter()
+                .filter(|t| *t == "delegate_to_desk")
+                .count(),
+            1,
+            "exactly one `delegate_to_desk` may be wired: {orchestrator:?}"
+        );
     }
 
     /// (c) No deferred family leaks into a dispatched belt: raw browser

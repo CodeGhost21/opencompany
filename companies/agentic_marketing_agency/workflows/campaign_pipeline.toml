@@ -30,6 +30,8 @@ id = "gate"
 kind = "condition"
 name = "Needs research?"
 summary = "Branch on topic familiarity."
+[node.config]
+field = "=item.needs_research"
 
 [[node]]
 id = "research"

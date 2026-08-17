@@ -13,7 +13,7 @@ use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::TaskRecord;
 use crate::ports::types::{CompanyId, CompanyRecord, ContextChunk};
 use crate::runtime::RuntimeBuilder;
-use crate::runtime::journal::TaskLink;
+use crate::runtime::journal::{ApprovalConversation, TaskLink};
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
@@ -51,6 +51,47 @@ fn provisioned_names(tree: &serde_json::Value) -> Vec<String> {
 }
 
 async fn state_with_company(home: &std::path::Path) -> AppState {
+    state_with_quota(home, crate::runtime::WorkspaceQuota::default()).await
+}
+
+/// [`state_with_company`], with the workspace held to `quota`.
+///
+/// Parameterised rather than duplicated so the one test that needs a non-default
+/// `[workspace] max_blob_mb` (issue #647) exercises the same wiring every other
+/// test here does, instead of a second harness that could drift from it.
+async fn state_with_quota(
+    home: &std::path::Path,
+    quota: crate::runtime::WorkspaceQuota,
+) -> AppState {
+    state_with(home, quota, None).await
+}
+
+/// [`state_with_company`], with the workspace tree served by `workspace`
+/// (issue #759).
+///
+/// The `fs` backend refuses to create two sibling nodes with one name
+/// (`reject_path_collision`, issue #665), so the raced tree the repair route
+/// exists to fix cannot be built through it. sqlite and mongodb — the backends
+/// hosted tenants run, and the reason the state exists at all — accept it, and
+/// this swaps in a double that behaves the same way. Everything else about the
+/// harness is unchanged, so the route under test is the one the console calls.
+async fn state_with_workspace(
+    home: &std::path::Path,
+    workspace: std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>,
+) -> AppState {
+    state_with(
+        home,
+        crate::runtime::WorkspaceQuota::default(),
+        Some(workspace),
+    )
+    .await
+}
+
+async fn state_with(
+    home: &std::path::Path,
+    quota: crate::runtime::WorkspaceQuota,
+    workspace: Option<std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>>,
+) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -66,17 +107,21 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+    let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest())
         .with_id(id.clone())
-        .build()
-        .await
-        .unwrap();
+        .with_workspace_quota(quota);
+    if let Some(workspace) = workspace {
+        builder = builder.with_workspace(workspace);
+    }
+    let runtime = builder.build().await.unwrap();
     let state = AppState::new(AppConfig::default());
     state.registry().insert(id, std::sync::Arc::new(runtime));
     // Every route needs a principal now; the harness signs in as an admin so
@@ -700,6 +745,8 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -1214,6 +1261,62 @@ async fn workspace_create_write_move_and_cycle_rejection() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
+/// Issue #666 applies to every way the filesystem path can change, not only to
+/// creates. A rename that could alias a sibling is refused before either the
+/// index or either file body moves.
+#[tokio::test]
+async fn workspace_rename_cannot_claim_a_siblings_physical_path() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, first) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "first.md", "kind": "file", "content": "first body"})),
+    )
+    .await;
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let (_, second) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "second.md", "kind": "file", "content": "second body"})),
+    )
+    .await;
+    let second_id = second["id"].as_str().unwrap().to_string();
+
+    let (status, refusal) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/workspace/{second_id}"),
+        Some(json!({"name": "first.md"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["code"], "conflict", "{refusal}");
+
+    for (id, name, content) in [
+        (&first_id, "first.md", "first body"),
+        (&second_id, "second.md", "second body"),
+    ] {
+        let (status, file) = send(
+            &state,
+            "GET",
+            &format!("/api/v1/company/workspace/file/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{file}");
+        assert_eq!(file["name"], name, "the refused rename changed metadata");
+        assert_eq!(
+            file["content"], content,
+            "the refused rename moved or overwrote a sibling body"
+        );
+    }
+}
+
 /// The read plane the console's Workspace tab runs on (issue #177): the tree
 /// `GET` reflects writes, and the file `GET` carries content plus
 /// server-computed backlinks.
@@ -1229,15 +1332,16 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
     // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
-    // `Agents/` and `Desks/` roots (issue #551). The manifest here has an agent
-    // and it gets no folder — a member folder is minted on first use, not on
-    // joining the roster.
+    // `Agents/` root (issue #551). The manifest here has an agent and it gets
+    // no folder — a member folder is minted on first use, not on joining the
+    // roster. `Desks/` is absent for the same reason since issue #645: nothing
+    // writes into it, so it is minted on first use rather than scaffolded.
     let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["Agents", "Desks"],
-        "a fresh company starts with the two system roots and nothing else"
+        vec!["Agents"],
+        "a fresh company starts with the one system root and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
 
@@ -1304,15 +1408,13 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     assert_eq!(listed["updatedBy"], json!({"kind": "operator"}));
     // …and the scaffold's own nodes say what they are, so the console can tell
     // "the runtime laid this down" from "somebody wrote this".
-    for root in ["Agents", "Desks"] {
-        let node = tree
-            .iter()
-            .find(|node| node["name"] == json!(root))
-            .unwrap_or_else(|| panic!("the {root} root is in the tree"));
-        assert_eq!(node["createdBy"], json!({"kind": "seed"}));
-        assert_eq!(node["kind"], json!("folder"));
-        assert!(node["parentId"].is_null());
-    }
+    let root = tree
+        .iter()
+        .find(|node| node["name"] == json!("Agents"))
+        .expect("the Agents root is in the tree");
+    assert_eq!(root["createdBy"], json!({"kind": "seed"}));
+    assert_eq!(root["kind"], json!("folder"));
+    assert!(root["parentId"].is_null());
 
     // The file read carries the body and the inbound backlink, computed server
     // side — the console derives neither.
@@ -1434,7 +1536,7 @@ async fn workspace_reads_are_isolated_between_companies() {
     assert_eq!(status, StatusCode::OK);
     let note_id = note["id"].as_str().unwrap().to_string();
 
-    // B's own workspace holds only its own scaffolded system roots — A's note
+    // B's own workspace holds only its own scaffolded system root — A's note
     // is not in it.
     let (status, tree_b) = send_auth(
         &state,
@@ -1445,7 +1547,7 @@ async fn workspace_reads_are_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(provisioned_names(&tree_b), vec!["Agents", "Desks"]);
+    assert_eq!(provisioned_names(&tree_b), vec!["Agents"]);
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
     let (status, _) = send_auth(
@@ -1468,6 +1570,635 @@ async fn workspace_reads_are_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+/// `GET …/workspace/search` (issue #607): the hit body, both scope forms, and
+/// the two refusals stated rather than guessed.
+#[tokio::test]
+async fn workspace_search_returns_hits_with_paths_and_excerpts() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Standards", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap().to_string();
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "Support.md",
+            "kind": "file",
+            "parentId": folder_id,
+            "content": "# Support\n\nEscalate a REFUND request to the CEO."
+        })),
+    )
+    .await;
+    let note_id = note["id"].as_str().unwrap().to_string();
+
+    // A content hit carries the path the tree view would have to derive, the
+    // excerpt, the origins the console badges, and what matched.
+    let (status, results) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/search?q=refund",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(results["total"], json!(1));
+    let hits = results["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], json!(note_id));
+    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["matched"], "content");
+    assert_eq!(hits[0]["kind"], "file");
+    assert_eq!(hits[0]["updatedBy"], json!({"kind": "operator"}));
+    assert!(
+        hits[0]["excerpt"].as_str().unwrap().contains("REFUND"),
+        "{:?}",
+        hits[0]["excerpt"]
+    );
+
+    // A folder is a hit in its own right, matched by name and with no excerpt
+    // promising a body it does not have.
+    let (status, results) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/search?q=standards",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let hits = results["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], json!(folder_id));
+    assert_eq!(hits[0]["kind"], "folder");
+    assert_eq!(hits[0]["matched"], "name");
+    assert!(hits[0].get("excerpt").is_none(), "{:?}", hits[0]);
+
+    // `prefix` scopes to a subtree.
+    let (status, scoped) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/search?q=support&prefix=Standards",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["total"], json!(1));
+    let (_, elsewhere) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/search?q=support&prefix=Desks",
+        None,
+    )
+    .await;
+    assert_eq!(elsewhere["total"], json!(0));
+
+    // Both refusals are 400 and say what is wrong. An empty `q` is NOT "match
+    // everything" — a cleared search box must not fetch the whole tree.
+    for uri in [
+        "/api/v1/company/workspace/search",
+        "/api/v1/company/workspace/search?q=",
+        "/api/v1/company/workspace/search?q=%20%20",
+        "/api/v1/company/workspace/search?q=refund&limit=0",
+    ] {
+        let (status, body) = send(&state, "GET", uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} → {body}");
+        assert_eq!(body["code"], "invalid_request", "{uri} → {body}");
+    }
+
+    // The route resolves under the platform scope form too, and `search` is
+    // never captured as a node id by the `…/workspace/{node_id}` route.
+    let (status, results) = send(
+        &state,
+        "GET",
+        "/api/v1/companies/acme/workspace/search?q=refund",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(results["total"], json!(1));
+}
+
+/// `POST …/workspace/sweep-empty-agent-folders` (issue #700): the operator's
+/// one-time tidy of the empty `Agents/<id>/` folders a pre-#570 company still
+/// carries.
+///
+/// The whole route in one test, because the halves only mean something together:
+/// the dry run has to name every folder *and* leave the tree alone, or the
+/// confirm dialog it feeds is either uninformative or a lie; the real run has to
+/// remove exactly those folders, leave the occupied one, and announce each
+/// removal so a console watching the feed sees the tree change rather than
+/// discovering it on the next refetch.
+#[tokio::test]
+async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    // Boot already scaffolded `Agents/`; find it rather than making a rival.
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    let agents_id = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "Agents")
+        .expect("boot scaffolds the Agents root")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Two strays from the #551 era, one folder that actually holds a
+    // deliverable, and a note filed directly under the root by an operator.
+    let mut empty = Vec::new();
+    for id in ["ceo", "cto"] {
+        let (_, folder) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workspace",
+            Some(json!({"name": id, "kind": "folder", "parentId": agents_id})),
+        )
+        .await;
+        empty.push(folder["id"].as_str().unwrap().to_string());
+    }
+    let (_, cmo) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "cmo", "kind": "folder", "parentId": agents_id})),
+    )
+    .await;
+    send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "launch-brief.md",
+            "kind": "file",
+            "parentId": cmo["id"].as_str().unwrap(),
+            "content": "# Launch",
+        })),
+    )
+    .await;
+    send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "README.md",
+            "kind": "file",
+            "parentId": agents_id,
+            "content": "# who is who",
+        })),
+    )
+    .await;
+
+    let before = {
+        let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+        provisioned_names(&tree)
+    };
+    let events_before = journal_len(&runtime).await;
+
+    // -- the preview ------------------------------------------------------
+    let (status, preview) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        swept_names(&preview["wouldRemove"]),
+        vec!["ceo", "cto"],
+        "the confirm dialog needs every folder named, not a count: {preview}"
+    );
+    assert!(
+        preview.get("removed").is_none(),
+        "a preview must not claim it removed anything: {preview}"
+    );
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(
+        provisioned_names(&tree),
+        before,
+        "a dry run must leave the tree exactly as it found it"
+    );
+    assert_eq!(
+        journal_len(&runtime).await,
+        events_before,
+        "a dry run must not announce anything either"
+    );
+
+    // -- the real thing ---------------------------------------------------
+    let (status, done) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        swept_names(&done["removed"]),
+        vec!["ceo", "cto"],
+        "an operator who disagrees needs to know what went: {done}"
+    );
+    assert!(
+        done.get("wouldRemove").is_none(),
+        "a real run must not answer in the preview's field: {done}"
+    );
+
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(
+        provisioned_names(&tree),
+        vec![
+            "Agents".to_string(),
+            "README.md".to_string(),
+            "cmo".to_string(),
+            "launch-brief.md".to_string(),
+        ],
+        "the folder holding a deliverable, the operator's note and the root all stay"
+    );
+
+    // One `WorkspaceChanged{removed}` per folder — the announcer is reached
+    // because the handler deletes through `runtime.workspace()`, the same
+    // wrapped handle the per-node delete uses (issue #327).
+    let journal = runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+    //
+    // Sorted on both sides rather than compared in creation order: the sweep
+    // walks whatever order `tree()` returns, and the port promises none.
+    let mut announced: Vec<&str> = journal
+        .iter()
+        .filter_map(|stored| match &stored.event {
+            CompanyEvent::WorkspaceChanged { node_id, change } if change == "removed" => {
+                Some(node_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    announced.sort_unstable();
+    let mut expected: Vec<&str> = empty.iter().map(String::as_str).collect();
+    expected.sort_unstable();
+    assert_eq!(
+        announced, expected,
+        "each removal announces itself, exactly once, and nothing else was announced removed"
+    );
+
+    // -- and again, which must be a no-op ---------------------------------
+    let (status, again) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        again["removed"],
+        json!([]),
+        "running it twice must remove nothing the second time: {again}"
+    );
+
+    // The route resolves under the platform scope form too, and is never
+    // captured as a node id by the `…/workspace/{node_id}` route.
+    let (status, scoped) = send(
+        &state,
+        "POST",
+        "/api/v1/companies/acme/workspace/sweep-empty-agent-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["wouldRemove"], json!([]));
+}
+
+/// The sorted folder names in a sweep response list.
+fn swept_names(list: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = list
+        .as_array()
+        .unwrap_or_else(|| panic!("the sweep answers with a list, got {list}"))
+        .iter()
+        .map(|folder| folder["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `POST …/workspace/merge-duplicate-folders` (issue #759): the operator's
+/// repair for a tree a publish race already left ambiguous.
+///
+/// The whole route in one test, because the halves only mean anything together.
+/// A preview that did not name the relocations is a confirm dialog nobody can
+/// agree to; a real run that reported only its successes would call a tree fixed
+/// while two rival documents still sit on one path; and a repair that could not
+/// be run twice would be useless precisely on the tenant that needs it, since
+/// the first pass deliberately leaves the file collision behind.
+///
+/// The workspace here is the permissive double, not `FsOps`: the `fs` backend
+/// refuses to create the duplicate in the first place (issue #665), so this
+/// state is only reachable on the sqlite and mongodb backends hosted tenants
+/// actually run.
+#[tokio::test]
+async fn workspace_merge_folds_duplicate_folders_and_reports_the_file_collision() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_workspace(
+        &home,
+        std::sync::Arc::new(
+            crate::company::workspace_repair::loose_store::LooseWorkspace::default(),
+        ),
+    )
+    .await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    async fn make(state: &AppState, body: Value) -> String {
+        let (status, node) = send(state, "POST", "/api/v1/company/workspace", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{node}");
+        node["id"].as_str().expect("an id").to_string()
+    }
+
+    // The raced state: one deliverable folder published twice, each copy
+    // holding a different note — and both holding a `summary.md`, which is two
+    // documents on one path and the thing no merge may decide.
+    let a = make(&state, json!({"name": "reports", "kind": "folder"})).await;
+    let b = make(&state, json!({"name": "reports", "kind": "folder"})).await;
+    let a_note = make(
+        &state,
+        json!({"name": "q1.md", "kind": "file", "parentId": a, "content": "# Q1"}),
+    )
+    .await;
+    let b_note = make(
+        &state,
+        json!({"name": "q2.md", "kind": "file", "parentId": b, "content": "# Q2"}),
+    )
+    .await;
+    let a_summary = make(
+        &state,
+        json!({"name": "summary.md", "kind": "file", "parentId": a, "content": "# Mine"}),
+    )
+    .await;
+    let b_summary = make(
+        &state,
+        json!({"name": "summary.md", "kind": "file", "parentId": b, "content": "# Theirs"}),
+    )
+    .await;
+
+    let before = {
+        let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+        provisioned_names(&tree)
+    };
+    let events_before = journal_len(&runtime).await;
+
+    // -- the preview --------------------------------------------------------
+    let (status, preview) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/merge-duplicate-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let folds = preview["wouldMerge"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a preview answers with a list of folds, got {preview}"));
+    assert_eq!(folds.len(), 1, "{preview}");
+    let fold = &folds[0];
+
+    // Which twin survives is derived rather than hard-coded: two ULIDs minted
+    // in the same millisecond order by their random half, so the harness cannot
+    // know in advance which folder is older. The rule itself — oldest wins, node
+    // id breaks the tie — is pinned in `company::workspace_repair`'s own tests,
+    // where the timestamps are given.
+    let loser = fold["id"]
+        .as_str()
+        .expect("the fold names its loser")
+        .to_string();
+    let winner = fold["intoId"]
+        .as_str()
+        .expect("and its survivor")
+        .to_string();
+    assert!(
+        (loser == a && winner == b) || (loser == b && winner == a),
+        "the fold must be between the two `reports` folders, got {fold}"
+    );
+    let (moved, residual) = if loser == a {
+        (a_note.clone(), a_summary.clone())
+    } else {
+        (b_note.clone(), b_summary.clone())
+    };
+
+    assert_eq!(
+        fold["moved"].as_array().map(|m| m
+            .iter()
+            .map(|n| n["id"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>()),
+        Some(vec![moved.as_str()]),
+        "the operator is shown every note that would change hands: {preview}"
+    );
+    assert_eq!(
+        fold["removed"],
+        json!(false),
+        "the duplicate still holds a rival document, so it cannot go: {preview}"
+    );
+    assert_eq!(
+        preview["residuals"].as_array().map(|r| r
+            .iter()
+            .map(|n| (
+                n["id"].as_str().unwrap_or_default(),
+                n["cause"].as_str().unwrap_or_default()
+            ))
+            .collect::<Vec<_>>()),
+        Some(vec![(residual.as_str(), "fileInTheWay")]),
+        "and told exactly which document is still theirs to settle: {preview}"
+    );
+    assert!(
+        preview.get("merged").is_none(),
+        "a preview must not claim it changed anything: {preview}"
+    );
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(
+        provisioned_names(&tree),
+        before,
+        "a dry run must leave the tree exactly as it found it"
+    );
+    assert_eq!(
+        journal_len(&runtime).await,
+        events_before,
+        "a dry run must not announce anything either"
+    );
+
+    // -- the real thing -----------------------------------------------------
+    let (status, done) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/merge-duplicate-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        done.get("wouldMerge").is_none(),
+        "a real run must not answer in the preview's field: {done}"
+    );
+    assert_eq!(done["merged"][0]["id"], json!(loser));
+    assert_eq!(done["merged"][0]["removed"], json!(false));
+    assert_eq!(done["residuals"][0]["id"], json!(residual));
+
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    let parents: std::collections::HashMap<&str, &str> = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            (
+                node["id"].as_str().unwrap_or_default(),
+                node["parentId"].as_str().unwrap_or("-"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        parents.get(moved.as_str()),
+        Some(&winner.as_str()),
+        "the note moved into the surviving folder, under the id it was published as"
+    );
+    assert_eq!(
+        parents.get(residual.as_str()),
+        Some(&loser.as_str()),
+        "and the rival document did not move at all"
+    );
+    assert!(
+        parents.contains_key(loser.as_str()),
+        "the duplicate folder still holds something, so it must still be there"
+    );
+
+    // The move announces itself, because the repair runs through
+    // `runtime.workspace()` — the same announcer-wrapped handle the per-node
+    // routes use (issue #327).
+    assert!(
+        workspace_changes(&runtime)
+            .await
+            .contains(&(moved.clone(), "updated".to_string())),
+        "an open console must see the note change hands"
+    );
+
+    // -- the operator settles the collision, and runs it again --------------
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/workspace/{residual}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, again) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/merge-duplicate-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        again["merged"][0]["removed"],
+        json!(true),
+        "with nothing left in it, the duplicate finally goes: {again}"
+    );
+    assert_eq!(again["residuals"], json!([]));
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert!(
+        !tree
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["id"] == json!(loser)),
+        "the duplicate is gone from the tree: {tree}"
+    );
+    assert!(
+        workspace_changes(&runtime)
+            .await
+            .contains(&(loser.clone(), "removed".to_string())),
+        "and its removal was announced too"
+    );
+
+    // -- and once more, which must be a no-op -------------------------------
+    let (status, third) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/merge-duplicate-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(third["merged"], json!([]), "nothing left to merge: {third}");
+    assert_eq!(third["residuals"], json!([]));
+
+    // The route resolves under the platform scope form too, and is never
+    // captured as a node id by the `…/workspace/{node_id}` route.
+    let (status, scoped) = send(
+        &state,
+        "POST",
+        "/api/v1/companies/acme/workspace/merge-duplicate-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["wouldMerge"], json!([]));
+}
+
+/// Every `WorkspaceChanged` the company has journalled, as `(node id, change)`.
+async fn workspace_changes(
+    runtime: &std::sync::Arc<crate::runtime::CompanyRuntime>,
+) -> Vec<(String, String)> {
+    use crate::ports::types::CompanyEvent;
+    runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|stored| match stored.event {
+            CompanyEvent::WorkspaceChanged { node_id, change } => Some((node_id, change)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many events the company has journalled so far.
+async fn journal_len(runtime: &std::sync::Arc<crate::company::runtime::CompanyRuntime>) -> usize {
+    runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap()
+        .len()
 }
 
 #[tokio::test]
@@ -2256,6 +2987,68 @@ async fn a_copilot_thread_question_opens_no_board_card() {
     );
 }
 
+/// Issue #267: a question about the board's own state is answered, not carded.
+///
+/// This is the exact message that produced one of the six dead `backlog` cards
+/// on a live company. The route now triages it as `Answer`, so the
+/// deterministic card path stands down — and the reply still comes back OK,
+/// because triage decides what gets *written*, never whether the operator gets
+/// an answer.
+///
+/// The control half is the point: the same route, one sentence later, still
+/// opens a card for a real instruction. A test that only proved the question
+/// wrote nothing would also pass on a route that had stopped carding entirely.
+#[tokio::test]
+async fn a_question_about_the_board_opens_no_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    for ask in [
+        "what is there in the tasks list?",
+        "Tell what is there in the tasks list",
+        "list the tasks",
+        "show me the board",
+    ] {
+        let (status, body) = send(
+            &state,
+            "POST",
+            "/api/v1/company/chat",
+            Some(json!({ "message": ask })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "asking `{ask}` must still answer");
+        assert!(body["responses"].is_array(), "no reply for `{ask}`: {body}");
+
+        let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let cards = board.as_array().expect("the board lists cards");
+        assert!(
+            cards.is_empty(),
+            "the question `{ask}` left work on the board: {board}"
+        );
+    }
+
+    // Control: a real instruction on the same route still opens exactly one
+    // card, so this narrows the detector rather than switching it off.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({"message": "build the landing page"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cards = board.as_array().expect("the board lists cards");
+    assert_eq!(
+        cards.len(),
+        1,
+        "an instruction must still open exactly one card: {board}"
+    );
+}
+
 #[tokio::test]
 async fn chat_accepts_desk_id_and_replies() {
     let home_dir = home();
@@ -2360,6 +3153,16 @@ fn mcp_manifest() -> CompanyManifest {
 /// Boots an fs-backed company from a caller-supplied manifest (mirrors
 /// `state_with_company`, which pins the default manifest).
 async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
+    state_with_manifest_and_defaults(home, manifest, Vec::new()).await
+}
+
+/// Like [`state_with_manifest`], but with install-wide default MCP servers
+/// configured (issue #527), for asserting the default-override guards.
+async fn state_with_manifest_and_defaults(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    defaults: Vec<crate::company::McpServer>,
+) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -2375,6 +3178,51 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        })
+        .await
+        .unwrap();
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .with_default_mcp_servers(defaults)
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+    state
+}
+
+/// Like [`state_with_manifest`], but seeds operator-added overlay teammates too,
+/// so a test can assert MCP reachability over the full runtime roster — manifest
+/// agents plus overlay agents — the way `build_roster` composes it (issue #568).
+async fn state_with_manifest_and_overlays(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    overlay_agents: Vec<crate::ports::types::OverlayAgent>,
+) -> AppState {
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.to_path_buf());
+    let id = CompanyId::new("acme");
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents,
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -2520,6 +3368,219 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["server"]["source"], "manifest");
     assert_eq!(updated["server"]["enabled"], false);
+    // The mutating response carries reachability too (issue #568), so the console
+    // reflects who can reach the server right after an edit, not only on reload.
+    assert!(
+        updated["server"]["reachableBy"].is_array(),
+        "a mutating response also carries reachableBy"
+    );
+}
+
+/// Issue #568: each listed server carries the ids of the agents whose *effective*
+/// grants reach it — over the full runtime roster, manifest agents plus overlay
+/// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
+/// (and every overlay teammate, which has no tools row) inherits the wildcard and
+/// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
+/// that server.
+#[tokio::test]
+async fn mcp_reachability_lists_reaching_agents_including_overlay() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
+         [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
+         [[mcp_server]]\nname = \"linear\"\nendpoint = \"https://linear.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let overlay = crate::ports::types::OverlayAgent {
+        id: "helper".to_string(),
+        name: "Helper".to_string(),
+        role: "Assistant".to_string(),
+        description: None,
+        tools: Vec::new(),
+    };
+    let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let reach = |name: &str| -> Vec<String> {
+        let row = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("server `{name}` is listed"));
+        let mut ids: Vec<String> = row["reachableBy"]
+            .as_array()
+            .expect("reachableBy serializes as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    // notion: the narrowed ceo, the wildcard-inheriting eng, and the overlay.
+    assert_eq!(reach("notion"), vec!["ceo", "eng", "helper"]);
+    // linear: only the wildcard holders — ceo scoped itself out of it.
+    assert_eq!(
+        reach("linear"),
+        vec!["eng", "helper"],
+        "ceo narrowed to mcp:notion, so it cannot reach linear"
+    );
+}
+
+/// Issue #568: a server no agent's grants cover comes back with an **empty**
+/// `reachableBy` — the signal the console flags loudly rather than showing a
+/// healthy server that is silently unreachable. Here a narrow company
+/// `allow = ["mcp:docs"]` reaches `docs` but never `notion`.
+#[tokio::test]
+async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"mcp:docs\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n\
+         [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, manifest).await;
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = |name: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("server `{name}` is listed"))
+            .clone()
+    };
+    assert_eq!(
+        row("docs")["reachableBy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ceo"],
+        "the company allow covers mcp:docs for the one agent"
+    );
+    assert!(
+        row("notion")["reachableBy"].as_array().unwrap().is_empty(),
+        "no agent's grants cover mcp:notion — the flagged zero case"
+    );
+}
+
+/// Issue #568: a **disabled** server reaches nobody, however wide the grants.
+/// `registry_for_agent` filters on `decl.enabled && grants_cover_server(..)`, so
+/// an agent holding `mcp:docs` is handed no such tool while the server is off —
+/// reporting it as reachable would be the console/harness disagreement this
+/// feature exists to remove. Asserted on both readers: the mutating response
+/// that turns the server off, and the later list.
+#[tokio::test]
+async fn mcp_reachability_is_empty_for_a_disabled_server() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, manifest).await;
+
+    let reach = |body: &serde_json::Value| -> Vec<String> {
+        body["reachableBy"]
+            .as_array()
+            .expect("reachableBy serializes as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Enabled: the one agent's grant covers it.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reach(&list[0]), vec!["ceo".to_string()]);
+
+    // Disabling it empties reachability in the mutating response itself.
+    let (status, updated) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/mcp/servers/docs",
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["server"]["enabled"], false);
+    assert!(
+        reach(&updated["server"]).is_empty(),
+        "a disabled server is handed to no agent, so it is reachable by none"
+    );
+
+    // And the list agrees on the next read — the grant is unchanged, the server is off.
+    let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(list[0]["enabled"], false);
+    assert!(
+        reach(&list[0]).is_empty(),
+        "the list reader applies the same enabled filter as the harness"
+    );
+}
+
+/// An install default is disabled by its *first* runtime override: no prior
+/// runtime entry exists to patch, so `update_server` must fall back to the
+/// default declaration as its patch base rather than 404 (issue #527).
+#[tokio::test]
+async fn mcp_default_server_can_be_disabled_with_its_first_override() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let default = crate::company::McpServer {
+        name: "deepwiki".to_string(),
+        endpoint: "https://deepwiki.example/mcp".to_string(),
+        ..Default::default()
+    };
+    let state = state_with_manifest_and_defaults(&home, manifest(), vec![default]).await;
+
+    // Cold, the default is visible and badged `default`.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list[0]["name"], "deepwiki");
+    assert_eq!(list[0]["source"], "default");
+
+    // The first override disables it — the override persists alongside the
+    // default, keeping the effective body but flipping `enabled` off.
+    let (status, updated) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/mcp/servers/deepwiki",
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["server"]["enabled"], false);
+    assert_eq!(
+        updated["server"]["source"], "default",
+        "an override inherits the default badge, so delete still refuses it"
+    );
+
+    // Delete still refuses: the declaration lives in the install config, and the
+    // disable override is the supported toggle.
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        "/api/v1/company/mcp/servers/deepwiki",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // The disable took: listing reflects `enabled: false`.
+    let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(list[0]["enabled"], false);
 }
 
 /// Without the `openhuman` feature there is no MCP transport, so live discovery
@@ -2638,6 +3699,8 @@ async fn state_with_source_dir(
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -2959,6 +4022,8 @@ async fn state_with_telegram_at(
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -3421,6 +4486,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     };
     for t in [
         card("t-parent", "Parent", None),
@@ -3469,6 +4536,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
+            origin_chat_id: None,
         },
     ] {
         runtime.events().append(&company, event).await.unwrap();
@@ -3607,6 +4675,8 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     }
 }
 
@@ -4272,6 +5342,8 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -4389,6 +5461,8 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -4425,6 +5499,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
+            origin_chat_id: None,
         },
         // After the window closed — must not leak either.
         approval("after"),
@@ -4491,6 +5566,8 @@ async fn dispatched_task(
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -4576,7 +5653,7 @@ async fn task_timeline_reports_the_wait_an_approval_actually_caused() {
             &parked_effect(),
             parked_at,
             TaskLink::Task { id: "t-1".into() },
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -4659,7 +5736,7 @@ async fn expired_approval_is_labelled_as_an_expiry_and_carries_its_wait() {
             &parked_effect(),
             parked_at,
             TaskLink::Task { id: "t-1".into() },
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -4715,7 +5792,7 @@ async fn a_wait_that_began_before_dispatch_is_clamped_to_the_run_window() {
             &parked_effect(),
             dispatched_at - 3_600_000,
             TaskLink::Task { id: "t-1".into() },
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -4777,7 +5854,7 @@ async fn a_currently_parked_approval_surfaces_as_a_live_wait() {
             &parked_effect(),
             parked_at,
             TaskLink::Task { id: "t-1".into() },
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -4827,6 +5904,7 @@ async fn a_task_that_never_waited_reports_no_waiting_fields() {
                 output: "shipped".into(),
                 column: "in_review".into(),
                 artifact_ids: Vec::new(),
+                origin_chat_id: None,
             },
         )
         .await
@@ -4879,7 +5957,7 @@ async fn a_parked_approval_appears_on_its_own_task() {
             &parked_effect(),
             parked_at,
             TaskLink::Task { id: "t-1".into() },
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -4946,6 +6024,8 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -4972,7 +6052,7 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 &parked_effect(),
                 dispatched_at + 5,
                 TaskLink::Task { id: owner.into() },
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -5048,7 +6128,7 @@ async fn a_resolved_approval_reports_its_verdict_and_wait_on_the_tab() {
             &parked_effect(),
             parked_at,
             TaskLink::Task { id: "t-1".into() },
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -5129,7 +6209,7 @@ async fn a_task_with_no_approvals_of_its_own_reports_an_empty_list() {
             TaskLink::Task {
                 id: "t-other".into(),
             },
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -5176,7 +6256,7 @@ async fn an_unlinked_approval_is_not_absorbed_by_the_running_card() {
             &parked_effect(),
             dispatched_at + 5,
             TaskLink::Unlinked,
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -5249,7 +6329,7 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
             &under_run("run-b"),
             dispatched_at + 5,
             TaskLink::Unlinked,
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -5263,7 +6343,7 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
             &under_run("run-c"),
             dispatched_at + 6,
             TaskLink::Task { id: "t-1".into() },
-            None,
+            ApprovalConversation::default(),
             None,
         )
         .await
@@ -5582,6 +6662,28 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
             "POST",
             "/api/v1/company/composio/authorize",
             Some(json!({ "toolkit": "gmail" })),
+        ),
+        // Revoking one of those accounts is the same decision as choosing it
+        // (issue #404) — a member who cannot connect must not be able to
+        // disconnect either.
+        (
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1",
+            None,
+        ),
+        // And choosing WHICH of two accounts every agent acts as (issue #820) —
+        // the same decision again, one step finer: it does not change what the
+        // company is connected to, only what it sends as, which is precisely
+        // the kind of company-wide answer this plane exists to hold.
+        (
+            "PUT",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
+        ),
+        (
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1/default",
+            None,
         ),
         // The model every agent thinks with, and the key it is billed against.
         (
@@ -6158,6 +7260,9 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
             updated_at_millis: 1,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         },
         Some("the agent's draft"),
     )
@@ -6219,6 +7324,8 @@ async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
             generated_at_millis: 1,
             run_id: "run-build-1".to_string(),
         }),
+        origin_run_id: None,
+        origin_workflow_id: None,
     };
     runtime
         .tasks()
@@ -6469,6 +7576,882 @@ async fn a_card_can_be_created_as_a_workflow_deliverable() {
 }
 
 // ---------------------------------------------------------------------------
+// Binary workspace nodes over HTTP (issue #553)
+// ---------------------------------------------------------------------------
+
+/// Sends a `multipart/form-data` upload with one file part and an optional
+/// `parentId`, hand-rolling the body so the test exercises the real
+/// `Multipart` extractor rather than a stub.
+async fn upload_file(
+    state: &AppState,
+    filename: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+    parent_id: Option<&str>,
+) -> (StatusCode, Value) {
+    const BOUNDARY: &str = "----opencompany553boundary";
+    let mut body: Vec<u8> = Vec::new();
+    if let Some(parent) = parent_id {
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"parentId\"\r\n\r\n{parent}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    body.extend_from_slice(
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    if let Some(ct) = content_type {
+        body.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
+    }
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/workspace/upload")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let out = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = if out.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&out).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+/// The headline of #553 over HTTP: a PNG uploads, appears in the tree with its
+/// metadata, and streams back byte-exactly — the round trip that used to be
+/// impossible because the create route only took a JSON body.
+#[tokio::test]
+async fn an_uploaded_image_round_trips_through_the_blob_route() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Not valid UTF-8, so nothing on this path can be quietly routing it
+    // through a `String`.
+    let png: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00,
+    ];
+    let (status, node) = upload_file(&state, "hero.png", Some("image/png"), &png, None).await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(node["name"], "hero.png");
+    assert_eq!(node["mime"], "image/png");
+    assert_eq!(node["size"], png.len() as u64);
+    let sha = node["sha256"]
+        .as_str()
+        .expect("a digest is returned")
+        .to_string();
+    assert_eq!(sha.len(), 64, "the store's digest, not the caller's");
+    assert!(
+        node["content"].is_null(),
+        "a payload is never inlined into the node body"
+    );
+    let id = node["id"].as_str().unwrap().to_string();
+
+    // It is in the tree, with its metadata, so the console can decide how to
+    // render it without opening it.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id.as_str())
+        .expect("the uploaded node is in the tree");
+    assert_eq!(listed["mime"], "image/png");
+    assert_eq!(listed["size"], png.len() as u64);
+
+    // The payload streams back exactly, with the headers a browser needs.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["etag"], format!("\"{sha}\""));
+    assert!(
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("hero.png")
+    );
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(got.to_vec(), png, "the bytes must survive the round trip");
+}
+
+/// Issue #666: the filesystem backend derives payload paths from sibling
+/// names, so accepting the same name twice used to leave two ids pointing at
+/// one file. The second upload overwrote the first while the first node kept
+/// its old length and digest.
+///
+/// Refusing the colliding create is the filesystem backend's honest answer: it
+/// preserves the first payload and prevents the blob route from serving bytes
+/// under metadata computed for a different file.
+#[tokio::test]
+async fn a_same_name_upload_is_refused_without_overwriting_the_first_blob() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let first_bytes = vec![0x89, b'P', b'N', b'G', 0xff];
+    let (status, first) =
+        upload_file(&state, "chart.png", Some("image/png"), &first_bytes, None).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let first_sha = first["sha256"].as_str().unwrap().to_string();
+
+    let second_bytes = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 0xff];
+    let (status, refusal) =
+        upload_file(&state, "chart.png", Some("image/png"), &second_bytes, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["code"], "conflict", "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("chart.png")),
+        "the operator can identify the occupied name: {refusal}"
+    );
+
+    let response = blob_response(&state, &first_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-length"],
+        first_bytes.len().to_string(),
+        "the surviving node still describes its own payload"
+    );
+    assert_eq!(response.headers()["etag"], format!("\"{first_sha}\""));
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        body.as_ref(),
+        first_bytes.as_slice(),
+        "the refused upload must not overwrite the first file"
+    );
+
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tree.as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["name"] == "chart.png")
+            .count(),
+        1,
+        "a rejected collision must not leave a second metadata row"
+    );
+
+    // The physical paths differ when the parent differs, so this is not a
+    // workspace-wide filename ban.
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Archive", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap();
+    let (status, nested) = upload_file(
+        &state,
+        "chart.png",
+        Some("image/png"),
+        &second_bytes,
+        Some(folder_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{nested}");
+    assert_eq!(nested["parentId"], folder_id);
+}
+
+/// A Markdown upload stays a **note**, not a payload. Storing it as bytes would
+/// silently cost it the editor, the diff-free text read, backlinks and search —
+/// so the decision is asserted rather than left to whichever branch ran.
+#[tokio::test]
+async fn a_markdown_upload_is_stored_as_a_note_not_as_bytes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "brief.md",
+        Some("text/markdown"),
+        b"# Launch\n\nLinks to [[voice]].",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert!(
+        node["mime"].is_null(),
+        "a note carries no mime — that field is what marks a node binary"
+    );
+    let id = node["id"].as_str().unwrap().to_string();
+
+    // …and it reads back through the *text* route, with backlinks.
+    let (status, file) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(file["content"].as_str().unwrap().contains("# Launch"));
+}
+
+/// A file *typed* as text whose bytes are not UTF-8 becomes a payload. The
+/// decision is made on the bytes, so a mislabelled upload cannot be mangled
+/// into a note.
+#[tokio::test]
+async fn a_mislabelled_text_upload_is_stored_as_bytes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "notes.txt",
+        Some("text/plain"),
+        &[0xff, 0xfe, 0x01],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(
+        node["mime"], "text/plain",
+        "it keeps the declared type, but is stored as a payload"
+    );
+    assert_eq!(node["size"], 3);
+}
+
+/// The two read routes are not interchangeable, and asking the wrong one says
+/// which is right instead of answering with an empty body.
+#[tokio::test]
+async fn the_text_and_blob_reads_refuse_each_others_nodes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, image) = upload_file(&state, "chart.png", Some("image/png"), &[0x89, 0xff], None).await;
+    let image_id = image["id"].as_str().unwrap().to_string();
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "voice.md", "kind": "file", "content": "# Voice"})),
+    )
+    .await;
+    let note_id = note["id"].as_str().unwrap().to_string();
+
+    // Text read of a payload: refused, and it names the route that works.
+    let (status, body) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{image_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("workspace/blob/"),
+        "the refusal must point at the route that serves it: {body}"
+    );
+
+    // Blob read of a note: a plain 404, exactly as for an id that names
+    // nothing — the two are deliberately indistinguishable.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{note_id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// The blob route never hands a browser a document (issue #667)
+// ---------------------------------------------------------------------------
+
+/// `GET …/workspace/blob/{id}` as a browser navigating to it would.
+async fn blob_response(state: &AppState, id: &str) -> axum::response::Response {
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    router(state.clone()).oneshot(request).await.unwrap()
+}
+
+/// The header triple a response must show before it can be called inert:
+/// a type that is not a document, a browser told not to second-guess it, and a
+/// disposition that downloads rather than renders.
+fn assert_not_executable(response: &axum::response::Response, context: &str) {
+    let content_type = response.headers()["content-type"].to_str().unwrap();
+    let disposition = response.headers()["content-disposition"].to_str().unwrap();
+    let nosniff = response
+        .headers()
+        .get("x-content-type-options")
+        .map(|v| v.to_str().unwrap().to_string());
+
+    assert!(
+        disposition.starts_with("attachment;"),
+        "{context}: a browser must download this, not render it — got {disposition:?}"
+    );
+    assert_eq!(
+        nosniff.as_deref(),
+        Some("nosniff"),
+        "{context}: without nosniff the type below is a suggestion"
+    );
+    for executable in [
+        "text/html",
+        "image/svg+xml",
+        "application/xhtml+xml",
+        "text/xml",
+    ] {
+        assert!(
+            !content_type.starts_with(executable),
+            "{context}: served as {content_type:?}, which a browser parses into a \
+             document with a script context"
+        );
+    }
+}
+
+/// The vector in #667, end to end: a payload stored under a document media type
+/// is not servable as a document.
+///
+/// The bytes carry a trailing `0xff` so the upload takes the **binary** branch —
+/// a valid-UTF-8 `text/html` upload is stored as a prose note and never reaches
+/// this route at all. That byte is not a contrivance to reach the branch: a
+/// browser decoding these bytes substitutes U+FFFD for it and runs the script
+/// exactly the same, so this is the real shape of the attack.
+///
+/// The assertion that matters is the one about the *stored* mime: it is still
+/// `text/html` afterwards. The fix is on the read path precisely so that every
+/// payload already sitting in a tree under a caller's chosen mime is covered,
+/// which an upload-side sanitiser would not have been.
+#[tokio::test]
+async fn a_blob_stored_as_html_cannot_be_served_as_a_document() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let payload = b"<script>fetch('/api/v1/company/team')</script>\xff";
+    let (status, node) = upload_file(&state, "payload.png", Some("text/html"), payload, None).await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(
+        node["mime"], "text/html",
+        "the stored mime is untouched — the read path is what neutralises it"
+    );
+    let id = node["id"].as_str().unwrap().to_string();
+
+    let response = blob_response(&state, &id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream",
+        "a type nobody vouched for is served as opaque bytes"
+    );
+    assert_not_executable(&response, "an html-typed payload");
+
+    // Neutralised, not corrupted: an operator who downloads it still gets the
+    // file they stored.
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(got.to_vec(), payload.to_vec());
+}
+
+/// SVG is why an `image/*` prefix rule would not have closed this.
+///
+/// It is an image the console previews and a document a browser executes, so the
+/// two halves are answered separately: the type survives (an `<img>` will not
+/// decode SVG without it, and inside an `<img>` the SVG spec's secure static
+/// mode means no script runs), and the disposition becomes `attachment` so the
+/// same bytes at the top of a tab are downloaded instead of rendered.
+#[tokio::test]
+async fn an_svg_keeps_its_type_for_the_console_but_is_never_rendered_as_a_document() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>fetch('/api/v1/company/team')</script></svg>"#;
+    let (status, node) = upload_file(&state, "logo.svg", Some("image/svg+xml"), svg, None).await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    let id = node["id"].as_str().unwrap().to_string();
+
+    let response = blob_response(&state, &id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "image/svg+xml",
+        "the console's <img> preview needs this exact type to decode the bytes"
+    );
+    let disposition = response.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disposition.starts_with("attachment;"),
+        "a top-level navigation must download an SVG, not render it: {disposition:?}"
+    );
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+}
+
+/// An arbitrary caller-declared type — one nobody has ever vetted — is opaque.
+/// This is the closed-list half of the fix: the default arm is the safe one, so
+/// a media type invented after this was written is downloaded, not rendered.
+#[tokio::test]
+async fn an_unrecognised_stored_type_is_served_as_opaque_bytes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    for (name, declared) in [
+        ("doc.xhtml", "application/xhtml+xml"),
+        ("sheet.xml", "text/xml"),
+        ("archive.zip", "application/zip"),
+    ] {
+        let (status, node) =
+            upload_file(&state, name, Some(declared), &[0x50, 0x4b, 0xff], None).await;
+        assert_eq!(status, StatusCode::OK, "{node}");
+        let id = node["id"].as_str().unwrap().to_string();
+        let response = blob_response(&state, &id).await;
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/octet-stream",
+            "{declared} is not on the inline list"
+        );
+        assert_not_executable(&response, declared);
+    }
+}
+
+/// The behaviour #611 built, pinned so the fix above cannot quietly cost it: an
+/// image still arrives with its own type and `inline`, which is what makes the
+/// console's preview and a direct navigation both show the picture.
+#[tokio::test]
+async fn an_image_still_renders_inline_with_its_own_type() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "hero.png",
+        Some("image/png"),
+        &[0x89, b'P', b'N', b'G', 0xff],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    let id = node["id"].as_str().unwrap().to_string();
+
+    let response = blob_response(&state, &id).await;
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    let disposition = response.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disposition.starts_with("inline;"),
+        "an image must still render in place: {disposition:?}"
+    );
+    assert!(disposition.contains("hero.png"));
+}
+
+/// An upload lands under the folder it names, like any other node.
+#[tokio::test]
+async fn an_upload_can_target_a_parent_folder() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Shots", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap().to_string();
+
+    let (status, node) = upload_file(
+        &state,
+        "a.png",
+        Some("image/png"),
+        &[0x89, 0x50],
+        Some(&folder_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(node["parentId"], folder_id.as_str());
+}
+
+// ---------------------------------------------------------------------------
+// An over-cap upload says "too large", not "malformed" (issue #647)
+// ---------------------------------------------------------------------------
+
+/// The boundary the raw-body helpers below agree on.
+const OVERSIZE_BOUNDARY: &str = "----opencompany647boundary";
+
+/// Posts an already-built body at the upload route.
+///
+/// [`upload_file`] assembles its body into a `Vec`, which is the one thing these
+/// tests cannot do: the smallest of them weighs 65 MiB and two of them have to
+/// out-weigh a 256 MiB limit. Taking a `Body` lets the caller stream one — or
+/// malform one on purpose.
+async fn post_upload(state: &AppState, body: Body) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/workspace/upload")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={OVERSIZE_BOUNDARY}"),
+        )
+        .body(body)
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let out = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = serde_json::from_slice(&out).unwrap_or(Value::Null);
+    (status, value)
+}
+
+/// A body of `prefix` + `payload` zero bytes + `suffix`, streamed in 1 MiB
+/// frames with a yield before each.
+///
+/// The framing is load-bearing, not tidiness. A contiguous body would make the
+/// *test process* hold the whole payload before the server saw a byte of it,
+/// and the multipart reader drains every frame that is ready in one poll — so
+/// an always-ready stream is buffered whole however finely it was cut up. The
+/// yield keeps the reader one frame ahead of the parser rather than a whole
+/// body ahead, which is what lets a 257 MiB request that the handler *skips*
+/// cost about a megabyte instead of 257 of them.
+fn streamed_multipart(prefix: Vec<u8>, payload: usize, suffix: Vec<u8>) -> Body {
+    const FRAME: usize = 1024 * 1024;
+    let prefix = std::sync::Arc::new(prefix);
+    let suffix = std::sync::Arc::new(suffix);
+    let filler = bytes::Bytes::from(vec![0u8; FRAME]);
+    let frames = payload.div_ceil(FRAME);
+
+    let stream = futures::stream::unfold(0usize, move |step| {
+        let prefix = prefix.clone();
+        let suffix = suffix.clone();
+        let filler = filler.clone();
+        async move {
+            tokio::task::yield_now().await;
+            let frame = if step == 0 {
+                bytes::Bytes::from(prefix.as_ref().clone())
+            } else if step <= frames {
+                filler.slice(..(payload - (step - 1) * FRAME).min(FRAME))
+            } else if step == frames + 1 {
+                bytes::Bytes::from(suffix.as_ref().clone())
+            } else {
+                return None;
+            };
+            Some((Ok::<_, std::io::Error>(frame), step + 1))
+        }
+    });
+    Body::from_stream(stream)
+}
+
+/// The opening of a `file` part, up to (not including) its bytes.
+fn file_part_prefix(filename: &str) -> Vec<u8> {
+    format!(
+        "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// The node names currently in the workspace tree.
+async fn tree_names(state: &AppState) -> Vec<String> {
+    let (status, tree) = send(state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    provisioned_names(&tree)
+}
+
+/// The headline of #647: a file over the store's per-file cap is refused as
+/// **too large**, with the sentence an operator can act on.
+///
+/// This failed before the fix, and not subtly — the route's `DefaultBodyLimit`
+/// was the same 64 MiB as the cap, so it truncated the body first and the
+/// truncation surfaced as a parse failure: `400 invalid request: unreadable
+/// file part: Error parsing multipart/form-data request`. A correctly-formed
+/// request, described as broken, for a reason the operator could not guess.
+/// The store's refusal below existed the whole time and could never be reached
+/// through this route.
+#[tokio::test]
+async fn a_file_over_the_per_file_cap_is_refused_as_too_large_not_as_malformed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    // One megabyte over the 64 MiB default: enough to break the cap, nowhere
+    // near the 256 MiB the route will now read.
+    let oversize = 65 * 1024 * 1024;
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(
+            file_part_prefix("hero.mov"),
+            oversize,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(message.contains("hero.mov"), "names the file: {message}");
+    assert!(message.contains("65.0 MiB"), "names its size: {message}");
+    assert!(message.contains("64.0 MiB"), "names the limit: {message}");
+    assert!(message.contains("Nothing was stored"), "{message}");
+
+    // The two words the bug used to answer with. Asserting on their absence is
+    // the regression guard: a future change that lets the body limit preempt
+    // the store again would put them straight back.
+    assert!(
+        !message.contains("unreadable file part"),
+        "the request was not unreadable: {message}"
+    );
+    assert!(
+        !message.contains("Error parsing"),
+        "nor was it malformed: {message}"
+    );
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// A file part declared as a texty type, so the upload takes the **text**
+/// branch rather than the binary one.
+fn text_file_part_prefix(filename: &str) -> Vec<u8> {
+    format!(
+        "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"{filename}\"\r\nContent-Type: text/csv\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// Issue #665: an over-cap upload is refused even when its bytes are valid
+/// UTF-8.
+///
+/// The store's quota decorator meters **binary payloads only**, and that is a
+/// deliberate narrowing — `src/runtime/workspace_quota.rs` says so, on the
+/// grounds that "a note is bounded by what a model will emit into a tool call".
+/// That premise holds for every writer the decorator covers and is false for
+/// this route, which is where arbitrary operator-supplied bytes enter the tree.
+///
+/// So a 65 MiB `.csv` — valid UTF-8, therefore classified as prose — used to be
+/// stored with **no size check at all**, while the byte-identical payload under
+/// a binary content type was refused. Same request, same size, opposite answer,
+/// decided by whether the bytes happened to decode.
+///
+/// The narrowing itself is untouched: an agent's note is still unmetered, and
+/// `tree_quota_gb` still counts binary payloads alone.
+#[tokio::test]
+async fn an_over_cap_upload_is_refused_even_when_its_bytes_are_valid_utf8() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    // NUL bytes: valid UTF-8, so `text_body` decodes them and the upload takes
+    // the text branch. One megabyte over the 64 MiB default cap.
+    let oversize = 65 * 1024 * 1024;
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(
+            text_file_part_prefix("export.csv"),
+            oversize,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(message.contains("export.csv"), "names the file: {message}");
+    assert!(message.contains("65.0 MiB"), "names its size: {message}");
+    assert!(message.contains("64.0 MiB"), "names the limit: {message}");
+    assert!(message.contains("Nothing was stored"), "{message}");
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// The other half of #665, and the reason the fix is a cap rather than a
+/// reclassification: an *under*-cap text upload is still stored as prose.
+///
+/// Refusing large text must not turn ordinary text uploads into opaque blobs — a
+/// `.csv` an operator uploads is meant to stay searchable, backlinkable and
+/// editable in the console. If this ever fails, the fix has started deciding
+/// storage representation instead of bounding size.
+#[tokio::test]
+async fn an_under_cap_text_upload_is_still_stored_as_prose() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "notes.csv",
+        Some("text/csv"),
+        b"a,b,c\n1,2,3\n",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(
+        node["content"], "a,b,c\n1,2,3\n",
+        "a text upload keeps its body: {node}"
+    );
+    assert!(
+        node.get("mime").is_none() || node["mime"].is_null(),
+        "and is a prose note, not a binary payload: {node}"
+    );
+}
+
+/// The route's own backstop is classified too, and it fires while *skipping* a
+/// part — the reader can notice the limit anywhere it reads, not only where the
+/// handler wants bytes.
+///
+/// Without this the classifier arm ships untested and a drift in axum's status
+/// mapping would silently regress the answer to the old lying 400.
+#[tokio::test]
+async fn a_body_over_the_route_limit_is_classified_while_a_part_is_skipped() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    // A field the handler ignores by name, so it is drained rather than
+    // buffered — and the drain runs past the 256 MiB the route will read.
+    let prefix = format!(
+        "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"ignored\"\r\n\r\n"
+    )
+    .into_bytes();
+    let mut suffix = format!("\r\n--{OVERSIZE_BOUNDARY}\r\n").into_bytes();
+    suffix.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\nxx\r\n",
+    );
+    suffix.extend_from_slice(format!("--{OVERSIZE_BOUNDARY}--\r\n").as_bytes());
+
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(prefix, 257 * 1024 * 1024, suffix),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(
+        message.contains("256.0 MiB"),
+        "names the ceiling: {message}"
+    );
+    assert!(message.contains("Nothing was stored"), "{message}");
+    // The size is deliberately absent: the body was cut off, so the true total
+    // is not knowable here and a guess would be worse than silence.
+    assert!(
+        !message.contains("Error parsing"),
+        "still not a parse failure: {message}"
+    );
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// The same backstop, noticed at the other read site — while the handler is
+/// pulling the `file` part's bytes rather than skipping past someone else's.
+#[tokio::test]
+async fn a_file_part_over_the_route_limit_is_classified_too() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(
+            file_part_prefix("enormous.bin"),
+            257 * 1024 * 1024,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(
+        message.contains("256.0 MiB"),
+        "names the ceiling: {message}"
+    );
+    assert!(
+        !message.contains("unreadable file part"),
+        "the part was readable, just too long: {message}"
+    );
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// The counter-test, and the half of the issue that is easiest to lose: a
+/// genuinely malformed body still answers 400.
+///
+/// Classifying by size must not swallow the case the old message was right
+/// about. These two shapes stay `invalid_request` — and stay distinguishable
+/// from the 413s above, which is the whole point of the change.
+#[tokio::test]
+async fn a_malformed_multipart_body_is_still_a_400() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // The declared boundary never appears.
+    let (status, body) =
+        post_upload(&state, Body::from(b"this is not a multipart body".to_vec())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request", "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|m| m.contains("malformed multipart upload")),
+        "{body}"
+    );
+
+    // A part that opens and never closes: headers, some bytes, no terminating
+    // boundary. Truncated — the shape the body limit used to be mistaken for.
+    let mut unterminated = file_part_prefix("half.bin");
+    unterminated.extend_from_slice(b"partial bytes and then nothing");
+    let (status, body) = post_upload(&state, Body::from(unterminated)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request", "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|m| m.contains("unreadable file part")),
+        "{body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // First-run company setup (docs/spec/runtime/company-setup.md)
 // ---------------------------------------------------------------------------
 
@@ -6611,6 +8594,432 @@ async fn setup_answers_an_empty_body_with_the_generic_team() {
     assert!(
         body["agents"].as_array().expect("agents").len() >= 4,
         "{body}"
+    );
+}
+
+/// `[workspace] max_blob_mb` above the default is a real knob again.
+///
+/// It never was one: the route stopped reading at 64 MiB whatever a company had
+/// configured, so raising the cap bought nothing but a different way to fail.
+/// A company at 128 MiB can now actually store a 65 MiB file.
+#[tokio::test]
+async fn a_company_that_raised_its_blob_cap_can_use_it() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_quota(
+        &home,
+        crate::runtime::WorkspaceQuota {
+            max_blob_bytes: 128 * 1024 * 1024,
+            tree_quota_bytes: None,
+        },
+    )
+    .await;
+
+    let size = 65 * 1024 * 1024;
+    let (status, node) = post_upload(
+        &state,
+        streamed_multipart(
+            file_part_prefix("raised.bin"),
+            size,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(node["name"], "raised.bin");
+    assert_eq!(node["size"], size as u64);
+    assert!(tree_names(&state).await.contains(&"raised.bin".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #705 — an irreversible effect's amount is admin-only
+// ---------------------------------------------------------------------------
+
+/// Reads a task's detail as a specific principal.
+///
+/// The harness signs every other request in as an admin, which is exactly why
+/// this exists: a redaction verified only as an admin passes identically
+/// against no redaction at all.
+async fn detail_as(state: &AppState, id: &str, cookie: String) -> Value {
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/tasks/{id}"))
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Issue #705: any Member could read the dollar value of every irreversible
+/// effect on a card.
+///
+/// #618 restricted the money on an approval — the effect nobody has signed off
+/// yet. The *executed* effect carries the same number through a different DTO
+/// on a different route, and that route had no role check at all.
+///
+/// **Asserted on the serialized JSON, not on the struct.** `amount_usd` carries
+/// `skip_serializing_if`, so the wire shape is the only thing that settles
+/// whether the field shipped; a struct-level assertion can pass while the bytes
+/// still carry the amount.
+#[tokio::test]
+async fn a_member_does_not_see_an_irreversible_effects_amount() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+    let (status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Pay the Q3 retainer"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    let id = task["id"].as_str().unwrap().to_string();
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    // Two effects: one carrying money, one not. The second is the control that
+    // keeps "withheld" and "there was never an amount" distinguishable.
+    runtime
+        .journal
+        .record_executed(
+            "exec-705-paid",
+            crate::runtime::journal::ExecutedEffect {
+                kind: "payment.send".to_string(),
+                amount_usd: Some(2400.0),
+                task_id: Some(id.clone()),
+                at_millis: 1_000,
+                irreversible: true,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .journal
+        .record_executed(
+            "exec-705-free",
+            crate::runtime::journal::ExecutedEffect {
+                kind: "email.send".to_string(),
+                amount_usd: None,
+                task_id: Some(id.clone()),
+                at_millis: 2_000,
+                irreversible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The admin signs these off, so the admin sees what they cost.
+    let as_admin = detail_as(
+        &state,
+        &id,
+        crate::server::test_support::fixed_cookie("acme"),
+    )
+    .await;
+    let admin_effects = as_admin["irreversibleEffects"].as_array().unwrap();
+    assert_eq!(admin_effects.len(), 2, "{as_admin}");
+    let admin_paid = admin_effects
+        .iter()
+        .find(|e| e["kind"] == "payment.send")
+        .unwrap();
+    assert_eq!(admin_paid["amountUsd"].as_f64(), Some(2400.0), "{as_admin}");
+    assert!(
+        admin_paid.get("amountHidden").is_none(),
+        "an admin is not told anything was withheld: {as_admin}"
+    );
+
+    let as_member = detail_as(
+        &state,
+        &id,
+        crate::server::test_support::member_cookie("acme"),
+    )
+    .await;
+    let member_effects = as_member["irreversibleEffects"].as_array().unwrap();
+    assert_eq!(
+        member_effects.len(),
+        2,
+        "the rows survive — a member must still see what a retry would re-do: {as_member}"
+    );
+    let member_paid = member_effects
+        .iter()
+        .find(|e| e["kind"] == "payment.send")
+        .unwrap();
+
+    // The leak, closed. Absent from the wire, not null: `skip_serializing_if`.
+    assert!(
+        member_paid.get("amountUsd").is_none(),
+        "the amount must not reach a member: {as_member}"
+    );
+    // Hidden is not absent — the console has to be able to say why.
+    assert_eq!(
+        member_paid["amountHidden"], true,
+        "a withheld amount must be distinguishable from an effect that cost \
+         nothing: {as_member}"
+    );
+    // Everything that makes the retry warning legible survives.
+    assert_eq!(member_paid["kind"], "payment.send");
+    assert_eq!(member_paid["atMillis"].as_u64(), Some(1_000));
+
+    // The control: an effect that never carried money is not reported as
+    // redacted, or "nothing to show" and "not shown to you" collapse.
+    let member_free = member_effects
+        .iter()
+        .find(|e| e["kind"] == "email.send")
+        .unwrap();
+    assert!(member_free.get("amountUsd").is_none(), "{as_member}");
+    assert!(
+        member_free.get("amountHidden").is_none(),
+        "an effect with no amount was not redacted: {as_member}"
+    );
+}
+
+/// The export path is covered by construction, because it is handed the same
+/// value.
+///
+/// `assemble_detail` is deliberately shared between the JSON route and the
+/// export document (issue #352 calls that sharing "the export's redaction
+/// guarantee"). This drives that shared function directly with a
+/// member-scoped principal, so the guarantee is asserted at the seam both
+/// readers pass through rather than only at the JSON one.
+///
+/// **Why not assert on the exported HTML alone.** The export template does not
+/// currently render effect amounts at all, so an HTML-only assertion would pass
+/// whether or not the redaction exists — coverage that cannot fail. The HTML
+/// check below is kept as a secondary guard against a future template that does
+/// render them; the assertion that actually holds the line is the one on the
+/// shared projection.
+#[tokio::test]
+async fn the_export_document_is_built_from_the_redacted_detail() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+    let (status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Pay the Q3 retainer"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    let id = task["id"].as_str().unwrap().to_string();
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    runtime
+        .journal
+        .record_executed(
+            "exec-705-export",
+            crate::runtime::journal::ExecutedEffect {
+                kind: "payment.send".to_string(),
+                amount_usd: Some(2400.0),
+                task_id: Some(id.clone()),
+                at_millis: 1_000,
+                irreversible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The seam both readers share, driven as a member. `assemble_detail` is
+    // exactly what `export_task` calls.
+    let as_member = super::tasks::assemble_detail(
+        &super::ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: false,
+        },
+        &id,
+    )
+    .await
+    .expect("detail assembles");
+    // Serialized, not read off the struct: `skip_serializing_if` means the wire
+    // shape is what settles whether the amount shipped.
+    let wire = serde_json::to_value(&as_member.irreversible_effects).unwrap();
+    let paid = &wire.as_array().unwrap()[0];
+    assert!(
+        paid.get("amountUsd").is_none(),
+        "the shared projection the export renders must already be redacted: {wire}"
+    );
+    assert_eq!(paid["amountHidden"], true, "{wire}");
+
+    // …and the same principal reading it as an admin still gets the number, so
+    // the assertion above is redaction rather than the field being gone.
+    let as_admin = super::tasks::assemble_detail(
+        &super::ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+        },
+        &id,
+    )
+    .await
+    .expect("detail assembles");
+    let admin_wire = serde_json::to_value(&as_admin.irreversible_effects).unwrap();
+    assert_eq!(
+        admin_wire.as_array().unwrap()[0]["amountUsd"].as_f64(),
+        Some(2400.0),
+        "{admin_wire}"
+    );
+
+    // Secondary guard: the rendered document must not carry it either. This
+    // passes today regardless (the template renders no effects) and exists so a
+    // future template that does render them cannot reintroduce the leak.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/tasks/{id}/export"))
+        .header("cookie", crate::server::test_support::member_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(bytes.to_vec()).expect("the export is utf-8");
+    assert!(
+        !html.contains("2400"),
+        "the exported document must not carry an amount this reader may not read"
+    );
+}
+
+// ── Issue #661 (M5): the console's two new reads ───────────────────────────
+
+/// A run's board rows reach `GET …/workflows/runs`.
+///
+/// This is the surface PR3's console history panel consumes, and the only one a
+/// **scheduled** run has: nobody awaited its response, so without this the sole
+/// evidence a 3am run opened a card is the card itself, with nothing saying
+/// which run put it there.
+///
+/// Asserted through the real route and the real group-by-run fold, because the
+/// fold is where a row can be dropped — a `WorkflowRunFinished` that settles an
+/// open entry writes every field across, and one missing line there is invisible
+/// to a serialization test.
+#[tokio::test]
+async fn the_run_history_carries_a_runs_board_rows() {
+    use crate::ports::types::CompanyEvent;
+    use crate::ports::{WorkflowBoardAction, WorkflowRunBoardRow};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    for event in [
+        CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            scheduled: true,
+        },
+        CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: Some("run-1".into()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: vec![WorkflowRunBoardRow {
+                action: WorkflowBoardAction::Spawned,
+                task_id: Some("card-1".into()),
+                title: Some("Reply to the auditor".into()),
+                assignee: None,
+            }],
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        },
+        // A second run that touched no card, so the omission is asserted on a
+        // real row rather than on an absence that could be the fold failing.
+        CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: false,
+            run_id: Some("run-2".into()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        },
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let (status, runs) = send(&state, "GET", "/api/v1/company/workflows/runs", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = runs.as_array().expect("an array of runs");
+
+    let settled = runs
+        .iter()
+        .find(|r| r["runId"] == "run-1")
+        .unwrap_or_else(|| panic!("run-1 must be in the history: {runs:?}"));
+    assert_eq!(settled["board"][0]["action"], "spawned");
+    assert_eq!(settled["board"][0]["taskId"], "card-1");
+    assert_eq!(settled["board"][0]["title"], "Reply to the auditor");
+
+    let untouched = runs
+        .iter()
+        .find(|r| r["runId"] == "run-2")
+        .unwrap_or_else(|| panic!("run-2 must be in the history: {runs:?}"));
+    assert!(
+        untouched["board"].is_null(),
+        "a run that touched no card must omit the key entirely, so every existing history row's \
+         wire shape is unchanged: {untouched}"
+    );
+}
+
+/// A card opened by a run carries its provenance onto the board read, and a card
+/// opened any other way is byte-unchanged.
+///
+/// The second half is the compatibility claim and needs its own card rather than
+/// a re-read of the first: `skip_serializing_if` is what keeps every card the
+/// board rendered before #661 identical, and only an actually-absent field
+/// proves it.
+#[tokio::test]
+async fn a_card_opened_by_a_run_projects_its_provenance() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    let mut from_run = discussion_card("t-run", "Reply to the auditor");
+    from_run.origin_run_id = Some("run-1".to_string());
+    from_run.origin_workflow_id = Some("digest".to_string());
+    runtime.tasks().upsert(&company, &from_run).await.unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-hand", "Opened by hand"))
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cards = body.as_array().expect("an array of cards");
+
+    let from_run = cards
+        .iter()
+        .find(|c| c["id"] == "t-run")
+        .unwrap_or_else(|| panic!("the run's card must be on the board: {cards:?}"));
+    assert_eq!(from_run["originRunId"], "run-1");
+    assert_eq!(from_run["originWorkflowId"], "digest");
+
+    let by_hand = cards
+        .iter()
+        .find(|c| c["id"] == "t-hand")
+        .unwrap_or_else(|| panic!("the hand-opened card must be on the board: {cards:?}"));
+    assert!(
+        by_hand["originRunId"].is_null() && by_hand["originWorkflowId"].is_null(),
+        "a card no run opened must carry neither key, so the board's existing wire shape is \
+         unchanged: {by_hand}"
     );
 }
 

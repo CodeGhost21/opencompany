@@ -144,7 +144,7 @@ export function CronPreviewLine({
   if (preview.error) {
     if (suppressError) return null;
     return (
-      <p className="text-[10px] leading-snug text-amber-600 dark:text-amber-400">
+      <p className="text-3xs leading-snug text-status-blocked-text">
         {preview.error}
       </p>
     );
@@ -154,7 +154,7 @@ export function CronPreviewLine({
   if (next.length === 0) return null;
 
   return (
-    <p className="text-[10px] leading-snug text-muted-foreground">
+    <p className="text-3xs leading-snug text-muted-foreground">
       {preview.description ? (
         <>
           <span className="text-foreground">{preview.description}</span> — next run{" "}

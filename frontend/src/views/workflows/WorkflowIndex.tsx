@@ -167,7 +167,7 @@ function WorkflowCard({
         {workflow.editable === false && (
           <Badge
             variant="outline"
-            className="h-4 shrink-0 px-1.5 text-[10px] font-normal"
+            className="h-4 shrink-0 px-1.5 text-3xs font-normal"
             title="Defined by a file in the company source tree, so it can't be changed or removed from the console."
           >
             in source
@@ -218,7 +218,7 @@ function WorkflowRow({
       {workflow.editable === false && (
         <Badge
           variant="outline"
-          className="h-4 shrink-0 px-1.5 text-[10px] font-normal"
+          className="h-4 shrink-0 px-1.5 text-3xs font-normal"
           title="Defined by a file in the company source tree, so it can't be changed or removed from the console."
         >
           in source
@@ -245,7 +245,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
   if (!last) {
     // Nothing yet, and the two reasons for that are NOT the same thing.
     if (!runsLoaded) {
-      return <span className="text-[11px] text-muted-foreground/60">Loading runs…</span>;
+      return <span className="text-2xs text-muted-foreground/60">Loading runs…</span>;
     }
     // "No recent runs", never "never run". The company-wide run page is cut by
     // a limit, so a workflow whose last run has scrolled off it is
@@ -255,7 +255,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
     // does answer the stronger question.
     return (
       <span
-        className="text-[11px] text-muted-foreground"
+        className="text-2xs text-muted-foreground"
         title="No runs in the recent company-wide page. Open the workflow to read its own run history."
       >
         No recent runs
@@ -269,7 +269,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
   const failedNode = last.error ? failedNodeOf(last) : null;
 
   return (
-    <span className="flex flex-wrap items-center gap-1.5 text-[11px]">
+    <span className="flex flex-wrap items-center gap-1.5 text-2xs">
       {/* `runTone` owns the running reading too, so this reads the same way as
           the last-run chip and the history rows rather than being a second
           opinion that can drift from them. */}
@@ -282,7 +282,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
       {undelivered > 0 && (
         <Badge
           variant="outline"
-          className="h-4 px-1.5 text-[10px] font-normal border-red-500/40 bg-red-500/10"
+          className="h-4 px-1.5 text-3xs font-normal border-status-failed/40 bg-status-failed-soft"
         >
           {undelivered} not delivered
         </Badge>
@@ -290,7 +290,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
       {pending > 0 && (
         <Badge
           variant="outline"
-          className="h-4 px-1.5 text-[10px] font-normal border-sky-500/40 bg-sky-500/10"
+          className="h-4 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft"
         >
           {pending} awaiting approval
         </Badge>
@@ -321,7 +321,7 @@ function RunStrip({ runs }: { runs: WorkflowRunOutcome[] }) {
           />
         );
       })}
-      <span className="ml-0.5 text-[10px] text-muted-foreground/70">
+      <span className="ml-0.5 text-3xs text-muted-foreground/70">
         last {recent.length}
       </span>
     </span>

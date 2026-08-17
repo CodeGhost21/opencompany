@@ -273,6 +273,15 @@ export interface ChatReactionDto {
 export interface ChatResponse {
   responses: OutboundMessage[];
   /**
+   * On a resolve: how many OTHER decisions the turn behind that approval is
+   * still blocked on (issue #561). `0` means this decision released it.
+   *
+   * Absent on every other answer, and on a host that predates the field — which
+   * the console reads as "cannot tell", and words its confirmation without a
+   * claim about what happens next rather than guessing the optimistic one.
+   */
+  stillAwaiting?: number;
+  /**
    * The durable id the operator's own message was journaled under (issue #364)
    * — the id `chat/history` will return for it. Absent on a host that predates
    * the field, which the console reads as "this message cannot be threaded or
@@ -337,6 +346,20 @@ export interface ApprovalSummary {
    */
   payload?: unknown;
   /**
+   * Whether {@link payload} and {@link amount_usd} were withheld from **this
+   * reader** because of their role (#618).
+   *
+   * Membership decides whether you may know an approval exists; role decides
+   * whether you may read its contents. An admin never sees this set.
+   *
+   * The console must not treat a withheld approval as an empty one. `payload`
+   * being absent already means "the effect carries no arguments", so without
+   * this flag a hidden payment and a no-argument tool call are the same bytes —
+   * and a member would read "nothing to show" where the truth is "not shown to
+   * you". Render the difference; see `ApprovalPayload`.
+   */
+  contents_hidden?: boolean;
+  /**
    * The chat thread this approval was raised in (#379) — the **host** thread id,
    * which is a desk id for a channel and a roster agent id for a direct message.
    * Resolve it to a console channel id with `channelIdForThread`.
@@ -351,6 +374,27 @@ export interface ApprovalSummary {
    * alone, exactly as every approval did before this shipped.
    */
   thread?: string | null;
+  /**
+   * Which turn's gated calls this one belongs to (#842) — an opaque key shared
+   * by every approval a single agent turn parked.
+   *
+   * **A display grouping, never a decision.** One research turn that reaches
+   * three sites parks three approvals, and each stays its own record with its
+   * own id, its own approve/decline and — on approve — its own host-scoped
+   * grant (#739). The conversation consolidates them into one card so it
+   * interrupts once instead of three times; the Approvals page deliberately
+   * keeps one row per approval, matching how `Standing permissions` lists one
+   * revocable row per grant. Resolving is per id on both surfaces.
+   *
+   * Never compare it for anything but equality, and never show it: it is a
+   * runtime identifier, which the glossary rule keeps off an operator's screen.
+   *
+   * Absent for an approval no turn raised (a workflow node, a scheduler tick)
+   * and against a host that predates the field. Both are grouped alone, which
+   * is exactly the pre-#842 rendering — so an old host still produces a card
+   * that can be decided.
+   */
+  batch?: string | null;
 }
 
 /**
@@ -362,6 +406,12 @@ export interface ResolveReceipt {
   recorded: boolean;
   /** There was nothing left to resolve — a double-click, not a failure. */
   alreadyResolved: boolean;
+  /**
+   * How many OTHER decisions the turn behind this approval is still blocked on
+   * (issue #561). `0` means this decision released it; absent on a host that
+   * predates the field.
+   */
+  stillAwaiting?: number;
 }
 
 export type Verdict = "approve" | "deny";
@@ -402,7 +452,20 @@ export interface StandingGrant {
   expires_at_millis: number;
   /**
    * The slice of the tool it is confined to, when the tool's name is not the
-   * whole of what it can do (#457) — a Composio toolkit like `github`.
+   * whole of what it can do (#457).
+   *
+   * **Two kinds of value, in one untyped string** — both minted by the host's
+   * `standing_scope_of`, and a reader that assumes either one is the bug #785
+   * was:
+   *
+   * * a **Composio toolkit** identifier like `github` — a slug, which has to be
+   *   spelled out before an operator can read it;
+   * * a **URL origin** like `https://docs.rs`, added for `web_fetch` by
+   *   #673/#739 — already exactly what the operator approved, and to be shown
+   *   untouched.
+   *
+   * Render it through `grantHeadline` in `lib/language`, which is the one place
+   * that tells them apart. Do not spell a scope out at a call site.
    *
    * Absent for every tool whose name already says everything, and absent from
    * an older host that predates the field. Both mean "nothing to narrow", so
@@ -473,6 +536,18 @@ export interface AppSpec {
    * "is this instance provisioned" signal. No secret bytes are surfaced.
    */
   cycles_available: boolean;
+  /**
+   * Whether the first-run setup flow has been completed on this instance.
+   *
+   * Reported on this unauthenticated handshake because an instance nobody has
+   * configured has nobody who *can* sign in — gating the answer behind auth
+   * would make the setup wizard unreachable exactly when it is needed.
+   *
+   * Optional: a host predating the field omits it, and the console must read
+   * `undefined` as "assume configured" rather than showing a wizard that host
+   * has no route for.
+   */
+  setup_complete?: boolean;
 }
 
 /**
@@ -519,6 +594,59 @@ export interface TeamMemberDto {
   budgetSetBy?: string;
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
+  /**
+   * The declared cognition-tier hint (`[[agent]].tier`) verbatim, from the same
+   * host-side helper that answers `GET .../team/{agentId}` (issue #643).
+   *
+   * **Optional on the type, and genuinely absent on the wire** for a teammate
+   * that declares none — which is a different statement from any tier string.
+   * Do not coalesce it to a default: the overview graph stamped a literal
+   * `"worker"` on every node for exactly this reason, so a company declaring
+   * `tier = "orchestrator"` read back as a worker on its own graph. `undefined`
+   * means "cannot say", and the honest rendering of that is "not declared".
+   */
+  tier?: string;
+  /**
+   * Whether this teammate is the company's orchestrator (issue #643).
+   *
+   * **NOT the same question as `tier`** — this is the host's roster rule (the
+   * agent tagged with the orchestrator tier, else the first declared agent),
+   * and the two disagree in both directions: a company that tags nobody still
+   * has an orchestrator (no `tier`, `true` here), and a second agent tagged
+   * with that tier is not one (`tier` present, `false` here). Never re-derive
+   * this from the tier string; read it.
+   *
+   * Optional only because a host predating #643 does not send it, in which case
+   * `undefined` means "this host cannot say" — draw no marker rather than
+   * guessing one from `tier`.
+   */
+  isOrchestrator?: boolean;
+  /**
+   * This teammate's tool grants (issue #601) — the **same** three lists, from
+   * the same host-side constructor, that `GET .../team/{agentId}` serves.
+   *
+   * On the list because the overview graph draws a ring of each teammate's
+   * tools and is built from the roster read: without this it would have to
+   * fetch every agent's detail on page load, and it invented a tool shelf
+   * instead. Read `effective` and nothing else when the question is "what does
+   * this agent hold" — see {@link AgentToolsDto} for why `requested` alone
+   * inverts the answer.
+   *
+   * **Optional on the type, not on the wire.** A host predating #601 sends no
+   * such field; `undefined` means "this host cannot say", which is a different
+   * statement from an empty `effective` ("holds nothing") and must not be
+   * collapsed into it.
+   */
+  tools?: AgentToolsDto;
+  /**
+   * The desks this teammate sits on (issue #601), same shape as the detail
+   * read. Desks are the company's real grouping, so these are what the
+   * overview graph draws its department pillars from.
+   *
+   * **Optional on the type, not on the wire**, same rule as `tools`: absent
+   * means the host does not answer, empty means "on no desk".
+   */
+  desks?: AgentDeskDto[];
 }
 
 /**
@@ -670,11 +798,19 @@ export interface InboxMessageDto {
  * - `attested` — this instance carries a platform-minted identity, so
  *   connections are the platform's to run. Nothing to register here, and the
  *   console offers no local Connect.
+ * - `company` — this company's own TinyHumans credential (issue #586). Reported
+ *   by the Composio plane, which brokers through it. The native OAuth catalog
+ *   does **not** route through the company key today, so this value does not
+ *   appear on a native-only provider — see `api/credential.ts`.
  * - `static` — a token this company already stored, or this host's own
- *   registered provider application (the self-hosted hatch). Connect works.
+ *   registered provider application (the self-hosted hatch). The handshake
+ *   works; the console stopped offering it in issue #822, because what it
+ *   stores is read by no agent tool (#396). So this tier now says what the host
+ *   *could* do, and `connectRoute` (`lib/connections.ts`) routes such a
+ *   provider through Composio or reports it unavailable.
  * - `none` — neither, so no Connect can succeed on this host.
  */
-export type ConnectionCredentialSource = "attested" | "static" | "none";
+export type ConnectionCredentialSource = "attested" | "company" | "static" | "none";
 
 /**
  * One third-party connection's state, from `GET .../connections`.
@@ -751,14 +887,26 @@ export interface McpServer {
   timeoutSecs: number;
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;
+  /**
+   * Ids of the company's agents whose effective tool grants cover this server —
+   * who can actually call it (issue #568). On an **enabled** server an empty
+   * array means no teammate can reach it, a probable misconfiguration the
+   * console flags loudly. A **disabled** server is always empty (the harness
+   * hands out no tool for it whatever the grants say), so the console reads the
+   * empty case against `enabled` and stays quiet there. Optional only for
+   * forward-compat with an older backend that does not send the field;
+   * `undefined` (unknown) is treated differently from `[]` (known-empty).
+   */
+  reachableBy?: string[];
   /** The last recorded (scrubbed) probe outcome, when the server has been probed. */
   health?: McpHealth;
 }
 
 /**
- * A mutating MCP response: the resulting server, a rebuild reminder, the live
- * probe result (absent on a non-`openhuman` host), and any non-blocking
- * endpoint advisory.
+ * A mutating MCP response: the resulting server, the host's pickup note (since
+ * issue #566 that is next-turn pickup with no restart, not a rebuild reminder),
+ * the live probe result (absent on a non-`openhuman` host), and any
+ * non-blocking endpoint advisory.
  */
 export interface McpMutationResponse {
   server: McpServer;
@@ -848,8 +996,35 @@ export interface CapabilityStatusDto {
   composioGranted?: boolean;
   /** Whether the `composio` feature is compiled into this build at all. */
   composioInBuild?: boolean;
-  /** Whether a per-tenant Composio token is stored — never the token itself. */
+  /**
+   * Whether a per-tenant Composio **BYO override** token is stored under
+   * `composio/token` — never the token itself.
+   *
+   * Narrow on purpose, and **not** "can this company reach Composio" (issue
+   * #886). The BYO slot is the first of three credential tiers; on a hosted
+   * tenant nobody pastes one and the instance's platform identity answers, so
+   * this reads `false` for companies whose Composio tools are wired and
+   * working. Read `composioCredentialSource` for the resolution verdict.
+   */
   composioTokenConfigured?: boolean;
+  /**
+   * Which tier this company's Composio credential actually resolves from
+   * (issue #886) — the same three-tier resolution the toolbelt gates on, and
+   * the same `credentialSource` the Composio status route reports:
+   *
+   * * `attested` — the instance's platform identity (nothing stored here);
+   * * `company` — the company's own TinyHumans key;
+   * * `static` — a pasted BYO token, or a static instance key;
+   * * `none` — nothing resolves, so no tools are wired.
+   *
+   * A **resolution** verdict, not a liveness one: `attested` says a bearer can
+   * be obtained, not that Composio answered or that any account is connected.
+   *
+   * `undefined` is **unknown** — either an older host that does not send the
+   * field, or one whose secret store could not be read this request. It must
+   * never be rendered as `none`: that is the #886 lie in the other direction.
+   */
+  composioCredentialSource?: "attested" | "company" | "static" | "none";
   /**
    * Metered web search (issue #238): whether the company **explicitly** grants
    * the `search` namespace (a `*` wildcard does not count). Every call is a
@@ -866,6 +1041,25 @@ export interface CapabilityStatusDto {
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
+  /**
+   * Bound repositories (issue #245, agent half): whether the company
+   * **explicitly** grants the `repo` namespace (a `*` wildcard does not count).
+   *
+   * The grant is only half the setup — the other half is whether anything is
+   * bound — so the repositories card reads this alongside the bindings list and
+   * names whichever half is missing. `undefined` is an older host that does not
+   * send the field, and must not be rendered as "not granted".
+   */
+  repoGranted?: boolean;
+  /**
+   * Whether the agent-side MCP bridge is compiled into this build (issue #567).
+   * Not a grant question like the flags above: the `/mcp/servers` management
+   * routes ship in every build, so without this an operator can add a server,
+   * store a token and watch it probe healthy on a deployment that hands agents
+   * no MCP tool at all. `undefined` is **unknown** (an older host that does not
+   * send the field) and must never be rendered as "absent".
+   */
+  mcpInBuild?: boolean;
 }
 
 /** One day's token totals in the usage series (`GET .../usage`). */
@@ -999,4 +1193,23 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/**
+ * `GET {scope}/chat/read-state` — one channel's floor for the signed-in person
+ * (issue #755).
+ *
+ * A channel with no marker is **absent** from the response rather than zero.
+ * "Never opened" and "opened before anything was said" are different states,
+ * and only the console knows which floor a never-opened channel deserves.
+ */
+export interface ReadMarker {
+  channelId: string;
+  /** Milliseconds since the epoch. At or before this is read. */
+  lastReadAt: number;
+}
+
+/** Response of `GET {scope}/chat/read-state`. */
+export interface ReadStateResponse {
+  markers: ReadMarker[];
 }

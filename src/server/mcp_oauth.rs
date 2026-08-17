@@ -171,9 +171,14 @@ async fn probe_and_persist(
         .flatten()
         .map(|record| record.manifest.mcp_servers)
         .unwrap_or_default();
-    let decls = mcp::resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .ok()?;
+    let decls = mcp::resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .ok()?;
     let decl = decls.iter().find(|d| d.name == name)?;
     let health = crate::harness::mcp_probe::probe_server(decl).await;
     let _ = mcp::save_health(runtime.id(), name, &health, runtime.secrets().as_ref()).await;

@@ -47,6 +47,15 @@ on `<root>/.lock` (`flock`/`LockFileEx` via `fs2`) and hold it for the life of
 the process. A second instance is refused immediately with a message naming the
 directory and `OPENCOMPANY_DATA_DIR`.
 
+Since issue #726 the journal's *bytes* may live in the storage backend rather
+than under this root (see [journal.md](journal.md)), and that changes nothing
+here: single-writer-per-company is still the contract. Two live hosts on one
+tenant database no longer corrupt each other's records — sequences are allocated
+server-side, so appends interleave without collision — but each keeps its own
+in-memory replay of the executed-key set, so neither sees the other's commits
+until it reloads. That gap is pre-existing and unchanged; the root lock above is
+still what a single-node deployment relies on.
+
 An OS advisory lock rather than a pid file: the lock belongs to the open file
 description, so the kernel drops it when the process exits for any reason —
 clean exit, panic, `SIGKILL`, power loss. There is no stale state to detect and
@@ -60,23 +69,38 @@ share regardless.
 
 ### Hosted deployments: the overlap window
 
-**Open question for the platform.** In hosted mode the manager runs each tenant
-as a container over `OPENCOMPANY_DATA_DIR=/data`. If a rollout ever has the new
-pod running while the old one is still alive over the same volume, the new pod
-now **fails to boot** with a configuration error where it previously started and
-silently raced.
+**Answered — a tenant rollout cannot overlap**
+(`opencompany-microservice`#15). In hosted mode the manager runs each tenant as
+a container over `OPENCOMPANY_DATA_DIR=/data`, and the question was whether a
+rollout ever has the new pod running while the old one still holds the volume —
+which since this lock exists means the new pod fails to boot where it
+previously started and silently raced.
 
-Refusing is the correct behaviour — the alternative is two writers over one
-journal — but it changes what a deploy does, so it needs a decision rather than
-a discovery:
+It does not, and by construction rather than by configuration. A tenant is a
+**StatefulSet at one replica**, and a StatefulSet has no `maxSurge`: pod
+`opencompany-0` is deleted and fully terminated before its replacement is
+created, so at most one pod ever holds the claim. The one path that rolls
+tenants — `kubectl rollout restart statefulset -A -l app=opencompany` in the
+platform's deploy workflow — goes through exactly that sequence. A
+`Deployment` would have been the dangerous shape: its default rolling update
+surges one extra pod even at one replica.
 
-- If the manager already uses a `Recreate`-style strategy (old pod terminated
-  before the new one starts), nothing needs to change.
-- If it uses a rolling strategy with overlap, either the strategy or the
-  readiness gate has to account for a boot that legitimately refuses.
+Two things changed on the platform side anyway, because the invariant was
+incidental and the failure was illegible:
 
-Whoever owns `opencompany-manager` should confirm which it is before this
-reaches a tenant.
+- The manifest builder now states the no-surge strategy explicitly instead of
+  inheriting the API server's default, with a test that fails if the tenant
+  workload ever becomes a `Deployment` or grows a second replica.
+- A refused boot is now reported as the refusal. The manager's startup gate
+  polls `/healthz` and used to report only "did not become healthy before
+  timeout", which reads the same for a lock refusal and a slow image pull. The
+  tenant container runs with `terminationMessagePolicy:
+  FallbackToLogsOnError`, so the message above reaches the pod status, and the
+  manager reads it back into the error it returns.
+
+What remains genuinely outside the rollout path — a pod force-deleted while
+its node was unreachable, or a volume mounted by hand — is the case this lock
+was written for, and it now surfaces as the message naming the directory.
 
 ## Running two hosts side by side
 

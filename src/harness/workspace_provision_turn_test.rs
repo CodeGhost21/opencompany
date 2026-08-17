@@ -237,6 +237,8 @@ fn record(overlays: Vec<OverlayAgent>) -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
+        overlay_policy: None,
+        overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
         setup: None,
@@ -263,12 +265,14 @@ fn build_brain(
         // The agent workspaces hang off here. Nothing has created a single
         // directory under it — that is the precondition under test.
         workspace_root: dir.join("harness"),
+        audit_root: dir.join("harness"),
         model_override: Some("stub-model".to_string()),
         tasks: Some(ops.clone()),
         artifacts: None,
         skills: None,
         skills_source_dir: None,
         skills_registry: Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
@@ -278,6 +282,8 @@ fn build_brain(
         pending_publishes: Default::default(),
         workflow_refs: Default::default(),
         run_outputs: Default::default(),
+        run_output_store: None,
+        workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),
@@ -286,10 +292,17 @@ fn build_brain(
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
         workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: crate::harness::repo::CheckoutLedger::default(),
         search: None,
     };
     (
@@ -313,6 +326,8 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     }
 }
 
@@ -419,6 +434,7 @@ async fn an_overlay_teammate_added_at_runtime_writes_on_its_first_turn() {
         name: "Analyst".to_string(),
         role: "Analyst".to_string(),
         description: Some("Reads the numbers.".to_string()),
+        tools: Vec::new(),
     };
 
     let (script, workspace) = run_write_turn(dir.path(), OVERLAY_AGENT, vec![overlay]).await;

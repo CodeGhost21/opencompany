@@ -119,7 +119,9 @@ export function FeedbackView({ client, company }: Props) {
         <Card className="overflow-hidden">
           <CardContent className="flex flex-col items-start gap-4 py-6 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-3">
-              <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-[#5865F2]/12 text-[#5865F2]">
+              {/* Discord's own blurple, via the named token — see
+                  `--brand-discord` in index.css for why it stays a fixed hex. */}
+              <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-(--brand-discord)/12 text-(--brand-discord)">
                 <DiscordIcon className="size-6" />
               </div>
               <div>
@@ -133,7 +135,7 @@ export function FeedbackView({ client, company }: Props) {
             </div>
             <Button
               render={<a href={DISCORD_INVITE_URL} target="_blank" rel="noreferrer" />}
-              className="w-full shrink-0 bg-[#5865F2] text-white hover:bg-[#4752c4] sm:w-auto"
+              className="w-full shrink-0 bg-(--brand-discord) text-white hover:bg-(--brand-discord-hover) sm:w-auto"
             >
               <DiscordIcon className="size-4" /> Join our Discord
             </Button>

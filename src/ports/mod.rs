@@ -17,8 +17,12 @@ pub mod economy;
 pub mod events;
 pub mod facts;
 pub mod inbox;
+pub mod journal;
 pub mod login_codes;
 pub mod memory;
+pub mod notifications;
+pub mod read_state;
+pub mod run_output;
 pub mod runs;
 pub mod schedule_fires;
 pub mod secrets;
@@ -45,10 +49,16 @@ pub use context::ContextStore;
 pub use economy::AgentEconomy;
 pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
-pub use ids::{generate_id, now_millis};
+pub use ids::{AGENT_SLUG_FALLBACK, agent_slug, generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
+pub use journal::{Durability, JournalStore};
 pub use login_codes::{LoginCodeRecord, LoginCodeStore};
 pub use memory::MemoryStore;
+pub use notifications::{Notification, NotificationStore, NotificationView, Subject, SubjectKind};
+pub use read_state::{ChannelRead, ReadStateStore};
+pub use run_output::{
+    MAX_RUN_OUTPUTS_PER_COMPANY, WorkflowRunOutputRecord, WorkflowRunOutputStore, bound_node_output,
+};
 pub use runs::{
     NewRun, RunFilter, RunOutcome, RunRecord, RunStatus, RunStepRecord, RunStore,
     reap_orphaned_runs,
@@ -62,13 +72,17 @@ pub use tasks::{TaskRecord, TaskStore};
 pub use tools::ToolProvider;
 pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
-pub use users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore, normalize_email};
+pub use users::{
+    InviteRecord, LoginIdentity, UserRecord, UserRole, UserStatus, UserStore,
+    decode_wallet_address, normalize_email, normalize_wallet,
+};
 pub use workflow_revisions::{
     MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
 };
 pub use workflow_runner::{
-    DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowRun, WorkflowRunContext,
-    WorkflowRunNodeRow, WorkflowRunner,
+    DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowApprovalOutcome,
+    WorkflowBlockedNode, WorkflowBoardAction, WorkflowRun, WorkflowRunApprovalRow,
+    WorkflowRunBoardRow, WorkflowRunContext, WorkflowRunNodeRow, WorkflowRunner,
 };
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
@@ -100,13 +114,17 @@ mod test {
         _facts: &dyn crate::ports::facts::FactStore,
         _usage: &dyn crate::ports::usage::UsageMeter,
         _skills: &dyn crate::ports::skills_state::SkillStateStore,
+        _notifications: &dyn crate::ports::notifications::NotificationStore,
+        _read_state: &dyn crate::ports::read_state::ReadStateStore,
         _users: &dyn crate::ports::users::UserStore,
         _sessions: &dyn crate::ports::sessions::SessionStore,
         _login_codes: &dyn crate::ports::login_codes::LoginCodeStore,
         _runs: &dyn crate::ports::runs::RunStore,
         _workflow_revisions: &dyn crate::ports::workflow_revisions::WorkflowRevisionStore,
         _schedule_fires: &dyn crate::ports::schedule_fires::ScheduleFireStore,
+        _run_output: &dyn crate::ports::run_output::WorkflowRunOutputStore,
         _workflow_runner: &dyn crate::ports::workflow_runner::WorkflowRunner,
+        _journal: &dyn crate::ports::journal::JournalStore,
     ) {
     }
 

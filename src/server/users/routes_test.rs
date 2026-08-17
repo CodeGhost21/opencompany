@@ -85,6 +85,8 @@ async fn state_from(
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -242,6 +244,171 @@ async fn login_via_link(state: &AppState, sender: &RecordingMailSender, email: &
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     session_cookie(&response)
+}
+
+// ---------------------------------------------------------------------------
+// The header carrier — a hub console that cannot receive a cookie
+// ---------------------------------------------------------------------------
+
+/// A login request that asks for a session the client will carry itself.
+fn post_wanting_header_carrier(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header(super::cookie::SESSION_CARRIER_HEADER, "header")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn get_with_session_header(uri: &str, session: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header(super::cookie::SESSION_HEADER, session)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Signs `email` in asking for the header carrier, returning the whole body.
+async fn login_wanting_header_carrier(
+    state: &AppState,
+    sender: &RecordingMailSender,
+    email: &str,
+) -> (axum::http::HeaderMap, serde_json::Value) {
+    let code = request_code(state, sender, email).await;
+    let app = router(state.clone());
+    let response = app
+        .oneshot(post_wanting_header_carrier(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": code }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    (headers, body_json(response).await)
+}
+
+#[tokio::test]
+async fn the_header_carrier_returns_a_session_that_authenticates() {
+    // The whole point of the carrier: a console on another origin gets a
+    // credential it can actually present, because a cookie would never be sent.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let (_, json) = login_wanting_header_carrier(&state, &sender, "ada@example.com").await;
+
+    let session = json["session"]
+        .as_str()
+        .expect("the header carrier must return a session")
+        .to_string();
+    assert!(
+        session.starts_with("acme."),
+        "the value must name its company so a client need not know how the \
+         addressed company was resolved: {session}"
+    );
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_session_header(
+            "/api/v1/companies/acme/auth/me",
+            &session,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the returned session must authenticate the next request"
+    );
+    assert_eq!(body_json(response).await["email"], "ada@example.com");
+}
+
+#[tokio::test]
+async fn the_header_carrier_sets_no_cookie() {
+    // One session, one carrier. Setting both would leave the cookie half as a
+    // third-party cookie some browsers keep and others drop, so whether logging
+    // out actually ended the session would vary by browser.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let (headers, _) = login_wanting_header_carrier(&state, &sender, "ada@example.com").await;
+    assert!(
+        headers.get("set-cookie").is_none(),
+        "a client that asked to carry the session must not also be given a cookie"
+    );
+}
+
+#[tokio::test]
+async fn a_login_that_asks_for_nothing_is_unchanged() {
+    // The carrier is opt-in, and every existing console is the opt-out case:
+    // it must still get its HttpOnly cookie and must never see a token in the
+    // body, which is precisely what it has no way to store safely.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let code = request_code(&state, &sender, "ada@example.com").await;
+    let app = router(state.clone());
+    let response = app
+        .oneshot(post(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": code }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let set = response
+        .headers()
+        .get("set-cookie")
+        .expect("the default carrier is still the cookie")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(set.contains("HttpOnly"), "{set}");
+    let json = body_json(response).await;
+    assert!(
+        json.get("session").is_none(),
+        "a cookie client must never be handed the raw token: {json}"
+    );
+    // And the body it always returned is still there, unflattened by the change.
+    assert_eq!(json["email"], "ada@example.com");
+}
+
+#[tokio::test]
+async fn a_header_carried_session_can_be_logged_out() {
+    // Revocation has to reach the session however it was carried, or a hub
+    // console's "sign out" would clear its own storage and leave a live token
+    // on the server for the rest of its TTL.
+    let home = home();
+    let (state, sender) = state_with_mail(home.path()).await;
+    let (_, json) = login_wanting_header_carrier(&state, &sender, "ada@example.com").await;
+    let session = json["session"].as_str().unwrap().to_string();
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/companies/acme/auth/logout")
+                .header(super::cookie::SESSION_HEADER, &session)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let app = router(state.clone());
+    let after = app
+        .oneshot(get_with_session_header(
+            "/api/v1/companies/acme/auth/me",
+            &session,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status(),
+        StatusCode::UNAUTHORIZED,
+        "the token must be dead server-side, not merely dropped by the client"
+    );
 }
 
 /// Looks a user's id up through the admin roster.
@@ -652,6 +819,8 @@ async fn a_https_deployment_marks_the_cookie_secure() {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
             setup: None,
@@ -1401,5 +1570,440 @@ async fn the_env_admin_shows_on_the_invite_page_and_cannot_be_revoked() {
             .as_str()
             .unwrap()
             .contains("OPENCOMPANY_ADMIN_EMAIL")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Invite mail (issue #584)
+//
+// Adding a person used to write a record and mail nobody, while the console
+// reported unconditional success. These turn on both halves: that a mail
+// actually goes out, and that when it does not the caller is told so rather
+// than being congratulated.
+// ---------------------------------------------------------------------------
+
+/// A wired transport that refuses mail to one address and delivers the rest.
+///
+/// "No mail configured" is not the only way an invite fails to arrive, and it
+/// is the less dangerous one — it is at least visible in configuration. A
+/// wired transport that rejects the message is the case where a success toast
+/// is a lie, so it needs a mock of its own.
+///
+/// Refusal is per-recipient rather than global, for a reason that is not
+/// convenience: a sender that failed everything would also fail the admin's own
+/// login mail, leaving no way to reach the admin-authenticated route under
+/// test. It is also the truer model — a transport rejects a *message*, not a
+/// process.
+#[derive(Clone)]
+struct RefusingMailSender {
+    refuse: String,
+    accepted: RecordingMailSender,
+}
+
+#[async_trait::async_trait]
+impl crate::server::ops::mailer::MailSender for RefusingMailSender {
+    async fn send(
+        &self,
+        creds: &MailCredentials,
+        email: &crate::server::ops::mailer::OutboundEmail,
+    ) -> Result<(), crate::error::OpenCompanyError> {
+        if email.to == self.refuse {
+            // The same variant the real SMTP sender reports a rejected send
+            // with, so this exercises the branch production actually takes.
+            return Err(crate::error::OpenCompanyError::Store(
+                "smtp send: the transport refused the message".to_string(),
+            ));
+        }
+        self.accepted.send(creds, email).await
+    }
+}
+
+/// State whose transport works except for mail addressed to `refuse`.
+///
+/// Returns the recorder of everything it *did* accept, so a test can assert
+/// that the refused message is genuinely absent rather than merely unreported.
+async fn state_refusing_mail_to(
+    home: &std::path::Path,
+    refuse: &str,
+) -> (AppState, RecordingMailSender) {
+    let accepted = RecordingMailSender::new();
+    let sender = RefusingMailSender {
+        refuse: refuse.to_string(),
+        accepted: accepted.clone(),
+    };
+    let connections = ConnectionsRuntime::new()
+        .with_mail(Arc::new(sender))
+        .with_mail_credentials(MailCredentials::Smtp(SmtpCredentials {
+            host: "smtp.test".into(),
+            port: 587,
+            security: SmtpSecurity::Starttls,
+            username: "u".into(),
+            password: "p".into(),
+            from_name: "Acme".into(),
+            from_email: "noreply@acme.test".into(),
+        }));
+    (state_with(home, connections).await, accepted)
+}
+
+/// A transport that revokes the invite it is delivering, mid-send.
+///
+/// The race being modelled is an admin pressing Revoke while the SMTP round
+/// trip is still in flight — the exact window the route's post-send stamp sits
+/// in. Revoking from inside `send` reproduces that window deterministically:
+/// no sleep, no second task, and the route is provably still holding its
+/// pre-send copy of the record when the revocation lands.
+#[derive(Clone)]
+struct RevokingMailSender {
+    /// Filled once the state exists, since the runtime this revokes through is
+    /// the one the state owns — and the state cannot be built until the sender
+    /// it borrows is already wired into its connections.
+    runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::CompanyRuntime>>>,
+    revoke_for: String,
+    accepted: RecordingMailSender,
+}
+
+#[async_trait::async_trait]
+impl crate::server::ops::mailer::MailSender for RevokingMailSender {
+    async fn send(
+        &self,
+        creds: &MailCredentials,
+        email: &crate::server::ops::mailer::OutboundEmail,
+    ) -> Result<(), crate::error::OpenCompanyError> {
+        if email.to == self.revoke_for {
+            let runtime = self
+                .runtime
+                .get()
+                .expect("the runtime is wired before any invite is sent");
+            let invite = runtime
+                .users()
+                .find_invite_by_email(runtime.id(), &self.revoke_for)
+                .await
+                .unwrap()
+                .expect("the grant lands before the mail goes out");
+            assert!(
+                runtime
+                    .users()
+                    .delete_invite(runtime.id(), &invite.id)
+                    .await
+                    .unwrap(),
+                "the revocation this models must actually remove the invite"
+            );
+        }
+        self.accepted.send(creds, email).await
+    }
+}
+
+/// Signs an admin in on a host with no mail transport, via the dev echo.
+async fn login_via_dev_code(state: &AppState, email: &str) -> String {
+    let code = request_dev_code(state, email)
+        .await
+        .expect("a loopback host with no transport echoes the code");
+    let app = router(state.clone());
+    let response = app
+        .oneshot(post(
+            "/api/v1/companies/acme/auth/verify",
+            serde_json::json!({ "code": code }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    session_cookie(&response)
+}
+
+/// Invites `email` as `admin`, returning the status and decoded body.
+async fn invite_as(state: &AppState, admin: &str, email: &str) -> (StatusCode, serde_json::Value) {
+    let app = router(state.clone());
+    let response = app
+        .oneshot(post_with_cookie(
+            "/api/v1/companies/acme/users/invites",
+            serde_json::json!({ "email": email }),
+            admin,
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, body_json(response).await)
+}
+
+#[tokio::test]
+async fn inviting_someone_mails_them_a_credential_free_invitation() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, sender) = state_with_mail(&home).await;
+    let admin = login_via_link(&state, &sender, "ada@example.com").await;
+    let before = sender.sent().len();
+
+    let (status, body) = invite_as(&state, &admin, "bob@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["delivery"], "sent");
+    // The record's own fields stay top level: the response is additive.
+    assert_eq!(body["email"], "bob@example.com");
+    assert!(
+        body["notifiedAtMillis"].is_number(),
+        "a sent invite must record when: {body}"
+    );
+
+    let sent = sender.sent();
+    assert_eq!(
+        sent.len() - before,
+        1,
+        "inviting once must send exactly one mail"
+    );
+    let mail = &sent.last().unwrap().1;
+    assert_eq!(mail.to, "bob@example.com");
+    assert!(
+        mail.subject.contains("Acme"),
+        "the subject must name the company: {}",
+        mail.subject
+    );
+    assert!(
+        mail.body.contains("/login?company=acme"),
+        "the mail must say where to sign in: {}",
+        mail.body
+    );
+
+    // The property the issue's acceptance criteria turn on: this is a
+    // notification, not a credential. The allowlist plus the magic link stays
+    // the only way in, so nothing redeemable may appear in the body.
+    let invite_id = body["id"].as_str().expect("an invite id");
+    assert!(
+        !mail.body.contains(invite_id),
+        "the invite id must not travel in the mail: {}",
+        mail.body
+    );
+    assert!(
+        !mail.body.contains("code="),
+        "the mail must carry no login code: {}",
+        mail.body
+    );
+    // The inviter is named by local part, never by full address.
+    assert!(
+        mail.body.contains("ada"),
+        "the mail must name who invited them: {}",
+        mail.body
+    );
+    assert!(
+        !mail.body.contains("ada@example.com"),
+        "the inviter's full address must not be disclosed: {}",
+        mail.body
+    );
+
+    // And the stamp is durable, not just echoed in the response.
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie(
+            "/api/v1/companies/acme/users/invites",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    let invites = body_json(response).await;
+    let row = invites
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["email"] == "bob@example.com")
+        .expect("the invite must be listed");
+    assert!(
+        row["notifiedAtMillis"].is_number(),
+        "the mailed stamp must survive the store: {row}"
+    );
+}
+
+#[tokio::test]
+async fn inviting_on_a_host_with_no_mail_says_so_instead_of_reporting_success() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    // No transport at all — the shape the issue calls out as "fails quietly".
+    let state = state_with(&home, ConnectionsRuntime::new()).await;
+    let admin = login_via_dev_code(&state, "ada@example.com").await;
+
+    let (status, body) = invite_as(&state, &admin, "bob@example.com").await;
+    assert_eq!(status, StatusCode::OK, "the grant still succeeds");
+    assert_eq!(
+        body["delivery"], "no_transport",
+        "the operator must be told nothing was mailed: {body}"
+    );
+    assert!(
+        body["notifiedAtMillis"].is_null(),
+        "nothing was mailed, so nothing may be stamped: {body}"
+    );
+
+    // The invite itself is real — the person can sign in, they just have to be
+    // told out of band. Reporting no_transport must not have skipped the grant.
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie(
+            "/api/v1/companies/acme/users/invites",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    let invites = body_json(response).await;
+    assert!(
+        invites
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["email"] == "bob@example.com"),
+        "the invite must exist regardless of mail: {invites}"
+    );
+}
+
+#[tokio::test]
+async fn a_failing_transport_is_reported_and_never_rolls_back_the_invite() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, accepted) = state_refusing_mail_to(&home, "bob@example.com").await;
+    let admin = login_via_link(&state, &accepted, "ada@example.com").await;
+    let before = accepted.sent().len();
+
+    let (status, body) = invite_as(&state, &admin, "bob@example.com").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a mail failure must not fail the grant"
+    );
+    assert_eq!(
+        body["delivery"], "failed",
+        "a refused message must be reported, not swallowed: {body}"
+    );
+    assert!(
+        body["notifiedAtMillis"].is_null(),
+        "nothing arrived, so nothing may be stamped as sent: {body}"
+    );
+    assert_eq!(
+        accepted.sent().len(),
+        before,
+        "the refused message must not appear as delivered"
+    );
+
+    // The grant survives the failed send. This is the half that must not
+    // regress: rolling the invite back would turn a mail outage into a silent
+    // refusal to add people, and re-inviting would then 409 against a record
+    // the operator was told did not exist.
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie(
+            "/api/v1/companies/acme/users/invites",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    let invites = body_json(response).await;
+    assert!(
+        invites
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["email"] == "bob@example.com"),
+        "the invite must survive a failed send: {invites}"
+    );
+}
+
+#[tokio::test]
+async fn an_invite_revoked_while_its_mail_is_in_flight_stays_revoked() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let accepted = RecordingMailSender::new();
+    let runtime_cell = Arc::new(std::sync::OnceLock::new());
+    let connections = ConnectionsRuntime::new()
+        .with_mail(Arc::new(RevokingMailSender {
+            runtime: runtime_cell.clone(),
+            revoke_for: "bob@example.com".to_string(),
+            accepted: accepted.clone(),
+        }))
+        .with_mail_credentials(MailCredentials::Smtp(SmtpCredentials {
+            host: "smtp.test".into(),
+            port: 587,
+            security: SmtpSecurity::Starttls,
+            username: "u".into(),
+            password: "p".into(),
+            from_name: "Acme".into(),
+            from_email: "noreply@acme.test".into(),
+        }));
+    let state = state_with(&home, connections).await;
+    let _ = runtime_cell.set(
+        state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("the company is registered"),
+    );
+    let admin = login_via_link(&state, &accepted, "ada@example.com").await;
+
+    let (status, body) = invite_as(&state, &admin, "bob@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["delivery"], "sent",
+        "the message really did leave, and reporting otherwise would be a lie: {body}"
+    );
+    assert!(
+        body["notifiedAtMillis"].is_null(),
+        "an invite revoked mid-send has nothing left to stamp: {body}"
+    );
+
+    // The property this test exists for. The stamp is written from a record
+    // read before the send, so an upsert would put the revoked invite back —
+    // silently returning an address to the allowlist after an admin removed it,
+    // with nothing on screen to say so.
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie(
+            "/api/v1/companies/acme/users/invites",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    let invites = body_json(response).await;
+    assert!(
+        !invites
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["email"] == "bob@example.com"),
+        "the mailed stamp must not restore a revoked invite: {invites}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_invite_mails_nobody() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, sender) = state_with_mail(&home).await;
+    let admin = login_via_link(&state, &sender, "ada@example.com").await;
+
+    // Already a member: Ada bootstraps from the manifest and has signed in.
+    let before = sender.sent().len();
+    let (status, _) = invite_as(&state, &admin, "ada@example.com").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        sender.sent().len(),
+        before,
+        "an invite refused as already-a-member must mail nobody"
+    );
+
+    // And a duplicate outstanding invite is refused by the store, also silently
+    // as far as the mailbox is concerned — one invitation per address, not one
+    // per click. Without this, the button is a mail cannon aimed at whoever an
+    // admin most recently typed.
+    let (status, _) = invite_as(&state, &admin, "bob@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let after_first = sender.sent().len();
+
+    let (status, _) = invite_as(&state, &admin, "bob@example.com").await;
+    assert_eq!(status, StatusCode::CONFLICT, "one invite per address");
+    assert_eq!(
+        sender.sent().len(),
+        after_first,
+        "a duplicate invite must not re-mail"
+    );
+
+    // A malformed address never reaches a transport either.
+    let (status, _) = invite_as(&state, &admin, "not-an-email").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        sender.sent().len(),
+        after_first,
+        "a rejected address must mail nobody"
     );
 }

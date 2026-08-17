@@ -12,11 +12,33 @@
 // OpenCompany's `translate.rs` (which lays a node's `config` over the derived
 // defaults verbatim):
 //
-//   tool_call     { slug, args }
-//   http_request  { method, url, headers, body }
+//   tool_call     { slug, args, connection_ref }
+//   http_request  { method, url, headers, body, connection_ref }
 //   switch        { field | expression }        (cases are EDGE labels, not config)
 //   output_parser { schema, auto_fix }
 //   sub_workflow  { workflow_id }
+//   transform     { set }
+//
+// `condition` is a core palette kind (not one of the withheld five), but the
+// host now REQUIRES `config.field` at author time (#661 M1) — the engine
+// truthiness-tests that expression, and without it a condition always routed
+// `true`. So it carries a form too: `condition { field }` (the `yes`/`no`
+// branches are EDGE labels, not config).
+//
+// `transform` is likewise a core palette kind, but its one engine key —
+// `config.set`, a JSON object of field → literal/`=`-expression the engine lays
+// over each item (`nodes/control_flow/transform.rs`) — had no control, so a
+// console-authored transform lowered to a silent identity node. It carries a
+// form now: `transform { set }`. `set` is OPTIONAL — an absent/empty `set` is a
+// valid engine passthrough (what a plain `output` node lowers to), so it is
+// never required. The engine reads `set` only via `as_object`, so a non-object
+// `set` is silently ignored; the `object` shape gate rejects it at author time.
+//
+// `tool_call` and `http_request` also each read an optional `connection_ref`
+// (`cfg.get("connection_ref").and_then(as_str)` in their integration nodes) —
+// an opaque handle to a connected account / credential the host resolves, never
+// a token or secret. It used to survive an edit only by riding the `extra` bag
+// (so it was unauthorable); it is a first-class field on both kinds now.
 //
 // Keys the host REJECTS inside `config` — `on_error`, `retry`,
 // `requires_approval`, `schedule`, `destination`, `agent_ref` — are first-class
@@ -56,6 +78,16 @@ export interface ConfigFieldSpec {
  * `config` (if any) rides through an edit untouched, as before.
  */
 export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
+  condition: [
+    {
+      key: "field",
+      label: "Field",
+      control: "line",
+      required: true,
+      placeholder: "=item.approved",
+      hint: "The boolean expression the branch tests. The `yes` edge takes the true branch, `no` the false.",
+    },
+  ],
   tool_call: [
     {
       key: "slug",
@@ -72,6 +104,13 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       jsonShape: "object",
       placeholder: '{ "query": "=item.topic" }',
       hint: "A JSON object of arguments. `=`-expressions resolve per input item at run time.",
+    },
+    {
+      key: "connection_ref",
+      label: "Connection",
+      control: "line",
+      placeholder: "composio:slack:acct_1",
+      hint: "Optional. An opaque reference to a connected account or credential the host resolves — never a token or secret. Leave empty to use the default connection.",
     },
   ],
   http_request: [
@@ -111,6 +150,13 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       jsonShape: "object-or-string",
       placeholder: '{ "hello": "world" }',
       hint: "A JSON object sent as the body, or a JSON string like `\"raw text\"`.",
+    },
+    {
+      key: "connection_ref",
+      label: "Connection",
+      control: "line",
+      placeholder: "http:acct_2",
+      hint: "Optional. An opaque reference to a connected account or credential the host resolves — never a token or secret. Leave empty for an unauthenticated request.",
     },
   ],
   switch: [
@@ -157,6 +203,16 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       required: true,
       placeholder: "another workflow's id",
       hint: "The id of the workflow to run. It can't be this workflow's own id.",
+    },
+  ],
+  transform: [
+    {
+      key: "set",
+      label: "Set fields",
+      control: "json",
+      jsonShape: "object",
+      placeholder: '{ "greeting": "=item.name" }',
+      hint: "Optional. A JSON object of fields to add or overwrite on each item — each value is a literal or an `=`-expression resolved per item. Leave empty to pass items through unchanged.",
     },
   ],
 };
@@ -217,11 +273,10 @@ function stringifyConfigValue(spec: ConfigFieldSpec, value: unknown): string {
  *
  * Known keys become form strings. **Every other key is preserved verbatim in
  * `extra`** — the anti-data-loss guard: an orchestrator-authored node can carry
- * keys this form has no control for (`connection_ref` on a tool/http node,
- * `execution`/`concurrency`/`inputs` on a sub_workflow), and rebuilding the
- * node from the visible controls alone would silently delete them on the first
- * save. Reserved keys are the one exception — dropped, since the host would
- * reject them anyway.
+ * keys this form has no control for (`execution`/`concurrency`/`inputs` on a
+ * sub_workflow), and rebuilding the node from the visible controls alone would
+ * silently delete them on the first save. Reserved keys are the one exception —
+ * dropped, since the host would reject them anyway.
  */
 export function configDraftFrom(
   kind: string,
@@ -380,4 +435,83 @@ export function configDraftProblem(
     }
   }
   return null;
+}
+
+/**
+ * The console mirror of the host's write-time kind↔config rules, for the copilot
+ * proposal path (issue #783). Returns the one actionable sentence the host would
+ * refuse the write with, or `null` when the node is coherent for its kind.
+ *
+ * The source of truth is two host functions applied on every console-authored
+ * graph (create AND update):
+ *
+ * - `required_config_problems` (`src/company/workflow_file.rs`): a `tool_call`
+ *   needs `config.slug`, a `condition` needs `config.field`, an `http_request`
+ *   needs `config.method` and `config.url`, a `switch` needs `config.field` OR
+ *   `config.expression`, and a `sub_workflow` needs `config.workflow_id`.
+ * - the `agent`-node arm of `validate_draft_against_record`
+ *   (`src/company/workflow_create.rs`): an `agent` node must name a teammate in
+ *   its first-class `agent` field (never in `config`).
+ *
+ * Deliberately NOT {@link configDraftProblem}: that is the *form* validator, and
+ * it is stricter than the host in ways that would refuse a proposal the host
+ * accepts — it requires a `switch` to set field XOR expression where the host
+ * takes either, and it runs JSON-shape and blur rules the write path does not.
+ * This checks exactly what the host checks, so a coherent proposal is never
+ * turned away and an incoherent one is caught before the operator sees a diff
+ * for a step Apply would bounce.
+ *
+ * Config **shape** only: whether a named tool is actually granted, or a named
+ * teammate is really on the roster, stays the host's authority (a run-time gate
+ * this console cannot see). This checks that the key is present, not that its
+ * value resolves.
+ */
+export function nodeKindConfigProblem(node: {
+  kind: string;
+  agent?: string;
+  config?: unknown;
+}): string | null {
+  const table =
+    node.config && typeof node.config === "object" && !Array.isArray(node.config)
+      ? (node.config as Record<string, unknown>)
+      : undefined;
+  const nonEmpty = (key: string): boolean => {
+    const value = table?.[key];
+    return typeof value === "string" && value.trim() !== "";
+  };
+
+  switch (node.kind) {
+    case "agent":
+      // `node` may be raw proposal JSON, so `agent` can be any type — guard the
+      // string check rather than `.trim()` a non-string (which would throw and
+      // take the whole validation down instead of refusing the one node).
+      return typeof node.agent === "string" && node.agent.trim()
+        ? null
+        : "An agent step names no teammate — set its `agent` field to a roster member (not inside `config`).";
+    case "tool_call":
+      return nonEmpty("slug")
+        ? null
+        : 'A tool_call step sets no `config.slug` — put the tool\'s slug inside `config`, e.g. `"config": { "slug": "web_search" }`.';
+    case "condition":
+      return nonEmpty("field")
+        ? null
+        : "A condition step sets no `config.field` — put the boolean expression the branch tests inside `config`.";
+    case "http_request":
+      if (!nonEmpty("method")) {
+        return 'An http_request step sets no `config.method` — name the HTTP method inside `config`, e.g. `"config": { "method": "GET" }`.';
+      }
+      return nonEmpty("url")
+        ? null
+        : "An http_request step sets no `config.url` — put the request URL inside `config`.";
+    case "switch":
+      return nonEmpty("field") || nonEmpty("expression")
+        ? null
+        : "A switch step names no discriminant — set `config.field` or `config.expression` inside `config`.";
+    case "sub_workflow":
+      return nonEmpty("workflow_id")
+        ? null
+        : "A sub_workflow step sets no `config.workflow_id` — name the workflow to run inside `config`.";
+    default:
+      return null;
+  }
 }

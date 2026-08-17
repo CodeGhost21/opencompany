@@ -16,12 +16,22 @@
 //!
 //! * Shell + code tools share one [`SecurityPolicy`] built by [`exec_security`],
 //!   pinned to the agent's workspace with `workspace_only`, high-risk commands
-//!   blocked, tool-install denied, and an autonomy level mapped 1:1 from the
-//!   company's [`PolicyMode`]. This is the *strict* policy — opencompany's own
+//!   blocked, tool-install denied, and an autonomy level mapped from the
+//!   company's [`PolicyMode`] by [`autonomy_for`] — no longer 1:1 since `auto`
+//!   (issue #560) has no upstream counterpart and borrows `Supervised`. This is
+//!   the *strict* policy — opencompany's own
 //!   [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) tool policy stays
-//!   the real fail-closed approval gate on top of it.
-//! * Shell command audit is keyed on the agent's own workspace dir
-//!   ([`workspace_audit`]) so audit trails never cross tenants.
+//!   the real fail-closed approval gate on top of it, **except** on the workflow
+//!   `tool_call` path, where no such gate is installed and this policy is the
+//!   whole tier. See [`autonomy_for`].
+//! * Shell command audit is keyed on a per-agent, **host-owned** sink directory
+//!   ([`shell_audit`]) — `companies/<slug>/audit/<agent>/`, deliberately outside
+//!   the agent's own workspace — so audit trails never cross tenants *and* the
+//!   agent's sanctioned write paths cannot reach the record of what it did
+//!   (issue #775). The shell tool itself is wrapped by
+//!   [`AuditedShellTool`](crate::harness::audit::AuditedShellTool), which
+//!   appends the command's intent line *before* the command runs and refuses
+//!   the call if that append fails.
 //! * Web tools reuse OpenHuman's upstream SSRF guard (`url_guard`): every
 //!   request is validated against the per-company allowlist AND has
 //!   private/loopback/link-local/metadata IPs rejected — even in the default
@@ -105,7 +115,7 @@ const CURL_DEST_SUBDIR: &str = "downloads";
 /// The canonical list lives in [`crate::company::GATEABLE_NAMESPACES`] (always
 /// compiled, so manifest validation can see it in the default build); this is a
 /// re-export for the harness call sites that key off it.
-pub const GATEABLE_NAMESPACES: [&str; 7] = crate::company::GATEABLE_NAMESPACES;
+pub const GATEABLE_NAMESPACES: [&str; 8] = crate::company::GATEABLE_NAMESPACES;
 
 /// Map a tool's runtime `name()` onto its grant namespace, or `None` when the
 /// tool is **intrinsic** (memory / MCP / orchestrator / file / skill tools),
@@ -143,6 +153,13 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
         // `web_search` compiles under the plain `openhuman` feature, which is
         // what CI actually builds and tests.
         "web_search" => Some("search"),
+        // Bound repositories (issue #245, agent half). Lives in
+        // [`repo`](crate::harness::repo) rather than this module because it
+        // reaches a host-owned mirror and a forge, not the agent's own sandbox —
+        // but it is namespaced here for the same reason `search` is, and like
+        // `search` the arm is never inert: both tools compile under the plain
+        // `openhuman` feature, which is what CI builds and tests.
+        "repo_checkout" | "repo_pr" => Some("repo"),
         _ => None,
     }
 }
@@ -153,11 +170,16 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
 /// Extends the same `workspace_only` shape [`file_tools`](crate::harness::build)
 /// uses with the exec-relevant knobs:
 ///
-/// * `autonomy` is mapped **1:1** from the company [`PolicyMode`]
-///   (readonly/supervised/full → [`AutonomyLevel`] ReadOnly/Supervised/Full).
+/// * `autonomy` is mapped from the company [`PolicyMode`] — see
+///   [`autonomy_for`], which is **not** 1:1 since `auto` (issue #560) has no
+///   upstream counterpart, and which is a real security boundary on the
+///   workflow `tool_call` path rather than a mapping detail.
 /// * `block_high_risk_commands` is always on — destructive shell commands are
 ///   refused before they spawn.
-/// * `require_approval_for_medium_risk` mirrors Supervised mode.
+/// * `require_approval_for_medium_risk` covers Supervised **and** Auto, for the
+///   reason argued on [`autonomy_for`]: the flag is inert unless `autonomy` is
+///   `Supervised`, so leaving `auto` out of it would silently undo the very
+///   mapping chosen to keep `auto` from loosening shell execution.
 /// * `allow_tool_install` and `auto_approve_all` are always off — an embedded
 ///   company agent never installs OS packages nor blanket-approves itself.
 ///
@@ -173,18 +195,57 @@ pub fn exec_security(workspace: &Path, mode: PolicyMode) -> SecurityPolicy {
         action_dir: dir,
         workspace_only: true,
         block_high_risk_commands: true,
-        require_approval_for_medium_risk: mode == PolicyMode::Supervised,
+        require_approval_for_medium_risk: matches!(mode, PolicyMode::Supervised | PolicyMode::Auto),
         allow_tool_install: false,
         auto_approve_all: false,
         ..SecurityPolicy::default()
     }
 }
 
-/// The OpenHuman [`AutonomyLevel`] a company [`PolicyMode`] maps to (1:1).
+/// The OpenHuman [`AutonomyLevel`] a company [`PolicyMode`] maps to.
+///
+/// Three of the four map by name. `auto` (issue #560) has no upstream
+/// counterpart — OpenHuman's `AutonomyLevel` is `ReadOnly` / `Supervised` /
+/// `Full` — so it must borrow one, and **the borrowed level is a security
+/// decision, not a naming one.**
+///
+/// # Why `Supervised` and not `Full`
+///
+/// `auto` is more permissive than `supervised` at opencompany's own
+/// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy), which is where
+/// the tier is supposed to be expressed. Reaching for the matching *feel* here
+/// and mapping it to `Full` would loosen a different gate in the opposite
+/// direction, because this policy is not always sitting underneath that one:
+///
+/// * A workflow `tool_call` node runs through
+///   [`WorkflowToolInvoker`](crate::workflows::caps), which gates on the
+///   `[tools].allow` grant list and **this policy** — no `ApprovalPolicy` is
+///   installed on that path. (Workflow *agent* nodes go through the roster and
+///   do have one.) So for those nodes this is the whole tier.
+/// * Upstream, `AutonomyLevel::Full` stops asking about medium-risk shell
+///   commands: the approval arm in `command_checks` fires only when `autonomy
+///   == Supervised`. Mapping `auto` to `Full` would therefore let medium-risk
+///   commands run unapproved in workflow nodes on an `auto` company — while the
+///   tier's stated contract is that `shell` parks. The inverse of what the
+///   operator selected.
+///
+/// Mapping to `Supervised` costs nothing in the other direction. Every tool
+/// this policy governs — `shell`, the code runners, the web tools — is
+/// `Standing::PerCall` and therefore parks under `auto` at the authoritative
+/// layer anyway, so the stricter advisory tier underneath is never the thing
+/// the operator notices. `auto` buys its autonomy in tools this policy does not
+/// govern.
+///
+/// This is also why `require_approval_for_medium_risk` in [`exec_security`]
+/// lists `Auto` explicitly instead of leaving `mode == PolicyMode::Supervised`
+/// to answer it. That expression was exhaustive by accident and would have
+/// quietly returned `false` for the new variant — pairing `Supervised` autonomy
+/// with the medium-risk gate switched off, which is the loosening this mapping
+/// was chosen to prevent, arriving through the back door.
 fn autonomy_for(mode: PolicyMode) -> AutonomyLevel {
     match mode {
         PolicyMode::Readonly => AutonomyLevel::ReadOnly,
-        PolicyMode::Supervised => AutonomyLevel::Supervised,
+        PolicyMode::Supervised | PolicyMode::Auto => AutonomyLevel::Supervised,
         PolicyMode::Full => AutonomyLevel::Full,
     }
 }
@@ -195,23 +256,99 @@ pub fn native_runtime() -> Arc<dyn RuntimeAdapter> {
     Arc::new(NativeRuntime::new())
 }
 
-/// A workspace-scoped [`AuditLogger`] for shell command execution, built the way
-/// OpenHuman's `runtime_node::build_runtime_tools` does. Keyed on the agent's
-/// own workspace dir so audit trails are tenant-isolated.
+/// A shell audit logger paired with the file it appends to.
 ///
-/// Returns `None` when the logger cannot be initialized. Callers **must** treat
-/// `None` as fail-closed: [`shell_tools`] withholds the `ShellTool` entirely
-/// rather than register it unaudited (see there). The failure is logged at
-/// `error!` (not `warn!`): losing the audit logger drops shell capability for
-/// the agent, so the event must surface in production error telemetry.
-pub fn workspace_audit(workspace: &Path) -> Option<Arc<AuditLogger>> {
-    match get_or_create_workspace_audit_logger(AuditConfig::default(), workspace.to_path_buf()) {
-        Ok(logger) => Some(logger),
+/// The pairing is structural on purpose. [`AuditLogger`] does not expose its own
+/// path, and the fail-closed refusal in
+/// [`AuditedShellTool`](crate::harness::audit::AuditedShellTool) has to *name*
+/// the sink it could not write — an operator staring at a shell outage needs
+/// that path. Carrying the two together means the name can never describe a
+/// different file than the one being appended to.
+#[derive(Clone)]
+pub struct ShellAudit {
+    /// The shared per-agent logger. Cloning shares one instance, so every
+    /// append serializes through its write lock.
+    pub logger: Arc<AuditLogger>,
+    /// The file `logger` appends to, derived from the same
+    /// [`AuditConfig::default`] the logger was built with.
+    pub sink: std::path::PathBuf,
+}
+
+impl ShellAudit {
+    /// A disabled logger over a sentinel `sink`, for tests and contexts that
+    /// need a handle but must not touch the filesystem. `log()` short-circuits
+    /// before any I/O, so the sink path is never opened.
+    pub fn disabled() -> Self {
+        Self {
+            logger: AuditLogger::disabled(),
+            sink: std::path::PathBuf::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ShellAudit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellAudit")
+            .field("sink", &self.sink)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The per-agent [`AuditLogger`] for shell command execution, built the way
+/// OpenHuman's `runtime_node::build_runtime_tools` does, but keyed on a
+/// **host-owned** sink directory rather than the agent's workspace.
+///
+/// `audit_dir` is
+/// [`DataLayout::agent_audit_dir`](crate::store::DataLayout::agent_audit_dir) —
+/// `companies/<slug>/audit/<agent>/`, per agent and outside every agent
+/// workspace. Two properties depend on that, and neither survives putting the
+/// sink back in the workspace:
+///
+/// * The workspace is also the `workspace_only` [`SecurityPolicy`] root the
+///   file tools enforce, so a sink inside it is a **policy-permitted** target:
+///   the plain relative `file_write("audit.log")` — no traversal, no absolute
+///   path, no `shell` — is exactly what the policy allows, and it used to land
+///   on the audit trail. Outside the workspace that same call reaches nothing
+///   that matters (issue #775). Absolute paths and `../` are refused either
+///   way, by `workspace_only`'s own rules; they are not what moved.
+/// * The vendored registry caches one logger per *directory*, first config
+///   wins, so a directory shared between agents would hand the second agent the
+///   first agent's file.
+///
+/// The directory is created here, before the logger is built: the vendored
+/// factory keys its process-global registry on the *canonicalized* path and
+/// silently falls back to the raw one when the directory is missing, which
+/// registers one physical sink twice and reopens the interleaving race the
+/// registry exists to prevent.
+///
+/// Returns `None` when the directory cannot be created or the logger cannot be
+/// initialized. Callers **must** treat `None` as fail-closed: [`shell_tools`]
+/// withholds the `ShellTool` entirely rather than register it unaudited (see
+/// there). The failure is logged at `error!` (not `warn!`): losing the audit
+/// logger drops shell capability for the agent, so the event must surface in
+/// production error telemetry.
+///
+/// This makes the sink unreachable *through the sanctioned tool paths*. It is
+/// not tamper-evidence — the shell runs as the same uid and can still delete the
+/// file. See `docs/spec/security/agent-isolation.md`.
+pub fn shell_audit(audit_dir: &Path) -> Option<ShellAudit> {
+    if let Err(error) = std::fs::create_dir_all(audit_dir) {
+        tracing::error!(
+            audit_dir = %audit_dir.display(),
+            %error,
+            "[toolbelt] shell audit sink directory could not be created; withholding shell capability (fail-closed) — this agent gets NO shell tool"
+        );
+        return None;
+    }
+    let config = AuditConfig::default();
+    let sink = audit_dir.join(&config.log_path);
+    match get_or_create_workspace_audit_logger(config, audit_dir.to_path_buf()) {
+        Ok(logger) => Some(ShellAudit { logger, sink }),
         Err(error) => {
             tracing::error!(
-                workspace = %workspace.display(),
+                audit_dir = %audit_dir.display(),
                 %error,
-                "[toolbelt] workspace audit logger init failed; withholding shell capability (fail-closed) — this agent gets NO shell tool"
+                "[toolbelt] shell audit logger init failed; withholding shell capability (fail-closed) — this agent gets NO shell tool"
             );
             None
         }
@@ -231,22 +368,33 @@ pub fn workspace_audit(workspace: &Path) -> Option<Arc<AuditLogger>> {
 ///   Node/Python bootstrap in v1).
 /// * `read_workspace_state` — read-only git/tree overview.
 ///
-/// **Fail closed on audit:** `audit` is `None` only when the per-workspace audit
-/// logger could not be initialized (see [`workspace_audit`]). In that case the
-/// whole `shell` namespace is withheld — an empty vector — so a `ShellTool` can
-/// never run commands with no audit record. Dropping the capability is the safe
+/// **Fail closed on audit:** `audit` is `None` only when the per-agent audit
+/// logger could not be initialized (see [`shell_audit`]). In that case the whole
+/// `shell` namespace is withheld — an empty vector — so a `ShellTool` can never
+/// run commands with no audit record. Dropping the capability is the safe
 /// failure mode; registering an unaudited shell is not.
+///
+/// **Fail closed at run time too:** the `ShellTool` is wrapped in an
+/// [`AuditedShellTool`](crate::harness::audit::AuditedShellTool), which appends
+/// the command's intent line *before* delegating and refuses the call when that
+/// append fails. Init-time fail-closed alone was not enough — upstream's
+/// post-execution `emit_audit` is warn-and-continue by design, so a sink that
+/// became unwritable *after* the agent was built would let commands run with no
+/// record at all.
 pub fn shell_tools(
     security: Arc<SecurityPolicy>,
     runtime: Arc<dyn RuntimeAdapter>,
-    audit: Option<Arc<AuditLogger>>,
+    audit: Option<ShellAudit>,
     workspace: &Path,
 ) -> Vec<Box<dyn Tool>> {
     let Some(audit) = audit else {
         return Vec::new();
     };
     vec![
-        Box::new(ShellTool::new(security, runtime, audit)),
+        Box::new(crate::harness::audit::AuditedShellTool::new(
+            ShellTool::new(security, runtime, Arc::clone(&audit.logger)),
+            audit,
+        )),
         Box::new(WorkspaceStateTool::new(workspace.to_path_buf())),
     ]
 }
@@ -465,12 +613,7 @@ mod tests {
     fn shell_tools_expose_expected_names() {
         let ws = Path::new("/tmp/oc-toolbelt-shell");
         let security = test_security(ws, PolicyMode::Supervised);
-        let tools = shell_tools(
-            security,
-            native_runtime(),
-            Some(AuditLogger::disabled()),
-            ws,
-        );
+        let tools = shell_tools(security, native_runtime(), Some(ShellAudit::disabled()), ws);
         let got = names(&tools);
         for expected in ["shell", "read_workspace_state"] {
             assert!(got.contains(&expected), "missing {expected}: {got:?}");
@@ -518,7 +661,7 @@ mod tests {
         let shell = shell_tools(
             security.clone(),
             native_runtime(),
-            Some(AuditLogger::disabled()),
+            Some(ShellAudit::disabled()),
             ws,
         );
         let code = code_tools(security, ws);
@@ -596,6 +739,10 @@ mod tests {
         // Metered web search (issue #238) maps to the `search` namespace, so a
         // token-budget plan can shed it under spend pressure.
         assert_eq!(namespace_of("web_search"), Some("search"));
+        // Bound repositories (issue #245) map to the `repo` namespace, so a
+        // token-budget plan can shed a checkout under spend pressure.
+        assert_eq!(namespace_of("repo_checkout"), Some("repo"));
+        assert_eq!(namespace_of("repo_pr"), Some("repo"));
         // Intrinsic tools are unmapped (always kept by the filter).
         assert_eq!(namespace_of("memory_store"), None);
         assert_eq!(namespace_of("memory_recall"), None);
@@ -627,6 +774,8 @@ mod tests {
             "composio_authorize",
             "composio_execute",
             "web_search",
+            "repo_checkout",
+            "repo_pr",
         ];
         for tool in mapped {
             let ns = namespace_of(tool).expect("mapped tool has a namespace");
@@ -650,6 +799,10 @@ mod tests {
         assert!(
             GATEABLE_NAMESPACES.contains(&"search"),
             "the metered search namespace must be gateable (issue #238)"
+        );
+        assert!(
+            GATEABLE_NAMESPACES.contains(&"repo"),
+            "the bound-repository namespace must be gateable (issue #245)"
         );
     }
 
@@ -679,7 +832,6 @@ mod tests {
             "supervised must approve medium-risk"
         );
 
-        // Autonomy tracks the mode 1:1; medium-risk approval is Supervised-only.
         let readonly = exec_security(ws, PolicyMode::Readonly);
         assert_eq!(readonly.autonomy, AutonomyLevel::ReadOnly);
         assert!(!readonly.require_approval_for_medium_risk);
@@ -687,6 +839,120 @@ mod tests {
         let full = exec_security(ws, PolicyMode::Full);
         assert_eq!(full.autonomy, AutonomyLevel::Full);
         assert!(!full.require_approval_for_medium_risk);
+    }
+
+    /// `auto` must not loosen shell execution (issue #560).
+    ///
+    /// This is the test for the decision argued on [`autonomy_for`], and it
+    /// guards a hole with no other guard: a workflow `tool_call` node has **no**
+    /// `ApprovalPolicy` above it, so this policy is the entire tier there.
+    /// `auto` is more permissive than `supervised` at the approval gate, and the
+    /// tempting mapping — matching that feel with `AutonomyLevel::Full` — would
+    /// silently drop the medium-risk shell gate for every workflow node on an
+    /// `auto` company, because upstream's approval arm fires only when
+    /// `autonomy == Supervised`.
+    ///
+    /// The second assertion is the subtler half. With autonomy mapped to
+    /// `Supervised`, `require_approval_for_medium_risk` becomes load-bearing —
+    /// and it was written as `mode == PolicyMode::Supervised`, an expression
+    /// that was exhaustive by accident and answers `false` for a variant added
+    /// beside it. Getting the mapping right and leaving that expression alone
+    /// would have reopened the same hole from the other side.
+    #[test]
+    fn auto_borrows_supervised_exec_security_rather_than_full() {
+        let ws = Path::new("/tmp/oc-toolbelt-policy-auto");
+        let auto = exec_security(ws, PolicyMode::Auto);
+
+        assert_eq!(
+            auto.autonomy,
+            AutonomyLevel::Supervised,
+            "auto must not inherit Full's exec autonomy — a workflow tool_call node has no \
+             approval gate above this policy"
+        );
+        assert!(
+            auto.require_approval_for_medium_risk,
+            "the medium-risk gate is inert unless autonomy is Supervised, so auto must opt in \
+             explicitly or the mapping above buys nothing"
+        );
+
+        // The rest of the hardening is tier-independent and stays so.
+        assert!(auto.block_high_risk_commands);
+        assert!(!auto.allow_tool_install);
+        assert!(!auto.auto_approve_all);
+        assert!(auto.workspace_only);
+    }
+
+    /// The mapping above, proven where it actually bites: at openhuman's own
+    /// command gate, on the class that separates the two candidate mappings.
+    ///
+    /// `auto_borrows_supervised_exec_security_rather_than_full` pins the two
+    /// fields; this pins what they *do*.
+    ///
+    /// # Which class actually distinguishes the mappings
+    ///
+    /// Worth stating, because the intuitive example is the wrong one. At
+    /// `gate_decision`, `Destructive` prompts under `Supervised` **and** under
+    /// `Full` — so `rm -rf /` cannot tell the two mappings apart, and a test
+    /// written around it would pass whichever mapping `autonomy_for` chose.
+    /// (`block_high_risk_commands` is a separate, unconditional refusal on the
+    /// `validate_command` path; it is not what `gate_decision` reports.)
+    ///
+    /// The one class `Full` actually loosens is `Write`: `Supervised` prompts,
+    /// `Full` allows. That makes `Write` the whole of the difference here, and
+    /// it is the ordinary case rather than an exotic one — an unrecognised
+    /// command is classified `Write` by fail-closed default. So mapping `auto`
+    /// to `Full` would have let routine state-changing shell commands run
+    /// unprompted in workflow `tool_call` nodes, which is exactly the tier
+    /// inversion `autonomy_for` argues against.
+    ///
+    /// Asserted on `CommandClass` directly rather than through
+    /// `classify_command`, so this pins the tier decision and not the
+    /// classifier's string heuristics.
+    #[test]
+    fn auto_gates_write_class_commands_exactly_as_supervised_does() {
+        use oh::security::{CommandClass, GateDecision};
+        let ws = Path::new("/tmp/oc-toolbelt-policy-auto-cmd");
+
+        let auto = exec_security(ws, PolicyMode::Auto);
+        let supervised = exec_security(ws, PolicyMode::Supervised);
+        let full = exec_security(ws, PolicyMode::Full);
+
+        // The load-bearing assertion: the class the two mappings disagree about.
+        assert_eq!(
+            auto.gate_decision(CommandClass::Write),
+            GateDecision::Prompt,
+            "a write-class command must still ask on an auto desk — mapping auto to Full would \
+             let it run unprompted in a workflow tool_call node, which has no approval gate above \
+             this policy"
+        );
+        assert_eq!(
+            full.gate_decision(CommandClass::Write),
+            GateDecision::Allow,
+            "guard for the assertion above: if Full ever stops allowing Write, this test no \
+             longer distinguishes the two mappings and must be rewritten"
+        );
+
+        // Everything else `auto` decides, it decides identically to `supervised`.
+        for class in [
+            CommandClass::Read,
+            CommandClass::Write,
+            CommandClass::Network,
+            CommandClass::Install,
+            CommandClass::Destructive,
+        ] {
+            assert_eq!(
+                auto.gate_decision(class),
+                supervised.gate_decision(class),
+                "auto must gate {class:?} exactly as supervised does"
+            );
+        }
+
+        // And it is not readonly either — an auto desk can still act.
+        let readonly = exec_security(ws, PolicyMode::Readonly);
+        assert_eq!(
+            readonly.gate_decision(CommandClass::Write),
+            GateDecision::Block
+        );
     }
 
     #[tokio::test]
@@ -787,7 +1053,7 @@ mod tests {
         let mut tools = shell_tools(
             security.clone(),
             native_runtime(),
-            Some(AuditLogger::disabled()),
+            Some(ShellAudit::disabled()),
             ws,
         );
         tools.extend(code_tools(security, ws));
@@ -851,7 +1117,7 @@ mod tests {
         let mut tools: Vec<Box<dyn Tool>> = shell_tools(
             security.clone(),
             native_runtime(),
-            Some(AuditLogger::disabled()),
+            Some(ShellAudit::disabled()),
             ws,
         );
         tools.extend(code_tools(security.clone(), ws));

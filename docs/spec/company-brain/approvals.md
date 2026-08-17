@@ -17,8 +17,17 @@ Effect kinds that MAY require sign-off, grouped by what they risk:
 | **Identity** | handle registration/renewal, key rotation, delegated signer mint/expand | always approval |
 
 `readonly` mode gates *every* effect; `full` mode auto-allows everything
-except `[policy].always_approve` entries. Modes mirror OpenHuman's security
-tiers so an OpenHuman-backed `ApprovalGate` maps 1:1.
+except `[policy].always_approve` entries. `auto` sits between `supervised` and
+`full`: the agent's own sandbox writes and its outward reads run unattended,
+and anything that leaves the company or spends on submit still parks — see
+[the tier line](grants.md#the-auto-tier).
+
+Three of the four names are OpenHuman's own security tiers. `auto` is not, so
+the mapping is no longer 1:1 and `PolicyMode::security_tier()` — the accessor
+that asserted it was — has been deleted rather than made to lie. Where the two
+vocabularies still have to meet, `harness::toolbelt::autonomy_for` borrows
+`Supervised` for `auto`; the argument is on that function and matters, because
+a workflow `tool_call` node has no `ApprovalPolicy` above it.
 
 ## Approval lifecycle
 
@@ -136,180 +145,14 @@ re-approving is the idempotent no-op above, so a retry mints no second grant.
 
 ## Approving a blocked tool call: single-use grants
 
-Two different things park on this queue and they need opposite treatment.
+Moved to [`grants.md`](grants.md) — this file was over the repository's 500-line limit. See that page for the full detail. What moved, in the order it appears there:
 
-A **native** effect is one the runtime performs itself (an email, a workflow
-delivery). Approving it executes it, as above.
-
-A **tool call** is one an agent tried to make and the OpenHuman tool policy
-blocked. There is nothing for the runtime to execute — the parked effect's
-payload is the tool's *arguments*, and only that agent can run the tool. So
-approving it mints a **single-use grant** and re-dispatches the agent to
-re-issue the call. Without this, approving recorded a verdict and nothing ran:
-the operator had to go back and ask for the same thing again.
-
-A grant is:
-
-- **single-use** — redeeming consumes it, so one approval buys one call and
-  never standing permission;
-- **agent-scoped** — a grant minted for one desk does not admit another's
-  identical call;
-- **argument-exact** — matching is whole-value equality on the arguments. A
-  re-issue with a different recipient or amount does not match and re-parks,
-  because the operator never saw those arguments. Approve-with-edit mints
-  against the *amended* arguments;
-- **time-boxed** — 15 minutes. An approval is consent to act now, not a
-  standing authorisation. An unredeemed grant expires and the operator is told
-  the agent did not act, so re-approving is an informed choice.
-
-The lifecycle is journaled (`ApprovalGranted` → `GrantConsumed` | `GrantExpired`)
-and replayed on boot, so a restart between approving and re-issuing does not
-drop the approval. Consumed and expired grants are folded out on replay: a
-resurrected single-use grant would not be single-use.
-
-### Standing grants: this tool, for this teammate, until a deadline
-
-Single-use is the right default and was, for a while, the only scope — which
-made it the whole design. An agent reaching for the same tool repeatedly
-produced a stream of near-identical cards, and the operator's rational escapes
-were approving blind or switching the company to `full`, throwing the gate away
-to stop it nagging. So an approve now carries a **scope**:
-
-- **just this once** — the default, and byte-identical to the single-use grant
-  above. Needs no interaction: a body with no `scope` key is exactly the
-  pre-#374 request.
-- **this tool, for this teammate** — a **standing grant**, with a mandatory
-  duration of 1 hour, 8 hours, or 7 days.
-
-A standing grant is a distinct type from a single-use one, not a scope flag on
-it, and both differences are load-bearing: it has **no arguments field**, so it
-cannot argument-match or be widened into doing so; and its **expiry is not
-optional**, so it cannot live forever. The duration is stored as an absolute
-epoch-millis deadline, capped at 7 days server-side — a request past the cap is
-a **400, never a silent clamp**, because quietly shortening a duration would
-leave the operator believing a permission is live when it lapsed days earlier.
-
-Expiry is enforced at **redemption**, under the same lock as the match, and also
-swept on the scheduler's maintenance tick. The sweep is housekeeping and an
-operator notice; it is never the enforcement, or "for one hour" would mean
-"until the next tick after one hour".
-
-#### What can never be granted broadly
-
-Decided by what a tool can **reach**, not by what it is called.
-
-This used to be "exactly the tools whose consequence group is the catch-all
-`Other`", on the reasoning that delegating to the taxonomy beat keeping a second
-hand-written set of safe tools. The reasoning was right and the measurement was
-wrong. `Other` is where a tool lands when the classifier finds no consequence
-word *in its name*, so the three broadest capabilities in the system —
-running an arbitrary command, reaching an arbitrary address, and overwriting the
-guidance the operator wrote — were all grantable, while a repository read scoped
-to one connected account was not. The bucket also conferred membership by
-omission: adding a tool and not thinking about it handed it the longest
-permission available.
-
-So the two questions are now separate answers from one declaration
-(`src/policy/consequence.rs`), one entry per tool:
-
-- **may it run unattended?** — `readonly` denies anything that mutates or
-  reaches outside; `supervised` parks it. This is what the approval card is for.
-- **may an operator hand it over for a stretch of time?** — refused for anything
-  that can execute arbitrary code (`shell`), reach an arbitrary address
-  (`http_request`, `curl`, `web_fetch`, `git_operations`), act through a
-  third-party server (`mcp_call_tool`), change the company's shared note tree
-  (`workspace_write`, `workspace_create`), or run a saved workflow; refused for
-  every named
-  consequence — Spend, Send, Sign, Publish, Hire, Identity; and refused for any
-  tool nobody has declared.
-
-What stays grantable is the low-consequence middle the feature exists for:
-writes confined to the agent's own sandboxed workspace (`file_write`, `edit`,
-`apply_patch`, `csv_export`, `memory_store`), and **Composio reads**.
-
-`composio_execute` is the reason arguments are part of the question. Every
-Composio action arrives under that one tool name, so classifying the name
-collapsed "list a repository's pull requests" and "send an email" into one
-verdict, and the cautious answer had to win for both. The action slug in the
-arguments is classified instead, against the provider's own curated catalogue —
-a read is grantable, a send is not, and **anything the catalogue does not name
-is a send**. That last part is not a detail: an action nobody has classified
-might do anything.
-
-Because a standing grant carries no arguments, the policy re-classifies the live
-call before honouring one, so a scope granted on a GitHub read cannot admit an
-outgoing email on the same tool name.
-
-The console hides the control for a card it cannot be used on; that is UX. The
-**enforcement** is host-side at mint time, so a hand-rolled request for a
-standing grant on a Send-group tool is a 400 rather than a permission. Native
-effects are refused too: the runtime performs those itself, so "this tool, for
-this teammate" names neither of the two things it needs.
-
-A refused scope changes nothing at all — the approval stays parked and no
-verdict is journaled — so the operator can simply approve it once instead.
-
-**Not yet as narrow as it should be.** A standing grant records a tool, not a
-toolkit, so "this teammate may read from GitHub for eight hours" is expressed as
-"may make Composio reads for eight hours". Reads only, never sends — but broader
-than the sentence an operator actually consented to. Narrowing it needs a scope
-field on the grant record.
-
-#### Listing and revoking
-
-`GET {scope}/grants` lists the live standing permissions; `DELETE
-{scope}/grants/{gid}` takes one back, 404 when it is already gone. Both are
-journaled with the **resolving operator's real identity**, so "who opened this
-up" is answerable later. Revocation takes effect on the tool's **next** call — a
-call already admitted is not aborted, because there is no abort lever inside an
-agent's turn and killing one mid-call is the lifecycle anti-pattern; the next
-policy check finds nothing and re-parks.
-
-The list carries no arguments, because a standing grant has none — so it opens
-no second redaction surface.
-
-Lifecycle records: `StandingGrantMinted` → `StandingGrantRevoked` |
-`StandingGrantExpired`. Replay folds out revoked and expired grants *and*
-anything already past its deadline, so a host that was down across an expiry
-cannot hand the permission back on boot.
-
-Per-use auditing is tracing-only in v1: mint, revoke and expiry are journaled
-with actor and timestamps, but each admitted call writes no journal record.
-Defensible because a standing grant only ever admits tools declared grantable
-and never a priced call; a per-use record is additive later.
-
-### Precedence at the tool gate
-
-A tool call is decided in this order:
-
-1. `never_do` hard-deny — **reserved**; the delegation-rule compiler is still a
-   Phase-1 stub, so no tool-level arm exists yet. It sits above the grant
-   deliberately: a grant is an operator saying yes to one call, `never_do` is
-   the company saying not ever, and the standing rule is the one meant to
-   survive a socially engineered operator.
-2. a live **single-use grant** matching agent + tool + exact arguments →
-   allow, once.
-3. a live **standing grant** matching agent + tool, unexpired → allow. Placed
-   immediately below single-use consumption so a matching single-use grant
-   still *burns*: masking it would leave the operator's one-off approval to
-   expire and be announced as "the agent didn't act", about a call that ran.
-   This arm refuses a **priced** call (a declared amount, a metered read), so a
-   standing grant can never admit money by placement rather than by promise —
-   and it re-checks the live arguments, so a grant minted on a Composio read
-   cannot admit a Composio send.
-4. `[policy].always_approve` → park.
-5. mode dispatch (`readonly` / `supervised` / `full`).
-
-The grant sits **above** `always_approve` on purpose. A tool on that list still
-parks the first time, which is what the list is for; but once the operator has
-approved that specific call, re-parking it would mean approval authorises
-nothing at all for precisely the tools an operator most wants to gate
-deliberately. Single-use, exact-args and agent-scope are what keep that
-narrow.
-
-Note this is the *tool* gate (`ApprovalPolicy`), which is a different path from
-the *effect* gate (`ManifestApprovalGate::evaluate`) the taxonomy above
-describes. A harness tool call parks directly and never reaches `evaluate`.
+- single-use grants: what approving a blocked **tool** call mints, versus a **native** effect the runtime performs itself (approving one of those executes it, per the lifecycle above);
+- [standing grants](grants.md#standing-grants-this-tool-for-this-teammate-until-a-deadline) — this tool, for this teammate, until a deadline — and [what can never be granted broadly](grants.md#what-can-never-be-granted-broadly);
+- [the `auto` tier](grants.md#the-auto-tier) that low-consequence middle defines, and [listing and revoking](grants.md#listing-and-revoking) live standing grants;
+- [which tier a new company gets](grants.md#which-tier-a-new-company-gets) (issue #605);
+- [what an `always_approve` entry names](grants.md#what-an-always_approve-entry-names-issue-684) (issue #684);
+- [precedence at the tool gate](grants.md#precedence-at-the-tool-gate), and its step 7, [per-call judgement](grants.md#per-call-judgement-issue-338) (issue #338).
 
 ## Approvals inside a workflow run (issue #395)
 
@@ -385,6 +228,68 @@ card can appear live. It is deliberately thin — an id, a dotted kind, a thread
 because the effect's payload is redacted in exactly one place and must not
 acquire a second. A reader re-reads the approvals feed for the rest.
 
+### One turn is asked about once (issue #842)
+
+A research turn that reaches `espn.com`, `bbc.com` and `theguardian.com` parks
+three approvals, and asking three times is the same fact told badly: it is one
+piece of work, and every interruption costs a re-dispatch cycle that can
+dead-end. So the parks a single turn raised are **surfaced as one request**.
+
+The grouping key is not new. Issue #469 already journals the parking cycle, so
+that a turn blocked on four decisions is continued exactly once when the last
+one lands. `ApprovalSummary.batch` projects that same key, which is what makes
+the two agree by construction: the batch an operator is asked about in one card
+is precisely the batch the runtime holds a single continuation for. It is opaque
+— an equality key, never an ordering, a count, or anything to show an operator.
+
+**The grant model does not change at all.** There is no batch entity on the
+host, no batch resolve on the wire, and nothing new in how a grant is minted,
+stored or revoked. Each approval keeps its own id, its own verdict and — on
+approve — its own host-scoped grant, so approving three fetches still leaves
+three independently revocable rows under `Standing permissions`, one per host,
+each with its own expiry. Batching the *asking* is not batching the *granting*,
+and widening a grant to save a click would be exactly the leak `grants.md`
+exists to prevent.
+
+Two renderings over that one state, divided by what each surface is **for**:
+
+- **Chat is the fast path: all-or-nothing.** One card per turn, listing the
+  hosts it covers, with a single Approve/Decline and the ordinary scope
+  control. Approve grants every call in the batch; Decline grants none. The
+  operator is mid-conversation and wants one decision, not a form. It answers
+  every item it is still asking about, because the turn stays blocked until each
+  parked call has a verdict — a decision that left one open would hold the turn
+  while looking as though it had resolved the card.
+- **The Approvals page is the granular path: itemised.** One row per gated
+  call, approved or declined on its own, matching how `Standing permissions`
+  lists one revocable row per grant. It is where an operator goes for precision,
+  or to clean up after the fact. A row says how many others came from the same
+  turn, so someone arriving from the toast can tell one batch from an unrelated
+  queue.
+
+Granular control in *both* places would be redundant, and would double the state
+that has to stay in step between two surfaces — so it lives in one.
+
+**A decision that does not land is named, not swallowed.** One click fans out to
+one resolve per item, so a failure on the third leaves two effects authorised
+and one not. A toast is the wrong home for that — it does not say *which*, and
+it is gone by the time the operator looks back at the card — so the row that
+failed says so itself, the card counts the failures honestly (never "nothing was
+recorded" about a click that authorised two of three), and the buttons stay live,
+because a retry is the way out. A retry re-resolves only what is still pending.
+
+The two must not drift, and do not, because neither owns any state: both render
+the same feed, and both react to the `approval_resolved` frame. Deciding a row
+on the page settles that item on the chat card without a reload, and the card
+reports a partial state (`1 of 3 decided`) rather than going on claiming three
+things are pending.
+
+An approval with **no** batch — a workflow node, a scheduler tick, a park
+journaled before #469 — is never grouped, not even with another one like it.
+Absent means "the host did not say which turn this came from", and folding two
+unknowns together would invent a batch out of a shared silence. Each is shown
+alone, exactly as before this existed.
+
 ## Delegation levels (standing rules)
 
 Prosumers adjust the fence in plain language, which compiles to policy:
@@ -392,8 +297,10 @@ Prosumers adjust the fence in plain language, which compiles to policy:
 - "Auto-approve spending under $5" → `auto_approve_under_usd = 5.0`
 - "Never contact my customers directly" → `never_do` → `Deny` on
   `dm.external` matching the customer list
-- "You can post to the blog without asking" → remove `external.publish`
-  from `always_approve` for that channel
+- "You can post to the blog without asking" → remove `publish_artifact` from
+  `always_approve` for that channel. Nothing to remove unless the operator put
+  it there: `always_approve` defaults to empty, and under `supervised` it is
+  the checkpoint taxonomy — not the list — that parks a publish
 
 Standing-rule changes are themselves Charter edits with provenance and audit
 ([charter.md](charter.md)); loosening a rule takes effect for *future*

@@ -1,18 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { signInWithHubToken, verifyCode } from "@/api/auth";
+import { isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
 import { embeddedHost } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
-import { ConnectionRail } from "@/components/connection-rail";
+import {
+  CONNECTION_RAIL_WIDTH,
+  ConnectionRail,
+  connectionRailVisible,
+} from "@/components/connection-rail";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
+  adoptEmbeddedHost,
   clientFor,
   probe,
   restoreConnections,
   useConnections,
 } from "@/connections/registry";
+import type { ConnectionId } from "@/connections/types";
 import { ConnectionConsole } from "@/views/ConnectionConsole";
 
 /**
@@ -95,7 +102,51 @@ function clearHubResultFromUrl(): void {
   window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
 }
 
+/**
+ * The styleguide answers before anything else does.
+ *
+ * It reads no company and holds no client — it renders the stylesheet and
+ * nothing else — so putting it behind the sign-in gate would only mean that
+ * reviewing the design system required credentials for a running host. This
+ * way `#/styleguide` works against any build, including a static one.
+ *
+ * Checked before `resolveConfig()` so a console with no reachable host still
+ * serves it.
+ */
+function isStyleguideRoute(): boolean {
+  return window.location.hash.replace(/^#\/?/, "").split("?")[0] === "styleguide";
+}
+
 export function App() {
+  /**
+   * Tracked rather than read once, so `#/styleguide` typed into the address
+   * bar of a *running* console switches to it. Without the listener the shell
+   * below would keep the screen, and its own router — which does not know
+   * this route — would canonicalize the unknown hash straight back to
+   * `#/overview`, making the styleguide reachable only by a full reload.
+   */
+  const [styleguide, setStyleguide] = useState(isStyleguideRoute);
+  useEffect(() => {
+    const onHash = () => setStyleguide(isStyleguideRoute());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  if (styleguide) {
+    return (
+      <Suspense fallback={null}>
+        <StandaloneStyleguide />
+      </Suspense>
+    );
+  }
+  return <Console />;
+}
+
+const StandaloneStyleguide = lazy(() =>
+  import("@/views/StyleguideView").then((m) => ({ default: m.StyleguideView })),
+);
+
+function Console() {
   const config = useMemo(() => resolveConfig(), []);
   /**
    * The bootstrap connection.
@@ -111,6 +162,27 @@ export function App() {
       // below finds its own profile already registered and reuses that entry
       // rather than creating a duplicate row for one host.
       restoreConnections();
+      // `null` in the desktop, which has no host at its own origin and never
+      // will — see `isAddressableBaseUrl`. Adding one anyway is what made the
+      // packaged app open on a connection that could not work and select it,
+      // presenting a failure on every launch while the embedded host added
+      // below sat healthy and unselected (issue #613).
+      //
+      // Only the same-origin *default* is refused, not the config path: a
+      // desktop given an explicit host through `?api=` or an injected
+      // `OPENCOMPANY_CONFIG` still gets its bootstrap connection.
+      if (!isAddressableBaseUrl(config.baseUrl)) return null;
+      // A hub's own origin serves this bundle and nothing else — there is no
+      // host there and there never will be. Adding one anyway reproduces #613
+      // in the browser exactly: a connection that cannot work, selected on
+      // load, presenting a failure in front of the hosts that are healthy. The
+      // hosts a hub knows are the remembered ones, which `restoreConnections`
+      // above has already put back.
+      //
+      // As with the desktop, only the same-origin *default* is refused: a hub
+      // opened with an explicit `?api=` still gets its bootstrap connection,
+      // which is how a link to one specific host is shared.
+      if (config.hub && config.baseUrl === "") return null;
       return addConnection({
         baseUrl: config.baseUrl,
         defaultCompany: config.company,
@@ -130,15 +202,38 @@ export function App() {
    * the desktop still shows every remote host, which is the point of holding
    * several.
    *
-   * A connection like any other. Added after the first paint because the
-   * address arrives over IPC; the probe effect below picks it up from the id
-   * list, so nothing here has to drive it.
+   * Added after the first paint because the address arrives over IPC; the probe
+   * effect below picks it up from the id list, so nothing here has to drive it.
+   *
+   * Registered through `adoptEmbeddedHost` rather than `addConnection`, because
+   * this is the one host whose address is *expected* to have changed since last
+   * launch — recognising it by that address is what left a dead row behind on
+   * every run (#615).
+   *
+   * Its id is kept because two things need it and neither can find it by
+   * sorting: it is what the desktop selects on launch, and — through
+   * `resolved` — what tells "not asked yet" apart from "there is no embedded
+   * host". Both leave `id` null and they read as opposite things on screen, one
+   * a spinner and the other a failure someone has to act on (#613).
    */
+  const [embedded, setEmbedded] = useState<EmbeddedState>(() => ({
+    // A browser has nothing to ask, so it is resolved before it starts.
+    resolved: !isDesktopRuntime(),
+    id: null,
+  }));
   useEffect(() => {
     let cancelled = false;
     void embeddedHost().then((host) => {
-      if (cancelled || !host) return;
-      addConnection({ baseUrl: host.baseUrl, label: "This computer" });
+      if (cancelled) return;
+      // `resolved` is set either way: "asked, and there is none" is a distinct
+      // answer from "not asked yet", and only one of them is a failure.
+      setEmbedded({
+        resolved: true,
+        id: host
+          ? adoptEmbeddedHost({ baseUrl: host.baseUrl, instanceId: host.instanceId })
+          : null,
+        operatorEmail: host?.operatorEmail,
+      });
     });
     return () => {
       cancelled = true;
@@ -154,8 +249,13 @@ export function App() {
    * what is *rendered* and nothing else. A selected-connection field in the
    * registry is the single-valued thing that stops buzz from holding two
    * workspaces, and it would undo this slice.
+   *
+   * `null` until someone chooses, which is the desktop's ordinary state: it has
+   * no bootstrap connection to seed this with. What is on screen then is
+   * decided by `active` below, not by leaving this pointing at a host that does
+   * not exist.
    */
-  const [selected, setSelected] = useState(bootstrapId);
+  const [selected, setSelected] = useState<ConnectionId | null>(bootstrapId);
 
   // A pure read, so StrictMode's double render is harmless.
   const magicLink = useMemo(() => readMagicLink(), []);
@@ -190,6 +290,13 @@ export function App() {
    */
   useEffect(() => {
     if (auth.ready) return;
+    if (bootstrapId === null) {
+      // A landing credential names the bootstrap host, and this runtime has
+      // none to redeem it against. Opening the console beats sitting on
+      // "Signing in…" forever, waiting on a client that will never exist.
+      setAuth({ ready: true });
+      return;
+    }
     const client = clientFor(bootstrapId);
     if (!client) return;
     let cancelled = false;
@@ -252,15 +359,34 @@ export function App() {
 
   if (!auth.ready) {
     return (
-      <div className="grid min-h-svh place-items-center bg-background p-6 text-center">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="size-4 animate-spin" /> Signing in…
-        </div>
-      </div>
+      <FullScreen>
+        <Waiting>Signing in…</Waiting>
+      </FullScreen>
     );
   }
 
-  const active = connections.find((c) => c.id === selected) ?? connections[0];
+  /**
+   * Which connection is rendered, in the order these questions get answers.
+   *
+   * The embedded host comes before "whichever is first" deliberately. Restored
+   * hosts are added before it — its port only arrives over IPC — so position in
+   * the list is a record of when a host was learned about, not of which one a
+   * person opening the desktop means. A launch that lands on someone's remote
+   * host because they added it last Tuesday is the same bug as #613 wearing
+   * different clothes.
+   *
+   * Which is also why the last fall-through waits for `resolved`. Until the
+   * core answers, "no embedded host" and "not asked yet" are indistinguishable
+   * from the list alone, and taking the first entry in the meantime opens a
+   * remembered host — mounting its console and issuing its requests — only to
+   * replace it a moment later. A brief wrong host is a smaller version of the
+   * same bug, so the desktop holds its startup state instead. A browser never
+   * waits: `resolved` starts `true` there, because there is nothing to ask.
+   */
+  const active =
+    connections.find((c) => c.id === selected) ??
+    connections.find((c) => c.id === embedded.id) ??
+    (embedded.resolved ? connections[0] : undefined);
   const client = active ? clientFor(active.id) : undefined;
 
   return (
@@ -268,6 +394,7 @@ export function App() {
       <ConnectionRail
         connections={connections}
         selected={active?.id ?? null}
+        hub={config.hub}
         onSelect={setSelected}
         onAdd={(baseUrl) => {
           const id = addConnection({ baseUrl });
@@ -275,8 +402,22 @@ export function App() {
           void probe(id);
         }}
       />
-      <div className="min-w-0 flex-1">
-        {active && client && (
+      {/* `--oc-rail-inset` tells the shell's `position: fixed` sidebar where
+          this column actually starts. A fixed element positions against the
+          viewport, so without it the sidebar pins to 0 and slides under the
+          rail — see the note on `sidebar-container`. Zero when no rail is
+          drawn, which is the ordinary single-host web deployment. */}
+      <div
+        className="min-w-0 flex-1"
+        style={
+          {
+            "--oc-rail-inset": connectionRailVisible(connections.length, config.hub)
+              ? CONNECTION_RAIL_WIDTH
+              : "0px",
+          } as CSSProperties
+        }
+      >
+        {active && client ? (
           // Keyed by connection: switching hosts remounts rather than
           // reconciling, so no view can carry one host's in-flight state into
           // another's render.
@@ -287,10 +428,86 @@ export function App() {
             defaultCompany={active.defaultCompany}
             notice={active.id === bootstrapId ? auth.notice : undefined}
             forceLogin={active.id === bootstrapId && auth.failed === true}
+            // Only ever the embedded host's own operator. Offering it on a
+            // remote connection would put a local address in front of someone
+            // signing in to a server that has never heard of it.
+            suggestedEmail={
+              active.id === embedded.id ? embedded.operatorEmail : undefined
+            }
           />
+        ) : (
+          <NoConnection starting={!embedded.resolved} />
         )}
       </div>
     </div>
+  );
+}
+
+/** Where the embedded host got to, and what it turned into. */
+interface EmbeddedState {
+  /** Whether the core has answered. `false` only ever means "still asking". */
+  resolved: boolean;
+  /** The connection it became, or `null` when there is no embedded host. */
+  id: ConnectionId | null;
+  /**
+   * The address that host signs a person in as (#632).
+   *
+   * Held here rather than on the connection because it is a fact about the host
+   * running *inside this application* — the one host this client starts itself
+   * and can therefore be told about without asking. A remote host has no such
+   * answer, and offering it one would be inventing an address.
+   *
+   * Absent on a shell predating the field, exactly as `instanceId` is.
+   */
+  operatorEmail?: string;
+}
+
+function FullScreen({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="grid min-h-svh place-items-center bg-background p-6 text-center">
+      {children}
+    </div>
+  );
+}
+
+function Waiting({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" /> {children}
+    </div>
+  );
+}
+
+/**
+ * What to show when there is no connection at all.
+ *
+ * The browser build cannot reach this: its bootstrap connection exists whether
+ * or not the host answers, and an unreachable one is a *console* rendering an
+ * error rather than an absence. The desktop genuinely can — it holds only the
+ * hosts it was told about, and the embedded one may not have started.
+ *
+ * The rail stays on screen behind this (see `connectionRailVisible`), because
+ * an operator whose local host is gone still has somewhere else to connect to,
+ * and this is the state in which that matters most.
+ */
+function NoConnection({ starting }: { starting: boolean }) {
+  return (
+    <FullScreen>
+      {starting ? (
+        <Waiting>
+          <span data-testid="no-connection-starting">Starting the host on this computer…</span>
+        </Waiting>
+      ) : (
+        <div className="max-w-sm space-y-2" data-testid="no-connection">
+          <p className="text-sm font-medium">No host to show</p>
+          <p className="text-sm text-muted-foreground">
+            The host on this computer didn't start — another copy of OpenCompany may be
+            holding its data. Quit the other copy and reopen this one, or add a host with
+            the + on the left.
+          </p>
+        </div>
+      )}
+    </FullScreen>
   );
 }
 

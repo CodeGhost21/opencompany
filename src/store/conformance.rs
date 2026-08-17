@@ -23,7 +23,11 @@ use crate::ports::facts::{FactKind, FactRecord, FactStore};
 use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::memory::MemoryStore;
+use crate::ports::notifications::{Notification, NotificationStore, Subject, SubjectKind};
 use crate::ports::now_millis;
+use crate::ports::run_output::{
+    MAX_RUN_OUTPUTS_PER_COMPANY, WorkflowRunOutputRecord, WorkflowRunOutputStore,
+};
 use crate::ports::sessions::{SessionKind, SessionRecord, SessionStore};
 use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
@@ -118,12 +122,31 @@ fn sample_budget_overrides() -> Vec<crate::ports::types::BudgetOverride> {
     ]
 }
 
+/// A populated `[policy]` override, so every store's round-trip proves a
+/// console-set tier survives persistence (issue #562).
+///
+/// Both fields are `Some`, and `always_approve` is deliberately **not** the
+/// manifest default — a round-trip that stored the manifest's own list would
+/// pass whether or not the override had been persisted at all.
+fn sample_policy_override() -> crate::ports::types::PolicyOverride {
+    use crate::ports::types::{Actor, ActorKind, PolicyOverride};
+    PolicyOverride {
+        mode: Some("auto".to_string()),
+        always_approve: Some(vec!["payment.send".to_string()]),
+        set_by: Actor {
+            kind: ActorKind::User,
+            id: "user-conformance".to_string(),
+        },
+        at_millis: 1_700_000_000_002,
+    }
+}
+
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
 /// the store round-trip covers the operator desk-hierarchy field, issue #131), a
 /// runtime-authored workflow body (issue #168), a populated budget-override set
-/// (issue #343), a paused workflow id (issue #276), and stamped with the sample
-/// template provenance (so round-trips assert it survives persistence, issue
-/// #85).
+/// (issue #343), a `[policy]` override (issue #562), a paused workflow id
+/// (issue #276), and stamped with the sample template provenance (so round-trips
+/// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -139,6 +162,13 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
+        overlay_policy: Some(sample_policy_override()),
+        // Non-empty so a backend that drops the field is caught: an empty map
+        // survives every possible bug, including not persisting it at all.
+        overlay_desk_tools: std::collections::BTreeMap::from([(
+            "studio".to_string(),
+            vec!["docs.*".to_string(), "web".to_string()],
+        )]),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
         setup: Some(sample_setup_answers()),
@@ -187,6 +217,7 @@ pub async fn assert_isolation_by_company(
                 text: "a".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -267,12 +298,36 @@ pub async fn assert_isolation_by_company(
             .any(|entry| entry.agent_id == "writer" && entry.budget_usd_daily.is_none()),
         "the explicitly-uncapped override decayed into an absent or zeroed entry"
     );
+    // The operator's `[policy]` override survives too (issue #562). Seeding the
+    // fixture is not enough on its own: without this assertion a backend that
+    // dropped the field would still pass, which is the failure the populated
+    // fixture exists to catch.
+    assert_eq!(
+        loaded.overlay_policy,
+        Some(sample_policy_override()),
+        "overlay_policy did not survive save/load"
+    );
+    assert_eq!(
+        loaded.effective_policy().mode,
+        "auto",
+        "the effective tier did not survive the round-trip, so a restart would \
+         silently move the company back to the manifest's gate"
+    );
     // Issue #276: a paused workflow survives save/load. A backend that dropped
     // this field would re-arm every schedule an operator had switched off, and
     // the only symptom would be a workflow firing again after a restart.
     assert!(
         !loaded.workflow_enabled("digest"),
         "the paused workflow id did not survive save/load"
+    );
+    // The per-desk tool ceilings survive too. A backend that dropped this would
+    // silently widen every console-narrowed department back to the company's
+    // full grant on the next restart — a capability regression whose only
+    // symptom is an agent succeeding at something it had been denied.
+    assert_eq!(
+        loaded.effective_desk_tools("studio"),
+        vec!["docs.*".to_string(), "web".to_string()],
+        "overlay_desk_tools did not survive save/load"
     );
     assert_eq!(
         events
@@ -321,6 +376,7 @@ pub async fn assert_append_only_event_and_ledger(
                 text: "e0".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -333,6 +389,7 @@ pub async fn assert_append_only_event_and_ledger(
                 text: "e1".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -351,6 +408,7 @@ pub async fn assert_append_only_event_and_ledger(
                 text: "e2".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -385,6 +443,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
                     text: format!("a{expected}"),
                     by: None,
                     chat: None,
+                    deliverable: None,
                 },
             )
             .await
@@ -401,6 +460,7 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
                 text: "b0".into(),
                 by: None,
                 chat: None,
+                deliverable: None,
             },
         )
         .await
@@ -427,6 +487,58 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
         .unwrap();
     assert_eq!(tail.len(), 2);
     assert_eq!(tail[0].seq, EventSeq::new(3));
+}
+
+/// `read_before` returns a bounded, newest-first page before an exclusive
+/// cursor. This is the primitive transcript pagination uses, so every durable
+/// EventLog backend must exercise its production query/stream implementation.
+pub async fn assert_event_read_before(events: Arc<dyn EventLog>) {
+    let id = CompanyId::new("history-page");
+    let mut seqs = Vec::new();
+    for text in ["zero", "one", "two", "three"] {
+        seqs.push(
+            events
+                .append(
+                    &id,
+                    CompanyEvent::OperatorMessage {
+                        parent: None,
+                        text: text.to_string(),
+                        by: None,
+                        chat: None,
+                        deliverable: None,
+                    },
+                )
+                .await
+                .unwrap(),
+        );
+    }
+
+    let tail = events.read_before(&id, None, 2).await.unwrap();
+    assert_eq!(
+        tail.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![seqs[3], seqs[2]],
+        "the tail page must be newest-first"
+    );
+
+    let before = events.read_before(&id, Some(seqs[3]), 2).await.unwrap();
+    assert_eq!(
+        before.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![seqs[2], seqs[1]],
+        "the cursor is exclusive and the limit is enforced"
+    );
+
+    assert!(
+        events
+            .read_before(&id, Some(seqs[0]), 2)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing precedes the first event"
+    );
+    assert!(
+        events.read_before(&id, None, 0).await.unwrap().is_empty(),
+        "a zero limit never reads a page"
+    );
 }
 
 /// Asserts the [`EventLog`] retention contract (issue #275): the default
@@ -594,6 +706,7 @@ pub async fn assert_export_totality(
             text: format!("event {i}"),
             by: None,
             chat: None,
+            deliverable: None,
         };
         events.append(&id, ev.clone()).await.unwrap();
         appended.push(ev);
@@ -658,6 +771,14 @@ pub async fn assert_export_totality(
         sample_budget_overrides(),
         "overlay_budgets did not round-trip through the store"
     );
+    // Issue #562: the console-set tier round-trips on every backend, for the
+    // same reason — an approval gate that forgets across a restart is not a gate.
+    assert_eq!(
+        loaded.overlay_policy,
+        Some(sample_policy_override()),
+        "overlay_policy did not round-trip through the store"
+    );
+    assert_eq!(loaded.effective_policy().mode, "auto");
     // Issue #276: the pause switch round-trips on every backend, for the same
     // reason the caps do — a switch that forgets across a restart is not a
     // safety switch.
@@ -890,6 +1011,8 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     };
 
     tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();
@@ -1121,6 +1244,7 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         created_at_millis: at,
         expires_at_millis: at + 1_000,
         accepted_at_millis: None,
+        notified_at_millis: None,
     };
 
     users
@@ -1174,9 +1298,70 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         Some(9)
     );
 
+    // The mailed stamp round-trips through the backend, both ways (issue
+    // #584). It is what the console reads to say "invite email sent", so a
+    // backend that dropped it would render every invite as un-mailed.
+    let mut notified = invite("i1", "carol@example.com", 1);
+    notified.notified_at_millis = Some(11);
+    users.upsert_invite(&alpha, &notified).await.unwrap();
+    assert_eq!(
+        users
+            .find_invite_by_email(&alpha, "carol@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .notified_at_millis,
+        Some(11),
+        "a stored notified_at_millis must survive the round trip"
+    );
+    // And back to unset: a store that only ever wrote the field when present
+    // would leave a stale timestamp behind on a re-invite.
+    users
+        .upsert_invite(&alpha, &invite("i1", "carol@example.com", 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        users
+            .find_invite_by_email(&alpha, "carol@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .notified_at_millis,
+        None,
+        "clearing notified_at_millis must persist as cleared"
+    );
+
+    // Stamping is an update, never an upsert. Mail delivery is a network round
+    // trip, and the record the route holds across it goes stale the moment an
+    // admin revokes the invite — so a backend that implemented the stamp as a
+    // full-record write would restore an address the admin had just removed
+    // from the allowlist.
+    assert!(
+        users.mark_invite_notified(&alpha, "i1", 12).await.unwrap(),
+        "stamping an outstanding invite must report that it landed"
+    );
+    let stamped = users
+        .find_invite_by_email(&alpha, "carol@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stamped.notified_at_millis, Some(12));
+    assert_eq!(
+        stamped.email, "carol@example.com",
+        "stamping must leave every other field alone"
+    );
+    assert_eq!(stamped.created_at_millis, 1);
+
     assert!(users.delete_invite(&alpha, "i1").await.unwrap());
     assert!(!users.delete_invite(&alpha, "i1").await.unwrap());
-    assert!(users.list_invites(&alpha).await.unwrap().is_empty());
+    assert!(
+        !users.mark_invite_notified(&alpha, "i1", 13).await.unwrap(),
+        "stamping a revoked invite must report that nothing was updated"
+    );
+    assert!(
+        users.list_invites(&alpha).await.unwrap().is_empty(),
+        "stamping must never recreate a revoked invite"
+    );
 }
 
 /// Asserts the [`SessionStore`] contract: per-company isolation, token-hash
@@ -1791,6 +1976,113 @@ pub async fn assert_workflow_revision_store(revisions: Arc<dyn WorkflowRevisionS
     );
 }
 
+/// Asserts the [`WorkflowRunOutputStore`] contract (issue #596): roundtrip,
+/// company isolation, overwrite idempotence, and prune-to-newest-N.
+pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutputStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let record = |run_id: &str, workflow_id: &str, at: u64, marker: &str| WorkflowRunOutputRecord {
+        run_id: run_id.to_string(),
+        workflow_id: workflow_id.to_string(),
+        at_millis: at,
+        nodes: serde_json::json!({ "writer": { "items": [marker] } }),
+        truncated: false,
+    };
+
+    // Roundtrip: a stored record reads back byte-identically.
+    let first = record("run-1", "greet", 10, "hello");
+    outputs.put_run_output(&alpha, &first).await.unwrap();
+    let got = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .expect("the stored run output must read back");
+    assert_eq!(got, first, "a run output must round-trip verbatim");
+
+    // A run that was never stored is `None`, not an error — the pre-feature /
+    // dry-run / hard-abort shape the read route turns into a 404.
+    assert!(
+        outputs
+            .get_run_output(&alpha, "never")
+            .await
+            .unwrap()
+            .is_none(),
+        "an unknown run id must read back as None"
+    );
+
+    // Company isolation: beta cannot see alpha's run, even by the same id.
+    outputs
+        .put_run_output(&beta, &record("run-1", "greet", 10, "beta-secret"))
+        .await
+        .unwrap();
+    let beta_got = outputs
+        .get_run_output(&beta, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(beta_got.nodes["writer"]["items"][0], "beta-secret");
+    let alpha_got = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        alpha_got.nodes["writer"]["items"][0], "hello",
+        "one company's run output must never leak into another's"
+    );
+
+    // Overwrite idempotence: re-writing the same run_id replaces, never stacks.
+    let replaced = record("run-1", "greet", 20, "world");
+    outputs.put_run_output(&alpha, &replaced).await.unwrap();
+    let after = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, replaced,
+        "a re-write must overwrite the prior snapshot"
+    );
+
+    // Prune-to-cap: push MAX+5 distinct runs and prove only the newest MAX survive.
+    for i in 0..(MAX_RUN_OUTPUTS_PER_COMPANY as u64 + 5) {
+        outputs
+            .put_run_output(&alpha, &record(&format!("r{i}"), "ring", 1000 + i, "x"))
+            .await
+            .unwrap();
+    }
+    // The newest run is retained…
+    let newest_id = format!("r{}", MAX_RUN_OUTPUTS_PER_COMPANY as u64 + 4);
+    assert!(
+        outputs
+            .get_run_output(&alpha, &newest_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the newest run must survive the prune"
+    );
+    // …and the oldest of the batch was evicted.
+    assert!(
+        outputs
+            .get_run_output(&alpha, "r0")
+            .await
+            .unwrap()
+            .is_none(),
+        "the oldest run beyond the cap must be pruned"
+    );
+
+    // Beta's single run is untouched by alpha's prune.
+    assert!(
+        outputs
+            .get_run_output(&beta, "run-1")
+            .await
+            .unwrap()
+            .is_some(),
+        "one company's prune must not touch another's records"
+    );
+}
+
 /// Asserts the [`FactStore`] contract: isolation, query/kind filtering, upsert,
 /// and delete.
 pub async fn assert_fact_store(facts: Arc<dyn FactStore>) {
@@ -2015,6 +2307,252 @@ pub async fn assert_usage_retention(usage: Arc<dyn UsageMeter>) {
 }
 
 /// Asserts the [`SkillStateStore`] contract: isolation, set/upsert, and remove.
+/// Every [`ReadStateStore`] must agree on these (issue #755).
+///
+/// The two properties worth pinning are the ones a backend can plausibly get
+/// wrong: **monotonicity** (a marker never moves backwards, however requests
+/// interleave) and **isolation** (per person as well as per company — a marker
+/// keyed only by channel would let one operator's reading clear another's
+/// badges).
+pub async fn assert_read_state_store(reads: Arc<dyn crate::ports::read_state::ReadStateStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // A channel never opened has no marker — absent, not zero.
+    assert!(reads.list(&alpha, "ada").await.unwrap().is_empty());
+
+    let first = reads
+        .mark(&alpha, "ada", "engineering", 1_000)
+        .await
+        .unwrap();
+    assert_eq!(first.last_read_at, 1_000);
+    assert_eq!(first.channel_id, "engineering");
+
+    // Forward moves.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 2_000)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+
+    // Backwards does NOT. A late request carrying an earlier instant must not
+    // resurrect messages already read, and the call answers with where the
+    // marker actually stands rather than what was asked for.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 500)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+    // Equal is not a move either, and must not error.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 2_000)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+
+    // Per person: Grace's marker on the same channel is her own, and reading it
+    // to the past does not disturb Ada's.
+    reads
+        .mark(&alpha, "grace", "engineering", 42)
+        .await
+        .unwrap();
+    let ada = reads.list(&alpha, "ada").await.unwrap();
+    assert_eq!(ada.len(), 1);
+    assert_eq!(ada[0].last_read_at, 2_000);
+    let grace = reads.list(&alpha, "grace").await.unwrap();
+    assert_eq!(grace.len(), 1);
+    assert_eq!(grace[0].last_read_at, 42);
+
+    // Per company: the same person in another company starts empty.
+    assert!(reads.list(&beta, "ada").await.unwrap().is_empty());
+    reads.mark(&beta, "ada", "engineering", 9).await.unwrap();
+    assert_eq!(
+        reads.list(&alpha, "ada").await.unwrap()[0].last_read_at,
+        2_000
+    );
+
+    // Several channels for one person, ordered by channel id ascending — the
+    // order the trait documents, not each backend's insertion order.
+    // `engineering` was written first and still sorts second.
+    reads.mark(&alpha, "ada", "dm:pm", 7).await.unwrap();
+    let all = reads.list(&alpha, "ada").await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].channel_id, "dm:pm");
+    assert_eq!(all[1].channel_id, "engineering");
+}
+
+/// Asserts the [`NotificationStore`] contract: per-company isolation, per-person
+/// read state, newest-first ordering, and the latch / `None`-marks-all
+/// semantics of `mark_read` (issue #749).
+///
+/// The property that matters most is **per-person read state**: one person
+/// marking a notification read must leave it unread for another. A `read` flag
+/// on the shared record — inbox's shape — would fail exactly this, which is why
+/// the port does not have one.
+pub async fn assert_notification_store(notes: Arc<dyn NotificationStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let note = |id: &str, created_at: u64, subject: SubjectKind, subject_id: &str| Notification {
+        id: id.to_string(),
+        kind: "approval_blocked".to_string(),
+        subject: Subject {
+            kind: subject,
+            id: subject_id.to_string(),
+        },
+        created_at,
+        title: format!("notification {id}"),
+    };
+
+    // Empty: nobody has anything.
+    assert!(notes.list(&alpha, "ada").await.unwrap().is_empty());
+
+    // Two notifications, appended oldest-then-newest.
+    notes
+        .append(&alpha, &note("n-old", 100, SubjectKind::Task, "task-1"))
+        .await
+        .unwrap();
+    notes
+        .append(&alpha, &note("n-new", 200, SubjectKind::Approval, "appr-1"))
+        .await
+        .unwrap();
+
+    // Newest first, and unread for everyone until read.
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    assert_eq!(ada.len(), 2);
+    assert_eq!(ada[0].notification.id, "n-new");
+    assert_eq!(ada[1].notification.id, "n-old");
+    assert!(ada.iter().all(|v| v.read_at.is_none()));
+    // The subject rides through untouched.
+    assert_eq!(ada[0].notification.subject.kind, SubjectKind::Approval);
+    assert_eq!(ada[0].notification.subject.id, "appr-1");
+
+    // Append is idempotent by id (first write wins): re-appending an existing
+    // id neither duplicates the record nor mutates it. Backends must agree — a
+    // naive push/insert duplicates on fs/mongo but errors on the sqlite primary
+    // key, so this pins the shared contract.
+    notes
+        .append(&alpha, &note("n-old", 999, SubjectKind::Run, "changed"))
+        .await
+        .unwrap();
+    let after = notes.list(&alpha, "ada").await.unwrap();
+    assert_eq!(after.len(), 2, "re-appending an id must not duplicate");
+    let old = after.iter().find(|v| v.notification.id == "n-old").unwrap();
+    assert_eq!(
+        old.notification.created_at, 100,
+        "first write wins: created_at unchanged"
+    );
+    assert_eq!(
+        old.notification.subject.id, "task-1",
+        "first write wins: subject unchanged"
+    );
+
+    // Per person: Ada reads the new one; the count of what is still unread for
+    // her comes back, and Grace still sees it unread.
+    let still_unread = notes
+        .mark_read(&alpha, "ada", Some(&["n-new".to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(still_unread, 1, "n-old is still unread for Ada");
+
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    let stamped = ada
+        .iter()
+        .find(|v| v.notification.id == "n-new")
+        .unwrap()
+        .read_at
+        .expect("Ada read n-new");
+    assert!(
+        ada.iter()
+            .find(|v| v.notification.id == "n-old")
+            .unwrap()
+            .read_at
+            .is_none()
+    );
+    let grace = notes.list(&alpha, "grace").await.unwrap();
+    assert!(
+        grace.iter().all(|v| v.read_at.is_none()),
+        "Ada's read must not touch Grace"
+    );
+
+    // A latch: re-marking does not move the timestamp forward.
+    //
+    // Wait past a millisecond boundary first: within one millisecond a backend
+    // that OVERWRITES `read_at` on every mark writes the same value a latch
+    // would, and this assertion would then pass for the very shape it exists to
+    // reject. After the wait, an overwriting backend produces a strictly greater
+    // `read_at` (and this fails); a real latch is unchanged (and this holds).
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    notes
+        .mark_read(&alpha, "ada", Some(&["n-new".to_string()]))
+        .await
+        .unwrap();
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    assert_eq!(
+        ada.iter()
+            .find(|v| v.notification.id == "n-new")
+            .unwrap()
+            .read_at,
+        Some(stamped),
+        "re-mark must preserve the original read_at"
+    );
+
+    // Unknown ids are ignored, not an error, and change nothing.
+    let unread = notes
+        .mark_read(&alpha, "ada", Some(&["does-not-exist".to_string()]))
+        .await
+        .unwrap();
+    assert_eq!(unread, 1);
+
+    // `None` marks the whole company read for that person.
+    let unread = notes.mark_read(&alpha, "ada", None).await.unwrap();
+    assert_eq!(unread, 0);
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    assert!(ada.iter().all(|v| v.read_at.is_some()));
+    let grace = notes.list(&alpha, "grace").await.unwrap();
+    assert!(
+        grace.iter().all(|v| v.read_at.is_none()),
+        "Ada marking all read must not touch Grace"
+    );
+
+    // Ties in created_at break by id descending — a stable order the trait
+    // documents, not each backend's insertion order. These two arrive after
+    // Ada's `None` mark, so they are unread for her.
+    notes
+        .append(&alpha, &note("id-a", 300, SubjectKind::Run, "run-1"))
+        .await
+        .unwrap();
+    notes
+        .append(&alpha, &note("id-b", 300, SubjectKind::Workflow, "wf-1"))
+        .await
+        .unwrap();
+    let ada = notes.list(&alpha, "ada").await.unwrap();
+    assert_eq!(ada[0].notification.id, "id-b");
+    assert_eq!(ada[1].notification.id, "id-a");
+
+    // Per company: beta starts empty and stays independent of alpha.
+    assert!(notes.list(&beta, "ada").await.unwrap().is_empty());
+    notes
+        .append(&beta, &note("b-1", 100, SubjectKind::Task, "task-9"))
+        .await
+        .unwrap();
+    assert_eq!(notes.list(&beta, "ada").await.unwrap().len(), 1);
+    assert_eq!(
+        notes.list(&alpha, "ada").await.unwrap().len(),
+        4,
+        "beta's write must not change alpha"
+    );
+}
+
 pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
@@ -2095,6 +2633,9 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
         updated_by: WorkspaceOrigin::Agent {
             id: "ceo".to_string(),
         },
+        mime: None,
+        size: None,
+        sha256: None,
     };
 
     assert!(ws.is_empty(&alpha).await.unwrap());
@@ -2217,6 +2758,859 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
     let tree = ws.tree(&alpha).await.unwrap();
     assert!(tree.iter().all(|n| n.id != "root" && n.id != "child"));
     assert!(!ws.delete(&alpha, "root").await.unwrap());
+}
+
+/// Collects a [`BlobStream`](crate::ports::workspace::BlobStream) into bytes.
+///
+/// Only the suite buffers: the port streams so a production download never has
+/// to be resident, but an assertion about byte-exactness has to hold the whole
+/// payload to make it.
+async fn drain(stream: crate::ports::workspace::BlobStream) -> Vec<u8> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    let mut stream = stream;
+    while let Some(chunk) = stream.next().await {
+        out.extend_from_slice(&chunk.expect("a blob chunk must not fail"));
+    }
+    out
+}
+
+/// Asserts the **binary** half of the [`WorkspaceStore`] contract (issue #553).
+///
+/// Kept separate from [`assert_workspace_store`] rather than folded into it,
+/// because the two answer different questions: that one pins the tree every
+/// backend has always had, this one pins the payload path added on top. A
+/// backend can be wired into the first and not yet the second, and the split
+/// makes that state visible instead of turning it into one large failure.
+///
+/// The suite deliberately includes a payload **larger than MongoDB's 16 MB BSON
+/// document cap**. That is the case GridFS exists for, and it is the reason
+/// this is a shared suite rather than a Mongo-only test: fs and sqlite run the
+/// identical assertion, so "the big file round-trips" is a property of the
+/// port, not a property of whichever backend somebody remembered to test.
+pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
+    let alpha = CompanyId::new("bin-alpha");
+    let beta = CompanyId::new("bin-beta");
+    let agent = || WorkspaceOrigin::Agent {
+        id: "designer".to_string(),
+    };
+    let node = |id: &str, name: &str, mime: Option<&str>, parent: Option<&str>| WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: NodeKind::File,
+        parent_id: parent.map(str::to_string),
+        updated_at_millis: now_millis(),
+        created_by: agent(),
+        updated_by: agent(),
+        mime: mime.map(str::to_string),
+        // Deliberately wrong, and deliberately not `None`: the store must
+        // compute these from the bytes and must not carry a caller's claim
+        // about them through to storage.
+        size: Some(999_999),
+        sha256: Some("not-a-real-digest".to_string()),
+    };
+
+    // A payload that is emphatically not text: a lone continuation byte, an
+    // interior NUL, and a byte sequence no UTF-8 decoder accepts. A backend
+    // that round-trips through `String` anywhere fails here rather than
+    // silently replacing bytes with U+FFFD.
+    let png: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0xc0, 0x80, 0x01,
+    ];
+
+    ws.create(&alpha, &folder_node("shots", "Shots"), None)
+        .await
+        .unwrap();
+    let stamped = ws
+        .create_binary(
+            &alpha,
+            &node("img", "hero.png", Some("image/png"), Some("shots")),
+            &png,
+        )
+        .await
+        .unwrap();
+
+    // -- The create RETURNS the stamped node (issue #668) ------------------
+    //
+    // Asserted with populated values, never `None`: a `None` here would pass
+    // against a backend that dropped the field entirely, which is the one thing
+    // this is meant to catch. The digest is the reason the signature returns a
+    // node at all — a caller that records it must be unable to obtain it from
+    // anywhere but the store.
+    let (expected_size, expected_sha) = crate::ports::workspace::blob_metadata(&png);
+    assert_eq!(
+        stamped.sha256.as_deref(),
+        Some(expected_sha.as_str()),
+        "create_binary must hand back the digest it computed, not an empty field"
+    );
+    assert_eq!(
+        stamped.size,
+        Some(expected_size),
+        "and the size it computed with it"
+    );
+    assert_eq!(
+        stamped.id, "img",
+        "the returned node is the one just created"
+    );
+    assert_eq!(stamped.mime.as_deref(), Some("image/png"));
+
+    // -- Metadata is computed, not accepted -------------------------------
+    let (meta, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(meta.mime.as_deref(), Some("image/png"));
+    assert_eq!(
+        meta.size,
+        Some(png.len() as u64),
+        "size must come from the bytes, not from the caller's claim"
+    );
+    assert_eq!(
+        meta.sha256.as_deref(),
+        Some(expected_sha.as_str()),
+        "sha256 must be computed from the stored bytes, not trusted from the caller"
+    );
+    assert_eq!(
+        drain(stream).await,
+        png,
+        "the payload must round-trip byte-exactly"
+    );
+
+    // -- Authorship survives the binary path ------------------------------
+    assert_eq!(meta.created_by, agent());
+    assert_eq!(meta.updated_by, agent());
+
+    // -- The tree carries the metadata ------------------------------------
+    let in_tree = ws
+        .tree(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.id == "img")
+        .expect("the binary node is in the tree");
+    assert_eq!(in_tree.mime.as_deref(), Some("image/png"));
+    assert_eq!(in_tree.size, Some(png.len() as u64));
+    assert!(in_tree.is_binary());
+
+    // -- A text read of a binary node is empty, never bytes-as-text -------
+    let (text_node, body) = ws.read(&alpha, "img").await.unwrap().unwrap();
+    assert!(body.is_empty(), "a binary node reads as an empty body");
+    assert!(text_node.is_binary());
+
+    // -- A text write over a payload is refused ---------------------------
+    let refused = ws
+        .write(&alpha, "img", "# not an image", WorkspaceOrigin::Operator)
+        .await
+        .expect_err("writing text over a payload must be refused");
+    assert!(
+        refused.to_string().contains("image/png"),
+        "the refusal must name what the node actually holds, got: {refused}"
+    );
+    // …and the refusal changed nothing.
+    let (still, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(still.sha256.as_deref(), Some(expected_sha.as_str()));
+    assert_eq!(drain(stream).await, png);
+
+    // -- `read_bytes` of a prose note, and of a folder, is None -----------
+    ws.create(
+        &alpha,
+        &WorkspaceNode {
+            mime: None,
+            size: None,
+            sha256: None,
+            ..node("note", "brief.md", None, None)
+        },
+        Some("# Brief"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        ws.read_bytes(&alpha, "note").await.unwrap().is_none(),
+        "a prose note has no payload"
+    );
+    assert!(
+        ws.read_bytes(&alpha, "shots").await.unwrap().is_none(),
+        "a folder has no payload"
+    );
+    assert!(ws.read_bytes(&alpha, "nope").await.unwrap().is_none());
+
+    // -- Replacing a payload keeps the node and restamps it ---------------
+    let replaced = ws
+        .write_binary(&alpha, "img", &[0x00, 0x01, 0x02], Some("image/jpeg"), {
+            WorkspaceOrigin::Operator
+        })
+        .await
+        .unwrap();
+    assert_eq!(replaced.mime.as_deref(), Some("image/jpeg"));
+    assert_eq!(replaced.size, Some(3));
+    assert_eq!(
+        replaced.updated_by,
+        WorkspaceOrigin::Operator,
+        "a payload replacement restamps updated_by like a text write"
+    );
+    assert_eq!(
+        replaced.created_by,
+        agent(),
+        "and never rewrites created_by"
+    );
+    let (_, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "the old payload must be gone, not merely shadowed"
+    );
+
+    // Writing bytes over a prose note is the mirror refusal of the text case.
+    assert!(
+        ws.write_binary(&alpha, "note", &[1, 2], Some("image/png"), agent())
+            .await
+            .is_err(),
+        "a prose note must not be convertible into a payload by a write"
+    );
+
+    // -- Rename/move leaves the payload intact ----------------------------
+    ws.create(&alpha, &folder_node("archive", "Archive"), None)
+        .await
+        .unwrap();
+    let moved = ws
+        .rename_move(&alpha, "img", Some("hero-final.jpg"), Some(Some("archive")))
+        .await
+        .unwrap();
+    assert_eq!(moved.name, "hero-final.jpg");
+    assert_eq!(
+        moved.mime.as_deref(),
+        Some("image/jpeg"),
+        "a move must not disturb the payload metadata"
+    );
+    let (after_move, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(after_move.size, Some(3));
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "the bytes must survive a rename and reparent"
+    );
+
+    // -- Cross-company isolation, including through the blob store --------
+    ws.create_binary(
+        &beta,
+        &node("img", "other.png", Some("image/png"), None),
+        b"beta-only-bytes",
+    )
+    .await
+    .unwrap();
+    let (_, stream) = ws.read_bytes(&beta, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        b"beta-only-bytes".to_vec(),
+        "the same node id in another company must resolve to that company's payload"
+    );
+    let (_, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "and must not have been overwritten by it"
+    );
+
+    // -- Delete removes the payload, not just the node --------------------
+    assert!(ws.delete(&beta, "img").await.unwrap());
+    assert!(
+        ws.read_bytes(&beta, "img").await.unwrap().is_none(),
+        "deleting a node must delete its payload"
+    );
+    // A folder delete takes its binary descendants' payloads with it.
+    assert!(ws.delete(&alpha, "archive").await.unwrap());
+    assert!(
+        ws.read_bytes(&alpha, "img").await.unwrap().is_none(),
+        "a recursive delete must remove descendants' payloads too"
+    );
+
+    // -- Past the 16 MB BSON document cap, under the per-write cap --------
+    //
+    // 17 MiB does double duty. It is past MongoDB's 16 MB BSON document limit,
+    // which is the case GridFS exists for — and it is comfortably under
+    // `DEFAULT_MAX_BLOB_BYTES` (64 MiB), so it is also the proof that a large
+    // but legitimate payload still round-trips on **all three** backends rather
+    // than being caught by the cap. The boundary either side of the cap itself
+    // is asserted on the quota decorator, where the comparison lives.
+    //
+    // Patterned rather than zeroed so a backend that silently truncates or pads
+    // is caught by the digest instead of matching by luck.
+    let big: Vec<u8> = (0..17 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let (big_size, big_sha) = crate::ports::workspace::blob_metadata(&big);
+    ws.create_binary(
+        &alpha,
+        &node("big", "render.mp4", Some("video/mp4"), None),
+        &big,
+    )
+    .await
+    .unwrap();
+    let (big_meta, stream) = ws.read_bytes(&alpha, "big").await.unwrap().unwrap();
+    assert_eq!(big_meta.size, Some(big_size));
+    assert_eq!(big_meta.sha256.as_deref(), Some(big_sha.as_str()));
+    let got = drain(stream).await;
+    assert_eq!(
+        got.len(),
+        big.len(),
+        "a payload past the BSON document cap must round-trip whole"
+    );
+    assert_eq!(
+        crate::ports::workspace::blob_metadata(&got).1,
+        big_sha,
+        "…and byte-exactly"
+    );
+
+    // -- Atomic staged-file swap -----------------------------------------
+    let old = WorkspaceNode {
+        mime: None,
+        size: None,
+        sha256: None,
+        ..node("swap-old", "report.md", None, None)
+    };
+    ws.create(&alpha, &old, Some("# old")).await.unwrap();
+    ws.create_binary(
+        &alpha,
+        &node(
+            "swap-new",
+            "report.md.publishing-test",
+            Some("application/pdf"),
+            None,
+        ),
+        b"new-payload",
+    )
+    .await
+    .unwrap();
+    let promoted = ws
+        .swap_files(&alpha, Some("swap-old"), "swap-new", "report.md")
+        .await
+        .unwrap()
+        .expect("the expected node is still current");
+    assert_eq!(promoted.id, "swap-new");
+    assert_eq!(promoted.name, "report.md");
+    assert!(ws.read(&alpha, "swap-old").await.unwrap().is_none());
+    let (_, stream) = ws.read_bytes(&alpha, "swap-new").await.unwrap().unwrap();
+    assert_eq!(drain(stream).await, b"new-payload".to_vec());
+
+    // A stale compare-and-swap loses and consumes its private stage, payload
+    // included. This is what prevents two concurrent publishers from leaving
+    // either a duplicate final path or quota-charging garbage behind.
+    ws.create_binary(
+        &alpha,
+        &node(
+            "swap-loser",
+            "report.md.publishing-loser",
+            Some("application/pdf"),
+            None,
+        ),
+        b"loser",
+    )
+    .await
+    .unwrap();
+    assert!(
+        ws.swap_files(&alpha, Some("already-gone"), "swap-loser", "report.md")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(ws.read(&alpha, "swap-loser").await.unwrap().is_none());
+    assert!(ws.read_bytes(&alpha, "swap-loser").await.unwrap().is_none());
+
+    // -- Conditional first publish (issue #697) ---------------------------
+    //
+    // `None` installs only while the name is unoccupied. `report.md` is
+    // occupied at this point — the swap above promoted `swap-new` onto it — so
+    // this must LOSE rather than overwrite it.
+    //
+    // This case is the whole reason the parameter is an `Option` rather than
+    // two methods: `Some(id)` and `None` are one type apart and mean opposite
+    // things, and a caller that passes `None` meaning "replace whatever is
+    // there" compiles. Nothing but this assertion stops that mistake from
+    // silently reintroducing the duplicate-path race it was meant to fix.
+    ws.create_binary(
+        &alpha,
+        &node(
+            "create-onto-occupied",
+            "report.md.publishing-occupied",
+            Some("application/pdf"),
+            None,
+        ),
+        b"must-not-land",
+    )
+    .await
+    .unwrap();
+    assert!(
+        ws.swap_files(&alpha, None, "create-onto-occupied", "report.md")
+            .await
+            .unwrap()
+            .is_none(),
+        "`None` asserts the name is free; it must not overwrite an occupant"
+    );
+    let survivor = ws.read(&alpha, "swap-new").await.unwrap();
+    assert!(
+        survivor.is_some(),
+        "the node that held the path must still hold it"
+    );
+    let (_, stream) = ws.read_bytes(&alpha, "swap-new").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        b"new-payload".to_vec(),
+        "and its payload must be untouched"
+    );
+    // The loser consumes its own stage on this arm too, payload included.
+    assert!(
+        ws.read(&alpha, "create-onto-occupied")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ws.read_bytes(&alpha, "create-onto-occupied")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // And the arm that succeeds: a name nothing holds is installed, keeping
+    // the staged node's id and taking the final name.
+    ws.create_binary(
+        &alpha,
+        &node(
+            "create-fresh",
+            "fresh.md.publishing-test",
+            Some("application/pdf"),
+            None,
+        ),
+        b"fresh-payload",
+    )
+    .await
+    .unwrap();
+    let created = ws
+        .swap_files(&alpha, None, "create-fresh", "fresh.md")
+        .await
+        .unwrap()
+        .expect("the name was free");
+    assert_eq!(created.id, "create-fresh");
+    assert_eq!(created.name, "fresh.md");
+    let (_, stream) = ws
+        .read_bytes(&alpha, "create-fresh")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(drain(stream).await, b"fresh-payload".to_vec());
+    // Exactly one node answers to the new name.
+    let tree = ws.tree(&alpha).await.unwrap();
+    assert_eq!(
+        tree.iter().filter(|n| n.name == "fresh.md").count(),
+        1,
+        "a first publish must leave exactly one node at the path: {tree:?}"
+    );
+
+    // -- A binary node must carry a mime ----------------------------------
+    assert!(
+        ws.create_binary(&alpha, &node("nomime", "x.bin", None, None), b"x")
+            .await
+            .is_err(),
+        "a binary node without a mime type is refused"
+    );
+    // …and must be a file.
+    assert!(
+        ws.create_binary(
+            &alpha,
+            &WorkspaceNode {
+                kind: NodeKind::Folder,
+                ..node("asfolder", "Nope", Some("image/png"), None)
+            },
+            b"x"
+        )
+        .await
+        .is_err(),
+        "a folder cannot hold a payload"
+    );
+}
+
+/// Every backend decides a folder claim the same way — including under
+/// contention (issue #759).
+///
+/// The contention case at the end is the one that matters. A naive
+/// read-then-create passes every sequential assertion above it and fails only
+/// there, which is precisely the shape of the defect: each backend's answer was
+/// correct about the instant it looked and wrong by the time it wrote. It is
+/// also what proves the MongoDB partial unique index is actually deciding, since
+/// nothing else on that backend can.
+pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
+    use crate::ports::workspace::{
+        FolderClaim, folder_claim_ambiguous_refusal, folder_claim_file_refusal,
+    };
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+    let cmo = WorkspaceOrigin::Agent {
+        id: "cmo".to_string(),
+    };
+    let cto = WorkspaceOrigin::Agent {
+        id: "cto".to_string(),
+    };
+
+    // -- Created when the name is free ------------------------------------
+    let claim = ws
+        .adopt_or_create_folder(&alpha, None, "Agents", cmo.clone())
+        .await
+        .expect("a free root name is claimable");
+    assert!(claim.was_created(), "nothing was there to adopt");
+    let root = claim.node().clone();
+    assert_eq!(root.name, "Agents");
+    assert_eq!(root.kind, NodeKind::Folder);
+    assert_eq!(root.parent_id, None);
+    assert_eq!(
+        root.created_by, cmo,
+        "the creating caller's origin is stamped"
+    );
+    assert_eq!(root.updated_by, cmo);
+    assert!(
+        ws.tree(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.id == root.id),
+        "a created folder is in the tree"
+    );
+
+    // -- Adopted, idempotently, keeping the original authorship -----------
+    let again = ws
+        .adopt_or_create_folder(&alpha, None, "Agents", cto.clone())
+        .await
+        .expect("an existing folder is adopted, not refused");
+    assert!(!again.was_created(), "the folder was already there");
+    assert_eq!(again.node().id, root.id, "adoption returns the same folder");
+    assert_eq!(
+        again.node().created_by,
+        cmo,
+        "adoption must not rewrite whose folder it is"
+    );
+    assert_eq!(
+        ws.tree(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|n| n.parent_id.is_none() && n.name == "Agents")
+            .count(),
+        1,
+        "and it must not have minted a rival"
+    );
+
+    // -- Nested under a parent, and only under that parent -----------------
+    let nested = ws
+        .adopt_or_create_folder(&alpha, Some(&root.id), "cmo", cmo.clone())
+        .await
+        .expect("a folder under a folder");
+    assert!(nested.was_created());
+    assert_eq!(nested.node().parent_id.as_deref(), Some(root.id.as_str()));
+    // The same name at the root is a different path and must be free there.
+    let sibling_at_root = ws
+        .adopt_or_create_folder(&alpha, None, "cmo", cmo.clone())
+        .await
+        .expect("the root is a different parent");
+    assert!(sibling_at_root.was_created());
+    assert_ne!(sibling_at_root.node().id, nested.node().id);
+
+    // -- A file holding the name is refused, identically on every backend --
+    let note = WorkspaceNode {
+        id: "claim-note".to_string(),
+        name: "notes.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    ws.create(&alpha, &note, Some("body")).await.unwrap();
+    let refused = ws
+        .adopt_or_create_folder(&alpha, None, "notes.md", cmo.clone())
+        .await
+        .expect_err("a note cannot be adopted as a folder");
+    assert!(
+        refused
+            .to_string()
+            .ends_with(&folder_claim_file_refusal("notes.md")),
+        "the refusal must be the shared one, or it drifts between backends: {refused}"
+    );
+
+    // -- A missing or non-folder parent is refused ------------------------
+    assert!(
+        ws.adopt_or_create_folder(&alpha, Some("no-such-parent"), "x", cmo.clone())
+            .await
+            .is_err(),
+        "a claim under a parent that does not exist is refused"
+    );
+    assert!(
+        ws.adopt_or_create_folder(&alpha, Some("claim-note"), "x", cmo.clone())
+            .await
+            .is_err(),
+        "a claim under a *file* is refused"
+    );
+
+    // -- Pre-existing ambiguity stays fail-closed -------------------------
+    //
+    // Written through `create` rather than through the primitive, because the
+    // primitive is exactly what makes this state unreachable from now on. It is
+    // still reachable from *history*: a tenant that lost this race before the
+    // guard existed carries it, and the answer must be a refusal rather than a
+    // third node piled on top. Ids are supplied, so no backend has to accept a
+    // name it would refuse — only a `create` that skips the sibling check, which
+    // sqlite and mongodb both do.
+    for id in ["dup-a", "dup-b"] {
+        let dup = WorkspaceNode {
+            id: id.to_string(),
+            name: "Legacy".to_string(),
+            kind: NodeKind::Folder,
+            parent_id: Some(root.id.clone()),
+            ..note.clone()
+        };
+        // `fs` refuses the second by design (issue #666); it has never been able
+        // to represent this state, so it simply has nothing to fail closed on.
+        if ws.create(&alpha, &dup, None).await.is_err() {
+            break;
+        }
+    }
+    let legacy: Vec<WorkspaceNode> = ws
+        .tree(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.name == "Legacy")
+        .collect();
+    if legacy.len() > 1 {
+        let refused = ws
+            .adopt_or_create_folder(&alpha, Some(&root.id), "Legacy", cmo.clone())
+            .await
+            .expect_err("an ambiguous path must stay refused");
+        assert!(
+            refused
+                .to_string()
+                .ends_with(&folder_claim_ambiguous_refusal("Legacy", legacy.len())),
+            "the ambiguity refusal must be the shared one: {refused}"
+        );
+    }
+
+    // -- Companies do not see each other's claims -------------------------
+    let elsewhere = ws
+        .adopt_or_create_folder(&beta, None, "Agents", cmo.clone())
+        .await
+        .expect("another company's identical path is free");
+    assert!(
+        elsewhere.was_created(),
+        "company beta must not adopt company alpha's folder"
+    );
+    assert_ne!(elsewhere.node().id, root.id);
+
+    // -- Eight-way contention on one path ---------------------------------
+    //
+    // The assertion the sequential cases cannot make. All eight callers must
+    // succeed, all eight must be holding the SAME folder, and exactly one may
+    // report having created it — that last count is what a duplicated folder
+    // would break even where the ids happened to agree.
+    let contested = Arc::new(root.id.clone());
+    let mut racers = Vec::new();
+    for i in 0..8 {
+        let ws = ws.clone();
+        let alpha = alpha.clone();
+        let parent = contested.clone();
+        let origin = WorkspaceOrigin::Agent {
+            id: format!("racer-{i}"),
+        };
+        racers.push(tokio::spawn(async move {
+            ws.adopt_or_create_folder(&alpha, Some(&parent), "task-42", origin)
+                .await
+        }));
+    }
+    let mut ids = Vec::new();
+    let mut created = 0usize;
+    for racer in racers {
+        let claim = racer
+            .await
+            .expect("the claim task must not panic")
+            .expect("every caller must come away with the folder, winner or not");
+        if matches!(claim, FolderClaim::Created(_)) {
+            created += 1;
+        }
+        ids.push(claim.into_node().id);
+    }
+    assert_eq!(created, 1, "exactly one caller may mint the folder");
+    assert!(
+        ids.windows(2).all(|pair| pair[0] == pair[1]),
+        "every caller must hold the same folder: {ids:?}"
+    );
+    let tree = ws.tree(&alpha).await.unwrap();
+    assert_eq!(
+        tree.iter()
+            .filter(|n| n.parent_id.as_deref() == Some(root.id.as_str()) && n.name == "task-42")
+            .count(),
+        1,
+        "one folder under one name, or every later publish beneath it is refused: {tree:?}"
+    );
+
+    // …and it stays claimable afterwards, which is the no-permanent-outage half.
+    let after = ws
+        .adopt_or_create_folder(&alpha, Some(&root.id), "task-42", cmo)
+        .await
+        .expect("the contested path must still resolve");
+    assert!(!after.was_created());
+    assert_eq!(&after.node().id, &ids[0]);
+}
+
+/// Asserts that a reader concurrent with a writer on the SAME node never errors
+/// and never observes a partial body (issue #887).
+///
+/// This is a statement about
+/// [`WorkspaceStore::read`](crate::ports::workspace::WorkspaceStore::read), so
+/// it is stated here rather than as an `fs` test: every backend a hosted tenant
+/// can run has to answer for it. sqlite and mongodb already do — a row update
+/// and a document replace are atomic — which is exactly why the guarantee
+/// belongs to the port and not to whichever backend happened to have it.
+///
+/// The `fs` backend did not. It wrote node content with a bare
+/// `tokio::fs::write`, whose `O_TRUNC` leaves the file short for the whole of
+/// the write, while `read` takes no lock. A reader landing in that window sees a
+/// prefix, and the two ways that surfaces are not equally visible:
+///
+/// * the cut lands **mid-codepoint** → `read_to_string` fails with
+///   `InvalidData`, which at least produces a red step; and
+/// * the cut lands **on** a codepoint boundary → the read **succeeds** with half
+///   a document, the agent grounds an answer in it, and nothing anywhere says
+///   so.
+///
+/// A retry only ever addresses the first. So the body is deliberately built from
+/// multi-byte characters and checked for **equality with a whole revision**
+/// rather than for decodability: length and content, not just "no error".
+pub async fn assert_workspace_read_never_tears(ws: Arc<dyn WorkspaceStore>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// How many times the note is rewritten end to end.
+    const ROUNDS: usize = 60;
+    /// Concurrent readers. More than one, because a single reader spends much of
+    /// its time not inside the window.
+    const READERS: usize = 4;
+    /// Repeats of the 8-byte unit below, giving a ~512 KiB body — large enough
+    /// that the write is not one instantaneous syscall.
+    const UNITS: usize = 64 * 1024;
+
+    let company = CompanyId::new("alpha");
+    // Every character is multi-byte, so a cut at an odd offset splits one. That
+    // is the visible half of the failure; the silent half is a cut that does
+    // not, which the equality check below is what catches.
+    let whole_a: String = "αβγδ".repeat(UNITS);
+    let whole_b: String = "εζηθ".repeat(UNITS);
+    assert_eq!(
+        whole_a.len(),
+        whole_b.len(),
+        "the two revisions must be the same size, so a short read cannot be \
+         mistaken for the other revision"
+    );
+
+    let node = WorkspaceNode {
+        id: "torn-note".to_string(),
+        name: "Torn.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    ws.create(&company, &node, Some(&whole_a))
+        .await
+        .expect("seed the note");
+
+    let done = Arc::new(AtomicBool::new(false));
+
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let ws = Arc::clone(&ws);
+            let company = company.clone();
+            let done = Arc::clone(&done);
+            let (a, b) = (whole_a.clone(), whole_b.clone());
+            tokio::spawn(async move {
+                let mut observed = 0usize;
+                while !done.load(Ordering::Relaxed) {
+                    let body = match ws.read(&company, "torn-note").await {
+                        Ok(Some((_, body))) => body,
+                        Ok(None) => {
+                            return Err(
+                                "the note vanished; nothing in this test deletes it".to_string()
+                            );
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "a read concurrent with a write FAILED ({e}). \
+                                 `read` has no failure mode of its own here — the note exists \
+                                 and is unchanged in size; this is the writer's truncation \
+                                 window observed from the outside."
+                            ));
+                        }
+                    };
+                    if body != a && body != b {
+                        return Err(format!(
+                            "a read concurrent with a write observed a PARTIAL body: \
+                             {seen} bytes, where either whole revision is {whole}. \
+                             It decoded cleanly, so nothing failed and nothing was logged — \
+                             an agent would have grounded its answer in this.",
+                            seen = body.len(),
+                            whole = a.len(),
+                        ));
+                    }
+                    observed += 1;
+                    // Yield so a current-thread runtime interleaves the writer.
+                    tokio::task::yield_now().await;
+                }
+                Ok(observed)
+            })
+        })
+        .collect();
+
+    for round in 0..ROUNDS {
+        let body = if round % 2 == 0 { &whole_b } else { &whole_a };
+        ws.write(&company, "torn-note", body, WorkspaceOrigin::Operator)
+            .await
+            .expect("the writer itself must not fail");
+    }
+    done.store(true, Ordering::Relaxed);
+
+    let mut total = 0usize;
+    for reader in readers {
+        match reader.await.expect("a reader task panicked") {
+            Ok(observed) => total += observed,
+            Err(why) => panic!("{why}"),
+        }
+    }
+    assert!(
+        total > 0,
+        "no read ran while the note was being rewritten, so this case proved nothing"
+    );
+
+    // And the note is one of the two whole revisions once everything settles.
+    let (_, final_body) = ws
+        .read(&company, "torn-note")
+        .await
+        .expect("the settled read")
+        .expect("the note is still there");
+    assert!(final_body == whole_a || final_body == whole_b);
+}
+
+/// A folder node for the binary suite.
+fn folder_node(id: &str, name: &str) -> WorkspaceNode {
+    WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: NodeKind::Folder,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2870,4 +4264,233 @@ pub async fn assert_schedule_fire_store(
         winners, 1,
         "exactly one of {N} concurrent claimers may win the key"
     );
+
+    // -- delete_schedule_fires: purge one schedule's whole ledger (issue #708) --
+    //
+    // Fresh schedule ids so this block never disturbs the prune-count assertions
+    // above. `del-a` gets three minutes, `del-b` one, and beta a same-named row,
+    // to prove the delete is scoped to exactly `(company, schedule_id)`.
+    for m in [200_u64, 201, 202] {
+        assert!(fires.claim_fire(&alpha, "del-a", m).await.unwrap());
+    }
+    assert!(fires.claim_fire(&alpha, "del-b", 200).await.unwrap());
+    assert!(fires.claim_fire(&beta, "del-a", 200).await.unwrap());
+
+    let removed = fires.delete_schedule_fires(&alpha, "del-a").await.unwrap();
+    assert_eq!(
+        removed, 3,
+        "delete removes every row for the schedule, whatever its minute"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "del-a").await.unwrap(),
+        None,
+        "a purged schedule has no anchor left — the recreate starts fresh"
+    );
+    // The recreate case: a purged minute is no longer claimed, so the first tick
+    // after a same-id recreate wins it again instead of losing to a stale claim.
+    assert!(
+        fires.claim_fire(&alpha, "del-a", 201).await.unwrap(),
+        "a purged minute is claimable again (delete+recreate fires, not suppressed)"
+    );
+
+    // Scoped: the sibling schedule and the other company are untouched.
+    assert_eq!(
+        fires.latest_fire(&alpha, "del-b").await.unwrap(),
+        Some(200),
+        "a sibling schedule's rows survive another schedule's delete"
+    );
+    assert_eq!(
+        fires.latest_fire(&beta, "del-a").await.unwrap(),
+        Some(200),
+        "company A's delete never reaches company B's identically-named schedule"
+    );
+
+    // A never-fired id removes nothing, and the call is idempotent.
+    assert_eq!(
+        fires
+            .delete_schedule_fires(&alpha, "del-never")
+            .await
+            .unwrap(),
+        0,
+        "deleting a schedule that never fired removes nothing"
+    );
+    assert_eq!(
+        fires.delete_schedule_fires(&alpha, "del-b").await.unwrap(),
+        1,
+        "del-b's single row is removed"
+    );
+    assert_eq!(
+        fires.delete_schedule_fires(&alpha, "del-b").await.unwrap(),
+        0,
+        "a second delete of the same schedule is idempotent — nothing left to remove"
+    );
+}
+
+/// Every backend's [`JournalStore`](crate::ports::journal::JournalStore) must
+/// keep opaque lines byte-identically, in append order, per company (#726).
+///
+/// The runtime journal carries the at-most-once effect set and the durable
+/// approval queue, and it decides what a line *means* above this port — so all a
+/// backend owes is bytes and order. Both halves are load-bearing:
+///
+/// * **Bytes.** A line the store rewrote, trimmed or re-encoded is a record
+///   `serde_json` no longer parses, which the journal reports as corruption and
+///   skips. A skipped `EffectExecuted` un-commits its key and lets an
+///   at-most-once effect fire a second time.
+/// * **Order.** Replay folds records in sequence. A park read back *after* the
+///   resolution that drains it resurrects a resolved approval.
+///
+/// Isolation is asserted for the same reason it is everywhere else, with a
+/// sharper consequence here: one company reading another's executed keys would
+/// suppress its own effects.
+pub async fn assert_journal_store(journal: Arc<dyn crate::ports::journal::JournalStore>) {
+    use crate::ports::journal::Durability;
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    assert!(
+        journal.read_journal(&alpha).await.unwrap().is_empty(),
+        "a company that has never journaled reads back nothing"
+    );
+
+    // Deliberately awkward payloads: a backend that stores these unchanged is not
+    // quietly normalising anything. No `\n` anywhere — the port's contract is one
+    // record per call, and the caller never puts a terminator inside a line.
+    let lines = [
+        r#"{"record":"EffectExecuted","key":"cyc:0"}"#,
+        r#"{"record":"EffectExecuted","key":"cyc:1","effect":{"kind":"payment.send"}}"#,
+        r#"  {"record":"leading and trailing space"}  "#,
+        "{\"record\":\"unicode\",\"memo\":\"caf\u{e9} \u{2014} \u{65e5}\u{672c}\u{8a9e}\t tabbed\"}",
+        "not json at all, and it must survive anyway",
+        "",
+    ];
+    // Both durability levels, alternating: a backend that honours only one of
+    // them (or ignores the parameter) must still store and order every record
+    // identically, and one that errored on the level it does not implement would
+    // fail here rather than in production.
+    for (n, line) in lines.iter().enumerate() {
+        let durability = if n % 2 == 0 {
+            Durability::Host
+        } else {
+            Durability::Process
+        };
+        journal
+            .append_journal(&alpha, line, durability)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        lines,
+        "every line must read back byte-identically and in append order"
+    );
+
+    // Isolation, both ways.
+    journal
+        .append_journal(&beta, "beta-only", Durability::Host)
+        .await
+        .unwrap();
+    assert_eq!(
+        journal.read_journal(&beta).await.unwrap(),
+        vec!["beta-only".to_string()],
+        "one company's journal must hold only its own records"
+    );
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap().len(),
+        lines.len(),
+        "and another company's append must not land in it"
+    );
+
+    // Appending after a read keeps going from the end, not from zero — a backend
+    // whose sequence restarted would overwrite the first record.
+    journal
+        .append_journal(&alpha, "later", Durability::Process)
+        .await
+        .unwrap();
+    let after = journal.read_journal(&alpha).await.unwrap();
+    assert_eq!(after.len(), lines.len() + 1);
+    assert_eq!(after.last().unwrap(), "later", "and it lands at the end");
+}
+
+/// The one-time filesystem import and the receipt that gates it (#726).
+///
+/// Only for backends that can actually *hold* an import — sqlite and mongodb.
+/// The fs backend reports itself permanently imported (its store is the file an
+/// import would copy from), so running this against it would assert nothing.
+///
+/// The receipt is not bookkeeping. `complete_import` **clears** before it copies,
+/// so a second import deletes every record the backend accumulated after the
+/// first one — un-committing effect keys that have already run. And it records
+/// the receipt **last**, so an import interrupted anywhere leaves the gate open
+/// and the next boot re-runs the whole copy rather than resuming into a truncated
+/// prefix. A truncated prefix is the failure this port exists to prevent.
+pub async fn assert_journal_import(journal: Arc<dyn crate::ports::journal::JournalStore>) {
+    use crate::ports::journal::Durability;
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    assert!(
+        !journal.journal_imported(&alpha).await.unwrap(),
+        "a company the backend has never seen has not been imported"
+    );
+
+    let source = vec![
+        r#"{"record":"EffectExecuted","key":"cyc:0"}"#.to_string(),
+        r#"{"record":"EffectExecuted","key":"cyc:1"}"#.to_string(),
+        "a corrupt line, migrated byte-for-byte".to_string(),
+    ];
+    journal
+        .complete_import(&alpha, source.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        source,
+        "the import copies verbatim and in file order"
+    );
+    assert!(
+        journal.journal_imported(&alpha).await.unwrap(),
+        "and closes the gate"
+    );
+    assert!(
+        !journal.journal_imported(&beta).await.unwrap(),
+        "the receipt is per company, not per database"
+    );
+
+    // Appends after the import continue the sequence rather than colliding with
+    // (or overwriting) the copied records.
+    journal
+        .append_journal(&alpha, "after-import", Durability::Host)
+        .await
+        .unwrap();
+    let after = journal.read_journal(&alpha).await.unwrap();
+    assert_eq!(
+        after.len(),
+        source.len() + 1,
+        "an append after the import must not collide with a copied record's key"
+    );
+    assert_eq!(after[..source.len()], source[..]);
+    assert_eq!(after.last().unwrap(), "after-import");
+
+    // A retry — the shape of an import interrupted before its receipt — replaces
+    // rather than appends.
+    journal
+        .complete_import(&alpha, source.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        source,
+        "a re-run import clears the partial copy; it must never append a second one"
+    );
+
+    // The empty import is how a company with no prior filesystem journal closes
+    // its gate, and it must be a real (clearing) import, not a skipped no-op.
+    journal.complete_import(&beta, Vec::new()).await.unwrap();
+    assert!(journal.journal_imported(&beta).await.unwrap());
+    assert!(journal.read_journal(&beta).await.unwrap().is_empty());
 }

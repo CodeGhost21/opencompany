@@ -54,7 +54,7 @@ test("any message on a desk thread can be added to the board", async ({ page }) 
 
   const prompt = `ship the launch checklist ${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(prompt);
-  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // The operator's own bubble is the one being turned into a card.
   const bubble = page.getByText(prompt, { exact: true }).first();
@@ -95,7 +95,7 @@ test("a card the orchestrator opens is chipped in chat, and survives a reload", 
   // `SPAWNONE` is the scripted backend's cue to call `spawn_task` once.
   const prompt = `please track this SPAWNONE ${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(prompt);
-  await page.getByRole("button", { name: "Send" }).click();
+  await page.getByRole("button", { name: "Send", exact: true }).click();
 
   // Live: the reply bubble says a card was opened.
   const chip = page.getByRole("link", { name: /Card opened/ }).last();

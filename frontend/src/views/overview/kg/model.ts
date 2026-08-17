@@ -66,14 +66,6 @@ export function orderGraphDepartments<T>(items: T[], deptIdOf: (item: T) => stri
   return [...items].sort((a, b) => rank(a) - rank(b) || deptIdOf(a).localeCompare(deptIdOf(b)));
 }
 
-/** 'design-review' → 'Design Review' */
-function prettify(slug: string): string {
-  return slug
-    .split(/[-_]/)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
 /** Graph node id for a task's worker: agents are `emp:`, humans are `person:`. */
 export function workerNodeId(kind: SopTask['assigneeKind'], assigneeId: string): string {
   return kind === 'agent' ? `emp:${assigneeId}` : `person:${assigneeId}`;
@@ -144,28 +136,45 @@ export function buildKnowledgeGraph(
   }
 
   // Workflows (ring 2) — the multi-step routines a department runs. Unlike an
-  // SOP task, a flow passes through several workers, so it draws one `runs`
-  // edge per agent it touches.
+  // SOP task, which one worker owns outright, a flow passes through several, so
+  // it draws one `runs` edge per stage that names an agent.
   const agentIds = new Set(agents.map((a) => a.id));
   for (const f of workflows) {
-    if (!drawn.has(f.departmentId)) continue;
     nodes.push({ id: `flow:${f.id}`, kind: 'workflow', label: f.name, ring: RING.workflow });
-    edges.push({ source: `team:${f.departmentId}`, target: `flow:${f.id}`, kind: 'flow' });
+    // A flow the adapter could not place — it runs through nobody on a desk, or
+    // it is a company flow with no saved graph at all — hangs off the core
+    // instead of a pillar, exactly as an unplaced worker does just below. The
+    // company really does declare this flow, so dropping it would be the
+    // quieter lie: it draws, stageless if that is all we know, rather than
+    // going missing with no error anywhere.
+    edges.push(
+      drawn.has(f.departmentId)
+        ? { source: `team:${f.departmentId}`, target: `flow:${f.id}`, kind: 'flow' }
+        : { source: SELF_ID, target: `flow:${f.id}`, kind: 'flow' },
+    );
 
     // Each stage is its own node, chained to the next so the flow reads as a
     // sequence rather than a bag, and handed to the agent who performs it.
-    const runners = f.agentIds.filter((id) => agentIds.has(id));
+    //
+    // That last edge is drawn ONLY where the stage names an agent. The saved
+    // graph says which of its nodes is an `agent` node and which roster
+    // teammate it runs as, so there is nothing to deal out: a `trigger` or an
+    // `http_request` stage is performed by no teammate, and drawing a line from
+    // it to one would be a claim the company never made. This used to be a
+    // round-robin across the department's agents, which gave every stage a
+    // performer and got the performer wrong (issue #601).
     let prevStep: string | null = null;
     f.stages.forEach((stage, i) => {
       const stepId = `step:${f.id}:${i}`;
-      nodes.push({ id: stepId, kind: 'step', label: stage, ring: RING.step });
+      nodes.push({ id: stepId, kind: 'step', label: stage.name, ring: RING.step });
       edges.push({ source: `flow:${f.id}`, target: stepId, kind: 'stage' });
       if (prevStep) edges.push({ source: prevStep, target: stepId, kind: 'next' });
       prevStep = stepId;
-      // Stages are dealt round-robin across the department's agents: the flow
-      // knows its order, not who owns which step.
-      if (runners.length) {
-        edges.push({ source: stepId, target: `emp:${runners[i % runners.length]}`, kind: 'runs' });
+      // A stage may name an agent the roster no longer carries (a graph saved
+      // before a teammate was deleted); `forceLink` throws on an edge to a node
+      // that was never created, so the membership check is load-bearing.
+      if (stage.agentId && agentIds.has(stage.agentId)) {
+        edges.push({ source: stepId, target: `emp:${stage.agentId}`, kind: 'runs' });
       }
     });
   }
@@ -216,14 +225,20 @@ export function buildKnowledgeGraph(
 
   // Software tools (outer ring) — one node per (tool, department-that-uses-it)
   // for shared tools, a single node otherwise.
+  //
+  // Labelled with the slug verbatim: a slug here is a tool-grant glob, which is
+  // the literal string in the company's `[tools] allow` list. Title-casing it
+  // turned `mcp:*` into "Mcp " and `workspace.*` into something that appears
+  // nowhere in the company's own config, so an operator reading the wheel could
+  // not grep for what they were looking at (issue #601).
   for (const slug of [...deptsOfTool.keys()].sort()) {
     const depts = [...deptsOfTool.get(slug)!].sort();
     if (depts.length > 1) {
       for (const deptId of depts) {
-        nodes.push({ id: `tool:${slug}@${deptId}`, kind: 'tool', label: prettify(slug), ring: RING.tool });
+        nodes.push({ id: `tool:${slug}@${deptId}`, kind: 'tool', label: slug, ring: RING.tool });
       }
     } else {
-      nodes.push({ id: `tool:${slug}`, kind: 'tool', label: prettify(slug), ring: RING.tool });
+      nodes.push({ id: `tool:${slug}`, kind: 'tool', label: slug, ring: RING.tool });
     }
   }
 
