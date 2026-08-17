@@ -1,0 +1,49 @@
+title: "RFC: "
+labels: ["rfc"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A change big enough that finding out after the PR is too late: a new
+        surface, a change to the journal or the storage ports, anything that
+        breaks an existing company's manifest or data.
+
+        Small changes do not need an RFC. Open the PR.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: Who hits it, how often, and what they do today instead.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+      description: What you want to build. Concrete enough to disagree with.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else you considered
+      description: Including doing nothing, and why that loses.
+    validations:
+      required: true
+  - type: textarea
+    id: blast
+    attributes:
+      label: What this breaks
+      description: |
+        Existing manifests, stored data, the HTTP surface, exports and bundles,
+        the hosted deployment. Say "nothing" only after you have checked each.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This changes data that is already on someone's disk.
+        - label: This changes a public HTTP route or its response shape.
+        - label: This needs a matching change in OpenHuman.
