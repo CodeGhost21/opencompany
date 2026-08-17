@@ -684,6 +684,50 @@ pub fn load_workflow_union(
     overlays: &[crate::ports::types::OverlayWorkflow],
     id: &str,
 ) -> Result<Option<WorkflowFile>> {
+    load_workflow_with_globals(source_dir, overlays, &[], id)
+}
+
+/// [`load_workflow_union`], honouring a company's `[globals].disable`.
+///
+/// The same read, with the one thing the two-source form cannot see: whether
+/// this company opted out of the global graph it would otherwise resolve to.
+/// Callers that hold the record pass `record.manifest.globals.disable`; the
+/// shorter form exists for the ones that do not, and resolves globals as if
+/// nothing were disabled — which is what an operator who wrote no opt-out gets
+/// either way.
+///
+/// Precedence is seed file, then overlay, then global: the company's committed
+/// graph wins, its console-authored graph wins over the baseline, and the
+/// baseline fills what neither defines. A global graph is never *merged* into a
+/// same-id company graph — nobody designed the half of each.
+pub fn load_workflow_with_globals(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    disable: &[String],
+    id: &str,
+) -> Result<Option<WorkflowFile>> {
+    if let Some(file) = load_company_workflow_union(source_dir, overlays, id)? {
+        return Ok(Some(file));
+    }
+    if crate::globals::disabled(disable, "workflow", id) {
+        return Ok(None);
+    }
+    Ok(crate::globals::workflows()
+        .iter()
+        .find(|workflow| workflow.id == id)
+        .cloned()
+        .map(|mut workflow| {
+            workflow.global = true;
+            workflow
+        }))
+}
+
+/// The company's own two sources — seed file, then overlay — with no baseline.
+fn load_company_workflow_union(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    id: &str,
+) -> Result<Option<WorkflowFile>> {
     if let Some(dir) = source_dir {
         let path = dir.join("workflows").join(format!("{id}.toml"));
         // Only load ids that exist on disk, so a missing file falls through to
