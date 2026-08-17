@@ -49,12 +49,14 @@ impl WorkspaceCheckpointer {
         let out_of_band = workspace.with_extension("git");
 
         if !out_of_band.join("HEAD").is_file() {
+            // Global options (`-c`, env) must precede the subcommand, so the
+            // isolation is applied before `init` is named.
             let mut init = Command::new("git");
+            isolate_git(&mut init);
             init.args(["init", "--quiet", "--initial-branch=checkpoints"])
                 .arg("--separate-git-dir")
                 .arg(&out_of_band)
                 .arg(workspace);
-            isolate_git(&mut init);
             let status = init.status()?;
             require_success(status, "git init")?;
         }
