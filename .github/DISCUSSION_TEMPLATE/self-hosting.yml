@@ -1,0 +1,42 @@
+title: ""
+labels: ["self-hosting"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Getting an instance up and keeping it up: Docker, the entrypoint, data
+        directories, reverse proxies, TLS, wake-on-request.
+
+        Most threads here are settled by two things — the container log and the
+        environment the container actually got. Paste both.
+  - type: textarea
+    id: what
+    attributes:
+      label: What is happening?
+      description: What you expected the instance to do, and what it does instead.
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: |
+        Host OS and architecture, Docker version, and how the container is
+        started. Include the OPENCOMPANY_* variables you set, with values
+        redacted where they are secrets.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Container log
+      description: From boot to the failure. `/healthz` behavior matters — the proxy blocks on it.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: data-dir
+    attributes:
+      label: Data directory
+      description: The value of OPENCOMPANY_DATA_DIR, and whether that path is writable in the container.
