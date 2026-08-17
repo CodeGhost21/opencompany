@@ -601,6 +601,7 @@ impl Tool for CloseEntry {
 
 struct DefineLedger {
     ctx: Ledgers,
+    can_declare_ledgers: bool,
 }
 
 #[async_trait]
