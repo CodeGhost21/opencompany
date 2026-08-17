@@ -3373,8 +3373,8 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     );
 }
 
-/// Issue #568: each listed server carries the ids of the agents whose *effective*
-/// grants reach it — over the full runtime roster, manifest agents plus overlay
+/// Issue #568: each listed server carries the agents whose *effective* grants
+/// reach it — over the full runtime roster, manifest agents plus overlay
 /// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
 /// (and every overlay teammate, which has no tools row) inherits the wildcard and
 /// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
@@ -3391,8 +3391,10 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
     .unwrap();
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
+    // A minted id, exactly as `POST …/team` gives an operator-added teammate —
+    // the shape that used to reach the console's "Reachable by" line raw (#931).
     let overlay = crate::ports::types::OverlayAgent {
-        id: "helper".to_string(),
+        id: "019fa75dbc9b-000000000001".to_string(),
         name: "Helper".to_string(),
         role: "Assistant".to_string(),
         description: None,
@@ -3402,29 +3404,48 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
 
     let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
     assert_eq!(status, StatusCode::OK);
-    let reach = |name: &str| -> Vec<String> {
+    let reach = |name: &str| -> Vec<(String, String)> {
         let row = list
             .as_array()
             .unwrap()
             .iter()
             .find(|s| s["name"] == name)
             .unwrap_or_else(|| panic!("server `{name}` is listed"));
-        let mut ids: Vec<String> = row["reachableBy"]
+        let mut agents: Vec<(String, String)> = row["reachableBy"]
             .as_array()
             .expect("reachableBy serializes as an array")
             .iter()
-            .map(|v| v.as_str().unwrap().to_string())
+            .map(|v| {
+                (
+                    v["id"].as_str().unwrap().to_string(),
+                    v["name"].as_str().unwrap().to_string(),
+                )
+            })
             .collect();
-        ids.sort();
-        ids
+        agents.sort();
+        agents
     };
+    let pair = |id: &str, name: &str| (id.to_string(), name.to_string());
 
     // notion: the narrowed ceo, the wildcard-inheriting eng, and the overlay.
-    assert_eq!(reach("notion"), vec!["ceo", "eng", "helper"]);
+    // Issue #931: every row carries the display label the rest of the console
+    // uses — a manifest agent's role, an overlay teammate's name — so the minted
+    // overlay id is never what a reader sees.
+    assert_eq!(
+        reach("notion"),
+        vec![
+            pair("019fa75dbc9b-000000000001", "Helper"),
+            pair("ceo", "Chief"),
+            pair("eng", "Engineer"),
+        ]
+    );
     // linear: only the wildcard holders — ceo scoped itself out of it.
     assert_eq!(
         reach("linear"),
-        vec!["eng", "helper"],
+        vec![
+            pair("019fa75dbc9b-000000000001", "Helper"),
+            pair("eng", "Engineer"),
+        ],
         "ceo narrowed to mcp:notion, so it cannot reach linear"
     );
 }
@@ -3461,9 +3482,9 @@ async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|v| v.as_str().unwrap())
+            .map(|v| (v["id"].as_str().unwrap(), v["name"].as_str().unwrap()))
             .collect::<Vec<_>>(),
-        vec!["ceo"],
+        vec![("ceo", "Chief")],
         "the company allow covers mcp:docs for the one agent"
     );
     assert!(
@@ -3495,7 +3516,7 @@ async fn mcp_reachability_is_empty_for_a_disabled_server() {
             .as_array()
             .expect("reachableBy serializes as an array")
             .iter()
-            .map(|v| v.as_str().unwrap().to_string())
+            .map(|v| v["id"].as_str().unwrap().to_string())
             .collect()
     };
 

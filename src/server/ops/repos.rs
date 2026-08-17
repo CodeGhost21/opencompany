@@ -38,6 +38,7 @@ use crate::company::runtime::CompanyRuntime;
 use crate::runtime::RepoManager;
 use crate::runtime::repo_manager::types::{BindRequest, RepoBinding};
 use crate::server::error::ApiError;
+use crate::server::ops::mcp::RosterAgentDto;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
 /// Builds the repository binding route fragment.
@@ -65,7 +66,10 @@ struct RepoList {
     /// per-binding copy of one list would imply a per-repository control that
     /// does not exist. Empty is the misconfiguration the card names: a company
     /// that bound repositories nobody is allowed to read.
-    granted_agents: Vec<String>,
+    ///
+    /// Each entry carries the label to print as well as the id (issue #931) —
+    /// see [`RosterAgentDto`].
+    granted_agents: Vec<RosterAgentDto>,
 }
 
 /// The reminder attached to every mutating response.
@@ -172,18 +176,24 @@ async fn list_repos(company: ScopedCompany) -> Result<Json<RepoList>, Response> 
 /// reach is what `build_agent` actually wires, rather than a second answer
 /// derived from the manifest by hand.
 ///
+/// Each agent carries the label the card prints alongside its id (issue #931).
+/// The id alone is readable only for a manifest agent; an operator-added
+/// teammate's is minted, so "Readable by" named half a company's teammates in
+/// internal strings — the same defect the MCP surface's "Reachable by" line had,
+/// which sharing one roster walk with it makes a single fix.
+///
 /// A store error degrades to an empty list rather than failing the read: the
 /// bindings are what this route is for, and losing the coverage annotation is a
 /// smaller loss than losing the page. Empty then reads as "nobody", which is the
 /// safe direction — it prompts an operator to check rather than reassuring them.
-async fn granted_agents(runtime: &CompanyRuntime) -> Vec<String> {
+async fn granted_agents(runtime: &CompanyRuntime) -> Vec<RosterAgentDto> {
     let Ok(Some(record)) = runtime.store().load(runtime.id()).await else {
         return Vec::new();
     };
     super::mcp::roster_grants(&record)
         .into_iter()
         .filter(|(_, grants)| crate::company::grants_repo_explicit(grants))
-        .map(|(id, _)| id)
+        .map(|(agent, _)| agent)
         .collect()
 }
 
@@ -501,13 +511,19 @@ mod test {
                 can_push: None,
             }],
             pull_requests_available: false,
-            granted_agents: vec!["ceo".to_string()],
+            granted_agents: vec![RosterAgentDto {
+                id: "ceo".to_string(),
+                name: "Chief".to_string(),
+            }],
         };
         let json = serde_json::to_string(&list).unwrap();
         assert!(!json.contains("SENTINEL"), "{json}");
         assert!(json.contains("tokenFingerprint"), "{json}");
         assert!(json.contains("pullRequestsAvailable"), "{json}");
         assert!(json.contains("grantedAgents"), "{json}");
+        // Issue #931: the card has a label to print, not only an id — for an
+        // operator-added teammate the id is a minted internal string.
+        assert!(json.contains(r#""name":"Chief""#), "{json}");
     }
 
     #[test]

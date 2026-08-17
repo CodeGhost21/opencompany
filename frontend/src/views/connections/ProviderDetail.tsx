@@ -508,7 +508,10 @@ function McpBody({
             ) : (
               <span>
                 Reachable by:{" "}
-                <span className="font-medium text-foreground">{server.reachableBy.join(", ")}</span>
+                {/* Names, not ids (issue #931) — see `McpServersSection`. */}
+                <span className="font-medium text-foreground">
+                  {server.reachableBy.map((agent) => agent.name).join(", ")}
+                </span>
               </span>
             )}
           </p>
