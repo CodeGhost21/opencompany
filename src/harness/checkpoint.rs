@@ -114,9 +114,7 @@ impl WorkspaceCheckpointer {
     /// multi-threaded runtime, making the inline path a defensive fallback.
     pub(crate) fn initialize_off_worker(workspace: &Path) -> anyhow::Result<Self> {
         match tokio::runtime::Handle::try_current() {
-            Ok(handle)
-                if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
-            {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                 tokio::task::block_in_place(|| Self::initialize(workspace))
             }
             _ => Self::initialize(workspace),
