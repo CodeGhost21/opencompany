@@ -106,18 +106,21 @@ impl WorkspaceCheckpointer {
     /// contend with this one on the Git index.
     ///
     /// [`build_agent`](crate::harness::build::build_agent) is synchronous, so
-    /// there is no `.await`; the lock is therefore acquired with `try_lock`,
-    /// falling back to a blocking acquisition on the current Tokio runtime when
-    /// a checkpoint is genuinely in flight. In practice a freshly built
-    /// workspace has no in-flight checkpoint, so the fallback is a defensive
-    /// backstop rather than the hot path.
+    /// there is no `.await` and the lock can only be probed with `try_lock`. A
+    /// contended lock — a tool checkpoint in flight while the roster is
+    /// rebuilt — is waited on by spinning with `yield_now` until the guard is
+    /// acquired. That is deliberate: calling `Handle::block_on` here inside a
+    /// Tokio task panics, and proceeding without the guard would race the
+    /// in-flight checkpoint on the Git index. A checkpoint holds the lock only
+    /// for a short `git add`/`commit`, so the spin is bounded; it is a
+    /// defensive backstop, not the hot path.
     fn initialize_baseline(&self) -> anyhow::Result<()> {
         let lock = path_lock(&self.git_dir);
-        let _guard = match lock.try_lock() {
-            Ok(guard) => Some(guard),
-            Err(_) => tokio::runtime::Handle::try_current()
-                .ok()
-                .map(|handle| handle.block_on(lock.lock())),
+        let _guard = loop {
+            match lock.try_lock() {
+                Ok(guard) => break Some(guard),
+                Err(_) => std::thread::yield_now(),
+            }
         };
         self.checkpoint_unlocked("initialize workspace", true)
     }
