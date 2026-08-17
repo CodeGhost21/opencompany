@@ -256,11 +256,7 @@ async fn provision(
         // inherits the same repository-credential gates — which need to know
         // which backend is holding this host's secrets.
         .with_storage_kind(state.storage_kind())
-        .with_skills_registry(skills_registry)
-        // A host-wide sign-in mode set by setup (or flipped later) must reach
-        // every company built from here on, including one provisioned after
-        // that change — see `AppState::auth_mode_override`.
-        .with_auth_mode_override(state.auth_mode_override());
+        .with_skills_registry(skills_registry);
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }
