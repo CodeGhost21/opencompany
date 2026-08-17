@@ -380,8 +380,19 @@ describe("the same panel, opened on a remote MCP server (#821)", () => {
     // usage above it is history, not evidence that it is reachable now.
     await openMcp(mcpServer({ reachableBy: [] }));
     expect(text()).toContain("No agent can reach this server");
-    await openMcp(mcpServer({ reachableBy: ["ceo", "engineer"] }));
-    expect(text()).toContain("ceo, engineer");
+    // #931: the line prints each teammate's display name. An operator-added
+    // teammate's id is a minted internal string, and printing it told a reader
+    // nothing about who can reach the server — which is the line's whole point.
+    await openMcp(
+      mcpServer({
+        reachableBy: [
+          { id: "ceo", name: "Chief" },
+          { id: "019fa75dbc9b-000000000001", name: "Jamie" },
+        ],
+      }),
+    );
+    expect(text()).toContain("Chief, Jamie");
+    expect(text()).not.toContain("019fa75dbc9b");
   });
 });
 
