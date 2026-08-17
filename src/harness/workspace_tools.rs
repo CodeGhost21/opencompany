@@ -4837,6 +4837,121 @@ mod tests {
         assert_eq!(node.size, Some(6));
     }
 
+    /// A manifest that declares no write-scoped `context` entry is unconfined
+    /// — `workspace_write` reaches anywhere in the tree, exactly as before this
+    /// existed. This is the regression the opt-in confinement must not cause.
+    #[tokio::test]
+    async fn workspace_write_stays_unconfined_by_default() {
+        let (_dir, store) = seeded("acme").await;
+        let tool = WorkspaceWriteTool::new(ws(store.clone(), CompanyId::new("acme")));
+
+        let result = tool
+            .execute(json!({
+                "id": "n-eng",
+                "content": "# Engineering\nRevised.",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", text(&result));
+    }
+
+    /// A manifest that declares a write-scoped `context` entry confines
+    /// `workspace_write` to exactly those paths — a path outside the scope is
+    /// refused, and the tree is untouched.
+    #[tokio::test]
+    async fn workspace_write_refuses_a_path_outside_the_declared_write_scope() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let workspace = ws(store.clone(), id.clone())
+            .with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
+        let tool = WorkspaceWriteTool::new(workspace);
+
+        let result = tool
+            .execute(json!({
+                "id": "n-eng",
+                "content": "# Engineering\nRevised.",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(result.is_error, "{}", text(&result));
+        let out = text(&result);
+        assert!(out.contains("write scope"), "{out}");
+
+        let (node, body) = store.read(&id, "n-eng").await.unwrap().expect("still there");
+        assert_eq!(node.updated_at_millis, 2_000, "untouched");
+        assert_eq!(body, "# Engineering\nReview every PR.");
+    }
+
+    /// A path that *is* in the declared write scope still succeeds.
+    #[tokio::test]
+    async fn workspace_write_allows_a_path_inside_the_declared_write_scope() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let workspace = ws(store.clone(), id.clone()).with_write_scope(Some(vec![
+            "Standards/Engineering standards.md".to_string(),
+        ]));
+        let tool = WorkspaceWriteTool::new(workspace);
+
+        let result = tool
+            .execute(json!({
+                "id": "n-eng",
+                "content": "# Engineering\nRevised.",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", text(&result));
+    }
+
+    /// A write-scoped agent may still create inside its own `Agents/<id>/`
+    /// home — the scope narrows the shared tree, not the ability to produce
+    /// and revise its own work.
+    #[tokio::test]
+    async fn a_write_scoped_agent_can_still_create_in_its_own_home() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let workspace = ws(store.clone(), id.clone())
+            .with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
+        let tool = WorkspaceCreateTool::new(workspace);
+
+        let result = tool
+            .execute(json!({
+                "path": "Agents/ceo/Notes.md",
+                "kind": "file",
+                "content": "# Notes"
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", text(&result));
+    }
+
+    /// The other half: `workspace_create` at a shared path outside scope is
+    /// refused before anything is written.
+    #[tokio::test]
+    async fn workspace_create_refuses_a_path_outside_the_declared_write_scope() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let workspace = ws(store.clone(), id.clone())
+            .with_write_scope(Some(vec!["Somewhere/Else.md".to_string()]));
+        let tool = WorkspaceCreateTool::new(workspace);
+
+        let result = tool
+            .execute(json!({
+                "path": "Standards/New standard.md",
+                "kind": "file",
+                "content": "# New"
+            }))
+            .await
+            .unwrap();
+        assert!(result.is_error, "{}", text(&result));
+        assert!(text(&result).contains("write scope"));
+
+        let tree = store.tree(&id).await.unwrap();
+        assert!(!tree.iter().any(|n| n.name == "New standard.md"));
+    }
+
     /// The listing marks a payload, so an agent never spends a `workspace_read`
     /// call to discover that a file is not text.
     #[tokio::test]
