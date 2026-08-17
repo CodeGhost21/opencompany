@@ -34,7 +34,7 @@ use tinymemory_api::error::MemoryError;
 use tinymemory_api::provider::MemoryProvider;
 use tinymemory_api::types::{MemoryCategory, MemoryEntry, MemoryTaint};
 
-use super::namespace::Namespace;
+use super::namespace::{Namespace, Scope};
 use crate::error::OpenCompanyError;
 use crate::ports::{
     ChunkAddr, ChunkHit, ChunkMeta, CompanyId, CompressedTrace, ContextChunk, ContextStore,
@@ -110,34 +110,45 @@ fn category(tag: &str) -> MemoryCategory {
     MemoryCategory::Custom(format!("oc:{tag}"))
 }
 
-/// Shared plumbing: a provider plus the one namespace a facade may touch.
+/// Shared plumbing: a provider, and which partition of a company's memory this
+/// facade addresses.
 ///
-/// Holds a [`Namespace`], never a string. Constructing one requires a value that
-/// came from [`Namespace::company_root`], so a facade cannot be pointed at a
-/// namespace that no `CompanyId` produced.
+/// # Why the company is a per-call argument, not a field
+///
+/// One `MemoryOverlay` is opened per *process* and injected into every
+/// company's runtime, so a facade instance is shared by every tenant this host
+/// serves. A namespace fixed at construction would therefore be one company's
+/// namespace serving all of them — a cross-tenant leak, and exactly the defect
+/// this module exists to prevent.
+///
+/// So the namespace is derived on every call from the `&CompanyId` the port
+/// method was given. That is strictly stronger than deriving it once: the
+/// namespace is a pure function of the argument the port contract already
+/// requires, so it cannot be stale, cannot be mismatched with the caller's
+/// intent, and cannot be set to a company the caller was not holding.
 #[derive(Clone)]
 pub(super) struct Bound {
     provider: std::sync::Arc<dyn MemoryProvider>,
-    namespace: Namespace,
+    scope: Scope,
     taint: MemoryTaint,
 }
 
 impl Bound {
     pub(super) fn new(
         provider: std::sync::Arc<dyn MemoryProvider>,
-        namespace: Namespace,
+        scope: Scope,
         taint: MemoryTaint,
     ) -> Self {
         Self {
             provider,
-            namespace,
+            scope,
             taint,
         }
     }
 
-    /// This facade's namespace, for the decorator's own checks.
-    pub(super) fn namespace(&self) -> &Namespace {
-        &self.namespace
+    /// The namespace this facade addresses for `company`.
+    fn namespace(&self, company: &CompanyId) -> Namespace {
+        Namespace::company_root(company).child(&self.scope)
     }
 
     /// Stores one typed record.
@@ -146,10 +157,16 @@ impl Bound {
     /// there is no defaulted, taint-dropping overload on the provider contract
     /// to fall into. (The engine-side `Memory::store_with_taint` *does* have one,
     /// which is precisely why nothing here wraps a bare `Memory`.)
-    async fn put<T: Serialize + Sync>(&self, key: &str, record: &T, tag: &str) -> Result<()> {
+    async fn put<T: Serialize + Sync>(
+        &self,
+        company: &CompanyId,
+        key: &str,
+        record: &T,
+        tag: &str,
+    ) -> Result<()> {
         self.provider
             .store(
-                self.namespace.as_str(),
+                self.namespace(company).as_str(),
                 key,
                 &encode(record)?,
                 category(tag),
@@ -161,53 +178,59 @@ impl Bound {
     }
 
     /// Fetches one typed record by key.
-    async fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+    async fn get<T: DeserializeOwned>(&self, company: &CompanyId, key: &str) -> Result<Option<T>> {
+        let namespace = self.namespace(company);
         Ok(self
             .provider
-            .get(self.namespace.as_str(), key)
+            .get(namespace.as_str(), key)
             .await
             .map_err(store_error)?
-            .and_then(|entry| decode(&entry, &self.namespace)))
+            .and_then(|entry| decode(&entry, &namespace)))
     }
 
-    /// Lists every typed record in this namespace.
-    async fn list<T: DeserializeOwned>(&self) -> Result<Vec<T>> {
+    /// Lists every typed record in this company's partition.
+    async fn list<T: DeserializeOwned>(&self, company: &CompanyId) -> Result<Vec<T>> {
+        let namespace = self.namespace(company);
         Ok(self
             .provider
-            .list(Some(self.namespace.as_str()), None, None)
+            .list(Some(namespace.as_str()), None, None)
             .await
             .map_err(store_error)?
             .iter()
-            .filter_map(|entry| decode(entry, &self.namespace))
+            .filter_map(|entry| decode(entry, &namespace))
             .collect())
     }
 
     /// Deletes one record, reporting whether it existed.
-    async fn forget(&self, key: &str) -> Result<bool> {
+    async fn forget(&self, company: &CompanyId, key: &str) -> Result<bool> {
         self.provider
-            .forget(self.namespace.as_str(), key)
+            .forget(self.namespace(company).as_str(), key)
             .await
             .map_err(store_error)
     }
 
-    /// Ranked recall, narrowed to this namespace on the way in and re-checked on
+    /// Ranked recall, narrowed to this partition on the way in and re-checked on
     /// the way out.
-    async fn recall(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    async fn recall(
+        &self,
+        company: &CompanyId,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Namespace, Vec<MemoryEntry>)> {
+        let namespace = self.namespace(company);
         let opts = tinymemory_api::recall::OwnedRecallOpts {
-            namespace: Some(self.namespace.as_str().to_string()),
+            namespace: Some(namespace.as_str().to_string()),
             ..Default::default()
         };
-        Ok(self
+        let hits = self
             .provider
             .recall(query, limit, &opts, None)
             .await
             .map_err(store_error)?
             .into_iter()
-            .filter(|entry| {
-                self.namespace
-                    .contains(entry.namespace.as_deref().unwrap_or_default())
-            })
-            .collect())
+            .filter(|entry| namespace.contains(entry.namespace.as_deref().unwrap_or_default()))
+            .collect();
+        Ok((namespace, hits))
     }
 }
 
@@ -234,11 +257,11 @@ impl ProviderFactStore {
 impl FactStore for ProviderFactStore {
     async fn list(
         &self,
-        _company: &CompanyId,
+        company: &CompanyId,
         query: Option<&str>,
         kind: Option<FactKind>,
     ) -> Result<Vec<FactRecord>> {
-        let mut facts: Vec<FactRecord> = self.bound.list().await?;
+        let mut facts: Vec<FactRecord> = self.bound.list(company).await?;
         if let Some(kind) = kind {
             facts.retain(|fact| fact.kind == kind);
         }
@@ -260,12 +283,12 @@ impl FactStore for ProviderFactStore {
         Ok(facts)
     }
 
-    async fn upsert(&self, _company: &CompanyId, fact: &FactRecord) -> Result<()> {
-        self.bound.put(&fact.id, fact, "fact").await
+    async fn upsert(&self, company: &CompanyId, fact: &FactRecord) -> Result<()> {
+        self.bound.put(company, &fact.id, fact, "fact").await
     }
 
-    async fn delete(&self, _company: &CompanyId, id: &str) -> Result<bool> {
-        self.bound.forget(id).await
+    async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        self.bound.forget(company, id).await
     }
 }
 
@@ -302,7 +325,7 @@ struct StoredChunk {
 
 #[async_trait]
 impl ContextStore for ProviderContextStore {
-    async fn put(&self, _company: &CompanyId, chunk: ContextChunk) -> Result<ChunkAddr> {
+    async fn put(&self, company: &CompanyId, chunk: ContextChunk) -> Result<ChunkAddr> {
         // The shared content address, so this backend mints the same addr for
         // the same body as fs / sqlite / mongodb do.
         let addr = content_address(&chunk.body);
@@ -312,7 +335,12 @@ impl ContextStore for ProviderContextStore {
         // in meaning — it would start reporting when a chunk was last *re-seen*
         // rather than when it was first written. sqlite and mongodb keep the
         // first write; match them.
-        if self.bound.get::<StoredChunk>(&addr).await?.is_some() {
+        if self
+            .bound
+            .get::<StoredChunk>(company, &addr)
+            .await?
+            .is_some()
+        {
             return Ok(ChunkAddr::new(addr));
         }
         let stored = StoredChunk {
@@ -320,12 +348,12 @@ impl ContextStore for ProviderContextStore {
             body: chunk.body,
             stored_at_millis: crate::ports::now_millis(),
         };
-        self.bound.put(&addr, &stored, "chunk").await?;
+        self.bound.put(company, &addr, &stored, "chunk").await?;
         Ok(ChunkAddr::new(addr))
     }
 
-    async fn list(&self, _company: &CompanyId, prefix: &str) -> Result<Vec<ChunkMeta>> {
-        let chunks: Vec<StoredChunk> = self.bound.list().await?;
+    async fn list(&self, company: &CompanyId, prefix: &str) -> Result<Vec<ChunkMeta>> {
+        let chunks: Vec<StoredChunk> = self.bound.list(company).await?;
         let mut metas: Vec<ChunkMeta> = chunks
             .into_iter()
             .filter(|chunk| chunk.label.starts_with(prefix))
@@ -346,13 +374,17 @@ impl ContextStore for ProviderContextStore {
 
     async fn peek(
         &self,
-        _company: &CompanyId,
+        company: &CompanyId,
         addr: &ChunkAddr,
         range: Option<Range<usize>>,
     ) -> Result<String> {
-        let chunk: StoredChunk = self.bound.get(addr.as_ref()).await?.ok_or_else(|| {
-            OpenCompanyError::NotFound(format!("context chunk {}", addr.as_ref()))
-        })?;
+        let chunk: StoredChunk =
+            self.bound
+                .get(company, addr.as_ref())
+                .await?
+                .ok_or_else(|| {
+                    OpenCompanyError::NotFound(format!("context chunk {}", addr.as_ref()))
+                })?;
         let Some(range) = range else {
             return Ok(chunk.body);
         };
@@ -361,15 +393,15 @@ impl ContextStore for ProviderContextStore {
 
     async fn search(
         &self,
-        _company: &CompanyId,
+        company: &CompanyId,
         query: &str,
         limit: usize,
     ) -> Result<Vec<ChunkHit>> {
-        let entries = self.bound.recall(query, limit).await?;
+        let (namespace, entries) = self.bound.recall(company, query, limit).await?;
         Ok(entries
             .iter()
             .filter_map(|entry| {
-                let chunk: StoredChunk = decode(entry, self.bound.namespace())?;
+                let chunk: StoredChunk = decode(entry, &namespace)?;
                 Some(ChunkHit {
                     addr: ChunkAddr::new(content_address(&chunk.body)),
                     snippet: snippet(&chunk.body),
@@ -453,8 +485,8 @@ impl ProviderMemoryStore {
     }
 
     /// Reads the live trace set, oldest first.
-    async fn ordered_traces(&self) -> Result<Vec<CompressedTrace>> {
-        let mut traces: Vec<CompressedTrace> = self.traces.list().await?;
+    async fn ordered_traces(&self, company: &CompanyId) -> Result<Vec<CompressedTrace>> {
+        let mut traces: Vec<CompressedTrace> = self.traces.list(company).await?;
         // Total order, not just by timestamp: two traces stamped in the same
         // millisecond must not reorder between reads, or `recent_traces` returns
         // a different window each call and eviction evicts a different set.
@@ -467,27 +499,30 @@ impl ProviderMemoryStore {
     }
 
     /// Reads the archived trace set, for the operator's inspect/export rights.
-    pub(super) async fn archived_traces(&self) -> Result<Vec<CompressedTrace>> {
-        self.archive.list().await
+    pub(super) async fn archived_traces(
+        &self,
+        company: &CompanyId,
+    ) -> Result<Vec<CompressedTrace>> {
+        self.archive.list(company).await
     }
 }
 
 #[async_trait]
 impl MemoryStore for ProviderMemoryStore {
-    async fn save_trace(&self, _id: &CompanyId, trace: CompressedTrace) -> Result<()> {
-        self.traces.put(&trace.cycle_id, &trace, "trace").await
+    async fn save_trace(&self, id: &CompanyId, trace: CompressedTrace) -> Result<()> {
+        self.traces.put(id, &trace.cycle_id, &trace, "trace").await
     }
 
-    async fn recent_traces(&self, _id: &CompanyId, limit: usize) -> Result<Vec<CompressedTrace>> {
-        let traces = self.ordered_traces().await?;
+    async fn recent_traces(&self, id: &CompanyId, limit: usize) -> Result<Vec<CompressedTrace>> {
+        let traces = self.ordered_traces(id).await?;
         // Newest last, per the port contract, so the tail is the window.
         let skip = traces.len().saturating_sub(limit);
         Ok(traces.into_iter().skip(skip).collect())
     }
 
-    async fn save_task_result(&self, _id: &CompanyId, result: TaskResult) -> Result<()> {
+    async fn save_task_result(&self, id: &CompanyId, result: TaskResult) -> Result<()> {
         self.task_results
-            .put(&result.task_id, &result, "task-result")
+            .put(id, &result.task_id, &result, "task-result")
             .await
     }
 
@@ -504,8 +539,8 @@ impl MemoryStore for ProviderMemoryStore {
     /// dies in between. Archive-then-delete leaves a trace in both places — a
     /// duplicate the next read reconciles. Delete-then-archive loses it. For a
     /// port whose whole promise is "not destroyed", that asymmetry decides it.
-    async fn evict(&self, _id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
-        let traces = self.ordered_traces().await?;
+    async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
+        let traces = self.ordered_traces(id).await?;
         let doomed: Vec<CompressedTrace> = match policy {
             EvictionPolicy::KeepRecent { n } => {
                 let keep_from = traces.len().saturating_sub(n);
@@ -518,8 +553,10 @@ impl MemoryStore for ProviderMemoryStore {
         };
         let mut evicted = 0u64;
         for trace in doomed {
-            self.archive.put(&trace.cycle_id, &trace, "trace").await?;
-            if self.traces.forget(&trace.cycle_id).await? {
+            self.archive
+                .put(id, &trace.cycle_id, &trace, "trace")
+                .await?;
+            if self.traces.forget(id, &trace.cycle_id).await? {
                 evicted += 1;
             }
         }

@@ -63,43 +63,46 @@ use tinymemory_api::provider::{MemoryProvider, audit_provider};
 use tinymemory_api::types::MemoryTaint;
 
 use facades::{Bound, ProviderContextStore, ProviderFactStore, ProviderMemoryStore};
-use namespace::{Namespace, Scope};
+use namespace::Scope;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::{CompanyId, ContextStore, FactStore, MemoryStore};
 
-pub use driver::{MemoryDriverConfig, MemoryDriverError, open_driver};
+pub use driver::{MemoryDriverConfig, MemoryDriverError, MemoryMode, open_driver};
 
-/// One company's memory, bound to one provider.
+/// A bound memory engine, and the only way to get a memory port out of one.
 ///
-/// Clone is cheap — the provider is shared and the namespaces are strings.
+/// Process-scoped, like the `MemoryOverlay` it is opened into: one engine serves
+/// every company this host runs, and each port method derives its namespace from
+/// the `&CompanyId` it is given. See [`facades::Bound`] for why the company is a
+/// per-call argument rather than a field — briefly, a namespace fixed at
+/// construction would be one tenant's namespace serving all of them.
+///
+/// Clone is cheap: the provider is shared.
 #[derive(Clone)]
-pub struct CompanyMemory {
+pub struct BoundMemory {
     provider: Arc<dyn MemoryProvider>,
-    root: Namespace,
     class: DriverClass,
     driver_id: String,
     capabilities: Capabilities,
 }
 
-impl std::fmt::Debug for CompanyMemory {
+impl std::fmt::Debug for BoundMemory {
     /// Renders the driver identity and class only.
     ///
-    /// Never the namespace: it is derived from the company id, and a company id
-    /// in a log line next to a driver endpoint is the pair an operator's logs
-    /// should not carry by default. Never anything from the provider's own
-    /// configuration, which is where the credential lives.
+    /// Never anything from the provider's own configuration, which is where the
+    /// endpoint and the credential live.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CompanyMemory")
+        f.debug_struct("BoundMemory")
             .field("driver_id", &self.driver_id)
             .field("class", &self.class.as_str())
             .finish_non_exhaustive()
     }
 }
 
-impl CompanyMemory {
-    /// Binds `provider` to one company.
+impl BoundMemory {
+    /// Binds `provider` as this host's memory engine.
     ///
     /// `class` comes from the host's configuration, never from the driver — see
     /// the module docs.
@@ -108,11 +111,7 @@ impl CompanyMemory {
     /// advertises a capability family it cannot actually serve fails here, at
     /// boot, rather than on the first call that needs it — which for a memory
     /// family could be days later, on a path nobody is watching.
-    pub fn bind(
-        provider: Arc<dyn MemoryProvider>,
-        company: &CompanyId,
-        class: DriverClass,
-    ) -> Result<Self> {
+    pub fn bind(provider: Arc<dyn MemoryProvider>, class: DriverClass) -> Result<Self> {
         audit_provider(provider.as_ref()).map_err(|audit| {
             OpenCompanyError::Config(format!(
                 "memory driver `{}` failed its capability audit at bind time: {audit}. \
@@ -125,7 +124,6 @@ impl CompanyMemory {
             driver_id: provider.driver_id().to_string(),
             capabilities: provider.capabilities(),
             provider,
-            root: Namespace::company_root(company),
             class,
         })
     }
@@ -152,9 +150,9 @@ impl CompanyMemory {
         self.capabilities.iter().map(|cap| cap.as_str()).collect()
     }
 
-    /// Builds a facade bound to one scope of this company's memory.
+    /// Builds a facade addressing one scope of a company's memory.
     fn bound(&self, scope: Scope, taint: MemoryTaint) -> Bound {
-        Bound::new(self.provider.clone(), self.root.child(&scope), taint)
+        Bound::new(self.provider.clone(), scope, taint)
     }
 
     /// The operator's hand-curated facts.
@@ -238,8 +236,11 @@ impl CompanyMemory {
     /// this, and `evict` promises the traces still exist, so something has to be
     /// able to show them. Also what makes "archives rather than destroys"
     /// testable as a property rather than as a count.
-    pub async fn archived_traces(&self) -> Result<Vec<crate::ports::CompressedTrace>> {
-        self.trace_store().archived_traces().await
+    pub async fn archived_traces(
+        &self,
+        company: &CompanyId,
+    ) -> Result<Vec<crate::ports::CompressedTrace>> {
+        self.trace_store().archived_traces(company).await
     }
 }
 

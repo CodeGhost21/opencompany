@@ -19,7 +19,7 @@ use tinymemory_api::types::{
     MemoryCategory, MemoryEntry, MemoryTaint, NamespaceSummary, RecallOpts,
 };
 
-use super::CompanyMemory;
+use super::BoundMemory;
 use crate::ports::{
     CompanyId, CompressedTrace, ContextChunk, EvictionPolicy, FactKind, FactRecord,
 };
@@ -177,20 +177,20 @@ impl Memory for FakeEngine {
     }
 }
 
-/// Binds one shared engine for two companies, which is the arrangement every
-/// isolation test needs: a leak is only observable when both tenants are in the
-/// same store.
-fn two_companies() -> (CompanyMemory, CompanyMemory) {
-    let provider = FakeEngine::provider();
-    let acme = CompanyMemory::bind(
-        provider.clone(),
-        &CompanyId::new("acme"),
-        DriverClass::Embedded,
-    )
-    .unwrap();
-    let globex =
-        CompanyMemory::bind(provider, &CompanyId::new("globex"), DriverClass::Embedded).unwrap();
-    (acme, globex)
+/// One shared engine, which is the arrangement every isolation test needs: a
+/// leak is only observable when both tenants are in the same store. There is
+/// deliberately no per-company binding to build — the engine is process-scoped
+/// and the company arrives with each call.
+fn engine() -> BoundMemory {
+    BoundMemory::bind(FakeEngine::provider(), DriverClass::Embedded).unwrap()
+}
+
+fn acme_id() -> CompanyId {
+    CompanyId::new("acme")
+}
+
+fn globex_id() -> CompanyId {
+    CompanyId::new("globex")
 }
 
 fn a_fact(id: &str, title: &str) -> FactRecord {
@@ -207,14 +207,14 @@ fn a_fact(id: &str, title: &str) -> FactRecord {
 #[tokio::test]
 async fn binding_runs_the_capability_audit() {
     let provider = FakeEngine::provider();
-    assert!(CompanyMemory::bind(provider, &CompanyId::new("acme"), DriverClass::Embedded).is_ok());
+    assert!(BoundMemory::bind(provider, DriverClass::Embedded).is_ok());
 }
 
 #[tokio::test]
 async fn facts_round_trip_through_the_provider() {
-    let (acme, _) = two_companies();
-    let facts = acme.facts();
-    let id = CompanyId::new("acme");
+    let mem = engine();
+    let facts = mem.facts();
+    let id = acme_id();
     let fact = a_fact("f1", "Ships on Fridays");
     facts.upsert(&id, &fact).await.unwrap();
     let listed = facts.list(&id, None, None).await.unwrap();
@@ -224,16 +224,12 @@ async fn facts_round_trip_through_the_provider() {
 #[tokio::test]
 async fn one_companys_facts_are_invisible_to_another() {
     // The single largest risk in this phase, against one shared engine.
-    let (acme, globex) = two_companies();
-    acme.facts()
-        .upsert(&CompanyId::new("acme"), &a_fact("f1", "secret"))
+    let mem = engine();
+    mem.facts()
+        .upsert(&acme_id(), &a_fact("f1", "secret"))
         .await
         .unwrap();
-    let theirs = globex
-        .facts()
-        .list(&CompanyId::new("globex"), None, None)
-        .await
-        .unwrap();
+    let theirs = mem.facts().list(&globex_id(), None, None).await.unwrap();
     assert!(
         theirs.is_empty(),
         "a company read another's facts: {theirs:?}"
@@ -242,18 +238,18 @@ async fn one_companys_facts_are_invisible_to_another() {
 
 #[tokio::test]
 async fn deleting_a_fact_reports_whether_it_existed() {
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    acme.facts().upsert(&id, &a_fact("f1", "t")).await.unwrap();
-    assert!(acme.facts().delete(&id, "f1").await.unwrap());
-    assert!(!acme.facts().delete(&id, "f1").await.unwrap());
+    let mem = engine();
+    let id = acme_id();
+    mem.facts().upsert(&id, &a_fact("f1", "t")).await.unwrap();
+    assert!(mem.facts().delete(&id, "f1").await.unwrap());
+    assert!(!mem.facts().delete(&id, "f1").await.unwrap());
 }
 
 #[tokio::test]
 async fn context_round_trips_and_peeks_a_range() {
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    let context = acme.context();
+    let mem = engine();
+    let id = acme_id();
+    let context = mem.context();
     let addr = context
         .put(
             &id,
@@ -279,9 +275,9 @@ async fn context_round_trips_and_peeks_a_range() {
 async fn scratch_is_unreachable_from_durable_recall() {
     // Asserted against the recall path itself, not against a routing table:
     // the durable facade is asked to find content that only exists in scratch.
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    acme.scratch()
+    let mem = engine();
+    let id = acme_id();
+    mem.scratch()
         .put(
             &id,
             ContextChunk {
@@ -292,9 +288,9 @@ async fn scratch_is_unreachable_from_durable_recall() {
         .await
         .unwrap();
 
-    let hits = acme.context().search(&id, "penguins", 10).await.unwrap();
+    let hits = mem.context().search(&id, "penguins", 10).await.unwrap();
     assert!(hits.is_empty(), "durable recall reached scratch: {hits:?}");
-    let listed = acme.context().list(&id, "").await.unwrap();
+    let listed = mem.context().list(&id, "").await.unwrap();
     assert!(
         listed.is_empty(),
         "durable list reached scratch: {listed:?}"
@@ -302,7 +298,7 @@ async fn scratch_is_unreachable_from_durable_recall() {
 
     // The agent and desk partitions are siblings of scratch too.
     assert!(
-        acme.agent_context("cto")
+        mem.agent_context("cto")
             .search(&id, "penguins", 10)
             .await
             .unwrap()
@@ -311,14 +307,14 @@ async fn scratch_is_unreachable_from_durable_recall() {
 
     // And it really is stored — the emptiness above is a firewall, not a
     // silently-dropped write.
-    assert_eq!(acme.scratch().list(&id, "").await.unwrap().len(), 1);
+    assert_eq!(mem.scratch().list(&id, "").await.unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn agent_partitions_do_not_leak_into_each_other() {
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    acme.agent_context("cto")
+    let mem = engine();
+    let id = acme_id();
+    mem.agent_context("cto")
         .put(
             &id,
             ContextChunk {
@@ -329,7 +325,7 @@ async fn agent_partitions_do_not_leak_into_each_other() {
         .await
         .unwrap();
     assert!(
-        acme.agent_context("cfo")
+        mem.agent_context("cfo")
             .list(&id, "")
             .await
             .unwrap()
@@ -341,11 +337,11 @@ async fn agent_partitions_do_not_leak_into_each_other() {
 async fn inbound_writes_are_stamped_external_and_internal_writes_are_not() {
     // Laundering external content into internal-trust content is the failure
     // the taint parameter exists to prevent.
-    let (engine, provider) = FakeEngine::with_handle();
-    let acme =
-        CompanyMemory::bind(provider, &CompanyId::new("acme"), DriverClass::Embedded).unwrap();
-    let id = CompanyId::new("acme");
-    acme.inbound_context()
+    let (fake, provider) = FakeEngine::with_handle();
+    let memory = BoundMemory::bind(provider, DriverClass::Embedded).unwrap();
+    let id = acme_id();
+    memory
+        .inbound_context()
         .put(
             &id,
             ContextChunk {
@@ -355,7 +351,8 @@ async fn inbound_writes_are_stamped_external_and_internal_writes_are_not() {
         )
         .await
         .unwrap();
-    acme.context()
+    memory
+        .context()
         .put(
             &id,
             ContextChunk {
@@ -367,12 +364,12 @@ async fn inbound_writes_are_stamped_external_and_internal_writes_are_not() {
         .unwrap();
 
     assert_eq!(
-        engine.taint_of("scraped from a page"),
+        fake.taint_of("scraped from a page"),
         Some(MemoryTaint::ExternalSync),
         "an inbound-channel write must stay marked as external"
     );
     assert_eq!(
-        engine.taint_of("the company decided this"),
+        fake.taint_of("the company decided this"),
         Some(MemoryTaint::Internal),
         "the company's own writes must not be marked external"
     );
@@ -380,9 +377,9 @@ async fn inbound_writes_are_stamped_external_and_internal_writes_are_not() {
 
 #[tokio::test]
 async fn recent_traces_are_newest_last_and_bounded() {
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    let memory = acme.memory();
+    let mem = engine();
+    let id = acme_id();
+    let memory = mem.memory();
     for (n, cycle) in ["c1", "c2", "c3", "c4", "c5"].iter().enumerate() {
         memory
             .save_trace(
@@ -412,9 +409,9 @@ async fn evict_archives_rather_than_destroys() {
     // Normative in docs/spec/company-brain/memory.md. The contract has no
     // archive tier, so this is the decorator's own behaviour and it needs its
     // own assertion against the archive, not just against a count.
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    let memory = acme.memory();
+    let mem = engine();
+    let id = acme_id();
+    let memory = mem.memory();
     for (n, cycle) in ["c1", "c2", "c3", "c4", "c5"].iter().enumerate() {
         memory
             .save_trace(
@@ -440,7 +437,7 @@ async fn evict_archives_rather_than_destroys() {
         vec!["c4", "c5"]
     );
 
-    let kept = acme.archived_traces().await.unwrap();
+    let kept = mem.archived_traces(&id).await.unwrap();
     let mut ids: Vec<&str> = kept.iter().map(|t| t.cycle_id.as_str()).collect();
     ids.sort_unstable();
     assert_eq!(ids, vec!["c1", "c2", "c3"], "evicted traces live on");
@@ -448,9 +445,9 @@ async fn evict_archives_rather_than_destroys() {
 
 #[tokio::test]
 async fn evict_older_than_archives_everything_it_removes() {
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    let memory = acme.memory();
+    let mem = engine();
+    let id = acme_id();
+    let memory = mem.memory();
     for (n, cycle) in ["c1", "c2", "c3"].iter().enumerate() {
         memory
             .save_trace(
@@ -481,14 +478,18 @@ async fn evict_older_than_archives_everything_it_removes() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(acme.archived_traces().await.unwrap().len(), 3, "none lost");
+    assert_eq!(
+        mem.archived_traces(&id).await.unwrap().len(),
+        3,
+        "none lost"
+    );
 }
 
 #[tokio::test]
 async fn task_results_do_not_appear_among_traces() {
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    let memory = acme.memory();
+    let mem = engine();
+    let id = acme_id();
+    let memory = mem.memory();
     memory
         .save_task_result(
             &id,
@@ -511,10 +512,10 @@ async fn task_results_do_not_appear_among_traces() {
 
 #[tokio::test]
 async fn traces_are_isolated_between_companies() {
-    let (acme, globex) = two_companies();
-    acme.memory()
+    let mem = engine();
+    mem.memory()
         .save_trace(
-            &CompanyId::new("acme"),
+            &acme_id(),
             CompressedTrace {
                 cycle_id: "c1".into(),
                 summary: "acme only".into(),
@@ -524,9 +525,8 @@ async fn traces_are_isolated_between_companies() {
         .await
         .unwrap();
     assert!(
-        globex
-            .memory()
-            .recent_traces(&CompanyId::new("globex"), usize::MAX)
+        mem.memory()
+            .recent_traces(&globex_id(), usize::MAX)
             .await
             .unwrap()
             .is_empty()
@@ -535,9 +535,9 @@ async fn traces_are_isolated_between_companies() {
 
 #[tokio::test]
 async fn re_putting_an_identical_body_keeps_the_first_stamp() {
-    let (acme, _) = two_companies();
-    let id = CompanyId::new("acme");
-    let context = acme.context();
+    let mem = engine();
+    let id = acme_id();
+    let context = mem.context();
     let chunk = ContextChunk {
         label: "notes/one".into(),
         body: "same body".into(),
@@ -553,9 +553,9 @@ async fn re_putting_an_identical_body_keeps_the_first_stamp() {
 
 #[tokio::test]
 async fn the_driver_id_and_capabilities_are_reportable() {
-    let (acme, _) = two_companies();
-    assert_eq!(acme.driver_id(), "fake-engine");
-    let caps = acme.capability_names();
+    let mem = engine();
+    assert_eq!(mem.driver_id(), "fake-engine");
+    let caps = mem.capability_names();
     // The mandatory three, and — for a mandatory-only composition — nothing else.
     assert!(caps.contains(&"core"), "{caps:?}");
     assert!(caps.contains(&"recall"), "{caps:?}");
@@ -564,9 +564,11 @@ async fn the_driver_id_and_capabilities_are_reportable() {
 }
 
 #[tokio::test]
-async fn debug_renders_the_driver_but_not_the_company() {
-    let (acme, _) = two_companies();
-    let rendered = format!("{acme:?}");
+async fn debug_names_the_driver_and_its_class() {
+    // The engine is process-scoped and structurally holds no company, so the
+    // only thing `Debug` can say is which driver was bound and how — which is
+    // exactly what an operator reading a boot log needs, and nothing more.
+    let rendered = format!("{:?}", engine());
     assert!(rendered.contains("fake-engine"), "{rendered}");
-    assert!(!rendered.contains("acme"), "{rendered}");
+    assert!(rendered.contains("embedded"), "{rendered}");
 }
