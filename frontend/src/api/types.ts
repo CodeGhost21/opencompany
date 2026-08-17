@@ -67,6 +67,7 @@ export type TurnStepFailure =
   | "unauthorized"
   | "missing_permission"
   | "missing_app"
+  | "not_found"
   | "timeout"
   | "unavailable"
   | "failed";
@@ -115,6 +116,7 @@ export const STEP_FAILURE_LABEL: Record<TurnStepFailure, string> = {
   unauthorized: "Unauthorized",
   missing_permission: "Missing permission",
   missing_app: "App unavailable",
+  not_found: "Not found",
   timeout: "Timed out",
   unavailable: "Service unavailable",
   failed: "Failed",
