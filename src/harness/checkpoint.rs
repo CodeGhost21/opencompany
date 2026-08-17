@@ -4,6 +4,12 @@
 //! redirects, downloads, and future workspace-writing tools all pass the same
 //! after-call boundary. A call that changed nothing produces no commit, and a
 //! Git failure is logged without replacing the tool's real result.
+//!
+//! History is permanent for the lifetime of the out-of-band repository: a
+//! workspace file committed at one checkpoint and deleted later survives in
+//! `workspace.git` objects, so operators who enable checkpoints on workspaces
+//! that can hold secrets must rotate or purge history deliberately (see the
+//! retention note in `docs/spec/runtime/workspace-layout.md`).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
