@@ -33,43 +33,70 @@ pub(crate) struct WorkspaceCheckpointer {
 impl WorkspaceCheckpointer {
     /// Initializes (or reopens) the workspace repository and records a baseline.
     ///
-    /// New repositories keep their object database beside the workspace at
+    /// The object database always lives **beside** the workspace at
     /// `workspace.git`; `workspace/.git` is only Git's small pointer file. This
     /// keeps history out of the files agents enumerate and publish while still
     /// allowing ordinary `git` commands run inside the workspace to discover it.
+    ///
+    /// The pointer file is write-only from the checkpointer's point of view. An
+    /// agent can plant a `.git` of its own (any file an agent can read it can
+    /// rewrite), so `initialize` never resolves its Git directory through it —
+    /// every Git invocation passes an explicit `--git-dir` for the out-of-band
+    /// path, and a planted pointer is overwritten with the real one so commands
+    /// the agent itself runs still discover the genuine repository.
     pub(crate) fn initialize(workspace: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(workspace)?;
         let out_of_band = workspace.with_extension("git");
-        let git_dir = if workspace.join(".git").exists() {
-            discover_git_dir(workspace).unwrap_or_else(|_| out_of_band.clone())
-        } else {
-            out_of_band.clone()
-        };
 
-        if !git_dir.join("HEAD").is_file() {
-            let status = Command::new("git")
-                .args(["init", "--quiet", "--initial-branch=checkpoints"])
+        if !out_of_band.join("HEAD").is_file() {
+            let mut init = Command::new("git");
+            init.args(["init", "--quiet", "--initial-branch=checkpoints"])
                 .arg("--separate-git-dir")
-                .arg(&git_dir)
-                .arg(workspace)
-                .status()?;
+                .arg(&out_of_band)
+                .arg(workspace);
+            isolate_git(&mut init);
+            let status = init.status()?;
             require_success(status, "git init")?;
-        } else if !workspace.join(".git").exists() && git_dir == out_of_band {
-            // The agent may remove hidden files from its working tree. The
-            // explicit-dir checkpointer still works, but ordinary Git commands
-            // inside the workspace would stop discovering the repository.
-            std::fs::write(
-                workspace.join(".git"),
-                format!("gitdir: {}\n", git_dir.display()),
-            )?;
         }
+
+        // Sanitize the in-workspace pointer to the out-of-band directory, even
+        // when the agent planted one of its own. Never *read* an existing
+        // pointer to derive a Git directory: an agent-controlled pointer could
+        // name a repository whose hooks `git commit` would run in the host
+        // process (CWE-94), which `base_git`'s explicit `--git-dir` and hook
+        // suppression exist to make unreachable.
+        std::fs::write(
+            workspace.join(".git"),
+            format!("gitdir: {}\n", out_of_band.display()),
+        )?;
 
         let checkpointer = Self {
             workspace: workspace.to_path_buf(),
-            git_dir,
+            git_dir: out_of_band,
         };
-        checkpointer.checkpoint_unlocked("initialize workspace", true)?;
+        checkpointer.initialize_baseline()?;
         Ok(checkpointer)
+    }
+
+    /// Records the baseline commit under the same process-wide lock the
+    /// per-call checkpoint path holds, so an in-flight tool checkpoint cannot
+    /// contend with this one on the Git index.
+    ///
+    /// [`build_agent`](crate::harness::build::build_agent) is synchronous, so
+    /// there is no `.await`; the lock is therefore acquired with `try_lock`,
+    /// falling back to a blocking acquisition on the current Tokio runtime when
+    /// a checkpoint is genuinely in flight. In practice a freshly built
+    /// workspace has no in-flight checkpoint, so the fallback is a defensive
+    /// backstop rather than the hot path.
+    fn initialize_baseline(&self) -> anyhow::Result<()> {
+        let lock = path_lock(&self.git_dir);
+        let _guard = match lock.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => tokio::runtime::Handle::try_current()
+                .ok()
+                .map(|handle| handle.block_on(lock.lock())),
+        };
+        self.checkpoint_unlocked("initialize workspace", true)
     }
 
     /// Records current workspace changes. Failures are returned for the caller
