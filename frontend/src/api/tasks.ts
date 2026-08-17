@@ -48,29 +48,54 @@ export interface TaskOutputWorkflow {
 }
 
 /**
+ * What produced a {@link TaskOutput} — and what its link of last resort points
+ * at (issue #806).
+ *
+ * A run is *an* addressable producer, not the only one. An operator chat turn
+ * produces things too, and run records stay reserved for actual work attempts,
+ * so such a turn has no run to name. This is a union rather than an optional
+ * `runId` so the console can label what is at the other end instead of calling
+ * a conversation an attempt.
+ *
+ * Discriminate with `"runId" in source` — the host flattens these keys onto the
+ * output, so a run-sourced record is byte-identical to what this type carried
+ * before the union existed.
+ */
+export type TaskOutputSource =
+  | {
+      /** The attempt that produced it. */
+      runId: string;
+      /** Its 1-based ordinal, for the label. Absent if unreadable. */
+      attempt?: number;
+    }
+  | {
+      /** The conversation whose turn produced it. */
+      chatId: string;
+    };
+
+/**
  * What a card's latest **successful** attempt produced (issue #339, epic #183
  * §6) — the link that turns a finished card into something you can open.
  *
- * `runId` is unconditional, and that is the whole design: an output with no
- * artifacts and no workflows is not an absence, it is the *trace case*. Plenty
- * of tasks produce no file — a message sent, a record updated, a question
- * answered — and for those the attempt's trace **is** the deliverable. It is
- * also the fallback when an artifact is later deleted.
+ * **A last-resort link is unconditional, and that is the whole design**: an
+ * output with no artifacts and no workflows is not an absence, it is the *trace
+ * case*. Plenty of tasks produce no file — a message sent, a record updated, a
+ * question answered — and for those the producer's own record **is** the
+ * deliverable. It is also the fallback when an artifact is later deleted.
+ *
+ * The guarantee is "there is always something to open", not "there is always a
+ * `runId`" (issue #806) — see {@link TaskOutputSource}.
  *
  * Absent entirely on a card that has never succeeded, one moved to Done by
  * hand, and every card settled before this shipped. Those link to the card
  * itself rather than to a synthesized output.
  */
-export interface TaskOutput {
-  /** The attempt that produced it — always present. */
-  runId: string;
-  /** That attempt's 1-based ordinal, for the label. Absent if unreadable. */
-  attempt?: number;
+export type TaskOutput = TaskOutputSource & {
   /** Epoch-millis the stamp was written. */
   atMillis: number;
   artifacts?: TaskOutputArtifact[];
   workflows?: TaskOutputWorkflow[];
-}
+};
 
 /**
  * What surface a plan's prerequisite is checked against (issue #337).
