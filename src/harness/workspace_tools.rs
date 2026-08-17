@@ -404,12 +404,22 @@ impl CompanyWorkspace {
         let Some(scope) = &self.write_scope else {
             return true;
         };
-        if let Ok(segments) = super::workspace_paths::split_logical_path(path)
-            && (self.is_own_home(&segments) || self.is_strictly_inside_own_home(&segments))
-        {
+        let Ok(segments) = super::workspace_paths::split_logical_path(path) else {
+            // A traversal-shaped or malformed path is refused by the tool's own
+            // validation before this is reached; treating it as out of scope
+            // here is the same answer by the same reasoning.
+            return false;
+        };
+        if self.is_own_home(&segments) || self.is_strictly_inside_own_home(&segments) {
             return true;
         }
-        scope.iter().any(|allowed| allowed.trim() == path.trim())
+        let key = segments.join("/");
+        scope.iter().any(|allowed| {
+            super::workspace_paths::split_logical_path(allowed)
+                .map(|allowed_segments| allowed_segments.join("/"))
+                .as_deref()
+                == Ok(key.as_str())
+        })
     }
 
     /// This agent's origin, for stamping [`WorkspaceNode::created_by`] /
