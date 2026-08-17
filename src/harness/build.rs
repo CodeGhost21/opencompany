@@ -798,15 +798,30 @@ pub fn build_agent(
             .join(company.as_ref())
             .join(&manifest_agent.id)
             .join("skill-catalog");
-        let effective = EffectiveSkills::materialize(
+        // Best-effort, not fatal. This ran only for a company with a skills
+        // source or an operator delta until the global baseline made it run for
+        // every company — including one whose workspace root is unusable, where
+        // failing here would turn "this agent has no skill catalogue" into "this
+        // company cannot build an agent at all". The agent still answers; it
+        // just answers without the catalogue, and the reason is logged.
+        match EffectiveSkills::materialize(
             skill_ws,
             deps.skills_source_dir.as_deref(),
             &deps.skills_registry,
             skill_deltas,
-        )?;
-        if !effective.is_empty() {
-            tools.extend(effective.read_tools());
-            persona.push_str(&effective.catalogue());
+        ) {
+            Ok(effective) => {
+                if !effective.is_empty() {
+                    tools.extend(effective.read_tools());
+                    persona.push_str(&effective.catalogue());
+                }
+            }
+            Err(err) => tracing::warn!(
+                company = %company.as_ref(),
+                agent = %manifest_agent.id,
+                error = %err,
+                "skill catalogue unavailable for this agent",
+            ),
         }
     }
 

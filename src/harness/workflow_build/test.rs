@@ -1857,6 +1857,7 @@ fn roster_entry(id: &str, role: &str, name: Option<&str>) -> RosterEntry {
         role: role.to_string(),
         name: name.map(str::to_string),
         description: None,
+        global: false,
     }
 }
 
