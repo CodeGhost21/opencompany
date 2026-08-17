@@ -15,7 +15,7 @@ fn ctx(home: &tempfile::TempDir) -> Ledgers {
 }
 
 fn tools(ctx: &Ledgers) -> Vec<Box<dyn Tool>> {
-    ledger_tools(ctx.clone(), "ceo".to_string())
+    ledger_tools(ctx.clone(), "ceo".to_string(), None, true)
 }
 
 fn tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {
