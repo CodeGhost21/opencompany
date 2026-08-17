@@ -25,14 +25,19 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
  * drag-and-drop does not scroll a nested scroll container, so a column parked
  * off-screen could not be reached by the gesture at all.
  *
- * # Ported to `#/ledgers/tasks`
+ * # Why this one drives `#/ledgers/tasks`
  *
- * The standalone board screen is gone. The board is the `tasks` ledger and
- * renders as its columns inside the Ledgers section, which is why this spec
- * moved rather than being deleted with the screen: **none of the three failures
- * above stopped being possible.** The gesture is the same gesture, over the same
- * host routes, against a board that is still a horizontal scroller wider than
- * the window.
+ * There are two boards now, and they are the same component: `LedgerBoard`
+ * renders the task board at `#/tasks` and every ledger's columns under
+ * `#/ledgers/<slug>`, with the card as a slot. The drag mechanics — all three
+ * fixes above — live in that component, so testing either entry point tests
+ * them.
+ *
+ * This spec drives the **ledger** one deliberately. It is the newer path and the
+ * one whose layout differs (a nav beside it, the board inside a pane rather
+ * than filling the window), so it is where a geometry regression would show up
+ * first; `board-columns.spec.ts` covers the task board's own screen. Between
+ * them both entry points are exercised, and neither can regress silently.
  *
  * Two things about the port are worth stating, because both are places where a
  * lazy rewrite would have quietly stopped testing anything:
