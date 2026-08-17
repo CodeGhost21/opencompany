@@ -418,7 +418,16 @@ fn overlay_toml<'a>(overlays: &'a [OverlayWorkflow], wid: &str) -> Option<&'a st
 }
 
 async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflow>, ApiError> {
-    Ok(workflow_state(company).await?.0)
+    Ok(overlay_workflows_and_globals(company).await?.0)
+}
+
+/// This company's overlay graph bodies and its `[globals].disable`, read
+/// together — the pair every union read needs.
+async fn overlay_workflows_and_globals(
+    company: &ScopedCompany,
+) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ApiError> {
+    let (overlays, _, globals_disable) = workflow_state(company).await?;
+    Ok((overlays, globals_disable))
 }
 
 /// The company's runtime-authored graph bodies **and** the ids the operator has
@@ -1305,7 +1314,7 @@ async fn run_workflow(
 
     // Load the saved graph from the seed ∪ overlay union, so a graph created on
     // a hosted tenant (no source directory) runs the same as a committed one.
-    let overlays = overlay_workflows(&company)
+    let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
         .await
         .map_err(IntoResponse::into_response)?;
     let file =
@@ -1903,7 +1912,7 @@ async fn fix_from_run(
 
     // Load the saved graph for `wid` (seed ∪ overlay) and convert it to the spec
     // the copilot corrects and pins its identity to.
-    let overlays = overlay_workflows(&company)
+    let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
         .await
         .map_err(IntoResponse::into_response)?;
     // A source-defined workflow (seed-backed, or seed-shadowed) can never take

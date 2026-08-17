@@ -67,7 +67,8 @@ use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
     Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile,
-    WorkflowNodeKind, create_company_workflow, list_workflows_union, load_workflow_union,
+    WorkflowNodeKind, create_company_workflow, list_workflows_union, list_workflows_with_globals,
+    load_workflow_union, load_workflow_with_globals,
 };
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;

@@ -101,6 +101,7 @@ use openhuman_core::openhuman as oh;
 
 use crate::company::{
     RawWorkflow, WorkflowSpecProjection, delete_company_workflow, load_workflow_union,
+    load_workflow_with_globals,
     project_workflow_spec, raw_workflow_from_toml, seed_file_exists, update_company_workflow,
     workflow_version,
 };

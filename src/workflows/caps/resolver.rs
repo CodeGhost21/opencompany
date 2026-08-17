@@ -42,7 +42,7 @@ use tinyflows::caps::WorkflowResolver;
 use tinyflows::error::{EngineError, Result as TfResult};
 use tinyflows::model::WorkflowGraph;
 
-use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_union};
+use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_union, load_workflow_with_globals};
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, OverlayWorkflow};
 
