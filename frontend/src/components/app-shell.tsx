@@ -47,6 +47,7 @@ import { useCompany } from "@/hooks/use-company";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
+import { readTaskFocus, type TaskFocus } from "@/lib/task-output";
 import { toast } from "sonner";
 
 import {
@@ -97,6 +98,29 @@ const WorkspaceView = lazy(() =>
 const FinancesView = lazy(() =>
   import("@/views/FinancesView").then((m) => ({ default: m.FinancesView })),
 );
+
+/**
+ * What `#/tasks` shows now that the board screen is gone.
+ *
+ * A forward rather than a silent redirect: an operator with the old address
+ * bookmarked should be told where the board went, once, rather than finding
+ * themselves somewhere they did not ask for with no explanation. Card links
+ * (`#/tasks/<id>`) are unaffected — they still open the card.
+ */
+function BoardMoved({ onGo }: { onGo: () => void }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+      <p className="text-sm text-muted-foreground">
+        The board is now the <span className="font-medium">Tasks</span> ledger,
+        under Ledgers — same columns, same drag, alongside everything else this
+        company records.
+      </p>
+      <Button size="sm" onClick={onGo}>
+        Open the board
+      </Button>
+    </div>
+  );
+}
 
 export type View =
   | "overview"
@@ -249,6 +273,19 @@ export function AppShell({
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [view, sub, navigate] = useHashView<View>(VIEWS, "overview");
+  // What `#/tasks/<id>?…` asks the card detail to open (issue #339): a pinned
+  // artifact, or an attempt's trace. Empty for a plain card link, which is the
+  // ordinary "open the card" navigation and lands on the default tab. Read off
+  // the live hash rather than off `sub`, because the focus rides the query
+  // half that `useHashView` does not parse.
+  const [taskFocus, setTaskFocus] = useState<TaskFocus>(() =>
+    readTaskFocus(window.location.hash),
+  );
+  useEffect(() => {
+    const onHash = () => setTaskFocus(readTaskFocus(window.location.hash));
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
   // of always dropping it to the parent view.
