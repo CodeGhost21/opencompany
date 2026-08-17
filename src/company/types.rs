@@ -537,6 +537,162 @@ pub struct Agent {
     /// here rather than having it guessed from the free-text `role`.
     #[serde(default)]
     pub classes: Vec<String>,
+    /// Declared ledgers this agent may reach through the ledger tools, with
+    /// per-ledger read/record access.
+    ///
+    /// `None` (the default, omitted key) means **unrestricted** — every ledger
+    /// the company has, at `record` access — which is the tool surface every
+    /// agent had before this field existed, so adding it is a no-op for an
+    /// existing company. `Some(vec![])` restricts the agent to no ledgers at
+    /// all, distinct from taking the default; `Option<Vec<LedgerGrant>>` rather
+    /// than a defaulted `Vec` is what makes that distinction representable, the
+    /// same reasoning as [`context`](Self::context).
+    ///
+    /// This is the **visibility and read/record** half of ledger access.
+    /// [`LedgerSpec::writers`](crate::ledger::LedgerSpec::writers) stays the
+    /// authoritative check for whether a `record`/`close` call actually lands —
+    /// declaring `access = "record"` here for a built-in ledger whose writers
+    /// exclude this agent is a manifest validation error (the two must not
+    /// silently disagree); for a company-declared ledger, which may not exist
+    /// yet when the manifest is validated, the same conflict surfaces as an
+    /// ordinary tool refusal at call time.
+    #[serde(default)]
+    pub ledgers: Option<Vec<LedgerGrant>>,
+    /// Whether this agent may declare a new ledger with `define_ledger`.
+    ///
+    /// Defaults to `true` — declaring an axis a company discovers it needs
+    /// while running is deliberately unrestricted by default (see
+    /// `docs/spec/runtime/ledgers.md`), and every manifest written before this
+    /// field existed relied on that. Set `false` to keep a narrow role from
+    /// growing the company's ledger registry.
+    #[serde(default = "default_true")]
+    pub can_declare_ledgers: bool,
+}
+
+/// One [`Agent::context`] entry.
+///
+/// A bare TOML string (`"Brand/Voice.md"`) deserializes as [`Self::Path`], read
+/// access, matching every manifest written before write access existed. The
+/// table form (`{ path = "...", access = "write" }`) is [`Self::Detailed`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ContextEntry {
+    /// Read access, the pre-existing shorthand.
+    Path(String),
+    /// Explicit access, most commonly `write`.
+    Detailed {
+        path: String,
+        #[serde(default)]
+        access: ContextAccess,
+    },
+}
+
+impl ContextEntry {
+    /// The workspace-relative path, whichever form declared it.
+    pub fn path(&self) -> &str {
+        match self {
+            ContextEntry::Path(path) => path,
+            ContextEntry::Detailed { path, .. } => path,
+        }
+    }
+
+    /// This entry's access — `Read` unless a `Detailed` form says otherwise.
+    pub fn access(&self) -> ContextAccess {
+        match self {
+            ContextEntry::Path(_) => ContextAccess::Read,
+            ContextEntry::Detailed { access, .. } => *access,
+        }
+    }
+}
+
+impl From<&str> for ContextEntry {
+    fn from(path: &str) -> Self {
+        ContextEntry::Path(path.to_string())
+    }
+}
+
+impl From<String> for ContextEntry {
+    fn from(path: String) -> Self {
+        ContextEntry::Path(path)
+    }
+}
+
+/// Whether a routed [`ContextEntry`] is read-only or additionally writable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextAccess {
+    /// Routed into the prompt; no write grant on this path.
+    #[default]
+    Read,
+    /// Routed into the prompt, and this exact path is in the agent's
+    /// `workspace_write`/`workspace_create` scope.
+    Write,
+}
+
+/// One [`Agent::ledgers`] entry: a ledger slug and this agent's access to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LedgerGrant {
+    /// The ledger's slug, as declared or built in — not validated against the
+    /// registry at manifest-load time, since a company-declared ledger may not
+    /// exist yet (the same reasoning as `Agent::context`'s missing-document
+    /// rule).
+    pub name: String,
+    /// This agent's access to it.
+    #[serde(default)]
+    pub access: LedgerAccess,
+}
+
+/// Read or record access to one ledger.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerAccess {
+    /// `list_ledgers` and `read_ledger` only.
+    #[default]
+    Read,
+    /// Read, plus `record_entry` and `close_entry` — still subject to
+    /// [`LedgerSpec::writers`](crate::ledger::LedgerSpec::writers).
+    Record,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Agent {
+    /// This agent's `workspace_write`/`workspace_create` scope.
+    ///
+    /// `None` means **unconfined** — every path in the company's tree, which is
+    /// the behaviour every agent had before per-path write access existed (see
+    /// `src/harness/workspace_tools.rs`), so a manifest that declares no
+    /// `access = "write"` entry is unaffected by this field's existence.
+    /// `Some(paths)` — returned as soon as `context` names at least one write
+    /// entry — confines `workspace_write`/`workspace_create` to exactly those
+    /// paths, plus this agent's own `Agents/<id>/` home, which the workspace
+    /// tools always allow regardless of this scope.
+    pub fn write_scope(&self) -> Option<Vec<String>> {
+        let entries = self.context.as_ref()?;
+        let paths: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry.access() == ContextAccess::Write)
+            .map(|entry| entry.path().to_string())
+            .collect();
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    /// This agent's declared access to ledger `slug`, or `None` if it may not
+    /// reach it at all.
+    ///
+    /// An omitted `ledgers` key answers `Some(Record)` for every slug —
+    /// unrestricted, matching the tool surface before this field existed.
+    pub fn ledger_access(&self, slug: &str) -> Option<LedgerAccess> {
+        match &self.ledgers {
+            None => Some(LedgerAccess::Record),
+            Some(grants) => grants
+                .iter()
+                .find(|grant| grant.name.eq_ignore_ascii_case(slug.trim()))
+                .map(|grant| grant.access),
+        }
+    }
 }
 
 /// The `[[agent]].tier` value that marks a roster's orchestrator.
