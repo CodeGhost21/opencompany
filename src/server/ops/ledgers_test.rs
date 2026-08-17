@@ -63,7 +63,7 @@ async fn state() -> (AppState, tempfile::TempDir) {
 }
 
 async fn send(state: &AppState, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
-    let mut request = Request::builder()
+    let request = Request::builder()
         .method(method)
         .uri(uri)
         .header("cookie", crate::server::test_support::fixed_cookie("acme"));
@@ -374,7 +374,7 @@ async fn the_derived_file_appears_in_the_workspace_and_is_read_only() {
     let (state, _home) = state().await;
     send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
 
-    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace/tree", None).await;
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     let nodes = tree.as_array().expect("tree");
     let file = nodes
         .iter()
