@@ -335,12 +335,30 @@ impl ContextStore for ProviderContextStore {
         // in meaning — it would start reporting when a chunk was last *re-seen*
         // rather than when it was first written. sqlite and mongodb keep the
         // first write; match them.
-        if self
-            .bound
-            .get::<StoredChunk>(company, &addr)
-            .await?
-            .is_some()
-        {
+        if let Some(existing) = self.bound.get::<StoredChunk>(company, &addr).await? {
+            // A hit is almost always the same body written twice. It can also be
+            // a content-address collision: `content_address` is a 64-bit
+            // non-cryptographic hash (`crate::store::content_address`, shared by
+            // every backend), so two different bodies can mint one address. That
+            // is a pre-existing property of the address scheme rather than
+            // anything this facade introduces — sqlite and mongodb keep the
+            // first write for a collision exactly as this does, and changing the
+            // scheme would move every existing chunk's address on every backend.
+            //
+            // What is worth doing here is refusing to be *silent* about it. On a
+            // collision `peek(addr)` returns a body the caller never wrote, and
+            // an operator debugging that has no way to reach this conclusion
+            // from the outside. So compare, and say so when they differ.
+            if existing.body != chunk.body {
+                tracing::error!(
+                    addr = %addr,
+                    label = %chunk.label,
+                    existing_label = %existing.label,
+                    "content-address collision: two different chunk bodies hashed to the same \
+                     address. The first body is kept and this write is dropped, so reads of this \
+                     address return the earlier chunk. See crate::store::content_address."
+                );
+            }
             return Ok(ChunkAddr::new(addr));
         }
         let stored = StoredChunk {
