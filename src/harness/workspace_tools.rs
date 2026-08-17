@@ -2029,8 +2029,11 @@ pub fn workspace_tools(
     company: CompanyId,
     agent_id: String,
     can_write: bool,
+    write_scope: Option<Vec<String>>,
 ) -> Vec<Box<dyn Tool>> {
-    let workspace = CompanyWorkspace::new(store, company, agent_id).with_artifacts(artifacts);
+    let workspace = CompanyWorkspace::new(store, company, agent_id)
+        .with_artifacts(artifacts)
+        .with_write_scope(write_scope);
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(WorkspaceListTool::new(workspace.clone())),
         Box::new(WorkspaceReadTool::new(workspace.clone())),
