@@ -140,9 +140,9 @@ Work is checkpointed as it happens, so a run's intermediate states survive.
   sibling runtime omits the shell from its write set, which means shell-written
   files are committed only incidentally by the next tool write. Do not repeat
   that.
-- The history lives in an **out-of-band git directory**, never `.git`. A
-  conventional one would make the product repository treat every company
-  workspace as an embedded repository.
+- The history lives in an **out-of-band git directory** (`workspace.git/`). The
+  working tree has only Git's `.git` pointer file, so ordinary Git commands work
+  there without putting the object database among agent-authored files.
 - An unchanged tree is a **no-op, not an error**.
 - **A failed checkpoint never fails the tool that succeeded.** And precisely
   because it swallows failures silently, the commit lock from
@@ -150,6 +150,9 @@ Work is checkpointed as it happens, so a run's intermediate states survive.
   are invisible.
 - Generated artifacts stay in the workspace. Do not write them into a source
   directory.
+
+This behavior is opt-in through `[workspace].git_enabled = true`; disabled is
+the compatibility default.
 
 ---
 

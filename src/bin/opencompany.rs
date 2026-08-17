@@ -298,6 +298,7 @@ fn company_builder(
     .with_default_mcp_servers(state.config().default_mcp_servers.clone())
     .with_host_base_url(state.config().host_base_url())
     .with_workspace_quota(state.config().workspace_quota)
+    .with_workspace_git_enabled(state.config().workspace_git_enabled)
     // Issue #752: the backend that serves this host's secrets, which the
     // repository-credential gates refuse on. Threaded through `company_builder`
     // rather than read from the environment further down, so a rebuild gets the
@@ -1166,6 +1167,7 @@ async fn async_main() -> Result<()> {
                 // the same `[workspace]` section as the soft disk quotas above
                 // and handed to every company's builder below.
                 workspace_quota: workspace_cfg.quota,
+                workspace_git_enabled: workspace_cfg.git_enabled,
                 ..AppConfig::default()
             })
             .with_cors(opencompany::server::cors::CorsConfig::from_env()?)

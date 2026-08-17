@@ -920,6 +920,25 @@ pub fn build_agent(
     // (memory/MCP/orchestrator/file/skill) have no mapped namespace and are
     // always kept.
     let tools = toolbelt::filter_by_capabilities(tools, &deps.capabilities);
+    let tools = if deps.workspace_git_enabled {
+        match crate::harness::checkpoint::WorkspaceCheckpointer::initialize(&workspace) {
+            Ok(checkpointer) => {
+                crate::harness::checkpoint::CheckpointingTool::wrap_all(tools, checkpointer)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    company = %company,
+                    agent = %manifest_agent.id,
+                    workspace = %workspace.display(),
+                    %error,
+                    "[workspace-checkpoint] could not initialize Git; continuing without checkpoints"
+                );
+                tools
+            }
+        }
+    } else {
+        tools
+    };
 
     // Tool-calling transport follows the provider's advertised capability. A
     // provider that advertises native tool calling (`profile().tool_calling`,
@@ -1503,6 +1522,7 @@ mod tests {
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,
+            workspace_git_enabled: false,
             audit_root,
             model_override: None,
             tasks: None,

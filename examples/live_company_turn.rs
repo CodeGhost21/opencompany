@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),
         workspace_root: dir.path().join("harness"),
+        workspace_git_enabled: false,
         // Issue #775: the shell audit sink hangs off the data root as
         // `companies/<slug>/audit/<agent>/`, deliberately a sibling of the
         // workspace tree rather than inside it.

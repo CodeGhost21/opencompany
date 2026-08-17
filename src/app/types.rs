@@ -75,6 +75,9 @@ pub struct AppConfig {
     /// each company's builder so the store-level quota decorator is configured
     /// from one place rather than re-read per company.
     pub workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Whether each agent's private filesystem workspace is Git-backed and
+    /// automatically checkpointed after tool calls.
+    pub workspace_git_enabled: bool,
     /// Tenant namespace for shared-single-DB deployments
     /// (`OPENCOMPANY_TENANT_ID`). When set, provisioned/booted company ids are
     /// prefixed with `<tenant>--` via [`Self::namespaced_company_id`] so many
@@ -133,6 +136,7 @@ impl Default for AppConfig {
             max_companies: None,
             max_companies_per_tenant: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            workspace_git_enabled: false,
             webhook: None,
             tenant_namespace: None,
             admin_email: None,

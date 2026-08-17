@@ -245,12 +245,24 @@ The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle
 
 ```toml
 [workspace]
+git_enabled = false           # opt in to automatic Git checkpoints per agent workspace
 clear_tmp_on_startup = true   # default; set false to preserve tmp/ across restarts
 storage_quota_gb = 5          # soft whole-workspace quota; omit or <= 0 = unlimited
 tmp_quota_gb = 1              # soft tmp/ quota; omit or <= 0 = unlimited
 tree_quota_gb = 2             # HARD cap on the note tree's binary payloads (#553)
 max_blob_mb = 64              # HARD cap on ONE binary write (default 64)
 ```
+
+When `git_enabled = true`, every private agent filesystem workspace under
+`harness/<company>/<agent>/workspace` is initialized as a Git working tree.
+OpenCompany creates a baseline commit and then commits changed files after each
+tool call, including shell commands, so redirects and generated files are not
+missed. Calls that leave the tree unchanged add no commit. Git history lives in
+the sibling `workspace.git/` directory; the working tree contains only Git's
+small `.git` pointer file, which keeps ordinary Git commands usable from inside
+the workspace. Checkpoint failures are warned about but never replace a tool's
+successful result. The setting defaults to `false`, preserving existing
+workspaces unless an operator explicitly opts in.
 
 **The first two quotas are soft/advisory in the binary.** At boot `serve`
 measures the workspace (and `tmp/`) and emits an operator-visible

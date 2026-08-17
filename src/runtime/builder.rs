@@ -395,6 +395,9 @@ pub struct RuntimeBuilder {
     /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
     /// naming a quota is still not a way to write an unbounded file.
     workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Whether private per-agent filesystem workspaces keep automatic Git
+    /// checkpoints after tool calls.
+    workspace_git_enabled: bool,
     /// Issue #752: which storage backend is serving this host's secrets. Only
     /// the repository-credential gates read it, and the default is the refusing
     /// side (`fs`) — a runtime built without naming a backend is assumed to keep
@@ -509,6 +512,7 @@ impl RuntimeBuilder {
             tasks: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            workspace_git_enabled: false,
             storage_kind: crate::store::StorageKind::default(),
             facts: None,
             artifacts: None,
@@ -715,6 +719,13 @@ impl RuntimeBuilder {
     /// tree). See [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace).
     pub fn with_workspace_quota(mut self, quota: crate::runtime::WorkspaceQuota) -> Self {
         self.workspace_quota = quota;
+        self
+    }
+
+    /// Enables or disables automatic Git checkpoints in private agent
+    /// workspaces. Disabled by default.
+    pub fn with_workspace_git_enabled(mut self, enabled: bool) -> Self {
+        self.workspace_git_enabled = enabled;
         self
     }
 
@@ -2195,6 +2206,7 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                workspace_git_enabled: self.workspace_git_enabled,
                                 // Issue #775: the shell audit sink is HOST-owned
                                 // and hangs off the data root, resolving to
                                 // `companies/<slug>/audit/<agent>/` — a sibling

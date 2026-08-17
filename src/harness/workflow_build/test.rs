@@ -683,6 +683,7 @@ pub(crate) fn agent_deps(
         store: runtime.store().clone(),
         meter: None,
         workspace_root: std::env::temp_dir(),
+        workspace_git_enabled: false,
         audit_root: std::env::temp_dir(),
         model_override: None,
         tasks: None,
