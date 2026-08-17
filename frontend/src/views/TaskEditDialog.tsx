@@ -203,7 +203,7 @@ export function TaskEditDialog({
                       progress"). */}
                   <SelectValue>
                     {(selected) =>
-                      selected ? labelFor(columns, String(selected)) : ""you-should-never-see-this"
+                      selected ? labelFor(columns, String(selected)) : ""
                     }
                   </SelectValue>
                 </SelectTrigger>
