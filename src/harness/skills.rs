@@ -415,6 +415,26 @@ mod tests {
         }
     }
 
+    /// How many docs an effective set has once the always-installed global
+    /// baseline is accounted for: this fixture's own slugs, unioned with the
+    /// baseline's (a fixture that uses a baseline slug supersedes it rather than
+    /// adding to it).
+    fn with_baseline(slugs: &[&str]) -> usize {
+        let mut all: std::collections::BTreeSet<&str> = slugs.iter().copied().collect();
+        all.extend(crate::globals::skills().iter().map(|doc| doc.slug.as_str()));
+        all.len()
+    }
+
+    /// The effective doc for `slug` — the assertions below are about one skill
+    /// each, and indexing stopped identifying it once every company installs a
+    /// baseline that sorts among the fixture's own.
+    fn doc<'a>(eff: &'a EffectiveSkills, slug: &str) -> &'a SkillDoc {
+        eff.docs
+            .iter()
+            .find(|doc| doc.slug == slug)
+            .unwrap_or_else(|| panic!("no `{slug}` in the effective set"))
+    }
+
     /// A shared-library document with a real multi-section body.
     fn library_doc(slug: &str) -> SkillDoc {
         SkillDoc {
@@ -444,9 +464,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(eff.docs.len(), 1);
-        assert!(eff.docs[0].body.contains("## Steps"));
-        assert!(eff.docs[0].body.contains("## Output"));
+        assert_eq!(eff.docs.len(), with_baseline(&["competitor-scan"]));
+        let healed = doc(&eff, "competitor-scan");
+        assert!(healed.body.contains("## Steps"));
+        assert!(healed.body.contains("## Output"));
 
         // The agent reads the tree on disk, so the heal must land there too.
         let on_disk =
@@ -497,7 +518,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(eff.docs[0].body.trim(), "My own note.");
-        assert!(!eff.docs[0].body.contains("## Steps"));
+        assert!(!doc(&eff, "competitor-scan").body.contains("## Steps"));
     }
 
     /// The pre-fix path wrote `description:` with an empty value when the client
@@ -521,8 +542,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(eff.docs.len(), 1, "the skill is no longer silently dropped");
-        assert!(eff.docs[0].body.contains("## Steps"));
+        assert_eq!(
+            eff.docs.len(),
+            with_baseline(&["competitor-scan"]),
+            "the skill is no longer silently dropped"
+        );
+        assert!(doc(&eff, "competitor-scan").body.contains("## Steps"));
     }
 
     /// The same unparseable row, but for a slug the library cannot serve (a
@@ -541,7 +566,11 @@ mod tests {
             )],
         )
         .unwrap();
-        assert!(eff.is_empty());
+        assert_eq!(
+            eff.docs.len(),
+            with_baseline(&[]),
+            "the phantom stays dropped; only the baseline remains"
+        );
     }
 
     #[test]
@@ -559,10 +588,10 @@ mod tests {
 
         assert_eq!(
             eff.docs.len(),
-            1,
+            with_baseline(&["retired"]),
             "the skill survives rather than vanishing"
         );
-        assert_eq!(eff.docs[0].body.trim(), "Gone from the library.");
+        assert_eq!(doc(&eff, "retired").body.trim(), "Gone from the library.");
     }
 
     #[test]
@@ -575,7 +604,7 @@ mod tests {
             .unwrap();
 
         // The parsed doc surfaces in the catalogue.
-        assert_eq!(eff.docs.len(), 1);
+        assert_eq!(eff.docs.len(), with_baseline(&["web-research"]));
         let cat = eff.catalogue();
         assert!(cat.contains("Web Research"), "{cat}");
         assert!(cat.contains("`web-research`"), "{cat}");
@@ -604,7 +633,12 @@ mod tests {
         )
         .unwrap();
 
-        let slugs: Vec<&str> = eff.docs.iter().map(|d| d.slug.as_str()).collect();
+        let slugs: Vec<&str> = eff
+            .docs
+            .iter()
+            .map(|d| d.slug.as_str())
+            .filter(|slug| ["keep", "drop"].contains(slug))
+            .collect();
         assert_eq!(slugs, vec!["keep"]);
         assert!(!ws.path().join("skills").join("drop").exists());
         assert!(ws.path().join("skills").join("keep").exists());
@@ -623,8 +657,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(eff.docs.len(), 1);
-        assert_eq!(eff.docs[0].name, "Invoicing");
+        assert_eq!(eff.docs.len(), with_baseline(&["invoicing"]));
+        assert_eq!(doc(&eff, "invoicing").name, "Invoicing");
         let written =
             std::fs::read_to_string(ws.path().join("skills").join("invoicing").join("SKILL.md"))
                 .unwrap();
@@ -646,8 +680,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(eff.docs.len(), 1);
-        assert_eq!(eff.docs[0].name, "New Report");
+        assert_eq!(eff.docs.len(), with_baseline(&["report"]));
+        assert_eq!(doc(&eff, "report").name, "New Report");
         let written =
             std::fs::read_to_string(ws.path().join("skills").join("report").join("SKILL.md"))
                 .unwrap();
@@ -664,16 +698,23 @@ mod tests {
             &[delta("broken", true, Some("no frontmatter here"))],
         )
         .expect("malformed custom doc must not fail the build");
-        assert!(eff.is_empty());
-        assert!(eff.catalogue().is_empty());
+        // The malformed doc is skipped; what remains is the baseline every
+        // company installs, so the set is not empty — it just never gained the
+        // broken skill.
+        assert_eq!(eff.docs.len(), with_baseline(&[]));
+        assert!(eff.docs.iter().all(|doc| doc.slug != "broken"));
     }
 
     #[test]
-    fn empty_set_yields_no_tools_catalogue() {
+    fn a_company_with_no_sources_still_gets_the_global_baseline() {
+        // This used to assert an empty set. Nothing about the layering changed:
+        // the baseline is simply installed in every company, including one with
+        // no source dir and no deltas — a platform-provisioned tenant.
         let ws = tempfile::tempdir().unwrap();
         let eff = EffectiveSkills::materialize(ws.path().to_path_buf(), None, &[], &[]).unwrap();
-        assert!(eff.is_empty());
-        assert!(eff.catalogue().is_empty());
+        assert_eq!(eff.docs.len(), with_baseline(&[]));
+        assert!(!eff.is_empty());
+        assert!(!eff.catalogue().is_empty());
     }
 
     #[test]
