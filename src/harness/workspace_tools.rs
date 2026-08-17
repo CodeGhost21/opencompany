@@ -404,7 +404,7 @@ impl CompanyWorkspace {
         let Some(scope) = &self.write_scope else {
             return true;
         };
-        let Ok(segments) = super::workspace_paths::split_logical_path(path) else {
+        let Ok(segments) = crate::company::workspace_paths::split_logical_path(path) else {
             // A traversal-shaped or malformed path is refused by the tool's own
             // validation before this is reached; treating it as out of scope
             // here is the same answer by the same reasoning.
@@ -415,7 +415,7 @@ impl CompanyWorkspace {
         }
         let key = segments.join("/");
         scope.iter().any(|allowed| {
-            super::workspace_paths::split_logical_path(allowed)
+            crate::company::workspace_paths::split_logical_path(allowed)
                 .map(|allowed_segments| allowed_segments.join("/") == key)
                 .unwrap_or(false)
         })
