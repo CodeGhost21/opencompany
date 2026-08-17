@@ -49,7 +49,7 @@ async function dismissTour(page: Page) {
 
 /** Creates a card through the board's one prompt box (issue #301). */
 async function createViaPromptBox(page: Page, prompt: string) {
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
   await page.getByRole("button", { name: "Add task" }).click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
@@ -135,7 +135,7 @@ test("a card assigned to a desk keeps the desk, not the desk's lead", async ({
   await pickAssignee(page, "task-assignee", /Engineering desk/);
   await page.getByRole("button", { name: "Save" }).click();
 
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
   const created = card(page, title);
   await expect(created).toBeVisible({ timeout: 15_000 });
@@ -153,7 +153,7 @@ test("a card can be assigned to a teammate, and created for nobody at all", asyn
   await openEditDialog(page, (await seeded.json()).id as string);
   await pickAssignee(page, "task-assignee", /^writer —/);
   await page.getByRole("button", { name: "Save" }).click();
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
   await dismissTour(page);
   await expect(card(page, forWriter)).toContainText("writer", { timeout: 15_000 });
 
