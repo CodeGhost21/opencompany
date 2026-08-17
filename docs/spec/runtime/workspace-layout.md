@@ -260,9 +260,15 @@ tool call, including shell commands, so redirects and generated files are not
 missed. Calls that leave the tree unchanged add no commit. Git history lives in
 the sibling `workspace.git/` directory; the working tree contains only Git's
 small `.git` pointer file, which keeps ordinary Git commands usable from inside
-the workspace. Checkpoint failures are warned about but never replace a tool's
-successful result. The setting defaults to `false`, preserving existing
-workspaces unless an operator explicitly opts in.
+the workspace. The pointer file is write-only scaffolding: a `.git` an agent
+plants is ignored for the checkpointer's own commands (which pass an explicit
+`--git-dir`) and rewritten to name the real repository, and checkpoint Git
+invocations are isolated from inherited config and hooks. Checkpoint failures
+are warned about but never replace a tool's successful result. The setting
+defaults to `false`, preserving existing workspaces unless an operator
+explicitly opts in. See
+[sandbox.md](orchestration/sandbox.md#-before-firing-a-command) for the security
+rationale.
 
 **The first two quotas are soft/advisory in the binary.** At boot `serve`
 measures the workspace (and `tmp/`) and emits an operator-visible
