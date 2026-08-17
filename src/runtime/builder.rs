@@ -390,6 +390,7 @@ pub struct RuntimeBuilder {
     /// manifest to answer.
     auth_mode_override: Option<AuthMode>,
     tasks: Option<Arc<dyn TaskStore>>,
+    ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
     /// Issue #553: the byte limits the workspace is held to. Defaults to a
     /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
@@ -507,6 +508,7 @@ impl RuntimeBuilder {
             bootstrap_admin: None,
             auth_mode_override: None,
             tasks: None,
+            ledgers: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
             storage_kind: crate::store::StorageKind::default(),
@@ -631,6 +633,7 @@ impl RuntimeBuilder {
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
         self.tasks = Some(handles.tasks.clone());
+        self.ledgers = Some(handles.ledgers.clone());
         self.workspace = Some(handles.workspace.clone());
         self.facts = Some(handles.facts.clone());
         self.artifacts = Some(handles.artifacts.clone());
@@ -682,6 +685,13 @@ impl RuntimeBuilder {
     }
 
     /// Swaps the task board store (default: fs-backed).
+    /// Injects the ledger store.
+    #[must_use]
+    pub fn with_ledgers(mut self, ledgers: Arc<dyn crate::ports::ledgers::LedgerStore>) -> Self {
+        self.ledgers = Some(ledgers);
+        self
+    }
+
     pub fn with_tasks(mut self, tasks: Arc<dyn TaskStore>) -> Self {
         self.tasks = Some(tasks);
         self
@@ -1145,6 +1155,7 @@ impl RuntimeBuilder {
                     )),
                     events.clone(),
                 )),
+                ledgers: self.ledgers.unwrap_or_else(|| fs_ops.clone()),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
