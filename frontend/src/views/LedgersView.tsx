@@ -46,12 +46,13 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import { patchTask } from "@/api/tasks";
 import { CreateTaskDialog } from "@/views/CreateTaskDialog";
-import { BOARD_LEDGER, columnsOf } from "@/lib/board-columns";
+import { BOARD_LEDGER, columnsOf, labelFor } from "@/lib/board-columns";
 import {
   byline,
   composableFields,
   defineLedger,
   deleteEntry,
+  isClosingStatus,
   isWritable,
   listLedgers,
   readLedger,
@@ -270,6 +271,14 @@ export function LedgersView({
    * A status that demands a reason does not write at all — it opens the compose
    * form pre-filled instead, because the host refuses a silent close and asking
    * first is the same rule met before it bites.
+   *
+   * **Optimistic, and reverted out loud.** The card moves under the pointer and
+   * snaps back if the host refuses, and the message then carries the whole
+   * story: which card, where it was going, and the host's own words for why it
+   * would not go. This screen validates no status itself — the declaration is
+   * the host's — so the reason for a refusal only ever exists in the response,
+   * and a card that silently returned to where it started is the failure issue
+   * #334 was reported as.
    */
   const move = async (entry: LedgerEntry, status: string) => {
     if (!company || !ledger || entry.status === status) return;
@@ -282,6 +291,21 @@ export function LedgersView({
       });
       return;
     }
+    const was = entry.status;
+    const restage = (to: string) =>
+      setRead((current) =>
+        current
+          ? {
+              ...current,
+              entries: current.entries.map((held) =>
+                held.id === entry.id
+                  ? { ...held, status: to, closed: isClosingStatus(ledger, to) }
+                  : held,
+              ),
+            }
+          : current,
+      );
+    restage(status);
     try {
       if (ledger.source === "native") {
         await patchTask(client, company, entry.id, { column: status });
@@ -293,9 +317,11 @@ export function LedgersView({
       }
       await Promise.all([refreshRead(), refreshList()]);
     } catch (e) {
-      // Shown verbatim: the host's refusal is the only place the reason for a
-      // rejected move exists — this screen validates nothing itself.
-      toast.error(e instanceof Error ? e.message : String(e));
+      restage(was);
+      const label = labelFor(columnsOf(ledger), status);
+      toast.error(`Could not move "${entry.title || entry.id}" to ${label}.`, {
+        description: e instanceof Error ? e.message : "the host refused the move",
+      });
     }
   };
 
@@ -564,6 +590,9 @@ export function LedgersView({
                   ledger={ledger}
                   entries={read.entries}
                   onMove={(entry, status) => void move(entry, status)}
+                  // A drop on dead board pixels. Saying so is the whole fix:
+                  // silence here is indistinguishable from a frozen app.
+                  onMiss={() => toast.error("Drop the card on a column to move it.")}
                   onOpen={(entry) =>
                     ledger.source === "native" && onOpenCard
                       ? onOpenCard(entry.id)
