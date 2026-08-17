@@ -266,6 +266,9 @@ impl Tool for CheckpointingTool {
     fn supports_markdown(&self) -> bool {
         self.inner.supports_markdown()
     }
+    fn spec(&self) -> ToolSpec {
+        self.inner.spec()
+    }
     fn permission_level(&self) -> PermissionLevel {
         self.inner.permission_level()
     }
