@@ -1200,9 +1200,14 @@ members = ["writer", "ceo"]
         let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
         assert_eq!(status, StatusCode::OK, "{roster}");
         let rows = roster.as_array().unwrap();
-        // Three manifest teammates, the overlay one, and the global baseline
-        // appended to every roster.
-        assert_eq!(rows.len(), 4 + crate::globals::agents().len(), "{roster}");
+        // Three manifest teammates, the overlay one, and every global the
+        // fixture does not already declare an id for — this roster has its own
+        // `writer`, which supersedes the baseline's rather than adding to it.
+        let added = crate::globals::agents()
+            .iter()
+            .filter(|global| !["ceo", "writer", "hermit"].contains(&global.id.as_str()))
+            .count();
+        assert_eq!(rows.len(), 4 + added, "{roster}");
 
         for row in rows {
             let id = row["id"].as_str().unwrap();

@@ -3803,7 +3803,16 @@ async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() 
     // `GET …/workflows` (seed ∪ overlay) now lists it.
     let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = list.as_array().unwrap();
+    // The company's own graphs; the baseline is listed in every company.
+    let rows: Vec<&serde_json::Value> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::workflows().iter().any(|w| w.id == id)
+        })
+        .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], "greet");
 
