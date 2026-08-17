@@ -100,6 +100,39 @@ fn text(value: Option<&Value>, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Reads a money field PayPal must have supplied, or fails.
+///
+/// The same rule the missing-array checks below already apply, one level down:
+/// **never invent a number about money.** These fields used to default to
+/// `"0.00"`, so a response whose shape drifted — a renamed field, a projection
+/// PayPal serves to some accounts, an object that arrives empty — reported a
+/// funded wallet as empty and a real payment as a zero-value transaction. That
+/// is not a degraded answer, it is a confident wrong one: an agent told the
+/// balance is `0.00` says the company has no money, and an operator acts on it.
+///
+/// An error says "PayPal's reply did not parse", which is true and which
+/// somebody can fix. `field` names the JSON path so the report identifies which
+/// part of the shape moved; the reply itself goes to the log, never into the
+/// message — same rule as `unparsed_body_message`.
+fn money(parent: Option<&Value>, key: &str, field: &str) -> Result<String> {
+    text(parent, key).ok_or_else(|| {
+        tracing::warn!(
+            field,
+            parent = %parent.map(|value| value.to_string()).unwrap_or_else(|| "null".to_string())
+                .chars().take(200).collect::<String>(),
+            "[paypal] reply carried no amount where one is required"
+        );
+        OpenCompanyError::Paypal {
+            status: 0,
+            code: "unexpected_response".to_string(),
+            message: format!(
+                "PayPal's reply carried no `{field}`, and this host does not substitute a zero \
+                 for an amount PayPal did not report. The reply is in the host log."
+            ),
+        }
+    })
+}
+
 /// Fetches the account's balances.
 pub async fn get_wallet_balance(client: &PaypalClient) -> Result<Vec<Balance>> {
     let body = client.get("/v1/reporting/balances", &[]).await?;
@@ -122,22 +155,30 @@ pub async fn get_wallet_balance(client: &PaypalClient) -> Result<Vec<Balance>> {
             }
         })?;
 
-    Ok(balances
+    balances
         .iter()
-        .map(|entry| Balance {
-            currency_code: text(Some(entry), "currency")
-                .or_else(|| text(entry.get("total_balance"), "currency_code"))
-                .unwrap_or_default(),
-            available: text(entry.get("available_balance"), "value")
-                .unwrap_or_else(|| "0.00".to_string()),
-            withheld: text(entry.get("withheld_balance"), "value")
-                .unwrap_or_else(|| "0.00".to_string()),
-            primary: entry
-                .get("primary")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+        .map(|entry| {
+            Ok(Balance {
+                currency_code: text(Some(entry), "currency")
+                    .or_else(|| text(entry.get("total_balance"), "currency_code"))
+                    .unwrap_or_default(),
+                available: money(
+                    entry.get("available_balance"),
+                    "value",
+                    "balances[].available_balance.value",
+                )?,
+                withheld: money(
+                    entry.get("withheld_balance"),
+                    "value",
+                    "balances[].withheld_balance.value",
+                )?,
+                primary: entry
+                    .get("primary")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Fetches transactions between two ISO 8601 instants.
@@ -203,16 +244,18 @@ pub async fn list_transactions(
             }
         })?;
 
-    Ok(rows
-        .iter()
+    rows.iter()
         .map(|row| {
             let info = row.get("transaction_info");
             let payer = row.get("payer_info");
-            Transaction {
+            Ok(Transaction {
                 id: text(info, "transaction_id").unwrap_or_default(),
                 date: text(info, "transaction_initiation_date").unwrap_or_default(),
-                amount: text(info.and_then(|i| i.get("transaction_amount")), "value")
-                    .unwrap_or_else(|| "0.00".to_string()),
+                amount: money(
+                    info.and_then(|i| i.get("transaction_amount")),
+                    "value",
+                    "transaction_details[].transaction_info.transaction_amount.value",
+                )?,
                 currency_code: text(
                     info.and_then(|i| i.get("transaction_amount")),
                     "currency_code",
@@ -225,9 +268,9 @@ pub async fn list_transactions(
                 )
                 .or_else(|| text(payer, "email_address")),
                 note: text(info, "transaction_note"),
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -324,6 +367,80 @@ mod tests {
         assert!(rendered.contains("balances"), "{rendered}");
         // And the body itself is logged, not relayed into the transcript.
         assert!(!rendered.contains("debug_id"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_balance_with_no_amount_is_an_error_rather_than_a_fabricated_zero() {
+        // These fields used to default to "0.00". A response whose shape drifted
+        // therefore reported a funded wallet as EMPTY — not a degraded answer but
+        // a confident wrong one, which an agent relays and an operator acts on.
+        for (label, body) in [
+            (
+                "no available_balance at all",
+                r#"{"balances":[{"currency":"USD","primary":true,
+                    "withheld_balance":{"currency_code":"USD","value":"12.30"}}]}"#,
+            ),
+            (
+                "an available_balance with no value",
+                r#"{"balances":[{"currency":"USD","primary":true,
+                    "available_balance":{"currency_code":"USD"},
+                    "withheld_balance":{"currency_code":"USD","value":"12.30"}}]}"#,
+            ),
+            (
+                "an empty-string value",
+                r#"{"balances":[{"currency":"USD","primary":true,
+                    "available_balance":{"currency_code":"USD","value":""},
+                    "withheld_balance":{"currency_code":"USD","value":"12.30"}}]}"#,
+            ),
+            (
+                "no withheld_balance",
+                r#"{"balances":[{"currency":"USD","primary":true,
+                    "available_balance":{"currency_code":"USD","value":"4320.50"}}]}"#,
+            ),
+        ] {
+            let (client, server) = stub_client(body).await;
+            let err = match get_wallet_balance(&client).await {
+                Ok(balances) => {
+                    panic!("{label}: a missing amount must not become a number: {balances:?}")
+                }
+                Err(err) => err,
+            };
+            server.abort();
+            let rendered = err.to_string();
+            // The report names WHICH part of the shape moved, so the fix is
+            // findable rather than "PayPal broke".
+            assert!(rendered.contains("balance.value"), "{label}: {rendered}");
+            assert!(!rendered.contains("0.00"), "{label}: {rendered}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transaction_with_no_amount_is_an_error_rather_than_a_zero_payment() {
+        // Same rule for the transaction list: a payment reported as 0.00 reads
+        // as a failed or free transaction, which is a lie about money rather
+        // than a gap in the answer.
+        let (client, server) = stub_client(
+            r#"{"transaction_details":[{"transaction_info":{
+                "transaction_id":"T1","transaction_status":"S",
+                "transaction_initiation_date":"2026-08-01T00:00:00+0000"
+            }}]}"#,
+        )
+        .await;
+        let err = match list_transactions(
+            &client,
+            "2026-08-01T00:00:00Z",
+            "2026-08-02T00:00:00Z",
+            None,
+        )
+        .await
+        {
+            Ok(rows) => panic!("a missing amount must not become 0.00: {rows:?}"),
+            Err(err) => err,
+        };
+        server.abort();
+        let rendered = err.to_string();
+        assert!(rendered.contains("transaction_amount.value"), "{rendered}");
+        assert!(!rendered.contains("0.00"), "{rendered}");
     }
 
     #[tokio::test]
