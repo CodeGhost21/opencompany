@@ -1516,7 +1516,7 @@ mod test {
         .expect("parse toml");
         assert_eq!(
             populated.context,
-            Some(vec!["GOAL.md".to_string(), "CLAIMS.md".to_string()])
+            Some(vec![ContextEntry::from("GOAL.md"), ContextEntry::from("CLAIMS.md")])
         );
 
         // The distinction survives a JSON round-trip too, since the routing
