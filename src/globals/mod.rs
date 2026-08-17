@@ -65,7 +65,7 @@ struct GlobalsManifest {
 #[derive(Debug, Default, serde::Deserialize)]
 struct GlobalTools {
     #[serde(default)]
-    baseline: Vec<String>,
+    default_allow: Vec<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -80,7 +80,7 @@ struct Baseline {
     agents: Vec<Agent>,
     workflows: Vec<WorkflowFile>,
     skills: Vec<SkillDoc>,
-    tool_baseline: Vec<String>,
+    default_tool_allow: Vec<String>,
     faults: Vec<String>,
 }
 
@@ -104,7 +104,7 @@ fn build() -> Baseline {
         agents: build_agents(&mut faults),
         workflows: build_workflows(&mut faults),
         skills: build_skills(&manifest.skills.always, &mut faults),
-        tool_baseline: manifest.tools.baseline,
+        default_tool_allow: manifest.tools.default_allow,
         faults,
     }
 }
@@ -198,9 +198,24 @@ pub fn skills() -> &'static [SkillDoc] {
     &baseline().skills
 }
 
-/// The tool namespaces every company grants on top of its own `[tools].allow`.
-pub fn tool_baseline() -> &'static [String] {
-    &baseline().tool_baseline
+/// The tool belt a company gets when its manifest declares no `[tools]` section.
+///
+/// Deliberately a **default**, not a floor. A floor would grant namespaces on
+/// top of whatever a company allowed, and so re-grant authority a company
+/// withheld on purpose — `workspace` confers workspace writes that not even a
+/// `*` grant does, and an agent with no `files` grant is meant to be offered no
+/// file tools. What is global here is where the starting belt is *authored*, not
+/// a minimum nobody can go under.
+///
+/// Falls back to the wildcard belt if the baseline carries none, so a missing or
+/// malformed `globals.toml` cannot leave every company grantless — the failure
+/// mode of a data-driven default has to be the old hardcoded one, not silence.
+pub fn default_tool_allow() -> Vec<String> {
+    let authored = &baseline().default_tool_allow;
+    if authored.is_empty() {
+        return vec!["*".into(), "media".into(), "composio".into()];
+    }
+    authored.clone()
 }
 
 /// Every problem found while parsing the baseline — empty in a healthy build.

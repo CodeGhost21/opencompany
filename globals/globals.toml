@@ -7,19 +7,23 @@
 # subset of the shared skill library that is installed rather than offered.
 
 [tools]
-# Namespaces every company grants on top of its own `[tools].allow`.
+# The tool belt a company gets when its manifest declares no `[tools]` section
+# at all — every vertical's starting point, authored here rather than hardcoded
+# in `src/company/types.rs`.
 #
-# Deliberately the three namespaces an agent cannot do *any* work without — its
-# own sandbox, the documents it writes, and the company workspace it reads.
-# None of them spend money, reach a third-party account, or leave the company,
-# so a vertical that narrows its belt to almost nothing still has teammates that
-# function rather than teammates that fail their first tool call.
+# Deliberately **not** a floor. A floor — namespaces granted on top of whatever
+# a company allows, which no company could drop below — would silently re-grant
+# authority a company withheld on purpose: `workspace` confers workspace
+# *writes*, which even a `*` grant deliberately does not, and an agent with no
+# `files` grant is meant to be offered no file tools at all. A default a company
+# can override is the version of "global tools" that does not quietly widen
+# anyone's blast radius.
 #
-# `*` is deliberately NOT here: a floor nobody can drop below has to stay at
-# what is safe for every company, and `*` covers `shell`, `code`, `web` and
-# `subagent` too. A company that wants those grants them in its own
-# `[tools].allow`, as it always did.
-baseline = ["files", "docs", "workspace"]
+# `*` covers files/docs/shell/code/web/subagent. `media` and `composio` are
+# listed literally because `*` excludes the real-money and
+# per-tenant-credential namespaces. `search` is deliberately absent: it is
+# opt-in, so a company that never asked for web search never spends on it.
+default_allow = ["*", "media", "composio"]
 
 [skills]
 # Shared-library skills installed in every company, by slug.

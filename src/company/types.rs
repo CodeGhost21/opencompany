@@ -1008,7 +1008,7 @@ impl Default for Tools {
             // `media`/`composio`: the #188 sign-off admitted it **opt-in**, so a
             // company that never asked for web search never spends on it.
             // Making it default-on is a one-word change here.
-            allow: vec!["*".into(), "media".into(), "composio".into()],
+            allow: crate::globals::default_tool_allow(),
             web_allowed_domains: Vec::new(),
             composio: ComposioTools::default(),
             search_daily_calls: None,
