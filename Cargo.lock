@@ -3173,7 +3173,6 @@ dependencies = [
  "tinymemory",
  "tinymemory-api",
  "tinymemory-remote",
- "tinymemory-tinycortex",
  "tokio",
  "tokio-rustls",
  "tokio-util",

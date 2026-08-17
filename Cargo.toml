@@ -212,14 +212,17 @@ tinycortex = { version = "0.1", optional = true }
 #
 # `tinymemory` carries the driver registry (`DriverRegistry::admit`) and the
 # mandatory-family composition (`MemoryTraitProvider`); `tinymemory-remote`
-# carries the HTTP adapters for hosted engines; `tinymemory-tinycortex` is the
-# seam onto the embedded engine, and deliberately names `tinycortex` by version
-# so it unifies onto the `[patch.crates-io]` entry below rather than pulling a
-# second engine copy.
+# carries the HTTP adapters for hosted engines.
+#
+# `tinymemory-tinycortex` is deliberately NOT here. It is the seam onto the
+# embedded engine, and the embedded mode does not go through this contract —
+# it keeps the durable `EngineCortex` overlay (see `store::memory::driver`).
+# Depending on it would drag `tinycortex`, and with it a bundled SQLite build,
+# into a tenant that selected a hosted engine over HTTP and needs neither
+# (tinymemory#18 §D).
 tinymemory = { path = "vendor/openhuman/vendor/tinymemory", optional = true }
 tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/api", optional = true }
 tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/adapters/remote", optional = true }
-tinymemory-tinycortex = { path = "vendor/openhuman/vendor/tinymemory/adapters/tinycortex", optional = true }
 
 # Single-file `.tar` packing/unpacking for `opencompany export`/`import`. Pure
 # Rust, no system libs, no network. Only links under the `export` feature; the
@@ -398,15 +401,16 @@ tinycortex = ["dep:tinycortex"]
 # *seam*: with it on, `OPENCOMPANY_MEMORY` additionally accepts `remote` and
 # `null`, and `embedded` becomes an alias for `tinycortex`.
 #
-# `tinymemory-tinycortex` implies `dep:tinycortex`, so the embedded driver is
-# always constructible under this feature and `OPENCOMPANY_MEMORY=embedded`
-# cannot select an engine that was compiled out.
+# Deliberately does NOT imply `tinycortex`. The two modes are independent code
+# paths: `remote`/`null` bind a provider here, `embedded` uses the `tinycortex`
+# overlay. Selecting `embedded` without that feature refuses loudly at boot
+# ("requires a build with the `tinycortex` feature"), which is the right
+# outcome — and it lets a hosted-memory tenant build without linking a bundled
+# SQLite it will never call (tinymemory#18 §D).
 tinymemory = [
     "dep:tinymemory",
     "dep:tinymemory-api",
     "dep:tinymemory-remote",
-    "dep:tinymemory-tinycortex",
-    "tinycortex",
     # The contract's storage trait (`tinymemory_api::traits::Memory`) returns
     # `anyhow::Result`, so anything implementing or calling it has to name
     # `anyhow` directly. Already an optional dep for other features.
