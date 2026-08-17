@@ -2568,7 +2568,7 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
 /// One per `skill:<slug>` entry, and nothing else: an entry naming another kind
 /// is that kind's business, and manifest validation has already refused an entry
 /// naming nothing at all.
-fn globals_skill_disables(disable: &[String]) -> Vec<SkillState> {
+pub(crate) fn globals_skill_disables(disable: &[String]) -> Vec<SkillState> {
     disable
         .iter()
         .filter_map(|entry| entry.strip_prefix("skill:"))
