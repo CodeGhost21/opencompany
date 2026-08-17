@@ -367,6 +367,7 @@ async fn harness(
         chargebee: None,
         #[cfg(feature = "paypal")]
         paypal: None,
+        hosting: None,
         composio: Some(TenantComposio::new(
             composio_url,
             Credential::from_value("stub-tenant-token"),

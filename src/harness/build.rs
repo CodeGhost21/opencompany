@@ -485,6 +485,38 @@ pub fn build_agent(
         }
     }
 
+    // Hosting: put this agent's workspace on a real hosting provider. Same
+    // fail-closed shape as `chargebee` and `paypal` above, and for both of their
+    // reasons at once — a deployment publishes the company's files to the public
+    // internet under its own account, and provisioning a database is a bill it
+    // pays. Two conditions, both required:
+    //
+    //  1. an **EXPLICIT** `hosting` grant. The catch-all `*` does NOT confer it.
+    //  2. a resolved per-company connection on the deps (`deps.hosting`), read
+    //     from THAT company's secret store by the runtime builder — never from
+    //     an environment variable, which under multi-tenancy could only ever be
+    //     somebody else's account.
+    //
+    // The tools are pinned to `workspace`, the same sandbox directory the file
+    // tools get, so an agent can only ever deploy what it can already read.
+    #[cfg(feature = "openhuman")]
+    if crate::company::grants_hosting_explicit(grants) {
+        match &deps.hosting {
+            Some(config) => {
+                tools.extend(crate::harness::hosting::hosting_tools(
+                    config,
+                    workspace.clone(),
+                ));
+            }
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `hosting` but no per-company hosting \
+                 credential is configured; hosting tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
     // Metered web search (issue #238) — the discovery tool the `web` namespace
     // never had. `web_fetch` / `http_request` / `curl` read a URL the agent
     // already has; nothing could find one, while three shipped skills instruct
@@ -1581,6 +1613,7 @@ mod tests {
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,

@@ -54,8 +54,9 @@ pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
 /// Hosting (TinyHosts): the per-company connection and the agent tools over it.
-/// The credential half is always compiled — the console's Hosting settings write
-/// it in every build — while the tools themselves need `openhuman`.
+/// The keys it reads live in `company::hosting`, which is compiled in every
+/// build — the console's Hosting settings write them whether or not this
+/// harness exists to use them.
 pub mod hosting;
 mod checkpoint;
 pub mod composio;
@@ -3279,6 +3280,7 @@ description = "Builds the product."
                 chargebee: None,
                 #[cfg(feature = "paypal")]
                 paypal: None,
+                hosting: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 run_supervisor: crate::runtime::RunSupervisor::default(),
                 delivery: None,
@@ -3491,6 +3493,7 @@ description = "Builds the product."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4185,6 +4188,7 @@ description = "Builds the product."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4370,6 +4374,7 @@ description = "Builds the product."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -5040,6 +5045,7 @@ description = "Builds the product."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -5219,6 +5225,7 @@ description = "Sets direction."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -5378,6 +5385,7 @@ description = "Sets direction."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
