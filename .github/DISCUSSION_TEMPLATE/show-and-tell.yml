@@ -1,0 +1,34 @@
+title: ""
+labels: ["show and tell"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A company you are running on OpenCompany. What it does, what you handed
+        to agents, and what you kept for yourself.
+
+        The useful posts here are specific: which functions run unattended, what
+        you approve by hand, and what went wrong before it worked.
+  - type: textarea
+    id: what
+    attributes:
+      label: What does the company do?
+      validations:
+        required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: How is it set up?
+      description: Roles, the approvals you require, the workflows on a schedule. A trimmed company.toml is welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: learned
+    attributes:
+      label: What you would do differently
+      description: The part everyone else is here to read.
+  - type: input
+    id: running-since
+    attributes:
+      label: Running since
+      description: Roughly how long it has been live.
