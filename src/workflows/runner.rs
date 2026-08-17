@@ -1411,6 +1411,8 @@ description = "Runs Acme."
 
     fn deps(dir: &std::path::Path) -> HarnessDeps {
         HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),

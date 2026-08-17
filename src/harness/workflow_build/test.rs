@@ -677,6 +677,8 @@ pub(crate) fn agent_deps(
     model: Arc<dyn HarnessModel>,
 ) -> crate::harness::HarnessDeps {
     crate::harness::HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: model,
         provider_slug: "managed".to_string(),
         context: runtime.context.clone(),

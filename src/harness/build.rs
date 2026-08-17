@@ -1477,6 +1477,8 @@ mod tests {
         let workspace_root = root.join("harness");
         let audit_root = root;
         HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(PinContext),

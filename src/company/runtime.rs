@@ -2310,6 +2310,8 @@ mod tests {
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> crate::harness::HarnessDeps {
         crate::harness::HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(crate::harness::provider::MockProvider::default()),
             provider_slug: "mock".to_string(),
             context: runtime.context.clone(),

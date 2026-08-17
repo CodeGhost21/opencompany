@@ -2626,6 +2626,8 @@ mod test {
             .unwrap();
 
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
