@@ -97,8 +97,8 @@ struct AgentFile {
     classes: Vec<String>,
     #[serde(default)]
     ledgers: Option<Vec<crate::company::LedgerGrant>>,
-    #[serde(default = "crate::company::types::default_can_declare_ledgers")]
-    can_declare_ledgers: bool,
+    #[serde(default)]
+    can_declare_ledgers: Option<bool>,
 }
 
 /// Loads every agent definition under `<dir>/agents/`, in roster order.
