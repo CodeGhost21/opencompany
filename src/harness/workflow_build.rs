@@ -753,6 +753,10 @@ struct RosterEntry {
     role: String,
     name: Option<String>,
     description: Option<String>,
+    /// Whether this teammate came from the global baseline rather than the
+    /// company's own roster. Read only when a label matches more than one
+    /// teammate — see [`resolve_agent_ids`].
+    global: bool,
 }
 
 /// The card-independent half of the evidence pack: everything about the company
@@ -792,12 +796,16 @@ async fn gather_company_evidence(runtime: &Arc<CompanyRuntime>) -> crate::Result
             // A manifest `[[agent]]` has no display name; its role is its label.
             name: None,
             description: a.description.clone(),
+            global: a.global,
         })
         .chain(record.overlay_agents.iter().map(|a| RosterEntry {
             id: a.id.clone(),
             role: a.role.clone(),
             name: Some(a.name.clone()),
             description: a.description.clone(),
+            // An operator added this teammate to *this* company; nothing about
+            // it comes from the baseline.
+            global: false,
         }))
         .collect();
 
@@ -1557,6 +1565,27 @@ fn resolve_agent_ids(
                 hits.push(entry.id.as_str());
             }
         }
+        // The baseline ships a `writer` and a `researcher`, so a company with
+        // its own writer now has two teammates answering to "the writer". The
+        // company's own wins, the same precedence every other globals merge
+        // point applies — an ambiguity error here would make a vertical's own
+        // roster unaddressable by role in a sentence.
+        if hits.len() > 1 {
+            let own: Vec<&str> = hits
+                .iter()
+                .copied()
+                .filter(|id| {
+                    roster
+                        .iter()
+                        .find(|entry| entry.id == *id)
+                        .is_some_and(|entry| !entry.global)
+                })
+                .collect();
+            if own.len() == 1 {
+                hits = own;
+            }
+        }
+
         match hits.as_slice() {
             [only] => {
                 let resolved = (*only).to_string();
