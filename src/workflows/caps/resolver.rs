@@ -42,7 +42,7 @@ use tinyflows::caps::WorkflowResolver;
 use tinyflows::error::{EngineError, Result as TfResult};
 use tinyflows::model::WorkflowGraph;
 
-use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_union, load_workflow_with_globals};
+use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_with_globals};
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, OverlayWorkflow};
 
@@ -202,6 +202,7 @@ impl StoreWorkflowResolver {
     fn guard_cycle(
         source_dir: Option<PathBuf>,
         overlays: Vec<OverlayWorkflow>,
+        globals_disable: Vec<String>,
         root_id: String,
         start_id: String,
         start_file: WorkflowFile,
