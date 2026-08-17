@@ -625,7 +625,10 @@ name = "Run"
 [node.config]
 slug = "shell"
 [node.config.args]
-command = "echo hi"
+# An ACTING command. Since issue #875 `shell` is classified by what it was
+# handed, so a read would be a call the policy does not park — and the
+# disclosure this fixture exists to exercise only happens for one that would.
+command = "rm -rf ."
 [[edge]]
 from = "start"
 to = "run"
