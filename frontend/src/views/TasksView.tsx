@@ -181,6 +181,10 @@ export function TasksView({
    */
   onOpenThread?: (threadId: string) => void;
 }) {
+  // The board's columns come from the `tasks` ledger, which is built from the
+  // host's one column table. Nothing here declares them, so a column added on
+  // the host appears with its label on the next load.
+  const columns = useBoardColumns(client, company);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -384,9 +388,12 @@ export function TasksView({
       // the host's own words for why it would not go. The board validates
       // nothing itself — `BOARD_COLUMNS` is the host's list — so the reason for
       // a refusal only ever exists in the response.
-      toast.error(`Could not move "${current.title}" to ${columnLabel(column)}.`, {
-        description: e instanceof Error ? e.message : "the host refused the move",
-      });
+      toast.error(
+        `Could not move "${current.title}" to ${columnLabel(columns, column)}.`,
+        {
+          description: e instanceof Error ? e.message : "the host refused the move",
+        },
+      );
     }
   }
 
@@ -895,6 +902,7 @@ function CreateTaskDialog({
     }
   }
 
+  const columns = useBoardColumns(client, company);
   const columnLabel = labelFor(columns, ADD_TASK_COLUMN);
 
   return (
