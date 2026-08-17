@@ -740,6 +740,8 @@ pub fn build_agent(
                 .with_tasks_opt(deps.tasks.clone())
                 .with_workspace_opt(deps.workspace.clone()),
             manifest_agent.id.clone(),
+            manifest_agent.ledgers.clone(),
+            manifest_agent.can_declare_ledgers,
         ));
     }
 
