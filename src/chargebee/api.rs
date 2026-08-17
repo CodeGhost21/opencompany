@@ -841,6 +841,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reply_without_a_list_array_is_an_error_not_an_empty_invoice_list() {
+        // `{"list":[]}` is a real empty history, but a 2xx body with no `list`
+        // array means the reply's shape moved — reporting that as "no invoices"
+        // would be a confident false negative about the billing ledger.
+        let (result, _seen) = stub(
+            vec![("GET /invoices", 200, r#"{"site":"acme"}"#)],
+            |client| async move {
+                list_invoices(&client, ListInvoicesArgs::default()).await
+            },
+        )
+        .await;
+
+        let err = result.expect_err("a missing `list` is an error");
+        assert!(err.to_string().contains("no `list` array"), "{err}");
+    }
+
+    #[tokio::test]
     async fn an_invoice_survives_a_payment_link_that_cannot_be_raised() {
         // A site with no gateway configured refuses the hosted page. Reporting
         // "no invoice" for an invoice that exists is the worst answer available.
