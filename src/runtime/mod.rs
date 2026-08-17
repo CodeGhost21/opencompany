@@ -143,6 +143,7 @@ pub use workflow_scheduler::WorkflowScheduler;
 pub(crate) use workflow_scheduler::workflow_schedule_id;
 pub use workflow_spawn::WorkflowSpawn;
 pub use workspace_events::WorkspaceAnnouncer;
+pub use derived_guard::DerivedGuardWorkspace;
 pub use workspace_quota::{
     DEFAULT_MAX_BLOB_BYTES, QuotaEnforcedWorkspace, UPLOAD_BODY_LIMIT_BYTES, WorkspaceQuota,
 };

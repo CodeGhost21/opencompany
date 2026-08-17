@@ -1148,14 +1148,22 @@ impl RuntimeBuilder {
                 // wrapped INSIDE the announcer so a refused write is never
                 // announced — the feed must not claim a file appeared that the
                 // quota rejected. See [`QuotaEnforcedWorkspace`].
+                // And the `derived/` folder refuses a hand-written edit,
+                // wrapped INSIDE both so a refused edit is never announced and
+                // never charged — and so that every writer, console or agent or
+                // workflow node, obeys without knowing it does. See
+                // [`DerivedGuardWorkspace`].
                 workspace: Arc::new(WorkspaceAnnouncer::new(
                     Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
-                        self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                        Arc::new(crate::runtime::DerivedGuardWorkspace::new(
+                            self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                            ledgers_for_guard.clone(),
+                        )),
                         self.workspace_quota,
                     )),
                     events.clone(),
                 )),
-                ledgers: self.ledgers.unwrap_or_else(|| fs_ops.clone()),
+                ledgers: ledgers_for_guard.clone(),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
