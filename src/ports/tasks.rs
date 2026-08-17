@@ -531,15 +531,27 @@ where
 /// of a task was a chat message: prose in a conversation, with no durable thing
 /// to open, share, or hand to somebody else. This is that thing.
 ///
-/// # `run_id` is unconditional, and that is the whole design
+/// # A last-resort link is unconditional, and that is the whole design
 ///
 /// An output with **no** artifacts and **no** workflows is not an absence — it
 /// is the *trace case*, and it is the common one. Plenty of tasks produce no
 /// file (a message sent, a record updated, a question answered), and for those
-/// the attempt's trace **is** the deliverable. Making `run_id` mandatory is what
-/// stops "no artifact" degrading into "no link", which is the failure epic #183
-/// §6 exists to close. It is also the fallback when an artifact is later
-/// deleted: the pinned artifact link dangles, the trace does not.
+/// the producer's own record **is** the deliverable. A mandatory last-resort
+/// link is what stops "no artifact" degrading into "no link", which is the
+/// failure epic #183 §6 exists to close. It is also the fallback when an
+/// artifact is later deleted: the pinned artifact link dangles, the producer
+/// does not.
+///
+/// **The invariant is "there is always something to open", not "there is always
+/// a `run_id`"** (issue #806). Until that issue this field *was* a bare
+/// `run_id: String`, and its own docs argued the mandatory run was the design —
+/// conflating the guarantee with the single mechanism that happened to provide
+/// it. A run is *an* addressable producer; it is not the only one. An operator
+/// chat turn produces things too, and run records stay deliberately reserved for
+/// actual work attempts (#183 §4), so such a turn has no run to name and a card
+/// it settled could carry no output at all. [`TaskOutputSource`] is that
+/// distinction made explicit: the guarantee is unchanged and now type-level,
+/// while what satisfies it is a closed set the console matches on.
 ///
 /// # Which attempt, and why nothing has to choose
 ///
@@ -567,17 +579,14 @@ where
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskOutput {
-    /// The attempt that produced it — always present, and the link of last
-    /// resort (see the type's docs).
-    pub run_id: String,
-    /// That attempt's 1-based ordinal, for the operator-facing label
-    /// (*"attempt 2"*).
+    /// What produced it — and the link of last resort (see the type's docs).
     ///
-    /// `None` when the run row could not be read at stamp time. The ordinal is
-    /// a label, never an identity: `run_id` addresses the attempt either way, so
-    /// a failed read costs a nicety and never a link.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attempt: Option<u32>,
+    /// Flattened, so a [`Run`](TaskOutputSource::Run) source is *byte-identical*
+    /// on the wire to the `runId` + `attempt` pair this struct carried before
+    /// [`TaskOutputSource`] existed. That is what makes this need no migration:
+    /// every stored card deserializes into the variant it always meant.
+    #[serde(flatten)]
+    pub source: TaskOutputSource,
     /// Epoch-millis the stamp was written (the moment the attempt settled).
     pub at_millis: u64,
     /// Every artifact the attempt published, pinned at the version it wrote.
@@ -594,6 +603,89 @@ pub struct TaskOutput {
     /// correlation, not of the record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workflows: Vec<TaskOutputWorkflow>,
+}
+
+/// What produced a [`TaskOutput`] — and, when nothing else survives, what the
+/// card's link of last resort points at (issue #806).
+///
+/// # Why this is a sum and not an optional `run_id`
+///
+/// Making `run_id` optional would have been honest about the absence and silent
+/// about what is actually there, leaving every reader to re-derive "then what do
+/// I link to?" and the console's trace arm to degrade to the card even for a
+/// turn that demonstrably produced a workflow. Synthesising a run row for a chat
+/// turn was the other candidate and is worse: it would reopen #183 §4 on purpose
+/// — *"run records stay reserved for actual work attempts, so the Attempts list
+/// shows turns that did something"* — and put an id that addresses nothing real
+/// behind a type that promises it does.
+///
+/// A closed set keeps the guarantee the type has always made (there is always
+/// one more link) while saying which kind of thing is at the other end, so the
+/// console can label it correctly instead of calling a conversation an attempt.
+///
+/// # Wire compatibility
+///
+/// `#[serde(untagged)]` plus the `#[serde(flatten)]` on
+/// [`TaskOutput::source`] means [`Run`](Self::Run) reads and writes exactly the
+/// `runId` / `attempt` keys the struct used before this type existed. Stored
+/// cards need no migration and no dual-read: they deserialize into `Run`, which
+/// is what they always were. A `ChatTurn` is new keys on a new record only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+// `rename_all` on an enum renames the VARIANTS, not their fields, and an
+// untagged enum never writes a variant name — so it would have silently done
+// nothing here while the fields went out as `run_id`/`chat_id` and broke every
+// stored card. `rename_all_fields` is the attribute that reaches them.
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum TaskOutputSource {
+    /// A work attempt — the original and still overwhelmingly common case.
+    Run {
+        /// The attempt that produced it.
+        run_id: String,
+        /// That attempt's 1-based ordinal, for the operator-facing label
+        /// (*"attempt 2"*).
+        ///
+        /// `None` when the run row could not be read at stamp time. The ordinal
+        /// is a label, never an identity: `run_id` addresses the attempt either
+        /// way, so a failed read costs a nicety and never a link.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+    },
+    /// An operator chat turn that produced something without a work attempt
+    /// behind it — a turn that authored a workflow inline with `create_workflow`
+    /// being the case that forced this (PR #805, issue #678).
+    ///
+    /// Carries the conversation, which is the durable, addressable record of
+    /// what the operator asked for and what came back. It is deliberately **not**
+    /// a run: minting one would make the Attempts list claim work was attempted.
+    ChatTurn {
+        /// The conversation the turn belongs to — [`TaskRecord::origin_chat_id`]
+        /// for the card this settles.
+        chat_id: String,
+    },
+}
+
+impl TaskOutputSource {
+    /// The run that produced this, when one did.
+    ///
+    /// The accessor exists so the many readers that only ever wanted "which run,
+    /// if any" do not each grow a `match`. A chat turn answers `None`, which is
+    /// the truthful answer to a question about runs — never an absence of a
+    /// *link*, which [`TaskOutput`] still always has.
+    pub fn run_id(&self) -> Option<&str> {
+        match self {
+            Self::Run { run_id, .. } => Some(run_id.as_str()),
+            Self::ChatTurn { .. } => None,
+        }
+    }
+
+    /// That attempt's 1-based ordinal, when there is an attempt and it was
+    /// readable.
+    pub fn attempt(&self) -> Option<u32> {
+        match self {
+            Self::Run { attempt, .. } => *attempt,
+            Self::ChatTurn { .. } => None,
+        }
+    }
 }
 
 /// One published deliverable, pinned to the exact revision this attempt wrote.
@@ -1379,8 +1471,10 @@ mod test {
     fn an_output_stamp_round_trips_and_is_absent_on_a_legacy_card() {
         let mut card = plain_card();
         card.output = Some(TaskOutput {
-            run_id: "run-2".to_string(),
-            attempt: Some(2),
+            source: TaskOutputSource::Run {
+                run_id: "run-2".to_string(),
+                attempt: Some(2),
+            },
             at_millis: 99,
             artifacts: vec![TaskOutputArtifact {
                 artifact_id: "a-1".to_string(),
@@ -1429,8 +1523,10 @@ mod test {
     fn a_task_that_produced_no_file_still_carries_a_link() {
         let mut card = plain_card();
         card.output = Some(TaskOutput {
-            run_id: "run-1".to_string(),
-            attempt: Some(1),
+            source: TaskOutputSource::Run {
+                run_id: "run-1".to_string(),
+                attempt: Some(1),
+            },
             at_millis: 5,
             artifacts: Vec::new(),
             workflows: Vec::new(),
@@ -1443,7 +1539,7 @@ mod test {
 
         let back: TaskRecord = serde_json::from_str(&json).expect("round trip");
         let output = back.output.expect("the stamp survives with no deliverable");
-        assert_eq!(output.run_id, "run-1");
+        assert_eq!(output.source.run_id(), Some("run-1"));
         assert!(output.artifacts.is_empty());
         assert!(output.workflows.is_empty());
     }
@@ -1453,8 +1549,10 @@ mod test {
     #[test]
     fn an_unknown_attempt_ordinal_still_leaves_an_addressable_link() {
         let output = TaskOutput {
-            run_id: "run-9".to_string(),
-            attempt: None,
+            source: TaskOutputSource::Run {
+                run_id: "run-9".to_string(),
+                attempt: None,
+            },
             at_millis: 5,
             artifacts: Vec::new(),
             workflows: Vec::new(),
@@ -1462,8 +1560,93 @@ mod test {
         let json = serde_json::to_string(&output).expect("serialize");
         assert!(!json.contains("attempt"), "{json}");
         let back: TaskOutput = serde_json::from_str(&json).expect("round trip");
-        assert_eq!(back.run_id, "run-9");
-        assert_eq!(back.attempt, None);
+        assert_eq!(back.source.run_id(), Some("run-9"));
+        assert_eq!(back.source.attempt(), None);
+    }
+
+    // --- issue #806: an output whose producer is not a run --------------------
+
+    /// **The migration guarantee.** Every card written before `TaskOutputSource`
+    /// existed carries a bare `runId` + `attempt` pair, and there is no dual-read
+    /// anywhere — so if this stops deserializing into `Run`, every stamped card
+    /// in every store silently loses its link.
+    ///
+    /// The literal here is deliberately hand-written rather than produced by
+    /// serializing the current type: a test that round-trips today's shape would
+    /// still pass if both halves drifted together, which is exactly the failure
+    /// it is supposed to catch.
+    #[test]
+    fn a_stamp_written_before_the_source_union_still_reads_as_a_run() {
+        let stored = r#"{"runId":"run-7","attempt":2,"atMillis":1234}"#;
+        let output: TaskOutput =
+            serde_json::from_str(stored).expect("a pre-#806 stamp must still load");
+        assert_eq!(output.source.run_id(), Some("run-7"));
+        assert_eq!(output.source.attempt(), Some(2));
+        assert_eq!(output.at_millis, 1234);
+    }
+
+    /// And the other direction: a `Run` source must still *write* those exact
+    /// keys, so a card stamped by this build is readable by anything that has
+    /// not been updated — and by the console's `"runId" in output` discriminator.
+    #[test]
+    fn a_run_source_serializes_to_the_keys_it_always_did() {
+        let output = TaskOutput {
+            source: TaskOutputSource::Run {
+                run_id: "run-7".to_string(),
+                attempt: Some(2),
+            },
+            at_millis: 1234,
+            artifacts: Vec::new(),
+            workflows: Vec::new(),
+        };
+        let json = serde_json::to_string(&output).expect("serialize");
+        assert!(json.contains(r#""runId":"run-7""#), "{json}");
+        assert!(json.contains(r#""attempt":2"#), "{json}");
+        assert!(
+            !json.contains("chatId") && !json.contains("source"),
+            "the union must be flattened, not nested or tagged: {json}"
+        );
+    }
+
+    /// A chat turn's stamp carries the conversation and **no** run — the whole
+    /// point of #806. `run_id()` answering `None` is the truthful answer to a
+    /// question about runs, and is what stops a reader labelling a conversation
+    /// as an attempt.
+    #[test]
+    fn a_chat_turn_stamp_carries_a_conversation_and_no_run() {
+        let output = TaskOutput {
+            source: TaskOutputSource::ChatTurn {
+                chat_id: "chat-3".to_string(),
+            },
+            at_millis: 9,
+            artifacts: Vec::new(),
+            workflows: vec![TaskOutputWorkflow {
+                workflow_id: "wf-1".to_string(),
+                run_id: None,
+                action: TaskOutputAction::Created,
+            }],
+        };
+        let json = serde_json::to_string(&output).expect("serialize");
+        assert!(json.contains(r#""chatId":"chat-3""#), "{json}");
+        assert!(
+            !json.contains("runId\":\"chat"),
+            "a chat turn must never be written as a run: {json}"
+        );
+
+        let back: TaskOutput = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back.source.run_id(), None);
+        assert_eq!(back.source.attempt(), None);
+        assert_eq!(
+            back.source,
+            TaskOutputSource::ChatTurn {
+                chat_id: "chat-3".to_string()
+            }
+        );
+        assert_eq!(
+            back.workflows.len(),
+            1,
+            "the deliverable it produced is what makes the link worth having"
+        );
     }
 
     // --- The plan → workflow bridge (issue #580) -----------------------------

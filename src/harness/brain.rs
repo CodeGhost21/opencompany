@@ -64,7 +64,7 @@ use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact};
+use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact, TaskOutputSource};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
     TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
@@ -1171,8 +1171,10 @@ impl HarnessBrain {
         // failed retry cannot erase the link to the success before it.
         if succeeded && let Some(sink) = sink.as_ref() {
             card.output = Some(TaskOutput {
-                run_id: sink.run_id().to_string(),
-                attempt: self.attempt_ordinal(sink.run_id()).await,
+                source: TaskOutputSource::Run {
+                    run_id: sink.run_id().to_string(),
+                    attempt: self.attempt_ordinal(sink.run_id()).await,
+                },
                 at_millis: now_millis(),
                 artifacts: recorded,
                 workflows: staged_workflows,

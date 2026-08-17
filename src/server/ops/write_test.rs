@@ -565,7 +565,7 @@ async fn a_task_created_from_a_thread_remembers_and_reads_back_that_thread() {
 async fn a_stamped_card_hands_its_output_link_to_both_reads() {
     use crate::ports::artifacts::ArtifactKind;
     use crate::ports::tasks::{
-        TaskOutput, TaskOutputAction, TaskOutputArtifact, TaskOutputWorkflow,
+        TaskOutput, TaskOutputAction, TaskOutputArtifact, TaskOutputSource, TaskOutputWorkflow,
     };
 
     let home_dir = home();
@@ -598,8 +598,10 @@ async fn a_stamped_card_hands_its_output_link_to_both_reads() {
         .find(|t| t.id == id)
         .expect("card");
     card.output = Some(TaskOutput {
-        run_id: "run-2".to_string(),
-        attempt: Some(2),
+        source: TaskOutputSource::Run {
+            run_id: "run-2".to_string(),
+            attempt: Some(2),
+        },
         at_millis: 42,
         artifacts: vec![TaskOutputArtifact {
             artifact_id: "a-1".to_string(),

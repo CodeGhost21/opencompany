@@ -98,17 +98,37 @@ function linksFor(taskId: string, output: TaskOutput): TaskLink[] {
           : "Opens the workflow this task built. It has not been run yet.",
     });
   }
-  // Always last, and always present: the attempt is the deliverable when
+  // Always last, and always present: the producer is the deliverable when
   // nothing else is, and the fallback when a published artifact is later
   // deleted. This is what stops "no artifact" degrading into "no link".
-  links.push({
-    kind: "trace",
-    href: traceHref(taskId, output.runId),
-    label: output.attempt
-      ? `View run trace · attempt ${output.attempt}`
-      : "View run trace",
-    hint: "Opens what this attempt actually did, step by step.",
-  });
+  //
+  // Which producer is a closed set (issue #806). A run has a trace to open; an
+  // operator chat turn has no run row and never gets a synthetic one, so it
+  // falls back to the card and says why. Labelling a conversation "attempt 1"
+  // would be the lie the union exists to prevent.
+  if ("runId" in output) {
+    links.push({
+      kind: "trace",
+      href: traceHref(taskId, output.runId),
+      label: output.attempt
+        ? `View run trace · attempt ${output.attempt}`
+        : "View run trace",
+      hint: "Opens what this attempt actually did, step by step.",
+    });
+  } else {
+    // `#/conversation/<id>` is deliberately NOT used here: `conversation` is a
+    // view in the hash router but the active thread is component state, so no
+    // such address resolves today. The card is where the conversation is
+    // reachable from ("Opened from a conversation", issue #246), so this points
+    // there and says so rather than minting a link that would silently land on
+    // the wrong thread. Deep-linking the thread is its own change.
+    links.push({
+      kind: "card",
+      href: cardHref(taskId),
+      label: "Open this task",
+      hint: "This was settled by a chat turn rather than a run, so there is no attempt to open — the conversation it came from is linked on the card.",
+    });
+  }
   return links;
 }
 

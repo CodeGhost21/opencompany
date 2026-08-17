@@ -133,6 +133,17 @@ Old `RunRecord`s are never synthesised from historical `AgentReply` events:
 fabricating identity for attempts nobody recorded would be worse than a
 pre-existing card honestly showing zero of them.
 
+Nor is one synthesised for an **operator chat turn** (issue #806). A turn that
+produces something from chat — authoring a workflow inline with
+`create_workflow`, say — has no attempt behind it, and minting a run row so its
+card could carry a `TaskOutput` would make the Attempts tab claim work was
+attempted. Run records stay reserved for actual work attempts, so the Attempts
+list shows turns that did something (epic #183 §4). `TaskOutput` instead names
+*what produced it* as a closed set — `TaskOutputSource::Run` or
+`TaskOutputSource::ChatTurn` — which keeps the board's "every card in Done links
+to what it produced" (#339) true without weakening what a run means. See
+[ports-state.md](ports-state.md) for the task record itself.
+
 ## Reading runs back
 
 Three surfaces, all in `src/server/ops/runs.rs`, under both scope forms:
