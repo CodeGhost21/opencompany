@@ -185,6 +185,10 @@ struct RetireQuery {
 /// becomes a system author, which the service refuses every deletion from. That
 /// is deliberate and not an oversight: the platform credential is a tenant, not
 /// a person, and *only a person deletes* has to mean a person.
+fn ctx(scope: &ScopedCompany) -> ledgers::Ledgers {
+    scope.runtime.as_ref().into()
+}
+
 fn author(scope: &ScopedCompany) -> LedgerAuthor {
     match &scope.actor {
         Some(actor) if matches!(actor.kind, ActorKind::Operator | ActorKind::User) => {
@@ -196,10 +200,10 @@ fn author(scope: &ScopedCompany) -> LedgerAuthor {
 }
 
 async fn summary(
-    runtime: &crate::company::runtime::CompanyRuntime,
+    ctx: &ledgers::Ledgers,
     spec: &LedgerSpec,
 ) -> Result<LedgerSummary, ApiError> {
-    let entries = ledgers::entries(runtime, spec).await?;
+    let entries = ledgers::entries(ctx, spec).await?;
     Ok(LedgerSummary {
         slug: spec.slug.clone(),
         title: spec.title.clone(),
@@ -218,10 +222,10 @@ async fn summary(
 }
 
 async fn list_ledgers(scope: ScopedCompany) -> Result<Json<LedgerList>, ApiError> {
-    let registry = ledgers::registry(&scope.runtime).await?;
+    let registry = ledgers::registry(&ctx(&scope)).await?;
     let mut out = Vec::new();
     for spec in registry.specs() {
-        out.push(summary(&scope.runtime, spec).await?);
+        out.push(summary(&ctx(&scope), spec).await?);
     }
     let declared = registry.specs().iter().filter(|spec| !spec.builtin).count();
     Ok(Json(LedgerList {
@@ -235,8 +239,8 @@ async fn define_ledger(
     scope: ScopedCompany,
     Json(document): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<LedgerSummary>), ApiError> {
-    let spec = ledgers::define(&scope.runtime, &document).await?;
-    let summary = summary(&scope.runtime, &spec).await?;
+    let spec = ledgers::define(&ctx(&scope), &document).await?;
+    let summary = summary(&ctx(&scope), &spec).await?;
     Ok((StatusCode::CREATED, Json(summary)))
 }
 
@@ -245,10 +249,10 @@ async fn read_ledger(
     Path(path): Path<LedgerPath>,
     Query(query): Query<ReadQuery>,
 ) -> Result<Json<LedgerRead>, ApiError> {
-    let registry = ledgers::registry(&scope.runtime).await?;
+    let registry = ledgers::registry(&ctx(&scope)).await?;
     let spec = registry.require(&path.slug)?;
     let read = ledgers::read(
-        &scope.runtime,
+        &ctx(&scope),
         spec,
         &ledgers::Query {
             entry: query.entry,
@@ -260,7 +264,7 @@ async fn read_ledger(
     )
     .await?;
     Ok(Json(LedgerRead {
-        ledger: summary(&scope.runtime, spec).await?,
+        ledger: summary(&ctx(&scope), spec).await?,
         entries: read.entries.iter().map(|e| EntryRow::of(e, spec)).collect(),
         matched: read.matched,
         faults: read.faults,
@@ -272,9 +276,9 @@ async fn rendered(
     scope: ScopedCompany,
     Path(path): Path<LedgerPath>,
 ) -> Result<String, ApiError> {
-    let registry = ledgers::registry(&scope.runtime).await?;
+    let registry = ledgers::registry(&ctx(&scope)).await?;
     let spec = registry.require(&path.slug)?;
-    Ok(ledgers::render(&scope.runtime, spec).await?)
+    Ok(ledgers::render(&ctx(&scope), spec).await?)
 }
 
 async fn record_entry(
@@ -282,7 +286,7 @@ async fn record_entry(
     Path(path): Path<LedgerPath>,
     Json(body): Json<RecordBody>,
 ) -> Result<Json<EntryRow>, ApiError> {
-    let registry = ledgers::registry(&scope.runtime).await?;
+    let registry = ledgers::registry(&ctx(&scope)).await?;
     let spec = registry.require(&path.slug)?;
     let mut fields = body.fields;
     if let Some(status) = body.status
@@ -293,7 +297,7 @@ async fn record_entry(
     if let Some(reason) = body.reason {
         fields.insert(crate::ledger::REASON_FIELD.to_string(), Some(reason));
     }
-    let entry = ledgers::record(&scope.runtime, spec, &author(&scope), &body.id, fields).await?;
+    let entry = ledgers::record(&ctx(&scope), spec, &author(&scope), &body.id, fields).await?;
     Ok(Json(EntryRow::of(&entry, spec)))
 }
 
@@ -301,10 +305,10 @@ async fn delete_entry(
     scope: ScopedCompany,
     Path(path): Path<EntryPath>,
 ) -> Result<StatusCode, ApiError> {
-    let registry = ledgers::registry(&scope.runtime).await?;
+    let registry = ledgers::registry(&ctx(&scope)).await?;
     let spec = registry.require(&path.slug)?;
     let removed =
-        ledgers::delete_entry(&scope.runtime, spec, &author(&scope), &path.entry_id).await?;
+        ledgers::delete_entry(&ctx(&scope), spec, &author(&scope), &path.entry_id).await?;
     Ok(if removed {
         StatusCode::NO_CONTENT
     } else {
@@ -317,7 +321,7 @@ async fn retire_ledger(
     Path(path): Path<LedgerPath>,
     Query(query): Query<RetireQuery>,
 ) -> Result<StatusCode, ApiError> {
-    ledgers::retire(&scope.runtime, &author(&scope), &path.slug, query.purge).await?;
+    ledgers::retire(&ctx(&scope), &author(&scope), &path.slug, query.purge).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
