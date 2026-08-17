@@ -187,6 +187,12 @@ pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
 /// and/or a source directory), the agent's effective skill set is materialized
 /// and surfaced as three read tools plus a persona-prompt catalogue.
 ///
+/// `routed_context` are this agent's workspace documents, already selected by
+/// [`context_routing`](crate::company::context_routing) and read out of the
+/// store by the async caller. Passed in rather than fetched here for the same
+/// reason `skill_deltas` is: this function is synchronous and runs on every
+/// roster rebuild, while the `WorkspaceStore` is async.
+///
 /// `is_orchestrator` marks the company's orchestrator agent (issue #53): it
 /// additionally receives the delegating-orchestrator persona brief and the
 /// `query_company` / `spawn_task` / `delegate_to_desk` tools.
@@ -203,6 +209,7 @@ pub fn build_agent(
     deps: &HarnessDeps,
     grants: &[String],
     skill_deltas: &[SkillState],
+    routed_context: &[(String, String)],
     is_orchestrator: bool,
 ) -> crate::Result<Agent> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
@@ -843,6 +850,13 @@ pub fn build_agent(
             },
         ));
     }
+
+    // The routed workspace documents go LAST, after every tool brief. They are
+    // the most volatile thing in the prompt — an operator editing a note between
+    // two turns moves them — and the prompt prefix is what a provider cache
+    // reuses across turns, so putting them anywhere earlier would invalidate
+    // every brief behind them on an edit that changed none of those briefs.
+    persona.push_str(&crate::company::prompt::context_section(routed_context));
 
     let prompt_builder = SystemPromptBuilder::for_subagent(
         persona, /* omit_identity */ true, /* omit_safety_preamble */ false,
@@ -1528,6 +1542,7 @@ mod tests {
             &deps,
             &grants,
             &[],
+            &[],
             is_orchestrator,
         )
         .expect("agent builds");
@@ -1572,6 +1587,7 @@ mod tests {
             &deps,
             &grants,
             &[],
+            &[],
             false,
         )
         .expect("agent builds");
@@ -1612,6 +1628,7 @@ mod tests {
             &deps,
             &grants,
             &[],
+            &[],
             false,
         )
         .expect("agent builds");
@@ -1649,6 +1666,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
@@ -1849,6 +1867,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
