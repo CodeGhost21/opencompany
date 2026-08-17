@@ -772,6 +772,20 @@ pub fn list_workflows_union(
     source_dir: Option<&Path>,
     overlays: &[crate::ports::types::OverlayWorkflow],
 ) -> Vec<WorkflowFile> {
+    list_workflows_with_globals(source_dir, overlays, &[])
+}
+
+/// [`list_workflows_union`], honouring a company's `[globals].disable`.
+///
+/// Global graphs are listed **last**, after the company's own seeds and saved
+/// overlays and only for ids neither of those already carries — the same
+/// precedence [`load_workflow_with_globals`] applies, so the picker and the
+/// loader can never disagree about which graph an id means.
+pub fn list_workflows_with_globals(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    disable: &[String],
+) -> Vec<WorkflowFile> {
     let mut files = list_source_workflows(source_dir);
     let mut seen: std::collections::HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
 
