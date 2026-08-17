@@ -110,5 +110,11 @@ describe("a configured host with no companies", () => {
     );
 
     expect(container.querySelector('[data-testid="no-company"]')).toBeNull();
+    // Prove the picker itself rendered, not merely the absence of the
+    // no-company screen: the supplied companies are on screen.
+    expect(container.textContent).toContain("Acme");
+    expect(container.textContent).toContain("Beta");
+    // Never the generic connection-error screen, which only offers a reload.
+    expect(container.querySelector('[data-testid="connection-error"]')).toBeNull();
   });
 });
