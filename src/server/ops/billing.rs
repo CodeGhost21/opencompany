@@ -144,30 +144,33 @@ async fn put_paypal(
     Json(body): Json<PaypalConfigBody>,
 ) -> Result<Json<PaypalStatus>, ApiError> {
     let runtime = &company.runtime;
-    let write = async |key: &str, value: Option<&str>| -> Result<(), ApiError> {
-        if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
-            runtime
-                .secrets()
-                .set(runtime.id(), key, SecretValue(value.to_string()))
-                .await?;
-        }
-        Ok(())
+    let supplied = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
     };
-    write(CLIENT_ID_SECRET, body.client_id.as_deref()).await?;
-    write(CLIENT_SECRET_SECRET, body.client_secret.as_deref()).await?;
+
+    // Collected and then applied together — a client id stored without its
+    // secret is exactly the half-configured state `write_all` exists to prevent.
+    let mut writes: Vec<(&str, String)> = Vec::new();
+    if let Some(client_id) = supplied(body.client_id.as_deref()) {
+        writes.push((CLIENT_ID_SECRET, client_id));
+    }
+    if let Some(client_secret) = supplied(body.client_secret.as_deref()) {
+        writes.push((CLIENT_SECRET_SECRET, client_secret));
+    }
     if let Some(raw) = body.environment.as_deref() {
         // Normalised through the same parser the client uses, so an unrecognised
         // value is stored as `sandbox` rather than kept verbatim and re-parsed
         // differently somewhere else later.
-        runtime
-            .secrets()
-            .set(
-                runtime.id(),
-                ENVIRONMENT_SECRET,
-                SecretValue(PaypalEnvironment::parse(raw).as_str().to_string()),
-            )
-            .await?;
+        writes.push((
+            ENVIRONMENT_SECRET,
+            PaypalEnvironment::parse(raw).as_str().to_string(),
+        ));
     }
+    write_all(runtime, &writes).await?;
+
     Ok(Json(paypal_status_of(runtime).await?))
 }
 
@@ -177,12 +180,14 @@ async fn put_paypal(
 /// rather than silently inheriting `live` from a previous account.
 async fn delete_paypal(company: AdminScopedCompany) -> Result<Json<PaypalStatus>, ApiError> {
     let runtime = &company.runtime;
-    for key in [CLIENT_ID_SECRET, CLIENT_SECRET_SECRET, ENVIRONMENT_SECRET] {
-        runtime
-            .secrets()
-            .set(runtime.id(), key, SecretValue(String::new()))
-            .await?;
-    }
+    // Together, for the same reason as the write: a clear that dropped the
+    // client id and then failed would leave a secret with no id — still "half
+    // configured", and reported by `PaypalStatus` as such.
+    let cleared: Vec<(&str, String)> = [CLIENT_ID_SECRET, CLIENT_SECRET_SECRET, ENVIRONMENT_SECRET]
+        .into_iter()
+        .map(|key| (key, String::new()))
+        .collect();
+    write_all(runtime, &cleared).await?;
     Ok(Json(paypal_status_of(runtime).await?))
 }
 
@@ -195,6 +200,71 @@ async fn delete_paypal(company: AdminScopedCompany) -> Result<Json<PaypalStatus>
 fn webhook_url(state: &AppState, company: &CompanyId) -> Option<String> {
     let base = state.config().public_webhook_base_url()?;
     Some(format!("{base}/hooks/{}/chargebee", company.as_ref()))
+}
+
+/// Applies a batch of credential writes so a failure part-way through cannot
+/// leave a company half configured.
+///
+/// The module header says a half-configured company is "impossible to express by
+/// accident". Sequential `set` calls, each with its own `?`, did not deliver
+/// that: a store that accepted the API key and then failed on the webhook
+/// credential returned an error to an operator whose key had nonetheless been
+/// stored — and the pair is meaningless apart, which is the whole reason they
+/// live in one place.
+///
+/// [`SecretStore`](crate::ports::SecretStore) has neither a transaction nor a
+/// delete; `set` is its entire write surface. So atomicity is built here: every
+/// key's prior value is read first, and a failure restores the ones already
+/// written before the original error is returned. A key with no prior value is
+/// restored to the empty string, which is how this module already spells "unset"
+/// (see [`delete_billing`]) and what every read site already treats as absent.
+///
+/// **The rollback is best-effort, by necessity.** It is itself a sequence of
+/// `set` calls against a store that has just failed one, so it can fail too.
+/// What it cannot undo it logs at `error` with the key named, because an
+/// operator told "save failed" who then finds a credential stored anyway has no
+/// way to discover that on their own.
+async fn write_all(runtime: &CompanyRuntime, writes: &[(&str, String)]) -> Result<(), ApiError> {
+    // Snapshot first. Reading after a partial write would capture the value this
+    // function itself just stored and roll back to it.
+    let mut prior: Vec<(&str, String)> = Vec::with_capacity(writes.len());
+    for (key, _) in writes {
+        prior.push((
+            key,
+            runtime
+                .secrets()
+                .get(runtime.id(), key)
+                .await?
+                .map(|value| value.expose().to_string())
+                .unwrap_or_default(),
+        ));
+    }
+
+    for (index, (key, value)) in writes.iter().enumerate() {
+        let Err(err) = runtime
+            .secrets()
+            .set(runtime.id(), key, SecretValue(value.clone()))
+            .await
+        else {
+            continue;
+        };
+        for (done, before) in &prior[..index] {
+            if let Err(undo) = runtime
+                .secrets()
+                .set(runtime.id(), done, SecretValue(before.clone()))
+                .await
+            {
+                tracing::error!(
+                    company = %runtime.id(),
+                    key = done,
+                    "[billing] a credential write failed and could not be rolled back; this \
+                     company is now half configured: {undo}"
+                );
+            }
+        }
+        return Err(ApiError(err));
+    }
+    Ok(())
 }
 
 /// Reads a stored secret, treating empty as absent.
@@ -286,29 +356,33 @@ async fn put_billing(
     Json(body): Json<BillingConfigBody>,
 ) -> Result<Json<BillingStatus>, ApiError> {
     let runtime = &company.runtime;
-    let write = async |key: &str, value: Option<&str>| -> Result<(), ApiError> {
-        if let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) {
-            runtime
-                .secrets()
-                .set(runtime.id(), key, SecretValue(value.to_string()))
-                .await?;
-        }
-        Ok(())
+    let supplied = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
     };
-    write(API_KEY_SECRET, body.api_key.as_deref()).await?;
-    write(WEBHOOK_SECRET_KEY, body.webhook_secret.as_deref()).await?;
 
+    // Collected and then applied together. Written one `?` at a time, a store
+    // that took the API key and then failed on the webhook credential left the
+    // key stored behind an error response — the half-configured state this
+    // module's header claims cannot be reached by accident.
+    let mut writes: Vec<(&str, String)> = Vec::new();
+    if let Some(api_key) = supplied(body.api_key.as_deref()) {
+        writes.push((API_KEY_SECRET, api_key));
+    }
+    if let Some(webhook_secret) = supplied(body.webhook_secret.as_deref()) {
+        writes.push((WEBHOOK_SECRET_KEY, webhook_secret));
+    }
     if let Some(site) = body
         .site
         .as_deref()
         .map(normalize_site)
         .filter(|s| !s.is_empty())
     {
-        runtime
-            .secrets()
-            .set(runtime.id(), SITE_SECRET, SecretValue(site))
-            .await?;
+        writes.push((SITE_SECRET, site));
     }
+    write_all(runtime, &writes).await?;
 
     Ok(Json(status_of(&state, runtime).await?))
 }
@@ -323,12 +397,15 @@ async fn delete_billing(
     State(state): State<AppState>,
 ) -> Result<Json<BillingStatus>, ApiError> {
     let runtime = &company.runtime;
-    for key in [API_KEY_SECRET, SITE_SECRET, WEBHOOK_SECRET_KEY] {
-        runtime
-            .secrets()
-            .set(runtime.id(), key, SecretValue(String::new()))
-            .await?;
-    }
+    // Together: a clear that dropped the key and then failed on the webhook
+    // credential would report the integration as disconnected while leaving the
+    // webhook endpoint live — the failure `clearing_removes_the_webhook_secret_
+    // too_not_just_the_key` guards against, arrived at by a different route.
+    let cleared: Vec<(&str, String)> = [API_KEY_SECRET, SITE_SECRET, WEBHOOK_SECRET_KEY]
+        .into_iter()
+        .map(|key| (key, String::new()))
+        .collect();
+    write_all(runtime, &cleared).await?;
     Ok(Json(status_of(&state, runtime).await?))
 }
 
@@ -557,6 +634,243 @@ mod tests {
         assert_eq!(cleared["clientIdConfigured"], false);
         assert_eq!(cleared["clientSecretConfigured"], false);
         assert_eq!(cleared["environment"], "sandbox", "{cleared}");
+    }
+
+    /// An in-memory secret store whose `set` refuses one nominated key.
+    ///
+    /// The failure worth simulating is a store that works, then stops working
+    /// mid-batch — a `set` that times out, a full disk, a dropped Mongo
+    /// connection. A store that fails everything would never get far enough to
+    /// leave the half-configured state.
+    #[derive(Default)]
+    struct FailsOnOneKey {
+        refuse: &'static str,
+        stored: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::SecretStore for FailsOnOneKey {
+        async fn get(
+            &self,
+            _company: &CompanyId,
+            key: &str,
+        ) -> crate::error::Result<Option<SecretValue>> {
+            Ok(self
+                .stored
+                .lock()
+                .expect("lock")
+                .get(key)
+                .map(|value| SecretValue(value.clone())))
+        }
+
+        async fn set(
+            &self,
+            _company: &CompanyId,
+            key: &str,
+            value: SecretValue,
+        ) -> crate::error::Result<()> {
+            if key == self.refuse {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "the secret store went away mid-write".into(),
+                ));
+            }
+            self.stored
+                .lock()
+                .expect("lock")
+                .insert(key.to_string(), value.0);
+            Ok(())
+        }
+    }
+
+    /// A host whose company's secret store refuses to write `refuse`.
+    async fn state_with_failing_secrets(home: &std::path::Path, refuse: &'static str) -> AppState {
+        use crate::ports::CompanyStore;
+        use crate::ports::types::CompanyRecord;
+
+        let id = CompanyId::new("acme");
+        let manifest: crate::company::CompanyManifest = ::toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        crate::store::FsCompanyStore::new(home.to_path_buf())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .expect("save");
+
+        let secrets = std::sync::Arc::new(FailsOnOneKey {
+            refuse,
+            ..Default::default()
+        });
+        let runtime = crate::runtime::RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_secrets(secrets)
+            .build()
+            .await
+            .expect("runtime");
+        let state = AppState::new(crate::AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        state
+    }
+
+    #[tokio::test]
+    async fn a_save_that_fails_part_way_stores_nothing_at_all() {
+        // The module header claims a half-configured company is impossible to
+        // express by accident. Written one `?` at a time it was not: a store
+        // that took the API key and then failed on the webhook credential
+        // answered the operator with an error while keeping the key. The
+        // credential pair is meaningless apart, so "the save failed" and "the
+        // key is stored" must not both be true.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_failing_secrets(home.path(), WEBHOOK_SECRET_KEY).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        let (status, answer) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/billing/chargebee",
+            &admin,
+            Some(json!({
+                "apiKey": "cb_live_supersecret",
+                "site": "acme-test",
+                "webhookSecret": "cbuser:cbpass",
+            })),
+        )
+        .await;
+        assert!(
+            status.is_server_error() || status.is_client_error(),
+            "a failed write must not answer OK: {status} {answer}"
+        );
+
+        // Read the store directly. Going through `GET` would prove only that the
+        // status agrees with itself; what matters is that nothing was left on
+        // disk for the next request — or the next agent turn — to pick up.
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("company");
+        for key in [API_KEY_SECRET, SITE_SECRET, WEBHOOK_SECRET_KEY] {
+            let stored = runtime
+                .secrets()
+                .get(runtime.id(), key)
+                .await
+                .expect("read secret");
+            assert!(
+                stored
+                    .as_ref()
+                    .is_none_or(|value| value.expose().is_empty()),
+                "{key} survived a failed save: {stored:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_paypal_save_does_not_leave_half_a_credential() {
+        // Same rule on the PayPal side, where half a credential is worse than
+        // none: a client id with no secret cannot obtain a token, so the tools
+        // fail on first use rather than never being wired.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_failing_secrets(home.path(), CLIENT_SECRET_SECRET).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+
+        let (status, answer) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/billing/paypal",
+            &admin,
+            Some(json!({
+                "clientId": "AY_id",
+                "clientSecret": "EL_secret",
+                "environment": "live",
+            })),
+        )
+        .await;
+        assert!(
+            status.is_server_error() || status.is_client_error(),
+            "a failed write must not answer OK: {status} {answer}"
+        );
+
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("company");
+        for key in [CLIENT_ID_SECRET, CLIENT_SECRET_SECRET, ENVIRONMENT_SECRET] {
+            let stored = runtime
+                .secrets()
+                .get(runtime.id(), key)
+                .await
+                .expect("read secret");
+            assert!(
+                stored
+                    .as_ref()
+                    .is_none_or(|value| value.expose().is_empty()),
+                "{key} survived a failed save: {stored:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rolled_back_save_restores_what_was_there_before() {
+        // Rollback restores the PRIOR value, not "empty". An operator correcting
+        // a site who hits a store failure must still have the connection they
+        // had before they touched the form.
+        let home = ::tempfile::tempdir().expect("tempdir");
+        let state = state_with_failing_secrets(home.path(), WEBHOOK_SECRET_KEY).await;
+        let admin = crate::server::test_support::seed_admin(&state, "acme").await;
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("company");
+
+        // A working connection, stored directly so the failing key stays out of it.
+        for (key, value) in [(API_KEY_SECRET, "cb_original"), (SITE_SECRET, "acme-test")] {
+            runtime
+                .secrets()
+                .set(runtime.id(), key, SecretValue(value.to_string()))
+                .await
+                .expect("seed");
+        }
+
+        let (status, _) = call(
+            &state,
+            "PUT",
+            "/api/v1/companies/acme/billing/chargebee",
+            &admin,
+            Some(json!({
+                "apiKey": "cb_replacement",
+                "site": "acme-live",
+                "webhookSecret": "cbuser:cbpass",
+            })),
+        )
+        .await;
+        assert!(!status.is_success(), "the save failed: {status}");
+
+        for (key, expected) in [(API_KEY_SECRET, "cb_original"), (SITE_SECRET, "acme-test")] {
+            let stored = runtime
+                .secrets()
+                .get(runtime.id(), key)
+                .await
+                .expect("read secret")
+                .map(|value| value.expose().to_string());
+            assert_eq!(
+                stored.as_deref(),
+                Some(expected),
+                "{key} was not restored to what it was before the failed save"
+            );
+        }
     }
 
     #[tokio::test]
