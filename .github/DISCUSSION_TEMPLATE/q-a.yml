@@ -1,0 +1,48 @@
+title: ""
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions about running a company on OpenCompany. Mark an answer when
+        you get one — an answered thread is the next person's documentation.
+
+        Reporting behavior that should change? Open an issue instead.
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to do?
+      description: The goal, not just the error. Most answers here change the approach, not the flag.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you already tried?
+      description: Commands run, config changed, docs read. Saves the first three replies.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `opencompany --version`, or the commit you are on.
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How are you running it?
+      options:
+        - cargo run / local build
+        - Docker
+        - Hosted (opencompany-manager)
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: manifest
+    attributes:
+      label: Relevant company.toml
+      description: The section that matters, with secrets removed.
+      render: toml
