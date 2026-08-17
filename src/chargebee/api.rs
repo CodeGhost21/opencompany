@@ -488,16 +488,12 @@ pub async fn list_invoices(
     query.push_opt("limit", args.limit);
 
     let body = client.get("/invoices", &query).await?;
-    Ok(body
-        .get("list")
-        .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| row.get("invoice"))
-                .map(|invoice| summarize_invoice(invoice, None))
-                .collect()
-        })
-        .unwrap_or_default())
+    let rows = require_array(&body, "list")?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get("invoice"))
+        .map(|invoice| summarize_invoice(invoice, None))
+        .collect())
 }
 
 #[cfg(test)]
