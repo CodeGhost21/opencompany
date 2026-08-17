@@ -27,7 +27,17 @@
 // what happened the first time.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ExternalLink, FileText, ListTree, Play, Plus, Workflow } from "lucide-react";
+import {
+  AlertTriangle,
+  CircleHelp,
+  ClipboardList,
+  FileText,
+  ListTree,
+  Paperclip,
+  Play,
+  Plus,
+  ScrollText,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -45,8 +55,9 @@ import { startVisiblePolling } from "@/lib/visible-poll";
 import { ADD_TASK_COLUMN, labelFor, PRIORITY_STYLES } from "@/lib/board-columns";
 import { useBoardColumns } from "@/hooks/use-board-columns";
 import {
+  extraOutputCount,
+  primaryLink,
   readTaskFocus,
-  taskLinks,
   type TaskFocus,
   type TaskLink,
 } from "@/lib/task-output";
@@ -338,6 +349,7 @@ export function TasksView({
         <LedgerBoard
           columns={columns}
           rows={tasks}
+          statusOf={(task) => task.column}
           loading={loading}
           emptyHint="No cards"
           onMove={(task, column) => void moveTo(task, column)}

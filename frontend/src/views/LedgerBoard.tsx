@@ -38,16 +38,18 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /**
- * The least a board needs to know about a row: which one it is, and which
- * column it is in.
+ * The least a board needs to know about a row: which one it is.
  *
- * Everything else is the caller's, and reaches the screen through
- * {@link BoardProps.renderCard}.
+ * Which *column* it is in is asked for separately
+ * ({@link BoardProps.statusOf}) rather than required as a property, because the
+ * two things this board serves spell it differently — a `Task` calls it
+ * `column`, a `LedgerEntry` calls it `status` — and making either side rename
+ * its own field to satisfy a board would be the board deciding what its callers'
+ * data is called. Everything else is the caller's, and reaches the screen
+ * through {@link BoardProps.renderCard}.
  */
 export interface BoardRow {
   id: string;
-  /** The column id this row sits in — one of the board's `columns`. */
-  status: string;
 }
 
 /**
@@ -74,6 +76,8 @@ export interface BoardProps<T extends BoardRow> {
   /** The columns, in board order. The host declares them; nothing here does. */
   columns: TaskColumn[];
   rows: T[];
+  /** Which column a row sits in. See {@link BoardRow}. */
+  statusOf: (row: T) => string;
   /** One card. `dragging` is this row's own drag state, for the lifted look. */
   renderCard: (row: T, dragging: boolean) => ReactNode;
   /** A row was dropped on a column. Already filtered: never fires for a no-op. */
@@ -91,6 +95,7 @@ export interface BoardProps<T extends BoardRow> {
 export function LedgerBoard<T extends BoardRow>({
   columns,
   rows,
+  statusOf,
   renderCard,
   onMove,
   onMiss,
@@ -197,7 +202,7 @@ export function LedgerBoard<T extends BoardRow>({
       className="flex min-h-0 flex-1 gap-4 overflow-x-auto py-1"
     >
       {columns.map((column) => {
-        const held = rows.filter((row) => row.status === column.id);
+        const held = rows.filter((row) => statusOf(row) === column.id);
         return (
           <div
             key={column.id}
@@ -224,7 +229,7 @@ export function LedgerBoard<T extends BoardRow>({
               // A row dropped back on its own column is a no-op, not a move:
               // the one deliberate silence on a board where every other exit
               // says something.
-              if (row && row.status !== column.id) onMove(row, column.id);
+              if (row && statusOf(row) !== column.id) onMove(row, column.id);
             }}
             className={cn(
               "flex min-h-0 w-72 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
