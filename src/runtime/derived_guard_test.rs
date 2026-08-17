@@ -38,7 +38,7 @@ async fn runtime() -> (CompanyRuntime, tempfile::TempDir) {
 /// starts from.
 async fn with_a_ledger(runtime: &CompanyRuntime) -> (String, String) {
     ledgers::define(
-        runtime,
+        &ledgers::Ledgers::from(runtime),
         &json!({
             "slug": "risks",
             "title": "Risks",
@@ -220,11 +220,12 @@ async fn a_derived_file_can_be_moved_neither_out_nor_in() {
 async fn the_runtimes_own_derivation_still_writes() {
     let (runtime, _home) = runtime().await;
     let (_folder, file) = with_a_ledger(&runtime).await;
-    let registry = ledgers::registry(&runtime).await.expect("registry");
+    let ctx = ledgers::Ledgers::from(&runtime);
+    let registry = ledgers::registry(&ctx).await.expect("registry");
     let spec = registry.find("risks").expect("declared");
 
     ledgers::record(
-        &runtime,
+        &ctx,
         spec,
         &LedgerAuthor::agent("ceo"),
         "vendor-slip",
