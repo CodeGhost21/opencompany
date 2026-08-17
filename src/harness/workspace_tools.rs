@@ -416,9 +416,8 @@ impl CompanyWorkspace {
         let key = segments.join("/");
         scope.iter().any(|allowed| {
             super::workspace_paths::split_logical_path(allowed)
-                .map(|allowed_segments| allowed_segments.join("/"))
-                .as_deref()
-                == Ok(key.as_str())
+                .map(|allowed_segments| allowed_segments.join("/") == key)
+                .unwrap_or(false)
         })
     }
 
