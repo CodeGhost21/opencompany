@@ -182,13 +182,22 @@ test("a card drags from In review to Done, and the board scrolls to get there", 
 
   const box = await card.boundingBox();
   if (!box) throw new Error("the seeded card has no box");
-  const viewport = page.viewportSize()!;
+  // The **board's** right edge, not the window's. On its own screen the board
+  // ran to the window edge and the two were the same pixel; inside Ledgers it
+  // sits past a nav and inside the section's padding. Riding the window edge
+  // here would hold the pointer over the page *outside* the board, where its
+  // `dragover` never fires — the test would fail for a reason that has nothing
+  // to do with the behaviour, and the band is defined relative to the board
+  // anyway.
+  const edge = await board(page).boundingBox();
+  if (!edge) throw new Error("the board has no box");
+  const rightEdge = edge.x + edge.width - 8;
 
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   // Ride the right edge and let the board bring Done to the pointer.
   for (let tick = 0; tick < 25; tick += 1) {
-    await page.mouse.move(viewport.width - 8 - (tick % 2), box.y + 160);
+    await page.mouse.move(rightEdge - (tick % 2), box.y + 160);
     await page.waitForTimeout(60);
   }
   const rode = await board(page).evaluate((el) => el.scrollLeft);
@@ -233,7 +242,11 @@ test("a drop that misses every column says so instead of doing nothing", async (
   // gesture without a word.
   const gutter = await board(page).locator("div[aria-hidden].w-4").first().boundingBox();
   if (!gutter) throw new Error("no trailing gutter");
-  await handDrag(page, card, gutter.x + gutter.width / 2, gutter.y + 200);
+  // The gutter's own middle, rather than a fixed offset down it. It is a flex
+  // item stretched to the tallest column, so on a board holding a card or two
+  // it is short — and a fixed 200px would drop *below* the board entirely,
+  // which is a miss of a different kind than the one under test.
+  await handDrag(page, card, gutter.x + gutter.width / 2, gutter.y + gutter.height / 2);
 
   await expect(page.getByText("Drop the card on a column to move it.")).toBeVisible({
     timeout: 5_000,
