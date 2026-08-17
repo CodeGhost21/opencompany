@@ -85,7 +85,8 @@ use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
     WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, delete_company_workflow,
-    list_workflows_union, load_workflow_union, rollback_company_workflow, seed_file_exists,
+    list_workflows_union, list_workflows_with_globals, load_workflow_union, load_workflow_with_globals,
+    rollback_company_workflow, seed_file_exists,
     set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
