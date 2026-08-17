@@ -25,8 +25,8 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
-use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ledger::{LedgerEvent, LedgerSpec};
+use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
 use crate::ports::ledgers::LedgerStore;
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};

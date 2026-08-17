@@ -120,10 +120,8 @@ mod test {
             card("middle", COLUMN_TODO, 20),
             card("oldest", COLUMN_TODO, 10),
         ]);
-        let ordered = super::super::engine::ordered(
-            &entries.entries,
-            super::super::spec::Order::Recent,
-        );
+        let ordered =
+            super::super::engine::ordered(&entries.entries, super::super::spec::Order::Recent);
         let ids: Vec<&str> = ordered.iter().map(|entry| entry.id.as_str()).collect();
         assert_eq!(ids, ["newest", "middle", "oldest"]);
     }

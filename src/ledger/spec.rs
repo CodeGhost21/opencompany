@@ -408,8 +408,8 @@ impl LedgerSpec {
         self.purpose = self.purpose.trim().to_string();
         self.written_by = self.written_by.trim().to_string();
         if self.written_by.is_empty() {
-            self.written_by = "`record_entry` to add or amend a row, `close_entry` to close one"
-                .to_string();
+            self.written_by =
+                "`record_entry` to add or amend a row, `close_entry` to close one".to_string();
         }
         self.derived = normalize_derived(&self.derived, &self.slug)?;
 
@@ -483,12 +483,11 @@ impl LedgerSpec {
             for name in &mut section.statuses {
                 *name = name.trim().to_ascii_lowercase();
             }
-            if let Some(unknown) = section.statuses.iter().find(|name| {
-                !self
-                    .statuses
-                    .iter()
-                    .any(|status| &&status.name == name)
-            }) {
+            if let Some(unknown) = section
+                .statuses
+                .iter()
+                .find(|name| !self.statuses.iter().any(|status| &&status.name == name))
+            {
                 return Err(invalid(format!(
                     "section `{}` filters on status `{unknown}`, which `{}` does not declare — the \
                      section would always be empty",

@@ -200,10 +200,7 @@ fn author(scope: &ScopedCompany) -> LedgerAuthor {
     }
 }
 
-async fn summary(
-    ctx: &ledgers::Ledgers,
-    spec: &LedgerSpec,
-) -> Result<LedgerSummary, ApiError> {
+async fn summary(ctx: &ledgers::Ledgers, spec: &LedgerSpec) -> Result<LedgerSummary, ApiError> {
     let entries = ledgers::entries(ctx, spec).await?;
     Ok(LedgerSummary {
         slug: spec.slug.clone(),
@@ -273,10 +270,7 @@ async fn read_ledger(
 }
 
 /// The exact Markdown `derived/<NAME>.md` holds.
-async fn rendered(
-    scope: ScopedCompany,
-    Path(path): Path<LedgerPath>,
-) -> Result<String, ApiError> {
+async fn rendered(scope: ScopedCompany, Path(path): Path<LedgerPath>) -> Result<String, ApiError> {
     let registry = ledgers::registry(&ctx(&scope)).await?;
     let spec = registry.require(&path.slug)?;
     Ok(ledgers::render(&ctx(&scope), spec).await?)

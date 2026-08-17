@@ -137,20 +137,21 @@ async fn closing_without_a_reason_is_refused() {
     record(&ctx, &spec, &agent(), "r1", fields(&[("risk", "a")]))
         .await
         .expect("recorded");
-    let error = record(
+    let error = record(&ctx, &spec, &agent(), "r1", fields(&[("status", "closed")]))
+        .await
+        .expect_err("no reason");
+    assert!(format!("{error}").contains("reason"), "{error}");
+
+    close(
         &ctx,
         &spec,
         &agent(),
         "r1",
-        fields(&[("status", "closed")]),
+        "closed",
+        "the vendor delivered",
     )
     .await
-    .expect_err("no reason");
-    assert!(format!("{error}").contains("reason"), "{error}");
-
-    close(&ctx, &spec, &agent(), "r1", "closed", "the vendor delivered")
-        .await
-        .expect("closed with a reason");
+    .expect("closed with a reason");
 }
 
 /// A row that already explained itself must not be refused for saying it twice.
@@ -219,12 +220,14 @@ async fn only_a_person_may_delete_a_row() {
     assert!(message.contains("only a person"), "{message}");
     assert!(message.contains("Close the row instead"), "{message}");
     // Refused, not silently ignored.
-    assert!(read(&ctx, &spec, &Query::default())
-        .await
-        .expect("read")
-        .entries
-        .iter()
-        .any(|entry| entry.id == "r1"));
+    assert!(
+        read(&ctx, &spec, &Query::default())
+            .await
+            .expect("read")
+            .entries
+            .iter()
+            .any(|entry| entry.id == "r1")
+    );
 
     assert!(
         delete_entry(&ctx, &spec, &person(), "r1")
@@ -264,7 +267,13 @@ async fn only_a_person_may_retire_a_ledger_and_the_rows_survive_it() {
     retire(&ctx, &person(), "risks", false)
         .await
         .expect("a person may");
-    assert!(registry(&ctx).await.expect("registry").find("risks").is_none());
+    assert!(
+        registry(&ctx)
+            .await
+            .expect("registry")
+            .find("risks")
+            .is_none()
+    );
 
     // Retiring a ledger nobody reads is worth doing; deleting what it recorded
     // is a separate, explicit act.
@@ -282,7 +291,10 @@ async fn a_built_in_cannot_be_retired() {
     let error = retire(&ctx, &person(), "goals", false)
         .await
         .expect_err("built in");
-    assert!(format!("{error}").contains("ships with the runtime"), "{error}");
+    assert!(
+        format!("{error}").contains("ships with the runtime"),
+        "{error}"
+    );
 }
 
 /// The board keeps its own store, its own routes and its own dispatch edge, so
@@ -324,18 +336,16 @@ async fn a_write_publishes_the_derived_file() {
     .await
     .expect("recorded");
 
-    let tree = runtime
-        .workspace()
-        .tree(runtime.id())
-        .await
-        .expect("tree");
+    let tree = runtime.workspace().tree(runtime.id()).await.expect("tree");
     let folder = tree
         .iter()
         .find(|node| node.name == "derived")
         .expect("the derived folder exists");
     let file = tree
         .iter()
-        .find(|node| node.parent_id.as_deref() == Some(folder.id.as_str()) && node.name == "RISKS.md")
+        .find(|node| {
+            node.parent_id.as_deref() == Some(folder.id.as_str()) && node.name == "RISKS.md"
+        })
         .expect("the ledger's file exists");
     let (_, body) = runtime
         .workspace()
@@ -376,11 +386,17 @@ async fn a_read_is_bounded_and_says_how_many_matched() {
         .expect("recorded");
     }
     let read = read(&ctx, &spec, &Query::default()).await.expect("read");
-    assert_eq!(read.entries.len(), crate::ledger::budget::DEFAULT_READ_LIMIT);
+    assert_eq!(
+        read.entries.len(),
+        crate::ledger::budget::DEFAULT_READ_LIMIT
+    );
     assert_eq!(read.matched, 40);
 
     let huge = read2(&ctx, &spec, 10_000).await;
-    assert_eq!(huge.entries.len(), crate::ledger::budget::MAX_READ_LIMIT.min(40));
+    assert_eq!(
+        huge.entries.len(),
+        crate::ledger::budget::MAX_READ_LIMIT.min(40)
+    );
 }
 
 async fn read2(ctx: &Ledgers, spec: &crate::ledger::LedgerSpec, limit: usize) -> Read {

@@ -110,15 +110,11 @@ pub async fn publish(
         .adopt_or_create_folder(company, None, DERIVED_DIR, WorkspaceOrigin::Seed)
         .await?;
     let name = file_name(spec);
-    let existing = workspace
-        .tree(company)
-        .await?
-        .into_iter()
-        .find(|node| {
-            node.kind == NodeKind::File
-                && node.parent_id.as_deref() == Some(folder.node().id.as_str())
-                && node.name == name
-        });
+    let existing = workspace.tree(company).await?.into_iter().find(|node| {
+        node.kind == NodeKind::File
+            && node.parent_id.as_deref() == Some(folder.node().id.as_str())
+            && node.name == name
+    });
     match existing {
         Some(node) => {
             workspace

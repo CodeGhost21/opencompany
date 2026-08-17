@@ -56,9 +56,7 @@ pub const DEFINE_LEDGER_TOOL: &str = "define_ledger";
 pub fn ledger_tools(ctx: Ledgers, agent_id: String) -> Vec<Box<dyn Tool>> {
     let author = LedgerAuthor::agent(agent_id);
     vec![
-        Box::new(ListLedgers {
-            ctx: ctx.clone(),
-        }),
+        Box::new(ListLedgers { ctx: ctx.clone() }),
         Box::new(ReadLedger { ctx: ctx.clone() }),
         Box::new(RecordEntry {
             ctx: ctx.clone(),
@@ -413,7 +411,15 @@ impl Tool for RecordEntry {
             Err(message) => return Ok(ToolResult::error(message)),
         };
         let id = text(&arguments, "id");
-        match ledgers::record(&self.ctx, &spec, &self.author, &id, merge_fields(&arguments)).await {
+        match ledgers::record(
+            &self.ctx,
+            &spec,
+            &self.author,
+            &id,
+            merge_fields(&arguments),
+        )
+        .await
+        {
             Ok(entry) => Ok(ToolResult::success(format!(
                 "Recorded `{}` on `{}`. It now reads:\n{}",
                 entry.id,

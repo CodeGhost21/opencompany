@@ -52,16 +52,16 @@ pub mod cycle;
 /// [`TurnOutcome`]: crate::harness::TurnOutcome
 #[cfg(feature = "openhuman")]
 pub mod delegation;
-/// The write guard on the `derived/` folder: a
-/// [`WorkspaceStore`](crate::ports::WorkspaceStore) decorator that refuses a
-/// hand-written edit to a file a ledger renders, and names the tool that
-/// actually writes the row.
-pub mod derived_guard;
 /// Brain-agnostic delegation-tool primitives (issue #176): the tool names,
 /// argument schemas, hosted [`ToolManifestEntry`](crate::brain::medulla::wire::ToolManifestEntry)
 /// catalog, and desk-lead resolver shared by BOTH the harness and hosted paths.
 /// Compiled in every build (the hosted brain ships in the default build).
 pub mod delegation_tools;
+/// The write guard on the `derived/` folder: a
+/// [`WorkspaceStore`](crate::ports::WorkspaceStore) decorator that refuses a
+/// hand-written edit to a file a ledger renders, and names the tool that
+/// actually writes the row.
+pub mod derived_guard;
 /// Single-use grants minted when an operator approves a blocked tool call
 /// (issue #243). Compiled in every build: the journal records and their replay
 /// are feature-independent, so a company that ran under the harness stays
@@ -123,6 +123,7 @@ pub use builder::{RuntimeBuilder, company_id_from_name};
 pub use channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
 pub use cron::{CivilTime, CronExpr};
 pub use cycle::CycleRunner;
+pub use derived_guard::DerivedGuardWorkspace;
 pub use handover::RuntimeHandover;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;
@@ -144,7 +145,6 @@ pub use workflow_scheduler::WorkflowScheduler;
 pub(crate) use workflow_scheduler::workflow_schedule_id;
 pub use workflow_spawn::WorkflowSpawn;
 pub use workspace_events::WorkspaceAnnouncer;
-pub use derived_guard::DerivedGuardWorkspace;
 pub use workspace_quota::{
     DEFAULT_MAX_BLOB_BYTES, QuotaEnforcedWorkspace, UPLOAD_BODY_LIMIT_BYTES, WorkspaceQuota,
 };

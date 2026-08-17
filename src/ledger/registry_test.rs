@@ -30,7 +30,10 @@ fn builtins_are_valid() {
     let (specs, faults) = builtins();
     assert!(faults.is_empty(), "{faults:?}");
     assert_eq!(
-        specs.iter().map(|spec| spec.slug.as_str()).collect::<Vec<_>>(),
+        specs
+            .iter()
+            .map(|spec| spec.slug.as_str())
+            .collect::<Vec<_>>(),
         ["tasks", "goals", "decisions"]
     );
     for spec in &specs {
@@ -57,7 +60,11 @@ fn the_board_is_native_and_says_it_is_not_written_with_record_entry() {
         "{}",
         tasks.written_by
     );
-    assert!(tasks.written_by.contains("spawn_task"), "{}", tasks.written_by);
+    assert!(
+        tasks.written_by.contains("spawn_task"),
+        "{}",
+        tasks.written_by
+    );
 }
 
 /// The board's statuses are its columns, and only Done ends a card's life. A
@@ -160,11 +167,15 @@ fn an_unknown_slug_comes_back_with_the_real_ones() {
 fn the_registry_names_the_owner_of_a_derived_file() {
     let registry = Registry::build([declared("risks")]);
     assert_eq!(
-        registry.owner_of_derived("derived/RISKS.md").map(|s| s.slug.as_str()),
+        registry
+            .owner_of_derived("derived/RISKS.md")
+            .map(|s| s.slug.as_str()),
         Some("risks")
     );
     assert_eq!(
-        registry.owner_of_derived("/derived/TASKS.md").map(|s| s.slug.as_str()),
+        registry
+            .owner_of_derived("/derived/TASKS.md")
+            .map(|s| s.slug.as_str()),
         Some("tasks")
     );
     assert!(registry.owner_of_derived("derived/NOBODY.md").is_none());

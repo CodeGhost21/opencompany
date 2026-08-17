@@ -63,9 +63,15 @@ fn events_merge_into_one_entry_rather_than_replacing_it() {
         &[
             event(
                 "vendor-slip",
-                &[("risk", Some("the vendor misses the date")), ("status", Some("open"))],
+                &[
+                    ("risk", Some("the vendor misses the date")),
+                    ("status", Some("open")),
+                ],
             ),
-            event("vendor-slip", &[("mitigation", Some("second supplier lined up"))]),
+            event(
+                "vendor-slip",
+                &[("mitigation", Some("second supplier lined up"))],
+            ),
         ],
     );
     assert_eq!(entries.entries.len(), 1, "one id is one row");
@@ -97,7 +103,13 @@ fn a_null_clears_a_field() {
 #[test]
 fn an_undeclared_field_is_kept() {
     let spec = spec();
-    let entries = fold(&spec, &[event("r1", &[("risk", Some("a")), ("severity", Some("high"))])]);
+    let entries = fold(
+        &spec,
+        &[event(
+            "r1",
+            &[("risk", Some("a")), ("severity", Some("high"))],
+        )],
+    );
     assert_eq!(entries.find("r1").expect("folded").get("severity"), "high");
 }
 
@@ -129,7 +141,10 @@ fn recording_against_an_old_row_moves_it_back_to_the_top() {
 #[test]
 fn the_first_and_last_author_are_both_kept() {
     let spec = spec();
-    let mut second = event("r1", &[("status", Some("closed")), ("reason", Some("passed"))]);
+    let mut second = event(
+        "r1",
+        &[("status", Some("closed")), ("reason", Some("passed"))],
+    );
     second.author = LedgerAuthor::human("u-1", "Dana");
     let entries = fold(&spec, &[event("r1", &[("risk", Some("a"))]), second]);
     let entry = entries.find("r1").expect("folded");
@@ -145,8 +160,14 @@ fn the_declared_checks_report_rather_than_drop() {
         &spec,
         &[
             event("no-title", &[("status", Some("open"))]),
-            event("bad-status", &[("risk", Some("a")), ("status", Some("shipped"))]),
-            event("silent-close", &[("risk", Some("a")), ("status", Some("closed"))]),
+            event(
+                "bad-status",
+                &[("risk", Some("a")), ("status", Some("shipped"))],
+            ),
+            event(
+                "silent-close",
+                &[("risk", Some("a")), ("status", Some("closed"))],
+            ),
         ],
     );
     assert_eq!(entries.entries.len(), 3, "every row survives its fault");
@@ -163,7 +184,13 @@ fn the_declared_checks_report_rather_than_drop() {
 #[test]
 fn a_required_id_field_does_not_fault_every_well_formed_row() {
     let spec = spec();
-    let entries = fold(&spec, &[event("r1", &[("risk", Some("a")), ("status", Some("open"))])]);
+    let entries = fold(
+        &spec,
+        &[event(
+            "r1",
+            &[("risk", Some("a")), ("status", Some("open"))],
+        )],
+    );
     assert!(entries.faults.is_empty(), "{:?}", entries.faults);
 }
 
@@ -178,7 +205,10 @@ fn an_event_naming_no_entry_is_reported_and_skipped() {
 #[test]
 fn render_sections_by_status_and_says_where_the_rest_is() {
     let spec = spec();
-    let mut events = vec![event("live", &[("risk", Some("live one")), ("status", Some("open"))])];
+    let mut events = vec![event(
+        "live",
+        &[("risk", Some("live one")), ("status", Some("open"))],
+    )];
     for n in 0..20 {
         events.push(event(
             &format!("closed-{n}"),
@@ -213,7 +243,13 @@ fn an_empty_ledger_says_so() {
 fn a_sectionless_ledger_renders_everything_once() {
     let mut spec = spec();
     spec.sections.clear();
-    let entries = fold(&spec, &[event("r1", &[("risk", Some("a")), ("status", Some("open"))])]);
+    let entries = fold(
+        &spec,
+        &[event(
+            "r1",
+            &[("risk", Some("a")), ("status", Some("open"))],
+        )],
+    );
     let rendered = render(&spec, &entries);
     assert!(rendered.contains("## Entries"), "{rendered}");
     assert!(rendered.contains("r1"), "{rendered}");
@@ -279,12 +315,18 @@ fn an_index_keeps_every_open_row_and_bounds_the_archive() {
     let entries = fold(&spec, &events);
     let index = index(&spec, &entries);
     for n in 0..12 {
-        assert!(index.contains(&format!("open-{n}")), "every open row is carried");
+        assert!(
+            index.contains(&format!("open-{n}")),
+            "every open row is carried"
+        );
     }
     assert!(index.contains("7 more `closed`"), "{index}");
     assert!(index.contains("read_ledger"), "{index}");
     // The payload is what an index drops.
-    assert!(!index.contains(&"why ".repeat(20)), "the index carries reasoning");
+    assert!(
+        !index.contains(&"why ".repeat(20)),
+        "the index carries reasoning"
+    );
     assert!(index.len() < render(&spec, &entries).len());
 }
 
@@ -301,7 +343,10 @@ fn a_search_matches_any_field_and_the_id() {
     let spec = spec();
     let entries = fold(
         &spec,
-        &[event("vendor-slip", &[("risk", Some("supplier misses the date"))])],
+        &[event(
+            "vendor-slip",
+            &[("risk", Some("supplier misses the date"))],
+        )],
     );
     let entry = entries.find("vendor-slip").expect("folded");
     assert!(entry.matches("SUPPLIER"));

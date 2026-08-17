@@ -78,7 +78,12 @@ async fn an_operator_cannot_overwrite_a_derived_file() {
 
     let error = runtime
         .workspace()
-        .write(runtime.id(), &file, "my own notes", WorkspaceOrigin::Operator)
+        .write(
+            runtime.id(),
+            &file,
+            "my own notes",
+            WorkspaceOrigin::Operator,
+        )
         .await
         .expect_err("refused");
     let message = format!("{error}");

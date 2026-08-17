@@ -379,7 +379,10 @@ pub async fn close(
     reason: &str,
 ) -> Result<engine::Entry> {
     let closing = spec.closing_statuses();
-    if !closing.iter().any(|name| name.eq_ignore_ascii_case(status.trim())) {
+    if !closing
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(status.trim()))
+    {
         return Err(OpenCompanyError::InvalidRequest(if closing.is_empty() {
             format!(
                 "`{}` declares no status that closes a row, so nothing on it can be closed. \
@@ -445,12 +448,7 @@ pub async fn define(ctx: &Ledgers, document: &serde_json::Value) -> Result<Ledge
 /// Returns [`OpenCompanyError::InvalidRequest`] when the author is not a person
 /// or the slug names a built-in, and [`OpenCompanyError::NotFound`] when
 /// nothing carries that slug.
-pub async fn retire(
-    ctx: &Ledgers,
-    author: &LedgerAuthor,
-    slug: &str,
-    purge: bool,
-) -> Result<()> {
+pub async fn retire(ctx: &Ledgers, author: &LedgerAuthor, slug: &str, purge: bool) -> Result<()> {
     refuse_non_human(author, "retire a ledger")?;
     let registry = registry(ctx).await?;
     let spec = registry.require(slug)?;
@@ -538,9 +536,7 @@ fn refuse_non_human(author: &LedgerAuthor, what: &str) -> Result<()> {
 }
 
 /// Trims and caps every value, dropping keys that are only whitespace.
-fn normalize_fields(
-    fields: BTreeMap<String, Option<String>>,
-) -> BTreeMap<String, Option<String>> {
+fn normalize_fields(fields: BTreeMap<String, Option<String>>) -> BTreeMap<String, Option<String>> {
     fields
         .into_iter()
         .filter_map(|(name, value)| {

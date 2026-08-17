@@ -65,7 +65,12 @@ async fn there_is_no_delete_tool_and_no_retire_tool() {
     let home = tempfile::tempdir().unwrap();
     let built = tools(&ctx(&home));
     let names: Vec<&str> = built.iter().map(|tool| tool.name()).collect();
-    for forbidden in ["delete_entry", "retire_ledger", "delete_ledger", "purge_ledger"] {
+    for forbidden in [
+        "delete_entry",
+        "retire_ledger",
+        "delete_ledger",
+        "purge_ledger",
+    ] {
         assert!(
             !names.contains(&forbidden),
             "`{forbidden}` must not be reachable from a turn"
@@ -158,7 +163,10 @@ async fn closing_without_a_reason_says_what_is_missing() {
     let home = tempfile::tempdir().unwrap();
     let ctx = ctx(&home);
     let tools = tools(&ctx);
-    tool(&tools, DEFINE_LEDGER_TOOL).execute(risks()).await.unwrap();
+    tool(&tools, DEFINE_LEDGER_TOOL)
+        .execute(risks())
+        .await
+        .unwrap();
     let result = tool(&tools, RECORD_ENTRY_TOOL)
         .execute(json!({
             "ledger": "risks",
@@ -176,7 +184,10 @@ async fn a_null_field_clears_it() {
     let home = tempfile::tempdir().unwrap();
     let ctx = ctx(&home);
     let tools = tools(&ctx);
-    tool(&tools, DEFINE_LEDGER_TOOL).execute(risks()).await.unwrap();
+    tool(&tools, DEFINE_LEDGER_TOOL)
+        .execute(risks())
+        .await
+        .unwrap();
     tool(&tools, RECORD_ENTRY_TOOL)
         .execute(json!({ "ledger": "risks", "id": "r1", "fields": { "risk": "a", "reason": "b" } }))
         .await
@@ -222,7 +233,10 @@ async fn a_bounded_read_says_it_is_bounded() {
     let home = tempfile::tempdir().unwrap();
     let ctx = ctx(&home);
     let tools = tools(&ctx);
-    tool(&tools, DEFINE_LEDGER_TOOL).execute(risks()).await.unwrap();
+    tool(&tools, DEFINE_LEDGER_TOOL)
+        .execute(risks())
+        .await
+        .unwrap();
     for n in 0..40 {
         tool(&tools, RECORD_ENTRY_TOOL)
             .execute(json!({

@@ -62,7 +62,12 @@ async fn state() -> (AppState, tempfile::TempDir) {
     (state, dir)
 }
 
-async fn send(state: &AppState, method: &str, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+async fn send(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let request = Request::builder()
         .method(method)
         .uri(uri)
@@ -125,23 +130,19 @@ async fn the_listing_carries_the_built_ins_with_their_shape() {
     // The board is listed but marked as written elsewhere, so the console knows
     // not to offer a compose box for it.
     assert_eq!(body["ledgers"][0]["source"], "native");
-    assert!(body["ledgers"][0]["writtenBy"]
-        .as_str()
-        .unwrap()
-        .contains("spawn_task"));
+    assert!(
+        body["ledgers"][0]["writtenBy"]
+            .as_str()
+            .unwrap()
+            .contains("spawn_task")
+    );
 }
 
 #[tokio::test]
 async fn a_ledger_round_trips_under_both_scope_forms() {
     let (state, _home) = state().await;
 
-    let (status, created) = send(
-        &state,
-        "POST",
-        "/api/v1/company/ledgers",
-        Some(risks()),
-    )
-    .await;
+    let (status, created) = send(&state, "POST", "/api/v1/company/ledgers", Some(risks())).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["slug"], "risks");
 
@@ -347,7 +348,11 @@ async fn a_read_narrows_by_status_and_search() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "an unknown sort is refused");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an unknown sort is refused"
+    );
 }
 
 /// A declaration that collides is refused with the reason, not silently
