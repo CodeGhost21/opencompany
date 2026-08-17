@@ -889,6 +889,21 @@ jobs:
       - name: Test the Composio account choice on the console plane
         run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,tinycortex,composio server::ops::composio::tests::gated_tests
 
+      # Issue #914. The `tinymemory` feature binds the engine-neutral
+      # `MemoryProvider` contract and adds the `remote`/`null` selection modes.
+      # It rides this lane rather than the fast `Rust` job because it implies
+      # `tinycortex` — a bundled SQLite build this lane already pays for, and the
+      # fast lane does not. Two filters because `run-scoped-suite.sh` takes
+      # exactly one each, and both halves need to run: `store::memory` covers the
+      # decorator's tenant-isolation and archive-on-evict properties, and
+      # `store::select` covers the boot refusals that keep a misconfigured hosted
+      # engine from starting.
+      - name: Test the TinyMemory provider contract
+        run: scripts/ci/run-scoped-suite.sh "tinymemory contract" tinymemory store::memory
+
+      - name: Test the memory engine selection surface
+        run: scripts/ci/run-scoped-suite.sh "tinymemory selection" tinymemory store::select
+
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
       # `tinyplace`-gated line and deliberately runs none of them, and no other
