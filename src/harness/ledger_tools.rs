@@ -440,6 +440,7 @@ impl Tool for ReadLedger {
 struct RecordEntry {
     ctx: Ledgers,
     author: LedgerAuthor,
+    ledger_grants: Option<Vec<LedgerGrant>>,
 }
 
 #[async_trait]
