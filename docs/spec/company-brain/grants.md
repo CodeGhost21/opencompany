@@ -132,8 +132,8 @@ edit loosening `Grantable` knows it is loosening two things.
 
 Three tools answer the reach question from their **arguments** rather than from
 their name, because the name is too coarse to be the answer. `composio_execute`
-reads the action slug (issue #441), `web_fetch` reads the URL's host (issue
-#673), and `shell` reads the command itself (issue #875).
+reads the action slug (issue #441), `web_fetch` reads the URL's host (issue #673),
+and `shell` reads the command itself (issue #875).
 
 `shell` is the one an operator feels. Classifying the name meant `grep -c foo
 *.log` and `rm -rf /` were the same input, so an agent that investigates by
