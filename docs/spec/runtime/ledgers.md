@@ -298,7 +298,11 @@ ids are unchanged (`Add task`, `New task`, `#new-prompt`) — moving a dialog
 between screens should not rewrite the vocabulary an operator, or a test,
 already knows.
 
-The board's own e2e specs went with the screen (`board-columns`, `board-drag`).
-Specs that merely navigated through `#/tasks` on their way to testing something
-else were repointed to `#/ledgers/tasks`; the ones that drive `#/tasks/<id>` are
-untouched.
+`board-columns` went with the screen — the two-language mirror it guarded no
+longer exists, and its labels are pinned in Rust now. `board-drag` was **ported**
+rather than deleted, because none of the three failures behind issue #334
+stopped being possible when the board changed screens: the board still scrolls
+itself while a drag sits on its edge, a drop that misses every column still says
+so, and the trailing gutter still exists. Specs that merely navigated through
+`#/tasks` were repointed to `#/ledgers/tasks`; the ones that drive `#/tasks/<id>`
+are untouched.
