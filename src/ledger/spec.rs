@@ -266,6 +266,13 @@ pub struct LedgerSpec {
     #[serde(default)]
     pub source: LedgerSource,
     /// The workspace file this renders into, under [`DERIVED_DIR`].
+    ///
+    /// Optional on the wire, and deliberately: a caller declaring a ledger
+    /// should not have to know the folder convention to succeed, and the
+    /// commonest declaration a model writes omits it entirely. An absent value
+    /// becomes `derived/<SLUG>.md`, which is what the caller meant. Naming one
+    /// explicitly still works and is still held to the folder rule.
+    #[serde(default)]
     pub derived: String,
     /// The fields an entry carries. Exactly one must have role
     /// [`FieldRole::Id`].
