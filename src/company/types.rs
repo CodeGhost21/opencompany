@@ -1532,14 +1532,15 @@ mod test {
     /// with no write entry — is unconfined, not "confined to nothing".
     #[test]
     fn write_scope_is_none_unless_a_context_entry_declares_write() {
-        let mut agent = base_agent();
+        let omitted: Agent = toml::from_str("id = \"critic\"\nrole = \"Critic\"\n").unwrap();
+        assert_eq!(omitted.write_scope(), None, "an omitted context key is unconfined");
 
-        agent.context = None;
-        assert_eq!(agent.write_scope(), None, "an omitted context key is unconfined");
-
-        agent.context = Some(vec!["Brand/Voice.md".into()]);
+        let read_only: Agent = toml::from_str(
+            "id = \"critic\"\nrole = \"Critic\"\ncontext = [\"Brand/Voice.md\"]\n",
+        )
+        .unwrap();
         assert_eq!(
-            agent.write_scope(),
+            read_only.write_scope(),
             None,
             "a read-only context list is unconfined, not confined to nothing"
         );
