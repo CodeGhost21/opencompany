@@ -1085,6 +1085,26 @@ fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
 /// no standing grant. A build without the harness feature has no classifier
 /// linked in and gates everything, the same seam the Composio catalogue
 /// straddles and answered the same way.
+///
+/// ## A read must also stay lexically inside the agent's own directory
+///
+/// `classify_command` grades by command *name*, never by path — `cat
+/// /etc/passwd` and `cat notes.md` classify identically. Nothing on this path
+/// (or upstream's own `ShellTool::run_with_security_in_context`, which never
+/// calls the vendored `validate_command_execution`/`is_command_allowed`
+/// allowlist) confines a `Read`-class command to the workspace at execution
+/// time; the only backstop the vendored runtime ships,
+/// `scan_command_for_cross_profile`, exists for a different boundary
+/// (sibling-profile isolation) and says so itself: "airtight process
+/// confinement … is deliberate follow-up work, not provided here." So a bare
+/// classifier-`Read` command is not yet a safe zero-approval command in this
+/// codebase's threat model, where "the agent's own workspace" is the entire
+/// premise the free pass rests on (see the issue's own framing). Every read
+/// this downgrades is additionally checked by
+/// [`shell_command_reaches_outside_cwd`] and gated back to `Consequence` if
+/// any argument names an absolute path, a `~` home-dir reference, or a `..`
+/// traversal segment — the three ways a token can point outside the working
+/// directory without resolving anything against the real workspace root.
 fn shell_consequence(args: &serde_json::Value) -> Consequence {
     let gated = Consequence {
         group: EffectGroup::Other,
@@ -1097,7 +1117,7 @@ fn shell_consequence(args: &serde_json::Value) -> Consequence {
         return gated;
     };
     let declared = args.get(SHELL_CATEGORY_KEY).and_then(|v| v.as_str());
-    if shell_command_is_read(command, declared) {
+    if shell_command_is_read(command, declared) && !shell_command_reaches_outside_cwd(command) {
         // A read of the agent's own workspace changes nothing, reaches nobody
         // and is billed for nothing — the shape `glob` and `grep` (the tools)
         // have carried since #462.
@@ -1108,6 +1128,34 @@ fn shell_consequence(args: &serde_json::Value) -> Consequence {
         };
     }
     gated
+}
+
+/// Lexical backstop for [`shell_consequence`]: does any whitespace-separated
+/// token in `command` name a location outside the agent's working directory?
+///
+/// This is deliberately a text scan, not a path resolver — it needs no
+/// `action_dir`/cwd context, so it stays a pure function of the command
+/// string like the rest of this module's classifiers. It catches the
+/// realistic, non-adversarial escape vectors a reviewer would actually type —
+/// an absolute path (`/etc/passwd`), a home-dir reference (`~/.ssh/id_rsa`),
+/// a `--flag=/absolute/value`, or a `..` traversal segment — without claiming
+/// to be airtight: a symlink inside the workspace pointing outside it is
+/// invisible to a lexical scan, and so would be a `cd` out of the workspace
+/// followed by a relative read, except that `cd` is not itself in the
+/// vendored classifier's `READ_ONLY_BASES`, so any segment naming it already
+/// fails the *whole* command closed to `Write` before this function is ever
+/// consulted (`classify_command` takes the max across `;`/`&&`/`||`-separated
+/// segments). Full process-level confinement remains upstream follow-up work,
+/// same as it is for the cross-profile guard this mirrors.
+fn shell_command_reaches_outside_cwd(command: &str) -> bool {
+    command.split_whitespace().any(|word| {
+        // A `--flag=/value` or `--flag=~/value` carries the path after `=`.
+        let candidate = word.rsplit('=').next().unwrap_or(word);
+        let candidate = candidate.trim_matches(|c| c == '"' || c == '\'');
+        candidate.starts_with('/')
+            || candidate.starts_with('~')
+            || candidate.split('/').any(|segment| segment == "..")
+    })
 }
 
 /// Is this command provably read-only, according to the vendored runtime's own
@@ -2565,6 +2613,72 @@ mod tests {
             assert!(
                 !c.reach.parks_under_supervision(),
                 "`{command}` must not park under any acting tier"
+            );
+        }
+    }
+
+    /// A command the vendored classifier grades `Read` — because it grades by
+    /// command name, never by path — must still park when its arguments name a
+    /// location outside the agent's own directory. Falsified against the
+    /// pre-fix behaviour: before `shell_command_reaches_outside_cwd` existed,
+    /// `shell_command_is_read` alone was sufficient and every one of these
+    /// downgraded to `Reach::Nothing` — `cat`/`ls`/`grep`/`readlink` are all in
+    /// the vendored `READ_ONLY_BASES` regardless of what they are pointed at.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_read_that_reaches_outside_the_workspace_still_parks() {
+        for command in [
+            "cat /etc/passwd",
+            "cat ~/.ssh/id_rsa",
+            "ls /root",
+            "grep -r secret /etc",
+            "readlink ~",
+            "cat ../../secrets.env",
+            "head --lines=5 /var/log/auth.log",
+            "cat notes/../../../etc/passwd",
+        ] {
+            let c = shell(command);
+            assert_eq!(
+                c.reach,
+                Reach::Consequence,
+                "`{command}` reaches outside the workspace and must still park"
+            );
+            assert!(
+                c.parks_under_auto(),
+                "`{command}` must still park under auto"
+            );
+        }
+    }
+
+    /// The lexical backstop alone, independent of the classifier — pins the
+    /// exact set of shapes it does and does not flag. No `openhuman` feature
+    /// needed: this is pure string logic with no classifier dependency.
+    #[test]
+    fn shell_command_reaches_outside_cwd_flags_the_realistic_escapes() {
+        for command in [
+            "cat /etc/passwd",
+            "ls ~/.ssh",
+            "cat ../secret.env",
+            "cat notes/../../etc/passwd",
+            "head --lines=5 /var/log/auth.log",
+            "cat \"/etc/passwd\"",
+        ] {
+            assert!(
+                shell_command_reaches_outside_cwd(command),
+                "`{command}` should be flagged as reaching outside the cwd"
+            );
+        }
+
+        for command in [
+            "cat notes.md",
+            "grep -l foo session_raw/*.jsonl",
+            "find . -maxdepth 4 -type d",
+            "ls -la",
+            "wc -l src/main.rs",
+        ] {
+            assert!(
+                !shell_command_reaches_outside_cwd(command),
+                "`{command}` stays inside the cwd and should not be flagged"
             );
         }
     }
