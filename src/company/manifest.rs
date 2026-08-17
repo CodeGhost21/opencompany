@@ -466,6 +466,7 @@ impl CompanyManifest {
     }
 
     /// Validates `[users]`: the sign-in mode, and the bootstrap list that mode
+    /// PLACEHOLDER_KEEP_DOC_BELOW
     /// actually reads.
     ///
     /// Split out because the interesting failures are not malformed values but
