@@ -53,7 +53,8 @@ async fn the_surface_is_five_tools_and_stays_five() {
     let ctx = ctx(&home);
     assert_eq!(tools(&ctx).len(), 5);
     ledgers::define(&ctx, &risks()).await.expect("declared");
-    let names: Vec<&str> = tools(&ctx).iter().map(|tool| tool.name()).collect();
+    let built = tools(&ctx);
+    let names: Vec<&str> = built.iter().map(|tool| tool.name()).collect();
     assert_eq!(names, LEDGER_TOOL_NAMES);
 }
 
@@ -62,10 +63,8 @@ async fn the_surface_is_five_tools_and_stays_five() {
 #[tokio::test]
 async fn there_is_no_delete_tool_and_no_retire_tool() {
     let home = tempfile::tempdir().unwrap();
-    let names: Vec<&str> = tools(&ctx(&home))
-        .iter()
-        .map(|tool| tool.name())
-        .collect();
+    let built = tools(&ctx(&home));
+    let names: Vec<&str> = built.iter().map(|tool| tool.name()).collect();
     for forbidden in ["delete_entry", "retire_ledger", "delete_ledger", "purge_ledger"] {
         assert!(
             !names.contains(&forbidden),
