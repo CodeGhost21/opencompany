@@ -3710,8 +3710,8 @@ mod tests {
                         // failed run parks nothing and blocks nothing, so both
                         // are empty here — see `Settled::from`'s Err arm, which
                         // makes the same choice for the same reason.
-                        approvals: Vec::new(),
                         blocked_nodes: Vec::new(),
+                        approvals: Vec::new(),
                     },
                 )
                 .await

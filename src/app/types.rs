@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::Serialize;
@@ -355,6 +356,23 @@ pub struct AppState {
     /// OpenCompany home root holding company bundles. Used by the tiny.place
     /// A2A inbound routes to resolve a company's Ed25519 identity.
     home: std::path::PathBuf,
+    /// The root `config.toml` — and everything the first-run setup flow
+    /// (`crate::server::setup`) reads and writes — resolves under.
+    ///
+    /// `None` means "same as [`Self::home`]", which is the aligned shape
+    /// [`crate::store::home_divergence_warning`] treats as silent: a hosted
+    /// tenant (`--home "$OPENCOMPANY_DATA_DIR"`), `OPENCOMPANY_DATA_DIR` alone,
+    /// and the untouched local default all resolve `home` and the instance's
+    /// `data_dir_from_env()` to the same path.
+    ///
+    /// Set explicitly whenever a deployment's `--home` (company bundles) and
+    /// data root (the instance workspace `config.toml` lives beside) diverge —
+    /// see `serve` in `src/bin/opencompany.rs`. Without this, startup resolves
+    /// `setup_completed_at` from the data root while setup itself resolved
+    /// `state.home()`, so a completed setup could read back as incomplete
+    /// (and vice versa) on exactly the deployments the divergence warning
+    /// already flags.
+    config_root: Option<std::path::PathBuf>,
     /// Company → owning-tenant map, populated when a company is provisioned in
     /// platform mode. Drives per-tenant quotas and cross-tenant isolation.
     ///
@@ -398,6 +416,30 @@ pub struct AppState {
     /// Which storage backend is serving the durable ports. Reported by `/spec`
     /// as a kind only — never a path or a connection string.
     storage_kind: crate::store::StorageKind,
+    /// Whether the first-run setup flow (`crate::server::setup`) has already run
+    /// against this data root.
+    ///
+    /// Seeded at boot from `config.toml`'s `setup_completed_at` and flipped by
+    /// `POST /api/v1/setup`. Held in memory rather than re-read per request: the
+    /// setup route is the only writer, and `/spec` — which reports it so an
+    /// unauthenticated console can decide between the wizard and the sign-in
+    /// form — would otherwise take a disk read on every poll. Shared so the
+    /// clone every handler holds observes the flip.
+    setup_complete: Arc<AtomicBool>,
+    /// The **live** host-wide sign-in mode, seeded at construction from
+    /// [`AppConfig::auth_mode_override`].
+    ///
+    /// Separate from the `AppConfig` field because that one is the value boot
+    /// resolved and can never change, and this one has to: the first-run setup
+    /// flow writes `auth_mode` and then rebuilds the affected companies in
+    /// place, so the mode the rebuild reads must be the one just chosen rather
+    /// than the one the process started with. Reading the frozen field there
+    /// made "no sign-in" apply only after the operator restarted the host by
+    /// hand — a setting that appeared to save and then did nothing.
+    ///
+    /// A lock rather than an atomic because [`AuthMode`] is not a primitive;
+    /// it is read once per company build, never on a request path.
+    auth_mode_override: Arc<RwLock<Option<AuthMode>>>,
     /// Host-global replay-protection cache shared across every inbound A2A
     /// request. Gated behind `tinyplace` so the default build links no crypto.
     #[cfg(feature = "tinyplace")]
@@ -450,10 +492,13 @@ impl std::fmt::Debug for AppState {
 impl AppState {
     /// Builds state from runtime configuration with an empty company registry.
     pub fn new(config: AppConfig) -> Self {
+        let auth_mode_override = Arc::new(RwLock::new(config.auth_mode_override));
         Self {
             config,
+            auth_mode_override,
             registry: CompanyRegistry::new(),
             home: std::path::PathBuf::from("."),
+            config_root: None,
             ownership: Arc::new(RwLock::new(HashMap::new())),
             stores: None,
             memory_overlay: None,
@@ -461,6 +506,10 @@ impl AppState {
             skill_registry: Arc::new(OnceLock::new()),
             instance_id: Arc::new(OnceLock::new()),
             storage_kind: crate::store::StorageKind::default(),
+            // Fails "not set up", so a host that never calls `with_setup_complete`
+            // — every test fixture — presents the wizard rather than silently
+            // claiming a configuration it does not have.
+            setup_complete: Arc::new(AtomicBool::new(false)),
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
             hub_identity: None,
@@ -512,6 +561,23 @@ impl AppState {
     pub fn with_home(mut self, home: impl Into<std::path::PathBuf>) -> Self {
         self.home = home.into();
         self
+    }
+
+    /// Sets the root `config.toml` — and the first-run setup flow — resolves
+    /// under, when it differs from [`Self::with_home`]. See the `config_root`
+    /// field doc for when that happens and why it matters.
+    pub fn with_config_root(mut self, config_root: impl Into<std::path::PathBuf>) -> Self {
+        self.config_root = Some(config_root.into());
+        self
+    }
+
+    /// The root `config.toml` resolves under: [`Self::with_config_root`] when
+    /// set, else [`Self::home`]. Every reader of `config.toml` — startup and
+    /// `crate::server::setup` alike — must resolve through this, not through
+    /// [`Self::home`] directly, so the two can never read or write two
+    /// different files for the same instance.
+    pub fn config_root(&self) -> &std::path::Path {
+        self.config_root.as_deref().unwrap_or(&self.home)
     }
 
     /// Sets the repo-level shared skill library directory (`skills/`) backing the
@@ -743,6 +809,52 @@ impl AppState {
         &self.home
     }
 
+    /// Marks this host as already set up, seeded at boot from `config.toml`'s
+    /// `setup_completed_at`. Mirrors the other `with_*` builders.
+    pub fn with_setup_complete(self, complete: bool) -> Self {
+        self.setup_complete.store(complete, Ordering::Relaxed);
+        self
+    }
+
+    /// Whether the first-run setup flow has run against this data root.
+    ///
+    /// This is the raw `setup_completed_at` stamp, and it is deliberately *not*
+    /// what [`AppSpec::setup_complete`] reports: a host serving a company named
+    /// on the command line has never been through setup, yet needs no wizard.
+    /// The spec answers "does the console need to offer setup", this answers
+    /// "did setup run", and only the authorization gate wants the latter — see
+    /// `server::setup::authorize`, where an empty registry is what makes the
+    /// call anonymous, because there is then no admin to authorize against.
+    pub fn setup_complete(&self) -> bool {
+        self.setup_complete.load(Ordering::Relaxed)
+    }
+
+    /// Records that setup has just completed, so the flip is visible to every
+    /// clone of this state without a restart.
+    pub fn mark_setup_complete(&self) {
+        self.setup_complete.store(true, Ordering::Relaxed);
+    }
+
+    /// The host-wide sign-in mode currently in force, or `None` when each
+    /// company's own `[users].mode` decides.
+    ///
+    /// Every company build must read this rather than
+    /// [`AppConfig::auth_mode_override`], so a mode changed after boot reaches
+    /// the next build or rebuild. See the field docs.
+    pub fn auth_mode_override(&self) -> Option<AuthMode> {
+        *self.auth_mode_override.read().expect("auth mode poisoned")
+    }
+
+    /// Sets the host-wide sign-in mode for companies built from now on.
+    ///
+    /// Does **not** touch companies already built: the mode is resolved once,
+    /// at build, and cached on the runtime. A caller changing it is expected to
+    /// rebuild or re-register whatever is already registered — which is what
+    /// makes the change take effect without restarting the process.
+    pub fn set_auth_mode_override(&self, mode: Option<AuthMode>) {
+        *self.auth_mode_override.write().expect("auth mode poisoned") = mode;
+    }
+
     /// The registry of running companies served by this host.
     pub fn registry(&self) -> &CompanyRegistry {
         &self.registry
@@ -838,6 +950,20 @@ impl AppState {
             display_name: self.config.instance_name.clone(),
             capabilities: self.capabilities(),
             storage: self.storage_kind.as_str(),
+            // Not the raw stamp: a host already serving a company is set up as
+            // far as the console is concerned, whether or not it was this flow
+            // that got it there. `--company` predates setup, so every existing
+            // deployment has companies and no `setup_completed_at`, and
+            // reporting the bare stamp would send all of them through the
+            // wizard on their next console load. The wizard exists to fix a
+            // host with nothing to open; a host with something to open does not
+            // need it.
+            //
+            // The authorization gate deliberately reads the raw
+            // [`Self::setup_complete`] instead — see `server::setup::authorize`.
+            // There, "has companies" is what supplies an admin to check
+            // against, so the two questions come apart.
+            setup_complete: self.setup_complete() || !self.registry().is_empty(),
         }
     }
 
@@ -894,6 +1020,14 @@ pub struct AppSpec {
     /// The storage backend kind. Deliberately the kind alone: `/spec` is
     /// unauthenticated, so a path or connection string here would be a gift.
     pub storage: &'static str,
+    /// Whether the first-run setup flow has been completed on this instance.
+    ///
+    /// Reported here, on the unauthenticated handshake the console already
+    /// fetches before sign-in, because a host that has never been set up has
+    /// nobody who *can* sign in — gating this behind auth would make the wizard
+    /// unreachable exactly when it is needed. A bare boolean is the whole
+    /// disclosure: the configuration itself lives behind `/api/v1/setup`.
+    pub setup_complete: bool,
 }
 
 #[cfg(test)]
@@ -962,6 +1096,21 @@ mod tests {
         assert_eq!(spec.framework, "axum");
         assert!(spec.modules.contains(&"server"));
     }
+
+    /// A host with nothing to open is the only one the wizard is for.
+    #[test]
+    fn spec_reports_setup_incomplete_for_an_empty_unstamped_host() {
+        let spec = AppState::new(AppConfig::default()).spec();
+
+        assert!(
+            !spec.setup_complete,
+            "no stamp and no companies is exactly the first-run case"
+        );
+    }
+
+    /// The registered-company half of this lives in `server::setup::test`,
+    /// beside the helper that can build a real runtime:
+    /// `spec_reports_setup_complete_once_a_company_is_registered`.
 
     #[cfg(feature = "mcp")]
     #[test]
@@ -1274,5 +1423,27 @@ mod tests {
         };
         assert!(config.cycles_available());
         assert!(AppState::new(config).spec().cycles_available);
+    }
+
+    /// `config_root` defaults to `home` — the aligned shape every deployment
+    /// but an explicit, diverging `--home` takes (see the field doc and
+    /// `store::home_divergence_warning`).
+    #[test]
+    fn config_root_defaults_to_home() {
+        let state = AppState::new(AppConfig::default()).with_home("/data/companies");
+        assert_eq!(state.config_root(), std::path::Path::new("/data/companies"));
+    }
+
+    /// Once set explicitly, `config_root` diverges from `home` — this is the
+    /// fix for #908's review: `server::setup` must resolve `config.toml`
+    /// through this, not through `home`, or it reads and writes a different
+    /// file than startup does on a deployment where the two differ.
+    #[test]
+    fn config_root_can_diverge_from_home() {
+        let state = AppState::new(AppConfig::default())
+            .with_home("/data/companies")
+            .with_config_root("/data");
+        assert_eq!(state.home(), std::path::Path::new("/data/companies"));
+        assert_eq!(state.config_root(), std::path::Path::new("/data"));
     }
 }

@@ -9,6 +9,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+use crate::app::config::AuthMode;
 use crate::company::CompanyManifest;
 use crate::ports::Brain;
 use crate::ports::types::{
@@ -1302,5 +1303,39 @@ async fn a_provisioned_company_keeps_whatever_tier_it_states() {
         checked,
         crate::company::POLICY_MODES.len(),
         "the walk skipped a tier"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Host-wide auth mode override
+// ---------------------------------------------------------------------------
+
+/// A host-wide sign-in override set before provisioning (by setup, or flipped
+/// live afterward) must reach a company provisioned *after* the change, the
+/// same way it reaches every company built at boot — see
+/// `AppState::auth_mode_override`. Provisioning built the runtime without
+/// threading it through, so an operator who locked the host to `email` after
+/// setup still got a provisioned tenant honoring its own manifest mode.
+#[tokio::test]
+async fn a_host_wide_auth_override_reaches_a_company_provisioned_after_it_is_set() {
+    let home_dir = home();
+    let state = platform_state(home_dir.path(), None);
+    state.set_auth_mode_override(Some(AuthMode::Email));
+    let app = router(state.clone());
+
+    let manifest = "[company]\nname = \"Acme\"\n[users]\nmode = \"wallet\"\n";
+    let response = app
+        .oneshot(provision_req(Some(PLATFORM_SECRET), manifest))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let id = CompanyId::new("acme");
+    let runtime = state.registry().get(&id).expect("company is registered");
+    assert_eq!(
+        runtime.auth_mode(),
+        AuthMode::Email,
+        "the host-wide override set before provisioning must beat the \
+         manifest's own mode, exactly as it does for a company built at boot"
     );
 }
