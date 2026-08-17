@@ -109,6 +109,15 @@ Clearing a field **removes the key** rather than writing `""`. An absent key
 falls through to the next layer; a blank string is a set-but-empty value that
 shadows it.
 
+`POST /api/v1/setup` requires an `application/json` body: axum's `Json`
+extractor rejects anything else, so a plain HTML form cannot submit to this
+route the way a CSRF attack against a cookie-authenticated endpoint normally
+would. A cross-origin page can still *ask* the browser to send JSON, but the
+browser sends a CORS preflight first, and this host only answers one for an
+origin on the exact `OPENCOMPANY_CORS_ORIGINS` allowlist — unset, the default,
+answers none. That allowlist is this route's actual anti-forgery boundary; see
+[`config.md`](config.md) for how it's configured.
+
 ## Who may call it
 
 Unauthenticated access is loopback-only, and only in exactly two situations, both
