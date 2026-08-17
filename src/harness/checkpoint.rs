@@ -102,6 +102,27 @@ impl WorkspaceCheckpointer {
         Ok(checkpointer)
     }
 
+    /// Initializes checkpointing without blocking a Tokio worker thread.
+    ///
+    /// [`initialize`](Self::initialize) shells out to `git init` and commits the
+    /// baseline, which can take tens of milliseconds of blocking file and
+    /// subprocess I/O. When this is called from an async harness path it should
+    /// run off the async worker pool: on a multi-threaded runtime the work is
+    /// moved off the worker via [`block_in_place`](tokio::task::block_in_place);
+    /// on a current-thread runtime or outside any runtime `block_in_place`
+    /// panics, so it runs inline. In practice roster builds happen on the
+    /// multi-threaded runtime, making the inline path a defensive fallback.
+    pub(crate) fn initialize_off_worker(workspace: &Path) -> anyhow::Result<Self> {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle)
+                if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
+            {
+                tokio::task::block_in_place(|| Self::initialize(workspace))
+            }
+            _ => Self::initialize(workspace),
+        }
+    }
+
     /// Records the baseline commit under the same process-wide lock the
     /// per-call checkpoint path holds, so an in-flight tool checkpoint cannot
     /// contend with this one on the Git index.
