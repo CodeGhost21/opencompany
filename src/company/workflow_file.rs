@@ -808,6 +808,17 @@ pub fn list_workflows_with_globals(
             }
         }
     }
+
+    for workflow in crate::globals::workflows() {
+        if seen.contains(&workflow.id)
+            || crate::globals::disabled(disable, "workflow", &workflow.id)
+        {
+            continue;
+        }
+        let mut workflow = workflow.clone();
+        workflow.global = true;
+        files.push(workflow);
+    }
     files
 }
 
