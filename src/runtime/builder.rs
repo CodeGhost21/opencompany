@@ -2146,6 +2146,24 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // Resolved to data here because `build_agent` is
+                            // synchronous. A store that cannot answer yields an
+                            // empty registry, which costs the prompt its
+                            // catalogue and leaves every tool working.
+                            let ledger_registry = crate::ledger::Registry::build(
+                                ops.ledgers
+                                    .list_specs(&id)
+                                    .await
+                                    .unwrap_or_else(|error| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            %error,
+                                            "could not read this company's ledger declarations; \
+                                             agents get the built-ins only"
+                                        );
+                                        Vec::new()
+                                    }),
+                            );
                             let deps = HarnessDeps {
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
@@ -2180,6 +2198,7 @@ impl RuntimeBuilder {
                                 tasks: Some(ops.tasks.clone()),
                                 artifacts: Some(ops.artifacts.clone()),
                                 ledgers: Some(ops.ledgers.clone()),
+                                ledger_registry,
                                 // Skill read surface (#28): the operator delta
                                 // store + the company source dir (`companies/<name>`,
                                 // held as `seed_dir`) whose `skills/` subtree

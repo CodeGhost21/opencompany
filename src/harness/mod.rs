@@ -240,6 +240,17 @@ pub struct HarnessDeps {
     /// for a path with no company behind it, and is what every construction site
     /// that predates them does.
     pub ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
+    /// The company's ledgers as they stood when the agent was built, for the
+    /// prompt catalogue.
+    ///
+    /// Resolved to **data** before deps construction because `build_agent` is
+    /// synchronous, the same shape the MCP servers already take. A ledger
+    /// declared mid-run is therefore reachable by every tool immediately (the
+    /// `ledger` argument is checked against the live registry at call time) and
+    /// appears in the *prompt* only from the next build — which is the honest
+    /// limit: system prompts are assembled once, and nothing can retroactively
+    /// edit one already in flight.
+    pub ledger_registry: crate::ledger::Registry,
     /// The company's skill-delta store, so a built agent can see its effective
     /// skill set (company-dir skills ∪ operator deltas ∪ custom docs) as read
     /// tools + a prompt catalogue. `None` leaves the agent skill-less (the chat
