@@ -2141,6 +2141,37 @@ impl HarnessBrain {
     /// orchestrator instead of the teammate the operator opened — the console
     /// would look like it were addressing an agent while talking to someone
     /// else.
+    ///
+    /// # Step 2 resolves the key rather than matching it exactly (issue #884)
+    ///
+    /// `chat` is a **human-and-console-typed** key: the console mints it from a
+    /// `TeamMember.id`, an operator can type one into a URL, and an audit script
+    /// can post one straight to the API. Matching it with the exact,
+    /// case-sensitive [`CompanyRecord::is_roster_agent`] meant any drift at all —
+    /// a capital letter, a console id that differs from the manifest id — read as
+    /// *unaddressed* and fell to arm 3, where an agent nobody asked answered
+    /// confidently and nothing said so.
+    /// [`CompanyRecord::resolve_roster_agent_id`] is documented as the resolver
+    /// for exactly this case, and returning its **canonical** id (rather than the
+    /// key as typed) is what stops the persona lookup one layer up in
+    /// [`HarnessBrain::agent_for`](crate::harness::HarnessBrain) missing on the
+    /// same difference. `is_roster_agent` keeps its exact-match contract for the
+    /// machine-written desk overlay.
+    ///
+    /// Case-folding can only claim keys that resolve to nothing today, so no
+    /// existing thread moves. The one behaviour it introduces: two roster ids
+    /// differing **only** by case make a mixed-case key order-dependent —
+    /// `resolve_roster_agent_id` returns the first match, manifest agents before
+    /// overlay ones. That roster is already ambiguous for every other typed key
+    /// (a card assignee resolves the same way), so this does not add a namespace
+    /// problem, it inherits one.
+    ///
+    /// # The fall-through warns (issue #884)
+    ///
+    /// Arm 3 answers as the orchestrator whether the message was unaddressed or
+    /// addressed to something that does not exist, and those are very different
+    /// facts. The log line is what makes the second one a greppable event in a
+    /// tenant's log instead of a silent wrong-agent answer.
     fn responder_for(&self, chat: Option<&str>) -> String {
         let Some(chat) = chat else {
             return self.responder.clone();
@@ -2148,9 +2179,16 @@ impl HarnessBrain {
         if let Some(lead) = self.desk_lead(chat) {
             return lead;
         }
-        if self.record().is_roster_agent(chat) {
-            return chat.to_string();
+        if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
+            return agent;
         }
+        tracing::warn!(
+            company = %self.record().id,
+            chat = %chat,
+            responder = %self.responder,
+            "[chat] addressed thread key matches no desk and no roster teammate; the \
+             orchestrator is answering a message that may not have been meant for it"
+        );
         self.responder.clone()
     }
 
@@ -5230,6 +5268,104 @@ members = ["engineer"]
         assert_eq!(brain.responder_for(Some("chief")), "chief");
     }
 
+    // ── Issue #884 D2: an unresolvable chat key is no longer silent ──
+
+    /// Captures everything logged on **this thread** while `body` runs.
+    ///
+    /// Thread-local (`with_default`) rather than a global default on purpose:
+    /// `workflow_scheduler`'s capture already claims the process-wide slot in
+    /// this same test binary and asserts it wins that race, so installing a
+    /// second global here would turn its test red for an unrelated reason.
+    fn logs_from(body: impl FnOnce()) -> String {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl Write for Writer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("log sink").extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Writer;
+            fn make_writer(&'a self) -> Self::Writer {
+                Writer(self.0.clone())
+            }
+        }
+
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Sink(sink.clone()))
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = sink.lock().expect("log sink").clone();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// A key that resolves to no desk and no teammate still answers as the
+    /// orchestrator — the fallback is deliberate — but it now says so.
+    ///
+    /// This is the whole of D2: before it, "nobody addressed anybody" and
+    /// "somebody addressed a teammate that does not exist" produced the same
+    /// confident answer from an agent nobody asked, and the tenant log carried
+    /// nothing to tell them apart.
+    #[test]
+    fn responder_for_warns_before_falling_back_to_the_orchestrator() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let logs = logs_from(|| {
+            assert_eq!(
+                brain.responder_for(Some("dm:engineer")),
+                "chief",
+                "the fallback itself is unchanged"
+            );
+        });
+        assert!(
+            logs.contains("dm:engineer"),
+            "the unresolved key must be named so the fall-through is greppable: {logs}"
+        );
+        assert!(logs.contains("WARN"), "{logs}");
+
+        // …and a key that DOES resolve stays silent, or the line is noise
+        // rather than a signal.
+        let quiet = logs_from(|| {
+            assert_eq!(brain.responder_for(Some("engineer")), "engineer");
+            assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
+        });
+        assert!(quiet.is_empty(), "a resolved key must not warn: {quiet}");
+    }
+
+    /// A human- or console-typed teammate key resolves case-insensitively to the
+    /// **canonical** roster id, so a capital letter no longer reads as "nobody"
+    /// and hands the turn to the orchestrator.
+    ///
+    /// Returning the canonical id rather than the key as typed is the load-bearing
+    /// half: the persona lookup downstream matches on the roster id, so echoing
+    /// `"Engineer"` back would move the miss one layer along instead of fixing it.
+    #[test]
+    fn responder_for_resolves_a_teammate_key_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        for typed in ["Engineer", "ENGINEER", "engineer"] {
+            assert_eq!(
+                brain.responder_for(Some(typed)),
+                "engineer",
+                "`{typed}` must reach the engineer under its canonical id"
+            );
+        }
+        // A key that resolves to nothing is still the orchestrator's — folding
+        // the case may only claim keys that reached nobody before.
+        assert_eq!(brain.responder_for(Some("engineeer")), "chief");
+    }
+
     /// Desks still win. A desk id is resolved as a desk even if an agent shares
     /// the name, so no existing thread changes where it lands.
     #[test]
@@ -8172,7 +8308,7 @@ members = ["eng1", "eng2"]
 
         let note = only_card(&provider.tasks).await.note.expect("note");
         assert!(
-            note.contains("hand-off to the \"ghost\" desk was not delivered"),
+            note.contains("hand-off to \"ghost\" was not delivered"),
             "the card must name the hand-off that did not happen: {note}"
         );
         assert!(
@@ -8212,11 +8348,11 @@ members = ["eng1", "eng2"]
         );
         let note = after.note.expect("note");
         assert!(
-            note.contains("hand-off to the \"writer\" desk was not delivered"),
+            note.contains("hand-off to \"writer\" was not delivered"),
             "the refused target must be named on the card: {note}"
         );
         assert!(
-            note.contains("not a desk this company can hand work to"),
+            note.contains("not somewhere this company can hand work to"),
             "the cause must be on the card: {note}"
         );
     }

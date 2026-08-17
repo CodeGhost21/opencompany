@@ -2,7 +2,11 @@ import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { DeliveryReport } from "@/api/workflows";
+import type {
+  DeliveryReport,
+  WorkflowBlockedNode,
+  WorkflowRunApprovalRow,
+} from "@/api/workflows";
 
 /**
  * One attention item off the company → operator SSE feed (issue #66). Mirrors
@@ -32,7 +36,13 @@ export type CompanyStreamEvent =
       parentId?: string;
     }
   | { type: "task_dispatched"; seq: number; atMillis: number; taskId: string }
-  | { type: "task_steered"; seq: number; atMillis: number; taskId: string; action: string }
+  | {
+      type: "task_steered";
+      seq: number;
+      atMillis: number;
+      taskId: string;
+      action: string;
+    }
   // A board card was written (issue #464) — the frame the board had no way to
   // learn about anything from. Emitted by the host's task store, so it fires
   // for a card opened from chat intake, from a delegation, from the publish
@@ -132,9 +142,27 @@ export type CompanyStreamEvent =
       kind: string;
       chatId?: string;
     }
-  | { type: "approval_resolved"; seq: number; atMillis: number; approvalId: string; verdict: string }
-  | { type: "lifecycle_changed"; seq: number; atMillis: number; from: string; to: string }
-  | { type: "payment_received"; seq: number; atMillis: number; amountUsd: number; memo: string }
+  | {
+      type: "approval_resolved";
+      seq: number;
+      atMillis: number;
+      approvalId: string;
+      verdict: string;
+    }
+  | {
+      type: "lifecycle_changed";
+      seq: number;
+      atMillis: number;
+      from: string;
+      to: string;
+    }
+  | {
+      type: "payment_received";
+      seq: number;
+      atMillis: number;
+      amountUsd: number;
+      memo: string;
+    }
   // A workflow run finished (issue #228), from either entry point. The whole
   // point is the *scheduled* case: nobody is watching a cron run, so without
   // this an owner summary that failed to send would be silent until someone
@@ -165,6 +193,20 @@ export type CompanyStreamEvent =
        * majority of runs. Not a failure — see `WorkflowRunOutcome.notices`.
        */
       notices?: string[];
+      /**
+       * The nodes this run blocked on a person (issue #881). Absent when
+       * nothing blocked.
+       *
+       * A blocked run carries NO `error` and is not `cancelled`, so without
+       * reading this a console watching a run settle would paint it green —
+       * and then the history it reloads a moment later would say it blocked.
+       */
+      blockedNodes?: WorkflowBlockedNode[];
+      /**
+       * The approvals this run parked (issue #880) — a receipt of what it
+       * opened, including the parks that failed.
+       */
+      approvals?: WorkflowRunApprovalRow[];
     }
   // Issue #371/#382: the live per-node progress trail. A run announces itself,
   // then brackets each non-trigger node with a *started* frame as it begins and
@@ -547,7 +589,10 @@ export function useEvents(
  * picker), so which subscriber a type reaches is worth pinning directly rather
  * than only through a mounted hook.
  */
-export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers): void {
+export function handleEvent(
+  event: CompanyStreamEvent,
+  subscribers: Subscribers,
+): void {
   const {
     onAgentReply,
     onTaskEvent,
@@ -648,9 +693,12 @@ export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers)
       // Refresh first, then say so. The refresh is what settles an inline card
       // whose decision was made on the Approvals page (or in another tab).
       onApprovalEvent?.(event);
-      toast(event.verdict === "approve" ? "Approval granted" : "Approval denied", {
-        description: "An approval was just resolved.",
-      });
+      toast(
+        event.verdict === "approve" ? "Approval granted" : "Approval denied",
+        {
+          description: "An approval was just resolved.",
+        },
+      );
       break;
     case "lifecycle_changed":
       toast(`Company is now ${event.to}`, {

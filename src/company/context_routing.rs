@@ -19,11 +19,9 @@
 //!   [`WorkspaceStore`](crate::ports::WorkspaceStore), skipping any that do not
 //!   exist.
 //!
-//! **Not yet spent.** Carrying the resolved documents into the agent's system
-//! prompt is the remaining step: the agent build is synchronous, so they have to
-//! ride `HarnessDeps` the way `mcp_servers` and the skill deltas already do, and
-//! be appended via [`crate::company::prompt::context_section`]. Until then a
-//! `context` line selects documents that nothing reads.
+//! The harness resolves these ahead of the (synchronous) agent build — see
+//! `Harness::resolve_routed_context` — and appends them to the persona last, via
+//! [`crate::company::prompt::context_section`].
 
 use crate::company::Agent;
 

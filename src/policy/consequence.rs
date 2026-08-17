@@ -330,6 +330,10 @@ const DECLARED: &[Declared] = &[
     d("query_company", EffectGroup::Other, Reach::Nothing),
     d("spawn_task", EffectGroup::Other, Reach::Nothing),
     d("delegate_to_desk", EffectGroup::Other, Reach::Nothing),
+    // Issue #884: `delegate_to_teammate` is `delegate_to_desk` resolved to a
+    // person instead of a desk. Same class exactly — it runs a turn inside this
+    // company and nothing leaves it.
+    d("delegate_to_teammate", EffectGroup::Other, Reach::Nothing),
     d("add_agent", EffectGroup::Other, Reach::Nothing),
     d("create_workflow", EffectGroup::Other, Reach::Nothing),
     d("assign_task", EffectGroup::Other, Reach::Nothing),
@@ -2225,6 +2229,7 @@ mod tests {
             orchestrator::QUERY_COMPANY_TOOL,
             orchestrator::SPAWN_TASK_TOOL,
             orchestrator::DELEGATE_TO_DESK_TOOL,
+            orchestrator::DELEGATE_TO_TEAMMATE_TOOL,
             orchestrator::ADD_AGENT_TOOL,
             orchestrator::CREATE_WORKFLOW_TOOL,
             orchestrator::ASSIGN_TASK_TOOL,

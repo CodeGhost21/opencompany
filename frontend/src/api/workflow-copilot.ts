@@ -166,7 +166,10 @@ export interface RosterEntry {
  * from the same function that sends it means the disclosure cannot drift from
  * the truth.
  */
-export function composeCopilotMessage(context: CopilotContext, question: string): string {
+export function composeCopilotMessage(
+  context: CopilotContext,
+  question: string,
+): string {
   const { graph, runs, runsKnown, roster, toolSlugs, toolSlugsKnown } = context;
   // `editable: false` means the graph is defined by a file in the company
   // source tree. Named for what it IS rather than for the flag's polarity: this
@@ -188,7 +191,9 @@ export function composeCopilotMessage(context: CopilotContext, question: string)
     `## Workflow`,
     `Name: ${graph.name}`,
     `Id: ${graph.id}`,
-    graph.description ? `Description: ${graph.description}` : `Description: (none)`,
+    graph.description
+      ? `Description: ${graph.description}`
+      : `Description: (none)`,
     sourceDefined
       ? `Editable from the console: NO — this workflow is defined by a file in the company source tree (workflows/${graph.id}.toml). You can explain it, but changes have to be made in the company repository, not here.`
       : `Editable from the console: yes, through the workflow editor.`,
@@ -201,7 +206,8 @@ export function composeCopilotMessage(context: CopilotContext, question: string)
     const bits = [`- ${node.id} [${node.kind}] "${node.name}"`];
     if (node.summary) bits.push(`summary: ${node.summary}`);
     if (node.agent) bits.push(`agent: ${node.agent}`);
-    if (node.schedule) bits.push(`schedule (5-field cron, UTC): ${node.schedule}`);
+    if (node.schedule)
+      bits.push(`schedule (5-field cron, UTC): ${node.schedule}`);
     if (node.requiresApproval) bits.push(`requires approval before proceeding`);
     if (node.onError) bits.push(`on error: ${node.onError}`);
     if (node.retry) bits.push(`retry: ${JSON.stringify(node.retry)}`);
@@ -223,7 +229,9 @@ export function composeCopilotMessage(context: CopilotContext, question: string)
     lines.push(`- (none — the nodes are not joined)`);
   } else {
     for (const edge of graph.edges) {
-      lines.push(`- ${edge.from} → ${edge.to}${edge.label ? ` [${edge.label}]` : ""}`);
+      lines.push(
+        `- ${edge.from} → ${edge.to}${edge.label ? ` [${edge.label}]` : ""}`,
+      );
     }
   }
 
@@ -260,9 +268,13 @@ export function composeCopilotMessage(context: CopilotContext, question: string)
     `An \`agent\` node names its teammate with the top-level \`agent\` field (a roster id below), NOT inside \`config\`.`,
   );
   if (roster === undefined) {
-    lines.push(`(The roster could not be listed here. Do not invent teammate ids.)`);
+    lines.push(
+      `(The roster could not be listed here. Do not invent teammate ids.)`,
+    );
   } else if (roster.length === 0) {
-    lines.push(`(This company has no roster teammates, so do not propose an \`agent\` step.)`);
+    lines.push(
+      `(This company has no roster teammates, so do not propose an \`agent\` step.)`,
+    );
   } else {
     for (const member of roster) {
       lines.push(`- ${member.id}${member.role ? ` — ${member.role}` : ""}`);
@@ -275,9 +287,13 @@ export function composeCopilotMessage(context: CopilotContext, question: string)
     `A \`tool_call\` node names its tool with \`config.slug\`, set to one of these EXACT slugs. Do not invent a slug (there is no \`github_integration\`, etc.).`,
   );
   if (!toolSlugsKnown || toolSlugs === undefined) {
-    lines.push(`(The granted tools could not be listed here. Do not invent a tool slug.)`);
+    lines.push(
+      `(The granted tools could not be listed here. Do not invent a tool slug.)`,
+    );
   } else if (toolSlugs.length === 0) {
-    lines.push(`(No tools are granted to this company's workflows, so do not propose a \`tool_call\` step.)`);
+    lines.push(
+      `(No tools are granted to this company's workflows, so do not propose a \`tool_call\` step.)`,
+    );
   } else {
     for (const slug of toolSlugs) lines.push(`- ${slug}`);
   }
@@ -369,19 +385,30 @@ function describeRun(run: WorkflowRunOutcome): string {
   const trail = nodes.length
     ? ` steps: ${nodes.map((n) => `${n.nodeId}=${n.status}(${n.elapsedMs}ms)`).join(", ")};`
     : "";
-  const undelivered = run.deliveries.filter((d) => d.status !== "sent" && d.status !== "pending");
+  const undelivered = run.deliveries.filter(
+    (d) => d.status !== "sent" && d.status !== "pending",
+  );
   const delivery = run.deliveries.length
     ? ` deliveries: ${run.deliveries.map((d) => `${d.node}→${d.kind}=${d.status}`).join(", ")};`
     : "";
+  // Issue #881: the blocked reading is named before the delivery one and before
+  // the bare "finished". A blocked run has no error, is not cancelled and
+  // routed nothing, so without this arm it grounded the copilot with the word
+  // "finished" about a run that produced no deliverable — and the copilot would
+  // then reason from that as fact.
+  const blocked = run.blockedNodes ?? [];
+  const parked = run.approvals?.length ?? 0;
   const outcome = run.running
     ? "still running"
     : run.error
       ? `FAILED: ${run.error}`
       : run.cancelled
         ? "stopped by an operator before it finished"
-        : undelivered.length
-          ? `finished, but ${undelivered.length} report(s) were not delivered`
-          : "finished";
+        : blocked.length
+          ? `BLOCKED at ${blocked.map((b) => b.nodeId).join(", ")} — produced no deliverable and the steps after did not run; parked ${parked} approval(s), which does NOT continue this run`
+          : undelivered.length
+            ? `finished, but ${undelivered.length} report(s) were not delivered`
+            : "finished";
   const approvals = run.pendingApprovals.length
     ? ` awaiting approval: ${run.pendingApprovals.join(", ")};`
     : "";
@@ -423,7 +450,11 @@ export async function askCopilot(
   question: string,
 ): Promise<string[]> {
   const message = composeCopilotMessage(context, question);
-  const reply = await client.chat(message, company, copilotThreadId(workflowId));
+  const reply = await client.chat(
+    message,
+    company,
+    copilotThreadId(workflowId),
+  );
   return reply.responses.map((r) => r.text);
 }
 
@@ -437,9 +468,15 @@ export async function loadCopilotHistory(
   client: OpenCompanyClient,
   company: string | null,
   workflowId: string,
-): Promise<{ ok: true; messages: CopilotMessage[] } | { ok: false; error: Error }> {
+): Promise<
+  { ok: true; messages: CopilotMessage[] } | { ok: false; error: Error }
+> {
   try {
-    const rows = await client.getChatHistory(copilotThreadId(workflowId), company, { limit: 200 });
+    const rows = await client.getChatHistory(
+      copilotThreadId(workflowId),
+      company,
+      { limit: 200 },
+    );
     return {
       ok: true,
       messages: rows.map((row) => ({
@@ -454,7 +491,10 @@ export async function loadCopilotHistory(
   } catch (e) {
     return {
       ok: false,
-      error: e instanceof Error ? e : new Error("The copilot transcript could not be loaded."),
+      error:
+        e instanceof Error
+          ? e
+          : new Error("The copilot transcript could not be loaded."),
     };
   }
 }
