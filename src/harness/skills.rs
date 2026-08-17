@@ -90,16 +90,53 @@ impl EffectiveSkills {
         registry: &[SkillDoc],
         deltas: &[SkillState],
     ) -> crate::Result<Self> {
+        Self::materialize_with_globals(workspace_dir, source_dir, registry, deltas, &[])
+    }
+
+    /// [`materialize`](Self::materialize), honouring a company's
+    /// `[globals].disable`.
+    ///
+    /// The always-installed skills of the global baseline
+    /// ([`crate::globals::skills`]) are the **bottom** layer: a company-bundle
+    /// skill of the same slug supersedes one, an enabled delta carrying a
+    /// `custom_doc` supersedes one, and a disabled delta drops one — so a
+    /// company that has its own `web-research` gets its own, and one that wants
+    /// none gets none. Unlike the shared registry beside them, these are
+    /// installed rather than offered: every company has them without anybody
+    /// installing anything.
+    pub fn materialize_with_globals(
+        workspace_dir: PathBuf,
+        source_dir: Option<&Path>,
+        registry: &[SkillDoc],
+        deltas: &[SkillState],
+        disable: &[String],
+    ) -> crate::Result<Self> {
         // Parsed effective docs, and where an on-disk bundle can be copied from
         // (company-dir skills only). Custom docs carry their SKILL.md inline.
         let mut docs: BTreeMap<String, SkillDoc> = BTreeMap::new();
         let mut source_paths: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut custom_docs: BTreeMap<String, String> = BTreeMap::new();
 
+        // 0. The global baseline, installed in every company. Written inline
+        //    (like a console-authored skill) rather than copied from disk: these
+        //    are embedded in the binary, because a platform-provisioned tenant
+        //    has no repository checkout to copy from.
+        for doc in crate::globals::skills() {
+            if crate::globals::disabled(disable, "skill", &doc.slug) {
+                continue;
+            }
+            custom_docs.insert(doc.slug.clone(), render_skill_md(doc));
+            docs.insert(doc.slug.clone(), doc.clone());
+        }
+
         // 1. Company-dir skills (verbatim on-disk bundles, resources included).
         if let Some(dir) = source_dir {
             let skills_root = dir.join("skills");
             for doc in load_dir_skills(&skills_root)? {
+                // A company bundle supersedes the global of the same slug: drop
+                // the inline global body so the on-disk bundle is what gets
+                // copied, resources and all.
+                custom_docs.remove(&doc.slug);
                 source_paths.insert(doc.slug.clone(), skills_root.join(&doc.slug));
                 docs.insert(doc.slug.clone(), doc);
             }
