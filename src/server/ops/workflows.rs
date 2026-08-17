@@ -3706,8 +3706,12 @@ mod tests {
                         cancelled: false,
                         notices: Vec::new(),
                         board: Vec::new(),
-                        blocked_nodes: Vec::new(),
+                        // Added by #881/#880 after this fixture was written. A
+                        // failed run parks nothing and blocks nothing, so both
+                        // are empty here — see `Settled::from`'s Err arm, which
+                        // makes the same choice for the same reason.
                         approvals: Vec::new(),
+                        blocked_nodes: Vec::new(),
                     },
                 )
                 .await
