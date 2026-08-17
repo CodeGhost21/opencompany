@@ -269,6 +269,18 @@ defaults to `false`, preserving existing workspaces unless an operator
 explicitly opts in. See [sandbox.md](orchestration/sandbox.md#checkpointing) for
 the security rationale.
 
+**Checkpoint history retains everything a workspace ever contained.** Because the
+checkpoint repository records the workspace tree state at each tool call, a file
+an agent writes and later deletes survives in `workspace.git/` history long after
+it leaves the working tree. Content an agent downloads, generates, or is handed
+by the operator can therefore accumulate there with no size bound — there are no
+ignore rules and `[workspace]` quotas do not apply to Git objects. Treat the
+feature as suitable for workspaces whose contents are not secrets, or purge
+history deliberately on the same schedule such data would otherwise be rotated.
+The supported purge path is ordinary Git maintenance run against the out-of-band
+repository from the host — `git --git-dir=<workspace>.git reflog expire --expire=now --all` followed by `git --git-dir=<workspace>.git gc --prune=now` drops unreferenced checkpoint blobs and shrinks the repository; deleting the whole `<workspace>.git/` directory resets a workspace to its next checkpoint baseline. No retention is automatic: the checkpointer
+never rewrites history and leaves the repository alone between checkpoints.
+
 **The first two quotas are soft/advisory in the binary.** At boot `serve`
 measures the workspace (and `tmp/`) and emits an operator-visible
 `tracing::warn` when either exceeds its configured quota. **Hard enforcement**
