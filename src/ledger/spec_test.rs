@@ -98,7 +98,7 @@ fn normalize_reclamps_a_spec_loaded_back_off_the_store() {
         order: Order::Recorded,
     });
     spec.normalize().expect("still valid");
-    assert_eq!(spec.sections[1].cap, super::super::budget::MAX_LISTED);
+    assert_eq!(spec.sections[0].cap, super::super::budget::MAX_LISTED);
 }
 
 #[test]
