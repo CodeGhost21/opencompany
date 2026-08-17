@@ -6,15 +6,15 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `asset_generator` | Asset Generator |  | Generate art, audio, and 3D assets. |
-| `balance_designer` | Balance Designer |  | Tune difficulty and game balance. |
-| `gameplay_engineer` | Gameplay Engineer |  | Implement gameplay systems and code. |
-| `marketer` | Marketer |  | Market and promote the launch. |
-| `narrative_designer` | Narrative Designer |  | Story, characters, and dialogue. |
-| `qa_tester` | QA Tester |  | Find and report bugs. |
-| `world_builder` | World Builder | orchestrator | Design worlds, lore, and settings. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `asset_generator` | Asset Generator | Generate art, audio, and 3D assets. |
+| `balance_designer` | Balance Designer | Tune difficulty and game balance. |
+| `gameplay_engineer` | Gameplay Engineer | Implement gameplay systems and code. |
+| `marketer` | Marketer | Market and promote the launch. |
+| `narrative_designer` | Narrative Designer | Story, characters, and dialogue. |
+| `qa_tester` | QA Tester | Find and report bugs. |
+| `world_builder` | World Builder (orchestrator) | Design worlds, lore, and settings. |
 
 `world_builder` (World Builder) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

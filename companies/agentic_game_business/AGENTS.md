@@ -6,15 +6,15 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `analytics_analyst` | Analytics Analyst |  | Track KPIs, LTV, retention, and cohorts. |
-| `community_manager` | Community Manager |  | Grow and moderate the player community. |
-| `liveops_manager` | LiveOps Manager |  | Plan and run events and content updates. |
-| `monetization_designer` | Monetization Designer |  | Design offers, pricing, and the in-game economy. |
-| `player_support` | Player Support |  | Resolve player issues and refunds. |
-| `store_optimizer` | Store Optimizer |  | App-store optimization and conversion. |
-| `user_acquisition` | User Acquisition | orchestrator | Run paid and organic UA campaigns. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `analytics_analyst` | Analytics Analyst | Track KPIs, LTV, retention, and cohorts. |
+| `community_manager` | Community Manager | Grow and moderate the player community. |
+| `liveops_manager` | LiveOps Manager | Plan and run events and content updates. |
+| `monetization_designer` | Monetization Designer | Design offers, pricing, and the in-game economy. |
+| `player_support` | Player Support | Resolve player issues and refunds. |
+| `store_optimizer` | Store Optimizer | App-store optimization and conversion. |
+| `user_acquisition` | User Acquisition (orchestrator) | Run paid and organic UA campaigns. |
 
 `user_acquisition` (User Acquisition) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

@@ -6,14 +6,14 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `code_analyst` | Code Analyst |  | Analyze codebases, product, and technical traction. |
-| `deck_evaluator` | Deck Evaluator |  | Evaluate pitch decks and business models. |
-| `founder_sourcer` | Founder Sourcer | orchestrator | Source founders and deal flow. |
-| `market_sizer` | Market Sizer |  | Size markets and model opportunity. |
-| `portfolio_support` | Portfolio Support |  | Support portfolio companies post-investment. |
-| `reference_checker` | Reference Checker |  | Run founder and customer reference checks. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `code_analyst` | Code Analyst | Analyze codebases, product, and technical traction. |
+| `deck_evaluator` | Deck Evaluator | Evaluate pitch decks and business models. |
+| `founder_sourcer` | Founder Sourcer (orchestrator) | Source founders and deal flow. |
+| `market_sizer` | Market Sizer | Size markets and model opportunity. |
+| `portfolio_support` | Portfolio Support | Support portfolio companies post-investment. |
+| `reference_checker` | Reference Checker | Run founder and customer reference checks. |
 
 `founder_sourcer` (Founder Sourcer) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

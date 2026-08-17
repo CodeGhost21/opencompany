@@ -6,12 +6,12 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `literature_reviewer` | Literature Reviewer | orchestrator | Review and synthesize scientific literature. |
-| `molecule_discovery` | Molecule Discovery |  | Propose candidate molecules. |
-| `simulation_agent` | Simulation Agent |  | Run in-silico simulations and screening. |
-| `trial_planner` | Trial Planner |  | Design and plan clinical trials. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `literature_reviewer` | Literature Reviewer (orchestrator) | Review and synthesize scientific literature. |
+| `molecule_discovery` | Molecule Discovery | Propose candidate molecules. |
+| `simulation_agent` | Simulation Agent | Run in-silico simulations and screening. |
+| `trial_planner` | Trial Planner | Design and plan clinical trials. |
 
 `literature_reviewer` (Literature Reviewer) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

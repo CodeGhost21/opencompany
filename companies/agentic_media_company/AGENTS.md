@@ -6,16 +6,16 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `illustrator` | Illustrator |  | Create article illustrations. |
-| `publisher` | Publisher |  | Publish to the CMS. |
-| `seo_optimizer` | SEO Optimizer |  | Optimize articles for search. |
-| `social_distributor` | Social Distributor |  | Distribute across social channels. |
-| `source_verifier` | Source Verifier |  | Verify sources and fact-check. |
-| `story_scout` | Story Scout | orchestrator | Find and pitch story ideas. |
-| `translator` | Translator |  | Localize stories across languages. |
-| `writer` | Writer |  | Write and edit articles. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `illustrator` | Illustrator | Create article illustrations. |
+| `publisher` | Publisher | Publish to the CMS. |
+| `seo_optimizer` | SEO Optimizer | Optimize articles for search. |
+| `social_distributor` | Social Distributor | Distribute across social channels. |
+| `source_verifier` | Source Verifier | Verify sources and fact-check. |
+| `story_scout` | Story Scout (orchestrator) | Find and pitch story ideas. |
+| `translator` | Translator | Localize stories across languages. |
+| `writer` | Writer | Write and edit articles. |
 
 `story_scout` (Story Scout) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

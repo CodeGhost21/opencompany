@@ -6,14 +6,14 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `candidate_sourcer` | Candidate Sourcer | orchestrator | Source candidates for open roles. |
-| `interviewer` | Interviewer |  | Conduct first-round interviews. |
-| `offer_generator` | Offer Generator |  | Draft and generate offers. |
-| `outreach_agent` | Outreach Agent |  | Run personalized candidate outreach. |
-| `resume_analyst` | Resume Analyst |  | Screen and rank resumes against the spec. |
-| `scheduler` | Scheduler |  | Coordinate interview scheduling. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `candidate_sourcer` | Candidate Sourcer (orchestrator) | Source candidates for open roles. |
+| `interviewer` | Interviewer | Conduct first-round interviews. |
+| `offer_generator` | Offer Generator | Draft and generate offers. |
+| `outreach_agent` | Outreach Agent | Run personalized candidate outreach. |
+| `resume_analyst` | Resume Analyst | Screen and rank resumes against the spec. |
+| `scheduler` | Scheduler | Coordinate interview scheduling. |
 
 `candidate_sourcer` (Candidate Sourcer) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

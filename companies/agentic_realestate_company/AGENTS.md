@@ -6,13 +6,13 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `contractor_coordinator` | Contractor Coordinator |  | Coordinate contractors and renovations. |
-| `deal_underwriter` | Deal Underwriter |  | Underwrite deals and model returns. |
-| `neighborhood_analyst` | Neighborhood Analyst |  | Analyze neighborhoods, comps, and trends. |
-| `property_scout` | Property Scout | orchestrator | Find and screen candidate properties. |
-| `tenant_manager` | Tenant Manager |  | Manage tenants and property operations. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `contractor_coordinator` | Contractor Coordinator | Coordinate contractors and renovations. |
+| `deal_underwriter` | Deal Underwriter | Underwrite deals and model returns. |
+| `neighborhood_analyst` | Neighborhood Analyst | Analyze neighborhoods, comps, and trends. |
+| `property_scout` | Property Scout (orchestrator) | Find and screen candidate properties. |
+| `tenant_manager` | Tenant Manager | Manage tenants and property operations. |
 
 `property_scout` (Property Scout) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

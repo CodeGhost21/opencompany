@@ -6,14 +6,14 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `contract_generator` | Contract Generator |  | Generate contracts from templates. |
-| `crm_updater` | CRM Updater |  | Keep CRM records accurate and current. |
-| `follow_up_agent` | Follow-up Agent |  | Nurture and follow up on pipeline. |
-| `lead_gen` | Lead Generation | orchestrator | Generate and qualify leads. |
-| `outreach_personalizer` | Outreach Personalizer |  | Craft personalized outreach at scale. |
-| `proposal_writer` | Proposal Writer |  | Write tailored proposals. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `contract_generator` | Contract Generator | Generate contracts from templates. |
+| `crm_updater` | CRM Updater | Keep CRM records accurate and current. |
+| `follow_up_agent` | Follow-up Agent | Nurture and follow up on pipeline. |
+| `lead_gen` | Lead Generation (orchestrator) | Generate and qualify leads. |
+| `outreach_personalizer` | Outreach Personalizer | Craft personalized outreach at scale. |
+| `proposal_writer` | Proposal Writer | Write tailored proposals. |
 
 `lead_gen` (Lead Generation) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

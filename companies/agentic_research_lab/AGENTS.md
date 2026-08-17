@@ -6,16 +6,16 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `analyst` | Analyst |  | Compute, model, and check the numbers a claim rests on. |
-| `critic` | Critic |  | Attack the lab's own conclusions before the operator sees them. |
-| `curator` | Curator |  | Owns the brief: one current statement of what the lab knows. |
-| `inventor` | Inventor |  | Propose a different angle when the current line stalls. |
-| `librarian` | Librarian |  | Find and download primary sources. Never reads them. |
-| `orchestrator` | Research Lead | orchestrator | Break the question into lines of inquiry, delegate, combine. |
-| `scholar` | Scholar |  | Read what was gathered; record what it establishes. Never fetches. |
-| `tool_builder` | Tool Builder |  | Write and run the programs, and keep the shared library. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `analyst` | Analyst | Compute, model, and check the numbers a claim rests on. |
+| `critic` | Critic | Attack the lab's own conclusions before the operator sees them. |
+| `curator` | Curator | Owns the brief: one current statement of what the lab knows. |
+| `inventor` | Inventor | Propose a different angle when the current line stalls. |
+| `librarian` | Librarian | Find and download primary sources. Never reads them. |
+| `orchestrator` | Research Lead (orchestrator) | Break the question into lines of inquiry, delegate, combine. |
+| `scholar` | Scholar | Read what was gathered; record what it establishes. Never fetches. |
+| `tool_builder` | Tool Builder | Write and run the programs, and keep the shared library. |
 
 `orchestrator` (Research Lead) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

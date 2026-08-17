@@ -6,13 +6,13 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `audit_prep` | Audit Preparer |  | Assemble documentation for audits. |
-| `bookkeeper` | Bookkeeper | orchestrator | Record transactions and reconcile accounts. |
-| `forecaster` | Forecaster |  | Build financial forecasts and budgets. |
-| `payroll_agent` | Payroll Agent |  | Run payroll and related filings. |
-| `tax_preparer` | Tax Preparer |  | Prepare tax filings. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `audit_prep` | Audit Preparer | Assemble documentation for audits. |
+| `bookkeeper` | Bookkeeper (orchestrator) | Record transactions and reconcile accounts. |
+| `forecaster` | Forecaster | Build financial forecasts and budgets. |
+| `payroll_agent` | Payroll Agent | Run payroll and related filings. |
+| `tax_preparer` | Tax Preparer | Prepare tax filings. |
 
 `bookkeeper` (Bookkeeper) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

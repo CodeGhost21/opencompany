@@ -6,16 +6,16 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `analytics_analyst` | Analytics Analyst |  | Analyze performance and advise. |
-| `community_manager` | Community Manager |  | Engage and moderate the community. |
-| `publisher` | Publisher |  | Schedule and post content. |
-| `scriptwriter` | Scriptwriter | orchestrator | Write video and post scripts. |
-| `sponsorship_outreach` | Sponsorship Outreach |  | Source and negotiate sponsorships. |
-| `thumbnail_designer` | Thumbnail Designer |  | Generate thumbnails and cover art. |
-| `trend_scout` | Trend Scout |  | Detect trends and content opportunities. |
-| `video_editor` | Video Editor |  | Edit video content. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `analytics_analyst` | Analytics Analyst | Analyze performance and advise. |
+| `community_manager` | Community Manager | Engage and moderate the community. |
+| `publisher` | Publisher | Schedule and post content. |
+| `scriptwriter` | Scriptwriter (orchestrator) | Write video and post scripts. |
+| `sponsorship_outreach` | Sponsorship Outreach | Source and negotiate sponsorships. |
+| `thumbnail_designer` | Thumbnail Designer | Generate thumbnails and cover art. |
+| `trend_scout` | Trend Scout | Detect trends and content opportunities. |
+| `video_editor` | Video Editor | Edit video content. |
 
 `scriptwriter` (Scriptwriter) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

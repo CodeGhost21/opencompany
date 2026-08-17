@@ -6,17 +6,17 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `backend_engineer` | Backend Engineer |  | Build and operate the backend and services. |
-| `customer_support` | Customer Support |  | Resolve customer issues and feed insight back. |
-| `designer` | Designer |  | Product and UX design. |
-| `devrel` | Developer Relations |  | Engage developers with demos, content, and community. |
-| `docs_writer` | Documentation Writer |  | Write and maintain product documentation. |
-| `frontend_engineer` | Frontend Engineer |  | Build the user-facing frontend. |
-| `product_manager` | Product Manager | orchestrator | Own the roadmap, specs, and prioritization. |
-| `qa_engineer` | QA Engineer |  | Test features and catch regressions. |
-| `security_engineer` | Security Engineer |  | Security review, hardening, and response. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `backend_engineer` | Backend Engineer | Build and operate the backend and services. |
+| `customer_support` | Customer Support | Resolve customer issues and feed insight back. |
+| `designer` | Designer | Product and UX design. |
+| `devrel` | Developer Relations | Engage developers with demos, content, and community. |
+| `docs_writer` | Documentation Writer | Write and maintain product documentation. |
+| `frontend_engineer` | Frontend Engineer | Build the user-facing frontend. |
+| `product_manager` | Product Manager (orchestrator) | Own the roadmap, specs, and prioritization. |
+| `qa_engineer` | QA Engineer | Test features and catch regressions. |
+| `security_engineer` | Security Engineer | Security review, hardening, and response. |
 
 `product_manager` (Product Manager) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

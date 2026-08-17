@@ -6,17 +6,17 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `customer_support` | Customer Support |  | Resolve customer issues and feed insight back to product. |
-| `designer` | Designer |  | Own product and brand design. |
-| `engineer` | Engineer |  | Build and ship the product. |
-| `finance` | Finance |  | Financial modeling, runway, and reporting. |
-| `founder` | Founder |  | Turn a thesis into a company: vision, roadmap, and priorities. |
-| `lawyer` | Lawyer |  | Incorporation, contracts, and compliance. |
-| `marketer` | Marketer |  | Positioning, demand generation, and launches. |
-| `opportunity_scout` | Opportunity Scout | orchestrator | Surface and score market opportunities and startup theses. |
-| `recruiter` | Recruiter |  | Source and staff each venture with agents or humans. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `customer_support` | Customer Support | Resolve customer issues and feed insight back to product. |
+| `designer` | Designer | Own product and brand design. |
+| `engineer` | Engineer | Build and ship the product. |
+| `finance` | Finance | Financial modeling, runway, and reporting. |
+| `founder` | Founder | Turn a thesis into a company: vision, roadmap, and priorities. |
+| `lawyer` | Lawyer | Incorporation, contracts, and compliance. |
+| `marketer` | Marketer | Positioning, demand generation, and launches. |
+| `opportunity_scout` | Opportunity Scout (orchestrator) | Surface and score market opportunities and startup theses. |
+| `recruiter` | Recruiter | Source and staff each venture with agents or humans. |
 
 `opportunity_scout` (Opportunity Scout) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

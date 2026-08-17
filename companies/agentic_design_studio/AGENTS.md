@@ -6,13 +6,13 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `brand_designer` | Brand Designer | orchestrator | Identity systems, logos, and guidelines. |
-| `illustrator` | Illustrator |  | Custom illustration and iconography. |
-| `motion_designer` | Motion Designer |  | Animation and motion graphics. |
-| `ui_designer` | UI Designer |  | Product UI and design systems. |
-| `user_researcher` | User Researcher |  | User testing and design validation. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `brand_designer` | Brand Designer (orchestrator) | Identity systems, logos, and guidelines. |
+| `illustrator` | Illustrator | Custom illustration and iconography. |
+| `motion_designer` | Motion Designer | Animation and motion graphics. |
+| `ui_designer` | UI Designer | Product UI and design systems. |
+| `user_researcher` | User Researcher | User testing and design validation. |
 
 `brand_designer` (Brand Designer) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

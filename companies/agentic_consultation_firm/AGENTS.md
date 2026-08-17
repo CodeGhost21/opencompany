@@ -6,15 +6,15 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `deck_builder` | Deck Builder |  | Produce client-ready presentations. |
-| `financial_modeler` | Financial Modeler |  | Build the supporting financial models. |
-| `implementation_planner` | Implementation Planner |  | Turn strategy into an execution roadmap. |
-| `industry_analyst` | Industry Analyst |  | Industry, market, and competitive analysis. |
-| `interviewer` | Interviewer |  | Conduct and synthesize stakeholder interviews. |
-| `researcher` | Researcher | orchestrator | Desk research and evidence gathering. |
-| `strategist` | Strategist |  | Synthesize findings into strategy recommendations. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `deck_builder` | Deck Builder | Produce client-ready presentations. |
+| `financial_modeler` | Financial Modeler | Build the supporting financial models. |
+| `implementation_planner` | Implementation Planner | Turn strategy into an execution roadmap. |
+| `industry_analyst` | Industry Analyst | Industry, market, and competitive analysis. |
+| `interviewer` | Interviewer | Conduct and synthesize stakeholder interviews. |
+| `researcher` | Researcher (orchestrator) | Desk research and evidence gathering. |
+| `strategist` | Strategist | Synthesize findings into strategy recommendations. |
 
 `researcher` (Researcher) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

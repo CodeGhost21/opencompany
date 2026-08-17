@@ -6,13 +6,13 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `bug_reporter` | Bug Reporter |  | File actionable bug reports. |
-| `docs_writer` | Docs Writer |  | Write and maintain help docs. |
-| `escalation_manager` | Escalation Manager |  | Route and manage escalations. |
-| `refund_handler` | Refund Handler |  | Process refunds within policy. |
-| `support_agent` | Support Agent | orchestrator | Resolve inbound customer tickets. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `bug_reporter` | Bug Reporter | File actionable bug reports. |
+| `docs_writer` | Docs Writer | Write and maintain help docs. |
+| `escalation_manager` | Escalation Manager | Route and manage escalations. |
+| `refund_handler` | Refund Handler | Process refunds within policy. |
+| `support_agent` | Support Agent (orchestrator) | Resolve inbound customer tickets. |
 
 `support_agent` (Support Agent) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

@@ -6,16 +6,16 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `application_screener` | Application Screener |  | Score and shortlist applications against the thesis. |
-| `curriculum_designer` | Curriculum Designer |  | Design and schedule the program curriculum. |
-| `demo_day_producer` | Demo Day Producer |  | Prepare pitches and stage demo day. |
-| `investor_liaison` | Investor Liaison |  | Make warm, targeted investor introductions. |
-| `mentor_matcher` | Mentor Matcher |  | Pair startups with the right mentors and resources. |
-| `portfolio_support` | Portfolio Support |  | Support alumni after the program. |
-| `progress_coach` | Progress Coach |  | Track weekly milestones and unblock founders. |
-| `startup_scout` | Startup Scout | orchestrator | Source promising founders and startups into the pipeline. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `application_screener` | Application Screener | Score and shortlist applications against the thesis. |
+| `curriculum_designer` | Curriculum Designer | Design and schedule the program curriculum. |
+| `demo_day_producer` | Demo Day Producer | Prepare pitches and stage demo day. |
+| `investor_liaison` | Investor Liaison | Make warm, targeted investor introductions. |
+| `mentor_matcher` | Mentor Matcher | Pair startups with the right mentors and resources. |
+| `portfolio_support` | Portfolio Support | Support alumni after the program. |
+| `progress_coach` | Progress Coach | Track weekly milestones and unblock founders. |
+| `startup_scout` | Startup Scout (orchestrator) | Source promising founders and startups into the pipeline. |
 
 `startup_scout` (Startup Scout) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

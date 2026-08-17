@@ -6,13 +6,13 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `compliance_agent` | Compliance Agent |  | Check regulatory compliance. |
-| `contract_drafter` | Contract Drafter |  | Draft contracts and legal documents. |
-| `discovery_agent` | Discovery Agent |  | Run and review document discovery. |
-| `legal_researcher` | Legal Researcher | orchestrator | Case law and legal research. |
-| `litigation_support` | Litigation Support |  | Prepare materials for litigation. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `compliance_agent` | Compliance Agent | Check regulatory compliance. |
+| `contract_drafter` | Contract Drafter | Draft contracts and legal documents. |
+| `discovery_agent` | Discovery Agent | Run and review document discovery. |
+| `legal_researcher` | Legal Researcher (orchestrator) | Case law and legal research. |
+| `litigation_support` | Litigation Support | Prepare materials for litigation. |
 
 `legal_researcher` (Legal Researcher) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 

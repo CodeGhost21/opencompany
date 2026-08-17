@@ -6,16 +6,16 @@ This file is routed into every teammate's system prompt alongside `METHOD.md` (`
 
 ## Roster
 
-| Agent id | Role | Desk lead | Responsibility |
-| --- | --- | --- | --- |
-| `analytics_analyst` | Analytics Analyst |  | Measure performance and report. |
-| `brand_strategist` | Brand Strategist |  | Positioning and brand strategy. |
-| `copywriter` | Copywriter |  | Write ads, pages, and campaign copy. |
-| `creative_director` | Creative Director | orchestrator | Own creative concept and direction. |
-| `email_marketer` | Email Marketer |  | Design and send lifecycle email. |
-| `landing_page_builder` | Landing Page Builder |  | Build and test conversion pages. |
-| `paid_ads_manager` | Paid Ads Manager |  | Plan and run paid-acquisition campaigns. |
-| `seo_specialist` | SEO Specialist |  | Organic search strategy and optimization. |
+| Agent id | Role | Responsibility |
+| --- | --- | --- |
+| `analytics_analyst` | Analytics Analyst | Measure performance and report. |
+| `brand_strategist` | Brand Strategist | Positioning and brand strategy. |
+| `copywriter` | Copywriter | Write ads, pages, and campaign copy. |
+| `creative_director` | Creative Director (orchestrator) | Own creative concept and direction. |
+| `email_marketer` | Email Marketer | Design and send lifecycle email. |
+| `landing_page_builder` | Landing Page Builder | Build and test conversion pages. |
+| `paid_ads_manager` | Paid Ads Manager | Plan and run paid-acquisition campaigns. |
+| `seo_specialist` | SEO Specialist | Organic search strategy and optimization. |
 
 `creative_director` (Creative Director) is this company's orchestrator: it holds the routing picture (`BRIEF.md`, `CLAIMS.md`, `THREADS.md`) and unrestricted ledger access, so it is the one that sets and revises goals and decisions rather than a specialist re-deciding them mid-task.
 
