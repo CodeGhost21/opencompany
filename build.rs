@@ -12,6 +12,12 @@
 //!
 //! Both `*.toml` rosters and the documents `prompt_files` names are embedded,
 //! because `agent_file::resolve_prompt_files` reads those bodies at parse time.
+//!
+//! The same script embeds the **global baseline** — `globals/` plus the shared
+//! `skills/` library — for a second reason: a platform-provisioned container has
+//! no repository checkout beside it, so anything only readable from disk is
+//! simply absent there. A baseline that every company gets except the hosted
+//! ones is not a baseline.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +25,8 @@ use std::path::{Path, PathBuf};
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let companies = root.join("companies");
+
+    embed_globals(&root);
 
     // Re-run when a bundle changes. Watching `companies/` alone is not enough:
     // cargo does not walk into it, so a new agent file inside an existing
