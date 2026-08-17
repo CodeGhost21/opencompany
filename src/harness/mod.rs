@@ -181,13 +181,14 @@ use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::types::{
-    BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, PolicyOverride, TurnStep,
+    BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, OverlayDesk, OverlayDeskMember,
+    PolicyOverride, TurnStep,
 };
 use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
     UsageMeter,
 };
-use crate::runtime::builder::agent_effective_grants;
+use crate::runtime::builder::agent_scoped_grants;
 
 /// Shared dependencies every harness-built agent draws on.
 #[derive(Clone)]
@@ -941,6 +942,31 @@ pub struct HarnessPool {
     /// restart. Without this axis the override persists and is silently ignored:
     /// `ApprovalPolicy` is built once per roster, not once per call.
     policy_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the desk scoping a roster's grants resolve
+    /// through — which desks exist, who sits on them, and each one's tool
+    /// ceiling.
+    ///
+    /// Needed for the same reason as [`Self::budget_fingerprints`]: a tool belt
+    /// is wired once per roster, not once per call, so without this axis a
+    /// console desk-ceiling edit (or seating a teammate on a restricted desk)
+    /// would leave every other fingerprint stable and the fast path would keep
+    /// serving the old belt until the process restarted. A company whose desks
+    /// declare no ceilings keeps a stable fingerprint and never rebuilds on this
+    /// axis.
+    desk_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the routed workspace documents — hashed over
+    /// their **bodies**, not merely their names.
+    ///
+    /// A persona is assembled once per roster, so without this axis an operator
+    /// editing a routed note would leave every other fingerprint stable and the
+    /// fast path would keep serving a prompt quoting the old text until the
+    /// process restarted. Hashing the names alone would have exactly that bug,
+    /// since the routing table does not move when a document's contents do —
+    /// which is the whole reason the routing layer is worth having.
+    ///
+    /// A company with no workspace store wired, or whose roles route nothing,
+    /// keeps a stable fingerprint and never rebuilds on this axis.
+    context_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
     /// failure has already been reported (issue #449).
     ///
@@ -989,6 +1015,8 @@ impl HarnessPool {
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
+            desk_fingerprints: RwLock::new(HashMap::new()),
+            context_fingerprints: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
     }
@@ -1072,11 +1100,16 @@ impl HarnessPool {
 
         // Re-resolve + fingerprint the live overlay-agent set the same way, and
         // the operator budget overrides riding the same store read (issue #343).
-        let (overlay_agents, overlay_budgets, overlay_policy) =
-            self.resolve_effective_overlay(company, deps).await;
-        let overlay_fp = overlay_fingerprint(&overlay_agents);
-        let budget_fp = budget_fingerprint(&overlay_budgets);
-        let policy_fp = policy_fingerprint(overlay_policy.as_ref());
+        let overlay = self.resolve_effective_overlay(company, deps).await;
+        let overlay_fp = overlay_fingerprint(&overlay.agents);
+        let budget_fp = budget_fingerprint(&overlay.budgets);
+        let policy_fp = policy_fingerprint(overlay.policy.as_ref());
+        // Desk scoping now decides capability (the middle level of the
+        // three-level narrowing), so it joins the staleness check: without this
+        // a console desk-ceiling edit — or seating a teammate on a restricted
+        // desk — would not reach the roster until a restart.
+        let desk_fp =
+            desk_scope_fingerprint(&overlay.desks, &overlay.desk_members, &overlay.desk_tools);
 
         // Re-resolve + fingerprint the tenant's capability filter (issue #108):
         // a per-tenant, per-period, fail-closed budget read from the meter. With
@@ -1138,6 +1171,18 @@ impl HarnessPool {
         };
         let skill_fp = skill_delta_fingerprint(&skill_deltas);
 
+        // Resolve the routed workspace documents (context routing) before the
+        // fast-path check, and fingerprint their *content*. Both halves matter:
+        // resolving here is what lets the synchronous `build_agent` fold them
+        // into a persona at all, and hashing the bodies rather than the file
+        // names is what makes an operator's edit to a routed note rebuild the
+        // roster. A name-only hash would leave an edited note invisible until a
+        // restart — the same staleness bug `skill_fp` above exists to close.
+        let routed_context = self
+            .resolve_routed_context(company, deps, &overlay.agents)
+            .await;
+        let context_fp = routed_context_fingerprint(&routed_context);
+
         {
             let agents = self.agents.read().await;
             let mcp_fingerprints = self.mcp_fingerprints.read().await;
@@ -1149,6 +1194,8 @@ impl HarnessPool {
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
+            let desk_fingerprints = self.desk_fingerprints.read().await;
+            let context_fingerprints = self.context_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
@@ -1159,6 +1206,8 @@ impl HarnessPool {
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
+                && desk_fingerprints.get(&company.id) == Some(&desk_fp)
+                && context_fingerprints.get(&company.id) == Some(&context_fp)
             {
                 return Ok(());
             }
@@ -1193,17 +1242,24 @@ impl HarnessPool {
         // boot-time snapshot (e.g. `HarnessBrain::record`), so the roster is
         // built from the live-resolved overlay set, not `company.overlay_agents`.
         let mut fresh_company = company.clone();
-        fresh_company.overlay_agents = overlay_agents;
+        fresh_company.overlay_agents = overlay.agents;
         // Same treatment for the budget overrides (issue #343): `build_roster`
         // resolves every agent's cap through `fresh_company.effective_budget`,
         // so installing the live set here is what carries a console budget edit
         // into the roster the very next turn runs on.
-        fresh_company.overlay_budgets = overlay_budgets;
+        fresh_company.overlay_budgets = overlay.budgets;
+        // The desk axis gets the same treatment, and needs it for the same
+        // reason: `build_roster` resolves every teammate's grants through
+        // `fresh_company.agent_desk_tools`, so the live desk set, seating and
+        // ceilings have to be the ones installed here.
+        fresh_company.overlay_desks = overlay.desks;
+        fresh_company.overlay_desk_members = overlay.desk_members;
+        fresh_company.overlay_desk_tools = overlay.desk_tools;
         // Issue #562: same treatment for the policy override — `build_roster`
         // resolves the tier through `fresh_company.effective_policy`, so installing
         // the live value here is what carries a console tier change into the roster
         // the next turn runs on.
-        fresh_company.overlay_policy = overlay_policy;
+        fresh_company.overlay_policy = overlay.policy;
 
         // Issue #551 note — this rebuild deliberately touches no workspace.
         //
@@ -1220,7 +1276,7 @@ impl HarnessPool {
         // repair path if boot's create ever fail-softed, since the minter
         // creates the root it needs. A rebuild-time call would now be a tree
         // read that can only ever find its work already done.
-        let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas)?;
+        let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas, &routed_context)?;
 
         let mut agents = self.agents.write().await;
         agents.insert(company.id.clone(), roster);
@@ -1260,6 +1316,14 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), policy_fp);
+        self.desk_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), desk_fp);
+        self.context_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), context_fp);
         Ok(())
     }
 
@@ -1479,26 +1543,97 @@ impl HarnessPool {
     /// The two collections share **one** store round-trip deliberately: they
     /// come off the same record, and splitting them would double the per-turn
     /// read for no gain.
+    /// Resolves every roster member's routed workspace documents, keyed by agent
+    /// id (`docs/spec/runtime/orchestration/context-routing.md`).
+    ///
+    /// Runs here, in the async caller, because `build_roster` is synchronous and
+    /// the [`WorkspaceStore`](crate::ports::WorkspaceStore) is not — the same
+    /// split as the skill deltas beside it.
+    ///
+    /// **Fails soft, per agent.** A store error yields no documents for that
+    /// role rather than failing the rebuild: routing enriches a prompt, and a
+    /// company whose workspace read hiccuped should answer from a thinner prompt
+    /// rather than stop answering. An unwired store (`None`) resolves to an
+    /// empty map, which is the pre-routing behaviour exactly.
+    ///
+    /// Overlay teammates are included: they are real roster agents that
+    /// [`build_roster`] builds the same way, so leaving them out would give a
+    /// console-added teammate a silently different prompt from a manifest one.
+    async fn resolve_routed_context(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+        overlay_agents: &[OverlayAgent],
+    ) -> HashMap<String, Vec<(String, String)>> {
+        let Some(workspace) = deps.workspace.as_ref() else {
+            return HashMap::new();
+        };
+
+        // A manifest agent wins an id collision, exactly as `build_roster`
+        // resolves one, so the overlay half skips any id already claimed.
+        let manifest_ids: HashSet<&str> = company
+            .manifest
+            .agents
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        let overlay_as_manifest: Vec<ManifestAgent> = overlay_agents
+            .iter()
+            .filter(|overlay| !manifest_ids.contains(overlay.id.as_str()))
+            .map(overlay_agent_to_manifest)
+            .collect();
+
+        let mut routed = HashMap::new();
+        for agent in company.manifest.agents.iter().chain(&overlay_as_manifest) {
+            match crate::company::context_routing::resolve_routed_documents(
+                workspace.as_ref(),
+                &company.id,
+                agent,
+            )
+            .await
+            {
+                // An agent that resolved nothing is left out of the map rather
+                // than stored as an empty vec: `build_roster` reads an absent id
+                // as "no routed documents", so the two are the same answer and
+                // the map stays the size of what actually routed.
+                Ok(documents) if documents.is_empty() => {}
+                Ok(documents) => {
+                    routed.insert(agent.id.clone(), documents);
+                }
+                Err(err) => tracing::warn!(
+                    company = %company.id,
+                    agent = %agent.id,
+                    error = %err,
+                    "[context] could not read this role's routed documents; its prompt \
+                     goes out without them"
+                ),
+            }
+        }
+        routed
+    }
+
     async fn resolve_effective_overlay(
         &self,
         company: &CompanyRecord,
         deps: &HarnessDeps,
-    ) -> (
-        Vec<OverlayAgent>,
-        Vec<BudgetOverride>,
-        Option<PolicyOverride>,
-    ) {
+    ) -> EffectiveOverlay {
         match deps.store.load(&company.id).await {
-            Ok(Some(record)) => (
-                record.overlay_agents,
-                record.overlay_budgets,
-                record.overlay_policy,
-            ),
-            _ => (
-                company.overlay_agents.clone(),
-                company.overlay_budgets.clone(),
-                company.overlay_policy.clone(),
-            ),
+            Ok(Some(record)) => EffectiveOverlay {
+                agents: record.overlay_agents,
+                budgets: record.overlay_budgets,
+                policy: record.overlay_policy,
+                desks: record.overlay_desks,
+                desk_members: record.overlay_desk_members,
+                desk_tools: record.overlay_desk_tools,
+            },
+            _ => EffectiveOverlay {
+                agents: company.overlay_agents.clone(),
+                budgets: company.overlay_budgets.clone(),
+                policy: company.overlay_policy.clone(),
+                desks: company.overlay_desks.clone(),
+                desk_members: company.overlay_desk_members.clone(),
+                desk_tools: company.overlay_desk_tools.clone(),
+            },
         }
     }
 
@@ -1558,6 +1693,22 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn billing_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.billing_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current desk-scope fingerprint for a company (test-only), so a
+    /// desk-scoping test can assert the roster was actually rebuilt after a
+    /// ceiling or seating change rather than inferring it from a refused call.
+    #[cfg(test)]
+    pub async fn desk_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.desk_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current routed-context fingerprint for a company (test-only), so a
+    /// routing test can assert that editing a routed workspace note actually
+    /// rebuilt the roster rather than inferring it from a reply.
+    #[cfg(test)]
+    pub async fn context_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.context_fingerprints.read().await.get(company).copied()
     }
 
     /// Routes a message to one agent and returns its reply, recording the turn's
@@ -2237,6 +2388,99 @@ fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
     hasher.finish()
 }
 
+/// The live overlay state one roster rebuild is resolved against.
+///
+/// A struct rather than the tuple this used to be: it grew past the point where
+/// positional returns stay readable, and — more to the point — the desk fields
+/// were added because desks now decide *capability*, so a caller silently
+/// binding `desk_tools` to the `desks` position would hand every teammate the
+/// wrong tool belt with nothing to catch it.
+pub(crate) struct EffectiveOverlay {
+    pub agents: Vec<OverlayAgent>,
+    pub budgets: Vec<BudgetOverride>,
+    pub policy: Option<PolicyOverride>,
+    pub desks: Vec<OverlayDesk>,
+    pub desk_members: Vec<OverlayDeskMember>,
+    pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// Fingerprints the routed workspace documents a roster's personas are built
+/// from — **over their bodies**, not their names.
+///
+/// Hashing the content is the whole point. The routing table is manifest data
+/// and does not move when an operator edits a note, so a name-only hash would
+/// leave the edit invisible: the persona is assembled once per roster, and the
+/// fast path would keep serving a prompt quoting the old text until the process
+/// restarted. That is precisely the staleness the routing layer exists to avoid.
+///
+/// Sorted by agent id before hashing, for the reason [`budget_fingerprint`]
+/// documents — a `HashMap` has no order, and an order-sensitive hash would drop
+/// every live agent session on a rebuild that changed nothing.
+fn routed_context_fingerprint(routed: &HashMap<String, Vec<(String, String)>>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut ordered: Vec<(&String, &Vec<(String, String)>)> = routed.iter().collect();
+    ordered.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut hasher = DefaultHasher::new();
+    ordered.len().hash(&mut hasher);
+    for (agent_id, documents) in ordered {
+        agent_id.hash(&mut hasher);
+        documents.len().hash(&mut hasher);
+        for (path, body) in documents {
+            path.hash(&mut hasher);
+            body.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Fingerprints the desk scoping a roster's grants are resolved through: which
+/// desks exist, who sits on them, and what each one's tool ceiling is.
+///
+/// All three axes are hashed together because all three feed one answer — an
+/// agent's effective grant. Seating a teammate on a restricted desk narrows its
+/// belt just as surely as editing that desk's ceiling does, so a fingerprint
+/// over the ceilings alone would leave a membership change invisible until the
+/// next restart, which is the staleness bug this whole fingerprint set exists to
+/// prevent.
+///
+/// Sorted before hashing, for the reason [`budget_fingerprint`] documents: the
+/// write routes push and retain rather than maintain an order, and an
+/// order-sensitive hash would drop every live agent session on a save that
+/// changed nothing an agent can observe. (`desk_tools` is a `BTreeMap` and so is
+/// already ordered by construction.)
+fn desk_scope_fingerprint(
+    desks: &[OverlayDesk],
+    members: &[OverlayDeskMember],
+    tools: &std::collections::BTreeMap<String, Vec<String>>,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+
+    let mut desk_ids: Vec<&str> = desks.iter().map(|desk| desk.id.as_str()).collect();
+    desk_ids.sort_unstable();
+    desk_ids.hash(&mut hasher);
+
+    let mut seats: Vec<(&str, &str)> = members
+        .iter()
+        .map(|seat| (seat.desk_id.as_str(), seat.agent_id.as_str()))
+        .collect();
+    seats.sort_unstable();
+    seats.hash(&mut hasher);
+
+    tools.len().hash(&mut hasher);
+    for (desk_id, ceiling) in tools {
+        desk_id.hash(&mut hasher);
+        ceiling.hash(&mut hasher);
+    }
+
+    hasher.finish()
+}
+
 /// A stable fingerprint of a company's operator budget-override set (issue
 /// #343), used to detect a cap set / changed / cleared / reset between
 /// [`HarnessPool::ensure`] calls. Mirrors [`overlay_fingerprint`]'s shape; a
@@ -2358,10 +2602,18 @@ fn repo_binding_fingerprint(bindings: &[crate::runtime::repo_manager::types::Rep
 ///
 /// `skill_deltas` are the company's operator skill overrides (fetched once by
 /// the async caller); every agent folds them into its effective skill set.
+///
+/// `routed_context` maps an agent id to the workspace documents routed into its
+/// system prompt, resolved by the async caller for the same reason
+/// `skill_deltas` is — this function is synchronous and the `WorkspaceStore` is
+/// not. An agent absent from the map gets no routed documents, which is the
+/// correct reading for a company with no workspace store wired: fail closed to
+/// the pre-routing prompt rather than to a half-populated one.
 pub(crate) fn build_roster(
     company: &CompanyRecord,
     deps: &HarnessDeps,
     skill_deltas: &[SkillState],
+    routed_context: &HashMap<String, Vec<(String, String)>>,
 ) -> crate::Result<Vec<Arc<CompanyAgent>>> {
     // Issue #562: the policy in force, not the one the manifest shipped with —
     // the same relationship `effective_budget` (issue #343) has to the manifest
@@ -2401,7 +2653,13 @@ pub(crate) fn build_roster(
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
-        let grants = agent_effective_grants(allow, &manifest_agent.tools);
+        // Three-level narrowing: company → the desks this teammate sits on →
+        // the teammate itself. `agent_desk_tools` resolves through the record's
+        // *effective* desk membership, so a console-seated member is scoped by
+        // its desk exactly as a manifest one is.
+        let desk_tools = company.agent_desk_tools(&manifest_agent.id);
+        let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -2410,6 +2668,10 @@ pub(crate) fn build_roster(
             deps,
             &grants,
             skill_deltas,
+            routed_context
+                .get(&manifest_agent.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
             is_orchestrator,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -2447,7 +2709,12 @@ pub(crate) fn build_roster(
         if let Some(meter) = deps.meter.as_ref() {
             agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
         }
-        let grants = agent_effective_grants(allow, &manifest_agent.tools);
+        // An overlay teammate is scoped by its desks the same as a manifest one:
+        // it can be seated on a desk, and a desk ceiling that applied to only
+        // half its members would not be a ceiling.
+        let desk_tools = company.agent_desk_tools(&manifest_agent.id);
+        let desk_allows: Vec<&[String]> = desk_tools.iter().map(Vec::as_slice).collect();
+        let grants = agent_scoped_grants(allow, &desk_allows, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
             company_name,
@@ -2456,6 +2723,10 @@ pub(crate) fn build_roster(
             deps,
             &grants,
             skill_deltas,
+            routed_context
+                .get(&manifest_agent.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
             /* is_orchestrator */ false,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -2497,7 +2768,12 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         // this slice, so it carries today's behaviour — no hand-off tools wired.
         // Opting overlays in needs a console write surface; see the follow-up.
         delegates_to: Vec::new(),
+        context: None,
         budget_usd_daily: None,
+        prompt: None,
+        prompt_files: Vec::new(),
+        prompt_files_resolved: Vec::new(),
+        classes: Vec::new(),
     }
 }
 
@@ -2515,6 +2791,10 @@ mod tests {
     use crate::ports::types::{
         ChunkAddr, ChunkHit, ChunkMeta, CompanySummary, ContextChunk, LedgerEntry,
     };
+    // The two-level resolver. Test-only now: the roster build goes through
+    // `agent_scoped_grants`, and these tests assert the desk-less case still
+    // resolves identically to what shipped before desks could scope tools.
+    use crate::runtime::builder::agent_effective_grants;
 
     fn fp_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
         use crate::ports::types::{Actor, ActorKind};
@@ -2866,6 +3146,7 @@ description = "Builds the product."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -2939,10 +3220,141 @@ description = "Builds the product."
     #[tokio::test]
     async fn roster_builds_every_manifest_agent() {
         let fx = fixture();
-        let roster = build_roster(&record(), &fx.deps, &[]).expect("roster builds");
+        let roster =
+            build_roster(&record(), &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(ids, vec!["ceo", "engineer"]);
         assert_eq!(roster[0].role, "Chief Executive");
+    }
+
+    /// Context routing: the resolution that feeds a persona, and the fingerprint
+    /// that decides whether an edit reaches the next turn.
+    mod routed_context {
+        use super::*;
+        use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+
+        fn docs(entries: &[(&str, &[(&str, &str)])]) -> HashMap<String, Vec<(String, String)>> {
+            entries
+                .iter()
+                .map(|(agent, documents)| {
+                    (
+                        (*agent).to_string(),
+                        documents
+                            .iter()
+                            .map(|(p, b)| ((*p).to_string(), (*b).to_string()))
+                            .collect(),
+                    )
+                })
+                .collect()
+        }
+
+        /// The property the whole axis exists for. The routing table is manifest
+        /// data and does not move when an operator edits a note, so a
+        /// name-only hash would leave the edit invisible until a restart.
+        #[test]
+        fn the_fingerprint_moves_when_a_documents_body_changes() {
+            let before = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "old")])]));
+            let after = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "new")])]));
+            assert_ne!(
+                before, after,
+                "an edited routed note must rebuild the roster"
+            );
+        }
+
+        /// A `HashMap` has no order, so an order-sensitive hash would drop every
+        /// live agent session on a rebuild that changed nothing.
+        #[test]
+        fn the_fingerprint_is_stable_across_map_iteration_order() {
+            let one = docs(&[
+                ("ceo", &[("BRIEF.md", "b")]),
+                ("engineer", &[("CLAIMS.md", "c")]),
+            ]);
+            let two = docs(&[
+                ("engineer", &[("CLAIMS.md", "c")]),
+                ("ceo", &[("BRIEF.md", "b")]),
+            ]);
+            assert_eq!(
+                routed_context_fingerprint(&one),
+                routed_context_fingerprint(&two)
+            );
+        }
+
+        /// Renaming a document is a real change even when its text is identical:
+        /// the persona quotes the path as the section heading.
+        #[test]
+        fn the_fingerprint_moves_when_a_document_is_renamed() {
+            let before = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "same")])]));
+            let after = routed_context_fingerprint(&docs(&[("ceo", &[("GOAL.md", "same")])]));
+            assert_ne!(before, after);
+        }
+
+        /// A company with no workspace store keeps a stable fingerprint and never
+        /// rebuilds on this axis — the pre-routing behaviour exactly.
+        #[tokio::test]
+        async fn no_workspace_store_resolves_to_nothing() {
+            let fx = fixture();
+            assert!(fx.deps.workspace.is_none(), "fixture has no store wired");
+
+            let pool = HarnessPool::new();
+            let routed = pool.resolve_routed_context(&record(), &fx.deps, &[]).await;
+            assert!(routed.is_empty(), "{routed:?}");
+            assert_eq!(
+                routed_context_fingerprint(&routed),
+                routed_context_fingerprint(&HashMap::new()),
+                "a company that routes nothing must not rebuild on this axis"
+            );
+        }
+
+        /// The real path: a routed document that exists in the tree is read and
+        /// keyed to the agent whose manifest asked for it.
+        #[tokio::test]
+        async fn a_routed_document_is_resolved_per_agent() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ws: Arc<dyn crate::ports::WorkspaceStore> =
+                Arc::new(crate::store::FsOps::new(dir.path()));
+            let company = CompanyId::new("acme");
+            ws.create(
+                &company,
+                &WorkspaceNode {
+                    id: "n-brief".to_string(),
+                    name: "BRIEF.md".to_string(),
+                    kind: NodeKind::File,
+                    parent_id: None,
+                    updated_at_millis: 1,
+                    created_by: WorkspaceOrigin::Operator,
+                    updated_by: WorkspaceOrigin::Operator,
+                    mime: None,
+                    size: None,
+                    sha256: None,
+                },
+                Some("What the company established."),
+            )
+            .await
+            .expect("create");
+
+            let mut fx = fixture();
+            fx.deps.workspace = Some(ws);
+
+            let pool = HarnessPool::new();
+            let routed = pool.resolve_routed_context(&record(), &fx.deps, &[]).await;
+
+            // Both fixture agents default to the `reasoning` row, which routes
+            // BRIEF — so both resolve it, and neither invents the notes that do
+            // not exist in the tree.
+            for agent in ["ceo", "engineer"] {
+                let documents = routed
+                    .get(agent)
+                    .unwrap_or_else(|| panic!("no routed documents for {agent}: {routed:?}"));
+                assert_eq!(
+                    documents,
+                    &vec![(
+                        "BRIEF.md".to_string(),
+                        "What the company established.".to_string()
+                    )],
+                    "{agent}"
+                );
+            }
+        }
     }
 
     /// The roster builds end-to-end with the skill read surface wired: the
@@ -3009,7 +3421,8 @@ description = "Builds the product."
             checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
 
-        let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
+        let roster = build_roster(&record(), &deps, &[], &HashMap::new())
+            .expect("roster builds with skills");
         assert_eq!(roster.len(), 2);
         // The scratch skill tree was materialized for the first roster agent.
         assert!(
@@ -3039,7 +3452,7 @@ description = "Builds the product."
             tools: Vec::new(),
         });
 
-        let roster = build_roster(&rec, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(ids, vec!["ceo", "engineer", "growth"], "got {ids:?}");
         let overlay_agent = roster
@@ -3063,7 +3476,7 @@ description = "Builds the product."
             tools: Vec::new(),
         });
 
-        let roster = build_roster(&rec, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -3139,7 +3552,7 @@ description = "Builds the product."
         let saved = store.load(&company).await.unwrap().expect("record");
         assert_eq!(saved.overlay_agents[0].id, "engineer_2");
 
-        let roster = build_roster(&saved, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&saved, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -3698,7 +4111,7 @@ description = "Builds the product."
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
-        let roster = build_roster(&record(), &deps, &[]).expect("roster");
+        let roster = build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
         // test's lifetime — the process ends the test anyway.
         std::mem::forget(dir);
@@ -4643,6 +5056,7 @@ description = "Sets direction."
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -5667,7 +6081,12 @@ budget_usd_daily = 0.0
             tier: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -5678,6 +6097,7 @@ budget_usd_daily = 0.0
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             is_orchestrator,
         )
@@ -5777,7 +6197,12 @@ budget_usd_daily = 0.0
             tier: None,
             tools: Vec::new(),
             delegates_to: Vec::new(),
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let agent = build::build_agent(
             &CompanyId::new("acme"),
@@ -5786,6 +6211,7 @@ budget_usd_daily = 0.0
             ApprovalPolicy::new(&Policy::default(), None),
             &deps,
             &["*".to_string()],
+            &[],
             &[],
             true,
         )

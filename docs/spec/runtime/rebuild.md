@@ -15,6 +15,36 @@ So first-time BYOK setup needed someone with pod access.
 
 This is the seam that removes it.
 
+## What triggers one
+
+Two routes, both requiring authority over the company:
+
+| Route | When |
+|---|---|
+| `PUT …/inference` | Automatically, when the save leaves the company `restart_required` |
+| `POST …/inference/restart` | On demand, from the console's **Restart now** button |
+
+The save path covers the transition this feature exists for: an operator
+configuring BYOK for the first time never sees the restart notice at all,
+because the rebuild happens inside the same request.
+
+The explicit route exists for the cases that path cannot reach — a company that
+was already sitting in the restart-required state before this landed, one whose
+rebuild failed transiently, and one an operator arrives at without touching the
+inference form. Without it the console's banner names a restart and offers no
+way to perform it, which is the dead end this whole document is about.
+
+It deliberately does **not** gate on `restart_required` first. A rebuild of a
+healthy company is a no-op from the operator's point of view — same journal,
+same parked approvals, same grants — so refusing would buy nothing and would
+introduce a race in which the check and the rebuild disagree. It would also
+refuse the case most worth allowing: an operator recovering a company whose
+state the console is reading wrongly.
+
+A host that wired no `RuntimeRebuilder` answers with the error naming the
+process restart that *would* work. The console surfaces that rather than
+reporting a success which changed nothing.
+
 ## The sequence (`src/runtime/rebuild.rs`)
 
 `runtime::rebuild_company(&state, id)`:

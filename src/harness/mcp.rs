@@ -661,7 +661,12 @@ mod tests {
             tier: None,
             tools: grants.iter().map(|g| g.to_string()).collect(),
             delegates_to: vec![],
+            context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         }
     }
 

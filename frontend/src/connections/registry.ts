@@ -303,6 +303,12 @@ function sameCredential(a: Credential, b: Credential): boolean {
   // comparison is what makes the bootstrap's live token count as a change.
   if (a.kind === "platform" && b.kind === "platform") return a.token === b.token;
   if (a.kind === "device" && b.kind === "device") return a.ref === b.ref;
+  // Signing in again mints a *new* session, so the values differ and the client
+  // has to be rebuilt around the new one. Comparing only the kind here would
+  // leave the console presenting the session it just replaced — which keeps
+  // working until the old one expires or is revoked, making it the kind of bug
+  // that surfaces an hour later and nowhere near its cause.
+  if (a.kind === "session" && b.kind === "session") return a.value === b.value;
   return true;
 }
 
@@ -490,6 +496,22 @@ export function unpairConnection(id: ConnectionId): void {
   adoptCredential(id, { kind: "cookie" });
 }
 
+/**
+ * Records the session a cross-origin sign-in just returned.
+ *
+ * Called with the `session` from a {@link SignIn}, and it must be called or the
+ * sign-in is wasted: the host returns that token exactly once, keeps only its
+ * hash, and — because no cookie was set — the console has no other way to prove
+ * who it is. The symptom of forgetting is a login that appears to succeed and a
+ * console that is anonymous from the next request onward.
+ *
+ * Replaces the client, through `adoptCredential`, so every request after this
+ * carries the new session rather than the one it was constructed with.
+ */
+export function adoptSession(id: ConnectionId, session: string): void {
+  adoptCredential(id, { kind: "session", value: session });
+}
+
 export function removeConnection(id: ConnectionId): void {
   entries = entries.filter((e) => e.connection.id !== id);
   forgetProfile(id);
@@ -585,11 +607,16 @@ async function readIdentity(client: OpenCompanyClient): Promise<InstanceIdentity
  * question here is what turns that refusal into something a person can act on;
  * see the note on `mayCarryACredential`.
  *
- * Desktop only. A browser's credential is a cookie the browser decides about,
- * with `Secure` and the origin's own rules doing this job — narrowing the web
- * build here would refuse the plain-HTTP deployments `opencompany serve` is
- * built for, on the transport where the console is not the thing holding the
- * secret.
+ * Desktop only **for the ambient credentials**. A browser's cookie is one the
+ * browser decides about, with `Secure` and the origin's own rules doing this
+ * job — narrowing the web build there would refuse the plain-HTTP deployments
+ * `opencompany serve` is built for, on the transport where the console is not
+ * the thing holding the secret.
+ *
+ * A `session` credential is the exception, and gated everywhere: a hub console
+ * holds that token itself and puts it on the wire itself, so "the browser is
+ * deciding" stops being true. The runtime it happens to run in changes nothing
+ * about what an unencrypted hop exposes.
  *
  * Read off the profile's credential *kind*, which is a claim about this machine
  * rather than the secret itself: a `device` entry means the keychain holds a
@@ -599,11 +626,22 @@ async function readIdentity(client: OpenCompanyClient): Promise<InstanceIdentity
  * gating on the credential rather than on the scheme.
  */
 function insecurelyCredentialed(connection: Connection | undefined): string | null {
-  if (!connection || !isDesktopRuntime()) return null;
-  const carries =
-    connection.credential.kind === "device" ||
-    (connection.credential.kind === "platform" && Boolean(connection.credential.token));
-  if (!carries || mayCarryACredential(connection.baseUrl)) return null;
+  if (!connection) return null;
+  // A same-origin connection is the browser's own origin, whose rules already
+  // decide this; there is no url to judge and nothing to protect it from that
+  // is not already inside the page.
+  if (connection.baseUrl === "") return null;
+  // A session is a secret **this page holds and sends**, in every runtime — so
+  // unlike the two below it is gated in the browser as well. The exposure is
+  // identical to the desktop's: a person's standing authority on a company,
+  // travelling in clear text past every device on the path.
+  const carriesInAnyRuntime = connection.credential.kind === "session";
+  const carriesOnDesktop =
+    isDesktopRuntime() &&
+    (connection.credential.kind === "device" ||
+      (connection.credential.kind === "platform" && Boolean(connection.credential.token)));
+  if (!carriesInAnyRuntime && !carriesOnDesktop) return null;
+  if (mayCarryACredential(connection.baseUrl)) return null;
   // Names the credential generically: this covers a paired device session and a
   // platform bearer from `?token=`, and the person reading it needs the reason
   // rather than which of the two it was.

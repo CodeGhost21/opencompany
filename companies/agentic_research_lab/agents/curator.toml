@@ -1,0 +1,5 @@
+role = "Curator"
+description = "Owns the brief. Keeps one current statement of what the lab knows, within budget."
+# The single writer of BRIEF.md, and the one role that sees everything, because
+# its whole job is compressing everything into the document the others read.
+context = ["GOAL.md", "BRIEF.md", "CLAIMS.md", "THREADS.md", "DEMANDS.md", "INDEX.md"]

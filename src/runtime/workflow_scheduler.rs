@@ -1227,6 +1227,8 @@ mod test {
                             nodes: Vec::new(),
                             notices: Vec::new(),
                             board: Vec::new(),
+                            blocked_nodes: Vec::new(),
+                            approvals: Vec::new(),
                         });
                     }
                 }
@@ -1240,6 +1242,8 @@ mod test {
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             })
         }
     }
@@ -2087,6 +2091,8 @@ to = "done"
                 cancelled,
                 notices: _,
                 board: _,
+                blocked_nodes: _,
+                approvals: _,
             } = event
             else {
                 unreachable!("filtered above")

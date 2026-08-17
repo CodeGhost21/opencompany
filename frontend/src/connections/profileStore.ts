@@ -165,6 +165,22 @@ function isLegacyEmbedded(profile: ConnectionProfile): boolean {
  * A platform bearer is redacted to its kind before writing: `localStorage` is
  * readable by any script that reaches the page, and the token is `?token=` URL
  * material re-derived on the next load, never something storage needs to hold.
+ *
+ * ## The one secret this file does write
+ *
+ * A `session` credential is persisted **in full** — a deliberate exception to
+ * this module's opening rule, and the only one. Redacting it would protect
+ * nothing and simply break the feature: unlike a platform bearer there is
+ * nowhere to re-derive it from, so a redacted session means signing in to every
+ * host again on every page load, and a console that does that is one people
+ * stop using.
+ *
+ * The cost is real and worth stating plainly. Script execution on a hub's
+ * origin reaches every host its operator has signed in to, where a same-origin
+ * console's `HttpOnly` cookie would have survived it. Two things bound it: the
+ * token is a *session*, revocable from the host's device list and expiring on
+ * its own, and this credential is only ever chosen for a connection where a
+ * cookie could not have worked at all (see `Credential`).
  */
 function persistedCredential(credential: Credential): Credential {
   if (credential.kind === "platform") return { kind: "platform" };

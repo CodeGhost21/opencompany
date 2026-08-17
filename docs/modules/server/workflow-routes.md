@@ -211,6 +211,45 @@ curl -X POST "$HOST/api/v1/company/workflows/weekly_digest/run" \
 }
 ```
 
+### A run that stopped for a person (issues #881, #880)
+
+When a tool call inside an agent node's turn is parked for approval, the node
+produces no deliverable and its branch stops. The run still answers `200` — a
+step waiting on a person is not a failure — and says so structurally:
+
+```jsonc
+{
+  "output": null,
+  "pendingApprovals": ["spec"],
+  "deliveries": [],
+  "nodes": [ { "nodeId": "spec", "status": "blocked", "elapsedMs": 42000 } ],
+  "blockedNodes": [
+    { "nodeId": "spec", "tools": ["publish_artifact"], "approvalIds": ["appr-1"] }
+  ],
+  "approvals": [
+    { "nodeId": "spec", "tool": "publish_artifact",
+      "outcome": "parked", "approvalId": "appr-1" }
+  ]
+}
+```
+
+`blockedNodes` and `approvals` are omitted entirely when empty, so a run that
+blocked on nobody is byte-unchanged. Both also ride the `WorkflowRunFinished`
+journal event, `GET …/workflows/runs` (where each blocked node's chip is
+relabelled from the `error` the engine reported) and the SSE
+`workflow_run_finished` frame — one shape on all four surfaces.
+
+`approvals` is a **receipt of what the run parked**, not a live count of what is
+outstanding: nothing flips a row when the operator approves. Its `outcome` is
+`parked`, `parkFailed` (the store refused the write, or no approvals queue is
+wired — **nobody will be asked about that call**) or `discarded` (the turn gated
+more calls than the per-turn cap allows; the drain drops the excess, so such a
+row carries no `tool`).
+
+**Approving does not continue the run.** An agent node is not re-enterable, so
+the operator decides the card and runs the workflow again. See
+[`workflow-vocabulary.md`](../../spec/runtime/workflow-vocabulary.md) for why.
+
 Swap `{ "kind": "owner" }` for `{ "kind": "email", "target": "ada@example.com" }`
 and a recipient who has never written in comes back as
 `"status": "skipped"` with the reason, having sent nothing:

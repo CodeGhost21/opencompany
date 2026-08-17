@@ -355,6 +355,13 @@ pub struct ApprovalGql {
     /// otherwise means "this effect involves no money", and a Member looking at
     /// a withheld payment would read it as a free action.
     pub contents_hidden: bool,
+    /// The workflow run waiting on this approval, when one is (issue #880).
+    ///
+    /// Structural — a run id, nothing more — and it is what lets a reader join
+    /// a card on the Approvals page back to the run that opened it. Null for
+    /// every park with no workflow behind it (a chat turn, a scheduler tick, a
+    /// board task's attempt), which is the majority.
+    pub workflow_run_id: Option<String>,
 }
 
 impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
@@ -365,6 +372,7 @@ impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
             amount_usd: summary.amount_usd,
             at_millis: summary.at_millis as f64,
             contents_hidden: summary.contents_hidden,
+            workflow_run_id: summary.workflow_run_id,
         }
     }
 }

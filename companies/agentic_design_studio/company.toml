@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Design Studio harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -23,31 +23,6 @@ human_role = "Creative direction sign-off"
 # Search spend is bounded by `[tools].search_daily_calls` (200/day by default);
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
-
-[[agent]]
-id = "brand_designer"
-role = "Brand Designer"
-description = "Identity systems, logos, and guidelines."
-
-[[agent]]
-id = "ui_designer"
-role = "UI Designer"
-description = "Product UI and design systems."
-
-[[agent]]
-id = "motion_designer"
-role = "Motion Designer"
-description = "Animation and motion graphics."
-
-[[agent]]
-id = "illustrator"
-role = "Illustrator"
-description = "Custom illustration and iconography."
-
-[[agent]]
-id = "user_researcher"
-role = "User Researcher"
-description = "User testing and design validation."
 
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.

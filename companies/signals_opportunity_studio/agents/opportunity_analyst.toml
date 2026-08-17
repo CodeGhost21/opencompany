@@ -1,0 +1,5 @@
+role = "Opportunity Analyst"
+description = "Cluster signals into pains and rank the resulting opportunities by evidence and size."
+tier = "reasoning"
+tools = ["web.*", "docs.*", "search"]
+budget_usd_daily = 8.0

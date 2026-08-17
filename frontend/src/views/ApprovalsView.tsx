@@ -22,6 +22,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
+import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
 import { approvalSummary, grantHeadline, timeAgo, toolAction } from "@/lib/language";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
@@ -136,7 +137,7 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
     markInFlight(a.id, verdict);
     const startedAt = Date.now();
     try {
-      await client.resolveApproval(a.id, verdict, undefined, company, { scope });
+      const answer = await client.resolveApproval(a.id, verdict, undefined, company, { scope });
       // Issue #243: approving no longer just records a verdict — it hands the
       // agent a single-use grant and re-dispatches it to make the call. The old
       // "Approved: …" read as "done", which was the exact lie that made the
@@ -152,14 +153,19 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
       // cold-recipient report — and naming an agent there is the same shape of
       // small lie the wording above exists to remove. The work is still in
       // flight either way, so both halves say so; only the actor changes.
+      // Issue #561: what happens next is the host's answer, not this view's
+      // guess. A turn continues once, when the last decision it parked lands,
+      // so approving one of several releases nothing — and saying otherwise is
+      // the one part of this flow that actively misleads.
+      const stillAwaiting = "stillAwaiting" in answer ? answer.stillAwaiting : undefined;
       const line =
         verdict !== "approve"
           ? `Declined: ${approvalSummary(a)}`
           : scope.kind === "tool"
             ? `Approved — ${toolAction(a.kind).toLowerCase()} won't ask again until this permission expires. Take it back under Standing permissions.`
             : a.agent
-              ? `Approved — the agent is completing the action: ${approvalSummary(a)}`
-              : `Approved — carrying it out now: ${approvalSummary(a)}`;
+              ? approvedLine(stillAwaiting, approvalSummary(a))
+              : approvedByRuntimeLine(stillAwaiting, approvalSummary(a));
       onResolved(line);
       toast.success(line);
       // The agent's reply arrives as a journaled `AgentReply` on its own thread,

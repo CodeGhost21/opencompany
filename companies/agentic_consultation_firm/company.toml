@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Consulting Firm harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -23,41 +23,6 @@ human_role = "Executive workshops"
 # Search spend is bounded by `[tools].search_daily_calls` (200/day by default);
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
-
-[[agent]]
-id = "researcher"
-role = "Researcher"
-description = "Desk research and evidence gathering."
-
-[[agent]]
-id = "interviewer"
-role = "Interviewer"
-description = "Conduct and synthesize stakeholder interviews."
-
-[[agent]]
-id = "industry_analyst"
-role = "Industry Analyst"
-description = "Industry, market, and competitive analysis."
-
-[[agent]]
-id = "strategist"
-role = "Strategist"
-description = "Synthesize findings into strategy recommendations."
-
-[[agent]]
-id = "financial_modeler"
-role = "Financial Modeler"
-description = "Build the supporting financial models."
-
-[[agent]]
-id = "deck_builder"
-role = "Deck Builder"
-description = "Produce client-ready presentations."
-
-[[agent]]
-id = "implementation_planner"
-role = "Implementation Planner"
-description = "Turn strategy into an execution roadmap."
 
 # Workflow graphs to enable. The graphs live in this company's workflows/
 # directory (one file per id), not inline here.

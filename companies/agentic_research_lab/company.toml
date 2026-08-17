@@ -1,0 +1,79 @@
+# Agent roster for the Agentic Research Lab harness.
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
+# the vendored OpenHuman / TinyAgents modules.
+#
+# This company is the acceptance test for the orchestration work described in
+# `docs/spec/runtime/orchestration/`. Where the other shipped companies model a
+# business, this one models an *investigation*: a question arrives, the lab
+# gathers primary sources, extracts what they actually establish, computes what
+# it can, argues with itself, and reports what it can defend.
+#
+# It is ported from a sibling runtime that solves mathematical conjectures with
+# 22 concurrent specialists on one shared workspace. The domain-general roles
+# survive here; the mathematics-specific ones (theorem provers, sequence
+# analysis, proof weakening) do not.
+
+[company]
+name = "Agentic Research Lab"
+output = "Source-backed research reports with the evidence attached"
+human_role = "Set the question and accept the findings"
+
+[tools]
+# The full belt plus metered `web_search` (#238). Research is the one thing this
+# company does, and nothing in the `web` namespace can *find* a URL —
+# `web_fetch` / `http_request` only read one the agent already holds. Without
+# `search`, the librarian below has no way to discover a source and the
+# fetch/read split collapses into "read what the operator pasted".
+#
+# `allow` REPLACES the default (`["*", "media", "composio"]`); it never extends
+# it. `*` covers files/docs/shell/code/web/subagent but deliberately excludes
+# the opt-in namespaces, so `search` is listed literally. `shell` and `code`
+# arrive with `*` and are load-bearing here: the analyst computes rather than
+# estimates.
+#
+# Search spend is bounded by `search_daily_calls`; set it to `0` to pause
+# search without editing this list.
+allow = ["*", "search"]
+search_daily_calls = 200
+
+# ---------------------------------------------------------------------------
+# The roster.
+#
+# `context` names the workspace documents routed into each agent's system
+# prompt. It is data, not decoration: context is authority, so what a role is
+# *not* given matters as much as what it is. Each entry below says why.
+#
+# The field is inert until the routing layer lands
+# (docs/spec/runtime/orchestration/alignment.md); it is declared now so the
+# routing is reviewable as data rather than inferred from prose.
+# ---------------------------------------------------------------------------
+
+# No `delegates_to`. That field is the *per-member* opt-in: it wires
+# `spawn_task` + `delegate_to_desk` onto a non-orchestrator agent and narrows
+# the latter to the desks named. This agent carries `tier = "orchestrator"`, so
+# it already holds the full delegating authority unrestricted, and this company
+# declares no desks for `delegate_to_desk` to address anyway. Listing `["*"]`
+# here would read as "may delegate anywhere" while resolving to nothing.
+
+# ---------------------------------------------------------------------------
+# Desks.
+#
+# Deliberately none. `docs/spec/runtime/orchestration/delegation.md` collapses
+# desks into workflows: a desk's entire behaviour is "resolve a lead, run that
+# member's turn, relay the reply", which an `agent` workflow node already does
+# with retries, approval gating, nesting and cancellation on top.
+#
+# This company is the proving ground for that, so it declares `[[group_chat]]`
+# nowhere and routes its collaboration through the workflow below instead.
+# ---------------------------------------------------------------------------
+
+[workflows]
+# The graph lives in this company's workflows/ directory, one file per id.
+enabled = ["research_loop"]
+
+[policy]
+# `auto` runs the lab's own sandbox writes and outward reads unattended, and
+# still parks anything that leaves the company or spends money. Research is
+# read-heavy and its outward actions are searches and fetches, so unattended is
+# the right default here; the report still reaches a person before it counts.
+mode = "auto"

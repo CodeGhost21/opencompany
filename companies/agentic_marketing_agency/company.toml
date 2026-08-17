@@ -1,5 +1,5 @@
 # Agent roster for the Agentic Marketing Agency harness.
-# The OpenCompany host instantiates one runtime agent per [[agent]], backed by
+# The OpenCompany host instantiates one runtime agent per `agents/<id>.toml`, backed by
 # the vendored OpenHuman / TinyAgents modules.
 
 [company]
@@ -24,48 +24,14 @@ human_role = "Campaign review and sign-off"
 # setting it to `0` pauses search without editing this list.
 allow = ["*", "media", "composio", "search"]
 
-[[agent]]
-id = "creative_director"
-role = "Creative Director"
-description = "Own creative concept and direction."
-
-[[agent]]
-id = "copywriter"
-role = "Copywriter"
-description = "Write ads, pages, and campaign copy."
-
-[[agent]]
-id = "seo_specialist"
-role = "SEO Specialist"
-description = "Organic search strategy and optimization."
-
-[[agent]]
-id = "paid_ads_manager"
-role = "Paid Ads Manager"
-description = "Plan and run paid-acquisition campaigns."
-
-[[agent]]
-id = "landing_page_builder"
-role = "Landing Page Builder"
-description = "Build and test conversion pages."
-
-[[agent]]
-id = "email_marketer"
-role = "Email Marketer"
-description = "Design and send lifecycle email."
-
-[[agent]]
-id = "analytics_analyst"
-role = "Analytics Analyst"
-description = "Measure performance and report."
-
-[[agent]]
-id = "brand_strategist"
-role = "Brand Strategist"
-description = "Positioning and brand strategy."
-
 # Group chats — the desks the human talks to. Each pulls in a few agents.
-# Members must be ids from the roster above.
+# Members must be ids declared under `agents/`.
+#
+# A desk is also a scoping level: its optional `tools` is the middle term of
+# `[tools].allow ∩ desk.tools ∩ agent.tools`. Stating a ceiling here restricts
+# every member at once, so a teammate seated on the desk later inherits the
+# restriction instead of quietly arriving with the company's full belt. Omitting
+# it (as `strategy` and `growth` do below) narrows nothing.
 [[group_chat]]
 id = "strategy"
 name = "Strategy desk"
@@ -77,6 +43,21 @@ id = "creative"
 name = "Creative studio"
 description = "Copy, design, and campaigns."
 members = ["creative_director", "copywriter", "landing_page_builder"]
+# The creative desk writes; it does not spend on generated media or on billed
+# search. Both are simply left out rather than denied, because every level of
+# this narrowing is subtractive — a desk can only remove capability, never add
+# it, so omission *is* the mechanism.
+#
+# `*` is listed because it is not a wildcard over everything: it covers
+# files/docs/shell/code/web/subagent and deliberately excludes the opt-in
+# namespaces (`media`, `composio`, `search`, `repo`), which is exactly the line
+# this desk wants. The company grants `media`/`composio`/`search` above; none of
+# them reach these three agents.
+#
+# Members of this desk sit on no other desk. That matters: a teammate on two
+# desks takes the UNION of their ceilings, so seating one of these agents on an
+# unrestricted desk would hand the company grant straight back.
+tools = ["*"]
 
 [[group_chat]]
 id = "growth"

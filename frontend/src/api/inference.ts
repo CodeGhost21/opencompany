@@ -118,6 +118,33 @@ export function revertInference(
   return client.del<InferenceMutation>(`${client.scopeFor(company)}/inference`);
 }
 
+/**
+ * Rebuild this company's runtime in place, now.
+ *
+ * The action behind the "Restart required" notice. Which brain a company runs
+ * is chosen when its runtime is built, so a company that booted with no
+ * inference source keeps echoing however the config changes underneath it.
+ * Saving already attempts this rebuild; this asks for it on its own, which is
+ * what a company already sitting in that state needs — or one whose rebuild
+ * failed the first time.
+ *
+ * In-flight work is preserved rather than dropped. The turn in progress
+ * completes, and the journal, parked approvals and single-use grants are handed
+ * to the successor — so an approval waiting on a person survives and nobody has
+ * to approve a tool call twice. Cycles arriving during the swap take a `503`
+ * and are retried against the successor.
+ *
+ * Rejects on a host that wired no rebuilder, with a message naming the process
+ * restart that would work instead. That is the honest answer, and the reason
+ * the console has to surface the failure rather than assume this always works.
+ */
+export function restartInference(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<InferenceMutation> {
+  return client.post<InferenceMutation>(`${client.scopeFor(company)}/inference/restart`, {});
+}
+
 /** Live-probe the resolved provider (one `ping` turn). */
 export function testInference(
   client: OpenCompanyClient,
