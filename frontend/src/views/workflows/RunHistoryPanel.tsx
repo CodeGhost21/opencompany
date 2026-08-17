@@ -16,7 +16,14 @@ import type {
 } from "@/api/workflows";
 
 import { failedNodeOf } from "./graph";
-import { awaitingCount, relativeTime, runTone, undeliveredCount } from "./run-health";
+import {
+  awaitingCount,
+  decidableApprovalCount,
+  isBlocked,
+  relativeTime,
+  runTone,
+  undeliveredCount,
+} from "./run-health";
 
 /** Badge styling per delivery outcome. A report that did NOT go out must not
  * look like one that did — `denied` and `failed` are the two an operator has to
@@ -46,18 +53,27 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium">Report delivery</span>
         {pending > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft">
+          <Badge
+            variant="outline"
+            className="h-4 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft"
+          >
             {pending} awaiting approval
           </Badge>
         )}
         {undelivered > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-status-failed/40 bg-status-failed-soft">
+          <Badge
+            variant="outline"
+            className="h-4 px-1.5 text-3xs font-normal border-status-failed/40 bg-status-failed-soft"
+          >
             {undelivered} not delivered
           </Badge>
         )}
       </div>
       {deliveries.map((d, i) => (
-        <div key={`${d.node}-${d.target ?? ""}-${i}`} className="flex flex-wrap items-baseline gap-1.5">
+        <div
+          key={`${d.node}-${d.target ?? ""}-${i}`}
+          className="flex flex-wrap items-baseline gap-1.5"
+        >
           <Badge
             variant="outline"
             className={`h-4 px-1.5 text-3xs font-normal ${DELIVERY_TONE[d.status] ?? ""}`}
@@ -112,11 +128,13 @@ export function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
           : run.cancelled
             ? " stopped"
             : undelivered > 0
-            ? ` · ${undelivered} not delivered`
-            : awaiting > 0
-              ? ` · ${awaiting} awaiting approval`
-              : ""}
-      <span className="text-muted-foreground">· {relativeTime(run.atMillis)}</span>
+              ? ` · ${undelivered} not delivered`
+              : awaiting > 0
+                ? ` · ${awaiting} awaiting approval`
+                : ""}
+      <span className="text-muted-foreground">
+        · {relativeTime(run.atMillis)}
+      </span>
     </Badge>
   );
 }
@@ -136,6 +154,9 @@ export function RunHistoryPanel({
   onClose,
   selectedRunSeq,
   onSelectRun,
+  onFixWithCopilot,
+  fixingRunSeq,
+  fixReason,
 }: {
   runs: WorkflowRunOutcome[];
   workflowName: string;
@@ -144,14 +165,34 @@ export function RunHistoryPanel({
   selectedRunSeq: number | null;
   /** Overlay this run's per-node states on the canvas (issue #371). */
   onSelectRun: (run: WorkflowRunOutcome) => void;
+  /**
+   * Correct this failed run's workflow with the copilot (issue #840, PR-3). When
+   * absent (no brain wired, or a host without the route) the affordance is not
+   * offered at all.
+   */
+  onFixWithCopilot?: (run: WorkflowRunOutcome) => void;
+  /** The run whose copilot fix is in flight, so its row shows a spinner. */
+  fixingRunSeq?: number | null;
+  /** A run the copilot judged un-fixable, shown inline under that run's row. */
+  fixReason?: { seq: number; reason: string } | null;
 }) {
+  // Only one fix may be in flight at a time: `handleFixWithCopilot` sets a
+  // single `prefilledDraft`/`editOpen` slot, so a second Fix started on a
+  // different row of this same panel while the first is still running would
+  // race it for that slot — whichever resolves last silently wins, which
+  // could show the operator the wrong run's correction. Disabling every row's
+  // button (not just the in-flight one's) while `fixingRunSeq` is set turns
+  // that race into "wait your turn".
+  const anyFixInFlight = fixingRunSeq != null;
   return (
     <div className="border-t bg-card/60" data-testid="workflow-run-history">
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Run history</span>
           {workflowName && (
-            <span className="truncate text-xs text-muted-foreground">{workflowName}</span>
+            <span className="truncate text-xs text-muted-foreground">
+              {workflowName}
+            </span>
           )}
           <Badge variant="secondary">{runs.length}</Badge>
         </div>
@@ -173,6 +214,10 @@ export function RunHistoryPanel({
                 run={run}
                 selected={run.seq === selectedRunSeq}
                 onSelect={() => onSelectRun(run)}
+                onFixWithCopilot={onFixWithCopilot}
+                fixing={fixingRunSeq === run.seq}
+                fixDisabled={anyFixInFlight}
+                fixReason={fixReason?.seq === run.seq ? fixReason.reason : null}
               />
             ))}
           </div>
@@ -191,13 +236,38 @@ function RunHistoryRow({
   run,
   selected,
   onSelect,
+  onFixWithCopilot,
+  fixing,
+  fixDisabled,
+  fixReason,
 }: {
   run: WorkflowRunOutcome;
   selected: boolean;
   onSelect: () => void;
+  /** Correct this run's workflow with the copilot (issue #840, PR-3). */
+  onFixWithCopilot?: (run: WorkflowRunOutcome) => void;
+  /** Whether this row's copilot fix is currently in flight. */
+  fixing?: boolean;
+  /** A DIFFERENT row's fix is in flight — disabled without the "Fixing…" label. */
+  fixDisabled?: boolean;
+  /** The copilot's reason this failure could not be fixed by re-wiring, if any. */
+  fixReason?: string | null;
 }) {
   const tone = runTone(run);
   const nodes = run.nodes ?? [];
+  // Issue #881 / #880: read once, so the chip, the badge and the terminal line
+  // below cannot disagree about whether this run stopped for a person.
+  const blocked = run.blockedNodes ?? [];
+  // Issue #900: `decidableApprovalCount`, not `parkedApprovalCount` — this
+  // paragraph tells the operator a card is waiting, so it must count only
+  // the receipts that actually landed one. Counting a failed park here said
+  // "needs your approval" and "decide it in Approvals" about a call the very
+  // next sentence admitted nobody would ever be asked about.
+  const parked = decidableApprovalCount(run);
+  // The loud half: calls nobody will ever be asked about, because the park
+  // itself failed or the excess was dropped past the per-turn cap. Strictly
+  // worse than a parked one — there is no card to click.
+  const unparkable = blocked.reduce((n, b) => n + (b.unparkable ?? 0), 0);
   const failedNode = failedNodeOf(run);
   return (
     <div
@@ -212,16 +282,32 @@ function RunHistoryRow({
           {run.scheduled ? "scheduled" : "manual"}
         </Badge>
         <span className="text-2xs text-muted-foreground">
-          {new Date(run.atMillis).toLocaleString()} · {relativeTime(run.atMillis)}
+          {new Date(run.atMillis).toLocaleString()} ·{" "}
+          {relativeTime(run.atMillis)}
         </span>
-        {run.pendingApprovals.length > 0 && (
+        {/* Issue #880: what the run PARKED, in those words. A blocked run's
+            `pendingApprovals` names the nodes it stopped at, which is a
+            different count from the cards it opened — and "pending" is the
+            phrasing that goes stale, since nothing here is refreshed when the
+            operator approves one. The receipt wins where there is one. */}
+        {parked > 0 ? (
           <Badge
             variant="outline"
             className="h-4 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft"
+            data-testid="workflow-run-parked"
           >
-            {run.pendingApprovals.length} pending approval
-            {run.pendingApprovals.length === 1 ? "" : "s"}
+            parked {parked} approval{parked === 1 ? "" : "s"}
           </Badge>
+        ) : (
+          run.pendingApprovals.length > 0 && (
+            <Badge
+              variant="outline"
+              className="h-4 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft"
+            >
+              {run.pendingApprovals.length} pending approval
+              {run.pendingApprovals.length === 1 ? "" : "s"}
+            </Badge>
+          )
         )}
         {run.running && (
           <Badge
@@ -249,7 +335,10 @@ function RunHistoryRow({
           "it failed HERE". Absent for a run journaled before #371 — those rows
           render exactly as they always did. */}
       {nodes.length > 0 && (
-        <div className="mb-1 flex flex-wrap gap-1" data-testid="workflow-run-nodes">
+        <div
+          className="mb-1 flex flex-wrap gap-1"
+          data-testid="workflow-run-nodes"
+        >
           {nodes.map((node) => (
             <RunNodeChip key={`${node.nodeId}-${node.elapsedMs}`} node={node} />
           ))}
@@ -264,8 +353,37 @@ function RunHistoryRow({
                 failing node as an errored step, so this is exact. When it does
                 not (a graph that would not compile, a capability that could not
                 be built), say nothing about nodes rather than guessing. */}
-            {failedNode ? `This run failed at “${failedNode}”: ` : "This run failed: "}
+            {failedNode
+              ? `This run failed at “${failedNode}”: `
+              : "This run failed: "}
             {run.error}
+            {/* Issue #840 (PR-3): correct the workflow with the copilot. Offered
+                only on the journaled failed run (keyed by runId) — the one
+                surface that always carries the failure, unlike the sync run
+                result — and only when the parent wired a handler (a brain is
+                available). */}
+            {onFixWithCopilot && run.runId && (
+              <div className="mt-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 px-2 text-3xs"
+                  disabled={fixing || fixDisabled}
+                  onClick={() => onFixWithCopilot(run)}
+                  data-testid="workflow-run-fix-with-copilot"
+                >
+                  {fixing ? "Fixing…" : "Fix with copilot"}
+                </Button>
+                {fixReason && (
+                  <p
+                    className="mt-1 text-2xs text-muted-foreground"
+                    data-testid="workflow-run-fix-not-automatable"
+                  >
+                    The copilot couldn't fix this by re-wiring the workflow: {fixReason}
+                  </p>
+                )}
+              </div>
+            )}
           </AlertDescription>
         </Alert>
       ) : run.cancelled ? (
@@ -282,8 +400,52 @@ function RunHistoryRow({
           {nodes.length > 0
             ? ` after ${nodes.length} step${nodes.length === 1 ? "" : "s"}`
             : " before any step finished"}
-          . The steps above completed; the one still running was stopped where it
-          was. Any approvals it had already raised are still waiting for you.
+          . The steps above completed; the one still running was stopped where
+          it was. Any approvals it had already raised are still waiting for you.
+        </p>
+      ) : isBlocked(run) ? (
+        // Issue #881, the fourth terminal reading — and the one that had NO
+        // arm at all, which is how a run that delivered nothing came to read as
+        // a clean success. A blocked run carries no error, is not cancelled,
+        // is not running, and routed no report, so it fell straight through to
+        // the "Finished — this run routed no reports" line below. That sentence
+        // is what lied.
+        //
+        // Deliberately not a destructive Alert: nothing broke. Same amber the
+        // gated-call notice already uses — "needs your attention, nothing is
+        // wrong" — and the same 11px rung as its siblings.
+        //
+        // Wording is the review item here. "Parked N approvals", never "waiting
+        // on N": nothing refreshes this row when the operator approves one, so
+        // an outstanding count is stale on arrival, while a record of what the
+        // run parked stays true. And it says plainly that approving does not
+        // continue THIS run — an agent step is not resumable, so the operator
+        // has to run the workflow again or they will sit waiting for a
+        // continuation that never comes.
+        <p
+          className="text-2xs text-[var(--status-blocked-text)]"
+          data-testid="workflow-run-blocked"
+        >
+          {/* Issue #900: the verb used to be unconditionally "needs your
+              approval", even when every one of the blocked node's calls was
+              unparkable — a call nobody will ever be asked about. That read
+              as a promise of a card that does not exist, and contradicted the
+              closing sentence below whenever `parked` was 0. */}
+          Not finished — {blocked.map((b) => `“${b.nodeId}”`).join(", ")}{" "}
+          {parked > 0
+            ? blocked.length === 1
+              ? "needs your approval"
+              : "need your approval"
+            : "could not be queued for approval"}, so{" "}
+          {blocked.length === 1 ? "it" : "they"} produced nothing and the steps
+          after {blocked.length === 1 ? "it" : "them"} did not run.{" "}
+          {parked > 0 &&
+            `This run parked ${parked} approval${parked === 1 ? "" : "s"}. `}
+          {unparkable > 0 &&
+            `${unparkable} call${unparkable === 1 ? "" : "s"} could not be queued for approval at all, so you will not be asked about ${unparkable === 1 ? "it" : "them"}. `}
+          {parked > 0
+            ? `Decide ${parked === 1 ? "it" : "them"} in Approvals, then run the workflow again — approving does not continue this run.`
+            : "Nothing here can be approved; change the policy and run the workflow again."}
         </p>
       ) : run.running ? (
         // Same root cause as the tone bug: a run still walking its graph has no
@@ -299,29 +461,34 @@ function RunHistoryRow({
               reached BEFORE the gate. Those rows are shown as they always were,
               with the waiting line above rather than instead of them: replacing
               them would trade one silent omission for another. */}
-          {run.deliveries.length > 0 && <DeliveryRows deliveries={run.deliveries} />}
-        // Issue #846. This is the arm that was missing, and its absence is how a
-        // run waiting on a human came to report success: a paused run has no
-        // error, no cancellation, is not `running` (the engine settled it) and
-        // routed nothing, so it fell through every branch to the "Finished" line
-        // below — while its gate sat undecided on the Approvals page.
-        //
-        // "Not finished" is the claim, stated in the operator's terms rather
-        // than the engine's. The run object really is settled; what has not
-        // happened is the work, and the work is what the operator is asking
-        // about. Naming the nodes matters as much as the state: a scheduled run
-        // that silently did nothing is exactly the failure this reads as, and
-        // the fix is a click, so the row says which click.
-        <p
-          className="text-2xs text-[var(--status-blocked-text)]"
-          data-testid="workflow-run-awaiting"
-        >
-          Not finished — waiting for your approval on{" "}
-          {run.pendingApprovals.map((node) => `“${node}”`).join(", ")}. Nothing past{" "}
-          {run.pendingApprovals.length === 1 ? "it" : "them"} has run
-          {run.deliveries.length === 0 ? ", and no reports were routed" : ""}. Approve or decline
-          it in Approvals to carry the run on.
-        </p>
+          {run.deliveries.length > 0 && (
+            <DeliveryRows deliveries={run.deliveries} />
+          )}
+          {/* Issue #846. This is the arm that was missing, and its absence is
+              how a run waiting on a human came to report success: a paused run
+              has no error, no cancellation, is not `running` (the engine
+              settled it) and routed nothing, so it fell through every branch
+              to the "Finished" line below — while its gate sat undecided on
+              the Approvals page.
+
+              "Not finished" is the claim, stated in the operator's terms
+              rather than the engine's. The run object really is settled;
+              what has not happened is the work, and the work is what the
+              operator is asking about. Naming the nodes matters as much as
+              the state: a scheduled run that silently did nothing is exactly
+              the failure this reads as, and the fix is a click, so the row
+              says which click. */}
+          <p
+            className="text-2xs text-[var(--status-blocked-text)]"
+            data-testid="workflow-run-awaiting"
+          >
+            Not finished — waiting for your approval on{" "}
+            {run.pendingApprovals.map((node) => `“${node}”`).join(", ")}.
+            Nothing past {run.pendingApprovals.length === 1 ? "it" : "them"} has
+            run
+            {run.deliveries.length === 0 ? ", and no reports were routed" : ""}.
+            Approve or decline it in Approvals to carry the run on.
+          </p>
         </>
       ) : run.deliveries.length > 0 ? (
         // Deliberately the SAME component the live run drawer uses, so a report
@@ -363,19 +530,37 @@ function RunHistoryRow({
 
 /** One node's outcome in a history row: its id, how it went, how long it took. */
 function RunNodeChip({ node }: { node: WorkflowRunNode }) {
-  const ok = node.status === "ok";
+  // Issue #881: three tones, not two. A blocked step is neither green nor red —
+  // painting it red sends an operator hunting for a bug when the fix is a click
+  // in Approvals, and painting it green is the lie the issue was filed about.
+  // The amber token is the console's standing "needs a person, nothing is
+  // broken" state, which a gated call already reads as elsewhere.
+  const tone =
+    node.status === "ok"
+      ? {
+          border: "border-status-done/40 bg-status-done-soft",
+          dot: "bg-status-done",
+        }
+      : node.status === "blocked"
+        ? {
+            border: "border-status-blocked/50 bg-status-blocked-soft",
+            dot: "bg-status-blocked",
+          }
+        : {
+            border: "border-status-failed/50 bg-status-failed-soft",
+            dot: "bg-status-failed",
+          };
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-3xs ${
-        ok
-          ? "border-status-done/40 bg-status-done-soft"
-          : "border-status-failed/50 bg-status-failed-soft"
-      }`}
+      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-3xs ${tone.border}`}
+      data-testid={`workflow-run-node-${node.status}`}
     >
-      <span className={`size-1.5 rounded-full ${ok ? "bg-status-done" : "bg-status-failed"}`} />
+      <span className={`size-1.5 rounded-full ${tone.dot}`} />
       <span className="font-medium">{node.nodeId}</span>
       <span className="font-mono opacity-70">
-        {node.elapsedMs < 1000 ? `${node.elapsedMs}ms` : `${(node.elapsedMs / 1000).toFixed(1)}s`}
+        {node.elapsedMs < 1000
+          ? `${node.elapsedMs}ms`
+          : `${(node.elapsedMs / 1000).toFixed(1)}s`}
       </span>
     </span>
   );

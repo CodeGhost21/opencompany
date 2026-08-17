@@ -6,10 +6,10 @@
 //! [`SecretStore`](crate::ports::SecretStore); the responses expose only
 //! non-secret status (connected / verified / configured). Routes follow the
 //! same dual scoping as the operator surface: the platform `{id}` form and the
-//! prosumer single-company alias (`/api/v1/company/…`).
+//! prosumer single-company alias (`/api/v1/company/â¦`).
 //!
-//! Everything that touches the network — real DNS lookups (`dns`), real SMTP
-//! send (`smtp`), and real OAuth token exchange (`oauth`) — is dependency-
+//! Everything that touches the network â real DNS lookups (`dns`), real SMTP
+//! send (`smtp`), and real OAuth token exchange (`oauth`) â is dependency-
 //! inverted behind a trait so the default build stays offline. The
 //! [`ConnectionsRuntime`] seam carries the injected resolver/sender (offline
 //! mocks in tests, real impls when a feature is on); the OAuth write routes are
@@ -36,7 +36,7 @@ pub mod policy;
 pub mod read_state;
 /// Issue #245 (operator half): bind a real repository to a company, list what
 /// is bound, revoke one. The whole credential path, with **no agent surface**
-/// behind it — no grant, no tool. See [`repos`].
+/// behind it â no grant, no tool. See [`repos`].
 pub mod repos;
 pub mod runs;
 pub mod scope;
@@ -45,11 +45,15 @@ pub mod smtp;
 pub mod task_export;
 pub mod tasks;
 pub mod team;
-/// Issue #264: one agent, opened — `GET`/`PATCH {scope}/team/{agent_id}`. The
+/// Issue #264: one agent, opened â `GET`/`PATCH {scope}/team/{agent_id}`. The
 /// detail read (identity, tier, **resolved** tool grants, desks) and the edit
 /// for the fields the console owns. Attached to [`team`]'s existing
 /// `/team/{agent_id}` route rather than merged as its own. See [`team_agent`].
 mod team_agent;
+/// The unified tool catalog read (`GET {scope}/tools/catalog`): everything this
+/// company can grant an agent — built-ins, MCP servers and Composio toolkits —
+/// in one vocabulary. Read-only and openhuman-free.
+pub mod tool_catalog;
 pub mod usage;
 pub mod workflows;
 pub mod workspace;
@@ -88,14 +92,14 @@ pub(crate) const INGEST_SECRET_KEY: &str = "ingest_secret";
 /// their features) or by tests (offline mocks).
 #[derive(Clone, Default)]
 pub struct ConnectionsRuntime {
-    /// Resolver used by `POST …/domain/verify`. When `None`, verify is
+    /// Resolver used by `POST â¦/domain/verify`. When `None`, verify is
     /// "not wired yet" (404).
     pub dns: Option<Arc<dyn DnsResolver>>,
-    /// Sender used by `POST …/smtp/test` and outbound mail. When `None`,
+    /// Sender used by `POST â¦/smtp/test` and outbound mail. When `None`,
     /// test-send is "not wired yet" (404).
     pub mail: Option<Arc<dyn MailSender>>,
     /// Host-level outbound credentials (`OPENCOMPANY_MAIL_*`), used for
-    /// platform mail such as login links — mail sent on the platform's behalf
+    /// platform mail such as login links â mail sent on the platform's behalf
     /// rather than a company's. A company's own outbound instead reads its
     /// `SecretStore`, so a tenant never sees this credential. `None` means the
     /// host sends no platform mail.
@@ -108,7 +112,7 @@ pub struct ConnectionsRuntime {
 }
 
 impl ConnectionsRuntime {
-    /// An empty runtime — every networked surface degrades to "not wired".
+    /// An empty runtime â every networked surface degrades to "not wired".
     pub fn new() -> Self {
         Self::default()
     }
@@ -158,6 +162,7 @@ impl std::fmt::Debug for ConnectionsRuntime {
 pub fn router() -> Router<AppState> {
     let router = Router::new()
         .merge(capabilities::router())
+        .merge(tool_catalog::router())
         .merge(connections_read::router())
         .merge(channels::router())
         .merge(company_key::router())
@@ -218,7 +223,7 @@ pub(crate) fn not_wired(what: &str) -> axum::response::Response {
 }
 
 /// A `409 restart_required` response for a surface that this build *does* have,
-/// but this company's running runtime does not — because the runtime was wired
+/// but this company's running runtime does not â because the runtime was wired
 /// at boot, before the inference config that would have wired it existed
 /// (issue #266).
 ///
@@ -243,21 +248,21 @@ pub(crate) fn restart_required(what: &str) -> axum::response::Response {
 }
 
 /// A `409 inference_required` response for a workflow-run attempt on a company
-/// that has *never* configured an inference source — `workflow_runner()` is
+/// that has *never* configured an inference source â `workflow_runner()` is
 /// `None` because there is no brain to run yet, not because this deployment
 /// lacks execution and not because a saved config is stranded behind a boot
 /// decision (issue #514).
 ///
 /// Deliberately neither of the sibling responses:
 ///   - not the `not_wired` 404: the console's bare-catch treats that as a
-///     permanent capability gap and degrades to a read-only view — the wrong
+///     permanent capability gap and degrades to a read-only view â the wrong
 ///     answer for a state the operator clears by configuring a provider (which
 ///     triggers issue #290's rebuild-in-place; no restart needed);
 ///   - not `restart_required`: nothing was ever saved to the strand, so there is
 ///     no configuration for a restart to pick up.
 ///
 /// The `code` is a contract the console keys its own copy on; the `error` prose
-/// is the fallback a curl user sees. It never says "deployment" or "not wired" —
+/// is the fallback a curl user sees. It never says "deployment" or "not wired" â
 /// the deployment is fine.
 pub(crate) fn inference_required(what: &str) -> axum::response::Response {
     use axum::http::StatusCode;
@@ -267,7 +272,7 @@ pub(crate) fn inference_required(what: &str) -> axum::response::Response {
         axum::Json(serde_json::json!({
             "error": format!(
                 "{what} needs an inference source, and none is configured for this \
-                 company. Set a provider in Settings → Inference, then run again."
+                 company. Set a provider in Settings â Inference, then run again."
             ),
             "code": "inference_required",
         })),

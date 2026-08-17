@@ -1,0 +1,5 @@
+role = "Inventor"
+description = "Propose a different line of attack when the current one stalls."
+# Must see what has already been tried and closed, or it re-proposes it — the
+# one thing this role exists not to do.
+context = ["GOAL.md", "BRIEF.md", "THREADS.md", "CLAIMS.md", "BOARD.md"]

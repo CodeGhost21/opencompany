@@ -170,20 +170,14 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
 /// This is what makes the agent answer *as* the CEO of Acme rather than falling
 /// back to openhuman's own assistant identity — the harness passes it as the
 /// archetype body with the default identity section omitted.
+///
+/// Delegates to [`crate::company::prompt::persona_prompt`], which is compiled in
+/// every build. Kept as a re-export rather than inlined at the call sites so the
+/// harness's existing callers and tests keep one name for "the persona", and so
+/// the composition rules (including the operator's inline `prompt`) are exercised
+/// by the default-build test suite rather than only where this module links.
 pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
-    let mut prompt = format!(
-        "You are the {role} at {company}. Speak in the first person as this role.",
-        role = agent.role,
-        company = company_name,
-    );
-    if let Some(description) = agent.description.as_deref() {
-        let description = description.trim();
-        if !description.is_empty() {
-            prompt.push(' ');
-            prompt.push_str(description);
-        }
-    }
-    prompt
+    crate::company::prompt::persona_prompt(company_name, agent)
 }
 
 /// Build one openhuman [`Agent`] for `manifest_agent` within `company`.
@@ -192,6 +186,12 @@ pub fn persona_prompt(company_name: &str, agent: &ManifestAgent) -> String {
 /// is wired to a skills source (a [`SkillStateStore`](crate::ports::SkillStateStore)
 /// and/or a source directory), the agent's effective skill set is materialized
 /// and surfaced as three read tools plus a persona-prompt catalogue.
+///
+/// `routed_context` are this agent's workspace documents, already selected by
+/// [`context_routing`](crate::company::context_routing) and read out of the
+/// store by the async caller. Passed in rather than fetched here for the same
+/// reason `skill_deltas` is: this function is synchronous and runs on every
+/// roster rebuild, while the `WorkspaceStore` is async.
 ///
 /// `is_orchestrator` marks the company's orchestrator agent (issue #53): it
 /// additionally receives the delegating-orchestrator persona brief and the
@@ -209,6 +209,7 @@ pub fn build_agent(
     deps: &HarnessDeps,
     grants: &[String],
     skill_deltas: &[SkillState],
+    routed_context: &[(String, String)],
     is_orchestrator: bool,
 ) -> crate::Result<Agent> {
     let memory: Arc<dyn Memory> = Arc::new(OcMemory::new(
@@ -398,12 +399,16 @@ pub fn build_agent(
     //     `media`, the catch-all `*` does NOT grant it, so a broadly-permissioned
     //     company never accidentally hands its agents a live account-reaching
     //     surface; it must opt in by name.
-    //  2. a resolved per-tenant token on the deps (`deps.composio`), read from the
-    //     company secret store by `HarnessPool::ensure` — never an env/platform
-    //     key. The backend derives the Composio entity from THIS token, so it is
-    //     the entire tenant-isolation lever.
+    //  2. a resolved credential on the deps (`deps.composio`), produced by
+    //     `HarnessPool::ensure` through `composio::resolve_credential` — the BYO
+    //     `composio/token` override, else the company's own TinyHumans key, else
+    //     this instance's platform identity (issue #586). The backend derives the
+    //     Composio entity from whichever tier answered, so this resolution is the
+    //     entire tenant-isolation lever. It is NOT "a stored token": on a hosted
+    //     tenant nobody pastes one and the platform identity is what wires the
+    //     tools (issue #886).
     //
-    // Granted-but-tokenless wires nothing and warns (fail-closed). The
+    // Granted-but-credential-less wires nothing and warns (fail-closed). The
     // `authorize` / `execute` tools additionally park for operator approval via
     // the `ApprovalPolicy`. Gated on the `composio` feature; the default/
     // `openhuman` build never compiles this.
@@ -425,7 +430,12 @@ pub fn build_agent(
             None => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
-                "[build] agent explicitly grants `composio` but no per-tenant Composio token is configured; composio tools NOT wired (fail-closed)"
+                // Issue #886: the gate is `deps.composio.is_none()`, which is a
+                // *resolver* outcome over three tiers (BYO `composio/token`,
+                // the company's TinyHumans key, this instance's platform
+                // identity) — not "no token is stored". Naming the stored token
+                // sent operators to paste one they did not need.
+                "[build] agent explicitly grants `composio` but no Composio credential could be resolved for this company; composio tools NOT wired (fail-closed)"
             ),
         }
     }
@@ -674,7 +684,16 @@ pub fn build_agent(
 
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
+    // Includes the operator's inline `prompt`, appended to the generated framing.
     let mut persona = persona_prompt(company_name, manifest_agent);
+
+    // The agent's checked-in briefing documents, placed here — before every
+    // tool brief and before the routed workspace documents — because they are
+    // the most static material in the prompt after the persona itself. The
+    // prompt prefix is what a provider cache reuses across turns, so ordering
+    // static-before-volatile is what keeps an operator editing a workspace note
+    // from invalidating the briefing behind it.
+    persona.push_str(&crate::company::prompt::bundle_section(manifest_agent));
 
     // A short, STATIC brief — never a tree snapshot. A snapshot baked into the
     // system prompt would be stale the moment the operator edits a note, which
@@ -831,6 +850,13 @@ pub fn build_agent(
             },
         ));
     }
+
+    // The routed workspace documents go LAST, after every tool brief. They are
+    // the most volatile thing in the prompt — an operator editing a note between
+    // two turns moves them — and the prompt prefix is what a provider cache
+    // reuses across turns, so putting them anywhere earlier would invalidate
+    // every brief behind them on an edit that changed none of those briefs.
+    persona.push_str(&crate::company::prompt::context_section(routed_context));
 
     let prompt_builder = SystemPromptBuilder::for_subagent(
         persona, /* omit_identity */ true, /* omit_safety_preamble */ false,
@@ -1315,6 +1341,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         }
     }
 
@@ -1497,6 +1527,10 @@ mod tests {
             delegates_to: delegates_to.iter().map(|d| d.to_string()).collect(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1507,6 +1541,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             is_orchestrator,
         )
@@ -1537,6 +1572,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1547,6 +1586,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
@@ -1573,6 +1613,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1583,6 +1627,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
@@ -1607,6 +1652,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1617,6 +1666,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )
@@ -1803,6 +1853,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1813,6 +1867,7 @@ mod tests {
             policy,
             &deps,
             &grants,
+            &[],
             &[],
             false,
         )

@@ -47,9 +47,13 @@ the known escape hatch if cron volume ever demands it.
 ### What these events deliberately do not carry
 
 **No node output and no error text.** The engine's `ExecutionStep` carries the
-node's output items; `WorkflowNodeFinished` carries a node id, a two-valued
-status and a duration, and `WorkflowNodeStatus` has no `String` arm — so there
-is no `format!` that could put a node's own words on the journal.
+node's output items; `WorkflowNodeFinished` carries a node id, a three-valued
+status (`ok` / `error` / `blocked`, issue #881) and a duration, and every
+`WorkflowNodeStatus` arm is a **unit** variant — so there is no `format!` that
+could put a node's own words on the journal. #881 added a reading and kept that
+invariant: what a blocked node is blocked *on* travels structurally on
+`WorkflowRunFinished.blocked_nodes` (node id, tool names, approval ids), never
+as prose.
 `WorkflowNodeStarted` (issue #382) is even thinner: the node has not run, so it
 carries the ids alone — no status, no duration, and never any input. This is the
 same stance the live turn-progress frames take on tool args, and it matters
@@ -180,3 +184,14 @@ pre-#382 guess marked both arms of a branch until the real finishes corrected it
 A failing node **is** reported exactly too: a node that dies under the default
 `stop` policy still emits a finish step with `Error` status before the run ends,
 so failure attribution is exact rather than inferred.
+
+That is also true of a **blocked** node (issue #881), and it is why the journal
+line says `error` there. A node whose agent turn had a tool call parked halts its
+branch by returning a capability error, so the observer reports `Error` — the
+engine's own honest account of what it saw. The host knows *why*, and
+reclassifies on the way out: `WorkflowRun` marks the node `blocked` and the run
+settles with no error at all, and `GET …/workflows/runs` relabels the folded node
+row against the finish's `blocked_nodes` list so the history's chips agree with
+its terminal reading. The durable node row is deliberately left as the engine
+wrote it — rewriting it would make the live progress frames disagree with the
+engine that produced them.

@@ -3615,6 +3615,25 @@ impl Tool for RunWorkflowTool {
                         "workflow": file.id,
                         "run_id": ctx.run_id,
                         "pending_approvals": run.pending_approvals.len(),
+                        // Issue #881: structural counts beside the prose, so a
+                        // model reading only the JSON still learns the run
+                        // delivered nothing.
+                        "blocked_nodes": run.blocked_nodes.len(),
+                        // Issue #900: `outcome == Parked` only, unlike
+                        // `WorkflowRun::approvals`'s own receipt semantics
+                        // (which deliberately count `ParkFailed` / `Discarded`
+                        // too — see that field's doc comment). This key has no
+                        // sibling field to carry the failure count the way the
+                        // console's prose does with "N calls could not be
+                        // queued", so a bare `approvals_parked` here has to
+                        // mean what its name says: cards actually sitting on
+                        // the Approvals page, not every receipt this run
+                        // filed.
+                        "approvals_parked": run
+                            .approvals
+                            .iter()
+                            .filter(|a| a.outcome == crate::ports::WorkflowApprovalOutcome::Parked)
+                            .count(),
                     }),
                     md,
                 ))
@@ -3716,13 +3735,48 @@ fn summarize_run(
         _ => md.push_str("_No per-node output was produced._\n"),
     }
 
-    if run.pending_approvals.is_empty() {
-        md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
-    } else {
+    // Issue #881: a blocked node and a paused gate are BOTH in
+    // `pending_approvals`, and they need different sentences. Approving a
+    // paused gate continues the run; approving a blocked node's card does not —
+    // an agent node is not re-enterable, so the only way forward is to run the
+    // workflow again. Telling the model "resolve these for the run to continue"
+    // about a blocked node would have it wait for a continuation that is never
+    // coming.
+    let blocked: Vec<&str> = run
+        .blocked_nodes
+        .iter()
+        .map(|b| b.node_id.as_str())
+        .collect();
+    let paused: Vec<&str> = run
+        .pending_approvals
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !blocked.contains(id))
+        .collect();
+    if !blocked.is_empty() {
+        md.push_str(&format!(
+            "\n**Blocked, waiting on a person** at: {}. {} produced no output and nothing after \
+             {} ran, because a tool call in the step needed approval. This run parked {} \
+             approval(s) and will NOT continue on its own — the approval has to be decided and \
+             the workflow run again.\n",
+            blocked.join(", "),
+            if blocked.len() == 1 {
+                "That step"
+            } else {
+                "Those steps"
+            },
+            if blocked.len() == 1 { "it" } else { "them" },
+            run.approvals.len()
+        ));
+    }
+    if !paused.is_empty() {
         md.push_str(&format!(
             "\n**Paused for approval** at: {}. Resolve these for the run to continue.\n",
-            run.pending_approvals.join(", ")
+            paused.join(", ")
         ));
+    }
+    if blocked.is_empty() && paused.is_empty() {
+        md.push_str("\nThe run reached its terminal node(s) without pausing for approval.\n");
     }
 
     // Footer: the previews above are the *last* item of each node, clipped, so
@@ -4531,6 +4585,10 @@ mod tests {
             delegates_to: Vec::new(),
             context: None,
             budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
         }
     }
 
@@ -4657,6 +4715,8 @@ mod tests {
             cancelled: false,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         });
 
         assert!(!summary.contains(RECIPIENT), "{summary}");
@@ -4685,6 +4745,8 @@ mod tests {
             cancelled: true,
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         });
 
         assert!(summary.contains("stopped"), "{summary}");
@@ -6754,6 +6816,7 @@ name = "Morning"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -7169,6 +7232,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             })
         }
     }
@@ -7295,6 +7360,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         });
         let calls = runner_impl.calls.clone();
         let runner: Arc<dyn WorkflowRunner> = Arc::new(runner_impl);
@@ -7340,6 +7407,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7440,6 +7509,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7476,6 +7547,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7498,6 +7571,109 @@ name = "Morning"
         let out = result.output_for_llm(true);
         assert!(out.contains("Paused for approval"), "{out}");
         assert!(out.contains("worker"), "{out}");
+    }
+
+    /// Issue #900 (tinysweeper `missing-test`): `summarize_run`'s blocked branch
+    /// had no coverage at all, and the doc comment on `blocked` / `paused`
+    /// (issue #881) — that a blocked node and a paused gate need separate
+    /// sentences even though both ride `pending_approvals` — was untested along
+    /// with it. One node blocks, a second is an ordinary paused gate: the
+    /// summary must name the blocked node under "Blocked, waiting on a person"
+    /// (never under "Paused for approval", which would tell the agent the run
+    /// resumes on its own) and the paused node under "Paused for approval"
+    /// only. The structural JSON counts (issue #881) must agree.
+    #[tokio::test]
+    async fn run_workflow_tool_separates_blocked_nodes_from_paused_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": [] } } }),
+            // Issue #881: the union — the blocked node's id rides here too, and
+            // `summarize_run` is what has to keep it out of the "Paused for
+            // approval" line.
+            pending_approvals: vec!["worker".to_string(), "gate".to_string()],
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                node_id: "worker".to_string(),
+                tools: vec!["publish_artifact".to_string()],
+                approval_ids: vec!["appr-1".to_string()],
+                unparkable: 0,
+            }],
+            approvals: vec![
+                crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("worker".to_string()),
+                    tool: Some("publish_artifact".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+                    approval_id: Some("appr-1".to_string()),
+                },
+                // Issue #900: a receipt for a call that did NOT land a card.
+                // `run.approvals.len()` would count this as a second "parked"
+                // approval; the JSON's `approvals_parked` must not.
+                crate::ports::WorkflowRunApprovalRow {
+                    node_id: Some("worker".to_string()),
+                    tool: Some("publish_artifact".to_string()),
+                    outcome: crate::ports::WorkflowApprovalOutcome::ParkFailed,
+                    approval_id: None,
+                },
+            ],
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+
+        let refs = WorkflowRefQueue::default();
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.path().to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            refs,
+            RunOutputCache::default(),
+        );
+        let result = tool
+            .execute(json!({ "id": "demo" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error);
+        let out = result.output_for_llm(true);
+        assert!(
+            out.contains("Blocked, waiting on a person") && out.contains("worker"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Paused for approval") && out.contains("gate"),
+            "{out}"
+        );
+        // The blocked node must not also read as an ordinary paused gate — that
+        // sentence promises the run continues once it is decided, which is
+        // false for a block (issue #881).
+        let paused_line = out
+            .lines()
+            .find(|l| l.contains("Paused for approval"))
+            .expect("a Paused for approval line");
+        assert!(!paused_line.contains("worker"), "{out}");
+
+        let payload = match &result.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data.clone(),
+            other => panic!("expected JSON payload, got {other:?}"),
+        };
+        assert_eq!(
+            payload.get("blocked_nodes").and_then(Value::as_u64),
+            Some(1)
+        );
+        // Issue #900: two receipts on this run (one parked, one that failed to
+        // park), and the JSON count must name only the decidable one.
+        assert_eq!(
+            payload.get("approvals_parked").and_then(Value::as_u64),
+            Some(1),
+            "approvals_parked must exclude the ParkFailed receipt: {payload}"
+        );
     }
 
     #[tokio::test]
@@ -7615,6 +7791,7 @@ name = "Morning"
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
             overlay_policy: None,
+            overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -7679,6 +7856,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7746,6 +7925,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7823,6 +8004,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7923,6 +8106,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -8540,6 +8725,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         let md = summarize_run(&file, &run, "run-xyz", RunOutputStored::Stored);
         assert!(md.contains("last of 3 items — third"), "{md}");
@@ -8555,6 +8742,8 @@ name = "Morning"
             nodes: Vec::new(),
             notices: Vec::new(),
             board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
         };
         let md = summarize_run(&file, &run_one, "run-1", RunOutputStored::Stored);
         assert!(md.contains("1 item(s) — only"), "{md}");
@@ -8592,6 +8781,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),
@@ -8621,6 +8812,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cancel_cache.clone(),
@@ -8657,6 +8850,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),
@@ -8719,6 +8914,8 @@ name = "Morning"
                 nodes: Vec::new(),
                 notices: Vec::new(),
                 board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),

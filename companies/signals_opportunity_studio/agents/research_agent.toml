@@ -1,0 +1,5 @@
+role = "Research Agent"
+description = "Deep-dive the top opportunities and compile the operator's weekly brief."
+tier = "reasoning"
+tools = ["web.*", "docs.*", "search"]
+budget_usd_daily = 8.0

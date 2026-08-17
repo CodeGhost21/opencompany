@@ -7,12 +7,13 @@
 
 import type { Edge, Node } from "@xyflow/react";
 
-import type {
-  WorkflowGraph,
-  WorkflowRunOutcome,
-} from "@/api/workflows";
+import type { WorkflowGraph, WorkflowRunOutcome } from "@/api/workflows";
 import type { CompanyStreamEvent } from "@/hooks/use-events";
-import { nodeKindMeta, type NodeRunState, type WorkflowNodeData } from "@/lib/workflow-sample";
+import {
+  nodeKindMeta,
+  type NodeRunState,
+  type WorkflowNodeData,
+} from "@/lib/workflow-sample";
 
 /** Horizontal gap between layers and vertical gap between nodes in a layer. */
 const COL_GAP = 300;
@@ -91,7 +92,8 @@ export function foldLiveRun(
       break;
     }
   }
-  if (startIndex === -1) return inFlight ? foldFromHistory(events, graph, inFlight) : null;
+  if (startIndex === -1)
+    return inFlight ? foldFromHistory(events, graph, inFlight) : null;
   const started = events[startIndex];
   if (started.type !== "workflow_run_started") return null;
 
@@ -102,7 +104,14 @@ export function foldLiveRun(
   // host from here (#382), not derived.
   const states = initialRunState(graph);
   const elapsed: Record<string, number> = {};
-  const active = applyFrames(events, startIndex + 1, runId, selectedId, states, elapsed);
+  const active = applyFrames(
+    events,
+    startIndex + 1,
+    runId,
+    selectedId,
+    states,
+    elapsed,
+  );
 
   settle(states, active);
   return { runId, states, elapsed, active, scheduled };
@@ -133,7 +142,13 @@ function foldFromHistory(
   const active = applyFrames(events, 0, inFlight.runId, null, states, elapsed);
 
   settle(states, active);
-  return { runId: inFlight.runId, states, elapsed, active, scheduled: inFlight.scheduled };
+  return {
+    runId: inFlight.runId,
+    states,
+    elapsed,
+    active,
+    scheduled: inFlight.scheduled,
+  };
 }
 
 /** Applies every frame belonging to `runId` from `from` onward, and reports
@@ -160,16 +175,22 @@ function applyFrames(
     // back to running.
     if (e.type === "workflow_node_started") {
       if (e.runId !== runId) continue;
-      if (states[e.nodeId] !== "ok" && states[e.nodeId] !== "error") {
+      if (
+        states[e.nodeId] !== "ok" &&
+        states[e.nodeId] !== "error" &&
+        states[e.nodeId] !== "blocked"
+      ) {
         states[e.nodeId] = "running";
       }
       continue;
     }
     if (e.type === "workflow_node_finished") {
       if (e.runId !== runId) continue;
-      // Anything that is not "ok" is treated as a failure: an unknown status
-      // word from a newer host must never paint a node as succeeded.
-      states[e.nodeId] = e.status === "ok" ? "ok" : "error";
+      // Issue #881: three reported readings now, not two. `blocked` is named
+      // explicitly and everything else that is not "ok" stays a failure — an
+      // unknown status word from a newer host must never paint a node as
+      // succeeded, and must not be quietly promoted to "blocked" either.
+      states[e.nodeId] = nodeStateFrom(e.status);
       elapsed[e.nodeId] = e.elapsedMs;
       continue;
     }
@@ -177,7 +198,8 @@ function applyFrames(
       // A pre-#371 host sends no runId; treat that as "the run on screen"
       // rather than ignoring it, else the canvas would spin forever.
       if (e.runId === runId) active = false;
-      else if (!e.runId && selectedId !== null && e.workflowId === selectedId) active = false;
+      else if (!e.runId && selectedId !== null && e.workflowId === selectedId)
+        active = false;
     }
   }
   return active;
@@ -210,7 +232,9 @@ export function nodeName(graph: WorkflowGraph | null, nodeId: string): string {
  * now REPORTED by the host's `workflow_node_started` frame (issue #382), so this
  * no longer guesses a frontier by lighting up a trigger's successors — that guess
  * over-marked both arms of a branch until the real finishes corrected it. */
-export function initialRunState(graph: WorkflowGraph): Record<string, NodeRunState> {
+export function initialRunState(
+  graph: WorkflowGraph,
+): Record<string, NodeRunState> {
   const state: Record<string, NodeRunState> = {};
   for (const node of graph.nodes) {
     if (node.kind !== "trigger") continue;
@@ -224,16 +248,33 @@ export function initialRunState(graph: WorkflowGraph): Record<string, NodeRunSta
  * No `running` ever comes out of this: the run is over. A node the run never
  * reached simply has no entry, so it renders unmarked — "not reached" and not
  * "still to come", which for a failed run is the honest reading. */
-export function statesFromRun(run: WorkflowRunOutcome): Record<string, NodeRunState> {
+export function statesFromRun(
+  run: WorkflowRunOutcome,
+): Record<string, NodeRunState> {
   const state: Record<string, NodeRunState> = {};
   for (const node of run.nodes ?? []) {
-    state[node.nodeId] = node.status === "ok" ? "ok" : "error";
+    state[node.nodeId] = nodeStateFrom(node.status);
   }
   return state;
 }
 
+/** Maps a reported node status onto a canvas state (issue #881).
+ *
+ * One place, so the live trail and a past run's overlay cannot disagree about
+ * what "blocked" looks like. Fail-safe in the same direction it always was:
+ * only the two words the host actually reports are trusted, and anything else
+ * — including a status a newer host invents — paints as a failure rather than
+ * as a success or as the gentler amber. */
+function nodeStateFrom(status: string): NodeRunState {
+  if (status === "ok") return "ok";
+  if (status === "blocked") return "blocked";
+  return "error";
+}
+
 /** Per-node durations of a past run, keyed for the canvas. */
-export function elapsedFromRun(run: WorkflowRunOutcome): Record<string, number> {
+export function elapsedFromRun(
+  run: WorkflowRunOutcome,
+): Record<string, number> {
   const out: Record<string, number> = {};
   for (const node of run.nodes ?? []) out[node.nodeId] = node.elapsedMs;
   return out;
@@ -255,7 +296,10 @@ export function elapsedFromRun(run: WorkflowRunOutcome): Record<string, number> 
  * * nothing ran at all — a graph that would not compile, or a capability that
  *   could not be built.
  */
-export function failureLocation(run: WorkflowRunOutcome, graph: WorkflowGraph | null): string {
+export function failureLocation(
+  run: WorkflowRunOutcome,
+  graph: WorkflowGraph | null,
+): string {
   const failed = failedNodeOf(run);
   if (failed) return `it failed at “${nodeName(graph, failed)}”.`;
   const ran = run.nodes?.length ?? 0;
@@ -270,9 +314,17 @@ export function failureLocation(run: WorkflowRunOutcome, graph: WorkflowGraph | 
  * The engine reports a failing node as an `error` step before the run ends, so
  * this is exact rather than inferred. `null` when the run failed with no
  * errored node — a graph that would not compile, a capability that could not be
- * built — where naming a node would be a fabrication. */
+ * built — where naming a node would be a fabrication.
+ *
+ * Issue #881: a `blocked` node is explicitly NOT a failure. It stopped for a
+ * person, and the run that stopped with it carries no error at all — so
+ * returning it here would have the panel say "it failed at X" about a step that
+ * is merely waiting. `WorkflowRunOutcome.blockedNodes` names those instead. */
 export function failedNodeOf(run: WorkflowRunOutcome): string | null {
-  return (run.nodes ?? []).find((n) => n.status !== "ok")?.nodeId ?? null;
+  return (
+    (run.nodes ?? []).find((n) => n.status !== "ok" && n.status !== "blocked")
+      ?.nodeId ?? null
+  );
 }
 
 /** Lays a saved graph out left→right by longest-path depth, stacking siblings

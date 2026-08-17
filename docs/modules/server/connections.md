@@ -109,6 +109,49 @@ Two consequences worth knowing:
   probe is a network call with no injection point, and the removed gate lived on
   the far side of it, which is how it survived unasserted.
 
+## The capabilities panel's Composio verdict is a tier, not a stored token (issue #886)
+
+`GET …/capabilities` is the panel an operator checks first when a tool looks
+missing, so a wrong answer there sends the whole debugging session the wrong
+way. It used to compute its Composio verdict from `composio::token_configured`,
+which reads exactly one secret slot — the BYO override `composio/token`.
+
+The credential is resolved over **three** tiers, and the toolbelt gates on all
+three (`composio::resolve_credential`, the seam issue #586 established): the BYO
+override, then the company's own TinyHumans key, then this instance's platform
+identity. On a hosted tenant nobody pastes a BYO token — the third tier answers,
+and the tools wire up and are ready to attempt calls. Credential resolution
+proves bearer presence, not that a later call succeeds — that is the probe's
+job (above), a separate axis. The one-tier probe reported `false` throughout.
+
+So the route now sends **both**, answering two different questions:
+
+| Field | Question | Shape |
+| --- | --- | --- |
+| `composioTokenConfigured` | did *this company* paste a BYO token? | boolean, unchanged meaning |
+| `composioCredentialSource` | which Composio credential tier resolves? | `attested` for the projected platform identity, `company` for the company's TinyHumans key, `static` for a BYO or static instance key, and `none` when no credential resolves |
+
+Three properties are load-bearing:
+
+- **The tier comes from the resolver, never from a second copy of its
+  precedence.** This is the same rule the `GET …/composio` status route already
+  follows; #886 is the copy that route's migration missed. The console must
+  never be able to name a tier the agents are not on.
+- **An unreadable secret store omits the field**, rather than reporting `none`.
+  `none` is a verdict — "nothing resolves, no tools are wired" — and claiming it
+  on a transient hiccup sends an operator to paste a token they already have.
+  The console treats an absent field as unknown and must not render it in the
+  alarm colour.
+- **It is a resolution verdict, not a liveness one.** `attested` says a bearer
+  can be obtained, not that Composio answered or that any account is connected.
+  `GET …/connections` above is the axis that answers those, and a company with a
+  valid bearer and zero connections is a working empty account, not a fault.
+
+The evidence pack the planning station builds reads the same resolver, for the
+same reason: it used to tell operators "this company has no Composio credential,
+so no Composio account can be reached" on a card whose own evidence listed the
+connectors as connected.
+
 ## Releasing a connection: two routes, not interchangeable (issue #404)
 
 There are two disconnects and they act on different things:

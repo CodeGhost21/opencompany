@@ -72,6 +72,64 @@ node config. A destination-bearing `output` node therefore lowers to the same
 bare pass-through `transform` as one without a destination — pinned by the
 `an_output_destination_never_reaches_the_engine_graph` test in `translate.rs`.
 
+## A node has three outcomes, and the third is the host's (issues #881, #880)
+
+`WorkflowNodeStatus` is `ok` / `error` / **`blocked`**. The engine reports only
+the first two — it knows success and failure and nothing else — so `blocked` is
+a **host** reading, applied on the way out. That is the same move
+`WorkflowRun.cancelled` makes for a deliberate stop: a cancelled run is not a
+failed one, and neither is a blocked one.
+
+A node blocks when a tool call **inside its agent turn** was parked for operator
+approval. This is a different mechanism from an authored or policy gate on a
+`tool_call` *node*, and the difference is the whole of #881:
+
+| | gate on a `tool_call` node | gate on a call inside an agent turn |
+| --- | --- | --- |
+| Who sees it | the engine — the node carries `requires_approval` | nobody outside the agent: the call is refused inside the model's tool loop |
+| What the run does | pauses; the node id lands on `pending_approvals` | before #881: **finished green**, with the model's prose about the blockage as the node's output |
+| What approving does | resumes the lineage through [`workflow_resume`](../../../src/runtime/workflow_resume.rs) | nothing to this run — see below |
+
+Since #881 the second column stops the branch: the capability returns an error,
+which under the default `on_error = "stop"` halts the run at that node with no
+retry, and the host relabels the node `blocked`, unions its id into
+`pending_approvals`, and settles the run **without** an error.
+
+**Approving does not resume a blocked run, deliberately.** An agent node is not
+re-enterable: `NodeControl::Interrupt` discards the activation's state and
+re-runs the node from the top, so resuming would spend a fresh inference turn,
+call the same gated tool, and park a *new* card — approve, re-run, re-park,
+forever. The engine says as much itself (`StopReason::Paused` maps to "resuming
+a paused agent is not supported yet"). The operator decides the card and runs
+the workflow again.
+
+An author who writes `on_error = "continue"` or `"route"` on a blocked node
+still gets a surviving branch — they asked for it — and the run-level record
+stays truthful either way.
+
+### What a run says it parked
+
+`WorkflowRun.approvals` is one row per approval the run parked: `{ nodeId, tool,
+outcome, approvalId }`, where `outcome` is `parked` / `parkFailed` /
+`discarded`. The two failure arms are the point — before this, a park that could
+not be performed was recorded only by a `tracing::error!`, which is the sole
+trace that a call the operator will never be asked about was dropped.
+
+It is named for what the run **parked**, not for what is still outstanding, and
+the console's wording follows: *"parked N approvals"*, never *"waiting on N"*.
+A receipt of an event cannot go stale; a settle-time count of what is still
+waiting becomes a fresh lie the moment somebody approves one. The Approvals
+page is the live source of truth.
+
+Two neighbouring fields mean narrower things and are not substitutes:
+`pending_approvals` is node ids (the engine's gate nodes plus the host's blocked
+ones), and `deliveries` is per-`output`-node routing only. Both were truthfully
+empty on the runs that prompted #880.
+
+Every new field carries `#[serde(default)]`. `CompanyEvent::WorkflowRunFinished`
+is replayed at boot, so a field without one makes every pre-existing journal
+line fail to parse — silent history loss, not a compile error.
+
 ## The engine-only kinds OpenCompany rejects
 
 The engine catalog carries four kinds the parser does **not** accept:

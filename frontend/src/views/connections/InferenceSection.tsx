@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   getInferenceStatus,
+  restartInference,
   revertInference,
   setInference,
   testInference,
@@ -159,7 +160,9 @@ export function InferenceSection({
 }) {
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
-  const [busy, setBusy] = useState<"save" | "reset" | "test" | "removeKey" | null>(null);
+  const [busy, setBusy] = useState<
+    "save" | "reset" | "test" | "removeKey" | "restart" | null
+  >(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
 
   // Switch form.
@@ -271,6 +274,38 @@ export function InferenceSection({
       await refresh();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Couldn't remove the key.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Rebuild the company's runtime now, clearing the restart-required state.
+   *
+   * The banner used to name a restart and offer no way to perform one, which is
+   * a dead end for exactly the operator most likely to hit it: a hosted tenant
+   * cannot restart its own container, and the control plane has no button for
+   * it either.
+   *
+   * The resulting status is read from the response rather than assumed. A host
+   * that wired no rebuilder genuinely cannot do this and says so, and reporting
+   * success there would replace a visible dead end with an invisible one.
+   */
+  async function restartNow() {
+    if (busy) return;
+    setBusy("restart");
+    try {
+      const result = await restartInference(client, company);
+      if (result.status.restartRequired) {
+        // The rebuild ran and the company is still on the old brain. Follow the
+        // host's note, which names the process restart that would work.
+        toast.warning("Still needs a restart.", { description: result.note });
+      } else {
+        toast.success("Restarted. Agents think with the new provider from their next turn.");
+      }
+      setStatus(result.status);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't restart the company.");
     } finally {
       setBusy(null);
     }
@@ -388,13 +423,39 @@ export function InferenceSection({
                     data-testid="inference-restart-required"
                   >
                     <RotateCcw className="mt-px size-3.5 shrink-0" />
-                    <span>
-                      <span className="font-medium">Restart required.</span> This company started
-                      with no inference source, so it is running the offline echo brain and its
-                      scheduled workflows cannot fire. The brain is chosen at startup — this
-                      configuration is saved, but agents keep echoing until the company is
-                      restarted.
-                    </span>
+                    <div className="space-y-2">
+                      <span>
+                        <span className="font-medium">Restart required.</span> This company started
+                        with no inference source, so it is running the offline echo brain and its
+                        scheduled workflows cannot fire. The brain is chosen at startup — this
+                        configuration is saved, but agents keep echoing until the company is
+                        restarted.
+                      </span>
+                      {/* The action, not just the diagnosis. Telling a hosted
+                          operator to "restart the company" names something they
+                          have no way to do — the container is the unit of
+                          restart and the control plane has no button for it —
+                          so this rebuilds the runtime in place instead (#290).
+                          Only rendered for an admin, matching the route's own
+                          authority check, so a member is not shown a control
+                          that can only 403. */}
+                      {canManage && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null}
+                          data-testid="inference-restart-now"
+                          onClick={() => void restartNow()}
+                        >
+                          {busy === "restart" ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="size-3.5" />
+                          )}
+                          Restart now
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 )}
                 {modelRows.length > 0 && (

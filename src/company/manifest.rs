@@ -13,8 +13,8 @@ use crate::ports::{decode_wallet_address, normalize_email};
 
 use super::types::{
     AUTH_MODES, BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest, GATEABLE_NAMESPACES,
-    KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, TIERS,
-    TOOL_PROVIDERS,
+    KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES,
+    PROMPT_CLASSES, TIERS, TOOL_PROVIDERS,
 };
 
 /// The `delegates_to` entry that means "every desk this company has".
@@ -74,26 +74,89 @@ impl CompanyManifest {
     ///
     /// `path` may be a manifest file or a directory containing one. Validation
     /// collects every problem and reports them together.
+    ///
+    /// When `path` resolves to a bundle carrying an `agents/` directory, the
+    /// roster is read from those per-teammate files instead of from
+    /// `[[agent]]` — see [`agent_file`](super::agent_file).
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self> {
-        let located = discover(path.as_ref())?;
-        Self::from_file(&located.path)
+        Self::from_located(&discover(path.as_ref())?)
+    }
+
+    /// Loads an already-[`discover`]ed manifest, reading the roster from
+    /// `agents/*.toml` when the bundle has one.
+    ///
+    /// Split out from [`from_path`](Self::from_path) so callers that need the
+    /// [`Located`] value for themselves — `opencompany check`, which prints the
+    /// legacy-filename deprecation note — do not have to re-derive "is this a
+    /// bundle roster?" on their own. That duplication is not hypothetical: the
+    /// check command called [`from_file`](Self::from_file) directly and silently
+    /// reported every desk member as "not an agent in the roster", because it
+    /// had validated a manifest whose roster it had never loaded.
+    pub(crate) fn from_located(located: &Located) -> Result<Self> {
+        // The bundle root is the located manifest's own parent, whether the
+        // caller passed the directory or the file itself: `discover` accepts
+        // both, and deriving the root from the located manifest is what keeps
+        // the two call forms from resolving `agents/` differently.
+        match located.path.parent() {
+            Some(bundle) if super::agent_file::has_agent_files(bundle) => {
+                Self::from_file_with_agents(&located.path, bundle)
+            }
+            _ => Self::from_file(&located.path),
+        }
     }
 
     /// Reads, parses, and validates a specific manifest file.
     pub fn from_file(path: &Path) -> Result<Self> {
+        Self::parse_file(path)?.into_validated(path)
+    }
+
+    /// [`from_file`](Self::from_file), with the roster taken from
+    /// `<bundle>/agents/*.toml` rather than the manifest's `[[agent]]` entries.
+    ///
+    /// The bundle roster **replaces** the inline one; it does not merge with it.
+    /// Declaring both is refused rather than resolved by precedence, because
+    /// either precedence rule silently discards teammates an operator wrote
+    /// down — and the roster is the one part of a manifest where a silent
+    /// omission stays invisible until the missing teammate fails to answer.
+    fn from_file_with_agents(path: &Path, bundle: &Path) -> Result<Self> {
+        let mut manifest = Self::parse_file(path)?;
+
+        if !manifest.agents.is_empty() {
+            return Err(OpenCompanyError::ManifestInvalid {
+                path: path.to_path_buf(),
+                problems: vec![format!(
+                    "this company defines its roster in `{dir}/*.toml`, but `{file}` also has `[[agent]]` entries — the two forms are exclusive, so remove the `[[agent]]` blocks or delete the `{dir}/` directory.",
+                    dir = super::agent_file::AGENTS_DIR,
+                    file = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(MANIFEST_FILE),
+                )],
+            });
+        }
+
+        manifest.agents = super::agent_file::load_agents(bundle)?;
+        manifest.into_validated(path)
+    }
+
+    /// Reads and deserializes a manifest file, without validating it.
+    fn parse_file(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).map_err(|source| OpenCompanyError::ManifestRead {
                 path: path.to_path_buf(),
                 source,
             })?;
 
-        let manifest: CompanyManifest = toml::from_str(&text).map_err(|err| {
+        toml::from_str(&text).map_err(|err| {
             OpenCompanyError::ManifestParse(path.to_path_buf(), err.message().to_string())
-        })?;
+        })
+    }
 
-        let problems = manifest.validate();
+    /// Runs [`validate`](Self::validate), reporting every problem against `path`.
+    fn into_validated(self, path: &Path) -> Result<Self> {
+        let problems = self.validate();
         if problems.is_empty() {
-            Ok(manifest)
+            Ok(self)
         } else {
             Err(OpenCompanyError::ManifestInvalid {
                 path: path.to_path_buf(),
@@ -149,6 +212,21 @@ impl CompanyManifest {
                 problems.push(format!(
                     "{label} `budget_usd_daily` cannot be negative — you wrote `{budget}`."
                 ));
+            }
+
+            // Classes gate which routed documents this role may be told, so an
+            // unrecognized entry is refused rather than ignored: a typo'd
+            // exclusion is an exclusion that is not applied, and the whole point
+            // of declaring the class explicitly is that it cannot be silently
+            // lost. See `PROMPT_CLASSES`.
+            for class in &agent.classes {
+                if !PROMPT_CLASSES.contains(&class.as_str()) {
+                    problems.push(one_of(
+                        &format!("{label} `classes` entry"),
+                        &PROMPT_CLASSES,
+                        class,
+                    ));
+                }
             }
         }
 
@@ -564,6 +642,144 @@ mod tests {
     /// cannot drift from what the decoder accepts.
     fn wallet_address() -> String {
         bs58::encode([9u8; 32]).into_string()
+    }
+
+    /// Writes a company bundle: `company.toml` plus optional `agents/` files.
+    fn write_bundle(company_toml: &str, agent_files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(MANIFEST_FILE), company_toml).expect("write manifest");
+        if !agent_files.is_empty() {
+            let agents = dir.path().join(super::super::agent_file::AGENTS_DIR);
+            std::fs::create_dir_all(&agents).expect("agents dir");
+            for (name, body) in agent_files {
+                std::fs::write(agents.join(name), body).expect("write agent");
+            }
+        }
+        dir
+    }
+
+    /// The compatibility rule: a bare `company.toml` with `[[agent]]` entries
+    /// and no `agents/` directory keeps working exactly as it always has.
+    #[test]
+    fn an_inline_roster_still_parses_when_there_is_no_agents_directory() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n",
+            &[],
+        );
+        let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
+        assert_eq!(manifest.agents.len(), 1);
+        assert_eq!(manifest.agents[0].id, "ceo");
+    }
+
+    /// The bundle roster replaces the inline one — so a company that has moved
+    /// to `agents/*.toml` gets exactly those teammates.
+    #[test]
+    fn a_bundle_roster_supplies_the_agents() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n",
+            &[
+                ("ceo.toml", "role = \"CEO\"\ntier = \"orchestrator\"\n"),
+                ("writer.toml", "role = \"Writer\"\n"),
+            ],
+        );
+        let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
+        let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["ceo", "writer"]);
+        assert_eq!(super::super::orchestrator_id(&manifest.agents), Some("ceo"));
+    }
+
+    /// Declaring both forms is refused rather than resolved by precedence:
+    /// either precedence rule silently discards teammates somebody wrote down.
+    #[test]
+    fn declaring_both_roster_forms_is_refused_in_prosumer_language() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n",
+            &[("writer.toml", "role = \"Writer\"\n")],
+        );
+        let err = CompanyManifest::from_path(dir.path()).expect_err("refused");
+        let problems = match err {
+            OpenCompanyError::ManifestInvalid { problems, .. } => problems,
+            other => panic!("expected ManifestInvalid, got {other}"),
+        };
+        assert_eq!(problems.len(), 1);
+        // It must name both places and say what to do, not merely that something
+        // is wrong: the operator has to know which half to delete.
+        assert!(problems[0].contains("agents/*.toml"), "{problems:?}");
+        assert!(problems[0].contains("[[agent]]"), "{problems:?}");
+        assert!(problems[0].contains("company.toml"), "{problems:?}");
+    }
+
+    /// `opencompany check` must load the bundle roster too. It calls
+    /// [`discover`] itself (for the legacy-filename note) and so takes its own
+    /// route into loading — which is exactly how it came to validate a manifest
+    /// whose roster it had never read, reporting every desk member as missing
+    /// from the roster.
+    #[test]
+    fn run_check_accepts_a_bundle_roster() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n\n[[group_chat]]\nid = \"d\"\nname = \"D\"\nmembers = [\"ceo\"]\n",
+            &[("ceo.toml", "role = \"CEO\"\n")],
+        );
+        assert!(
+            super::super::run_check(dir.path()),
+            "a bundle-roster company must validate through the check command"
+        );
+    }
+
+    /// Cross-cutting validation still applies to a bundle roster: a
+    /// `delegates_to` target is checked against the desks in `company.toml`,
+    /// which the per-file loader cannot see on its own.
+    #[test]
+    fn a_bundle_roster_is_still_validated_against_the_rest_of_the_manifest() {
+        let dir = write_bundle(
+            "[company]\nname = \"X\"\n\n[[group_chat]]\nid = \"research\"\nname = \"Research\"\n",
+            &[(
+                "ceo.toml",
+                "role = \"CEO\"\ndelegates_to = [\"marketing\"]\n",
+            )],
+        );
+        let err = CompanyManifest::from_path(dir.path()).expect_err("refused");
+        let problems = match err {
+            OpenCompanyError::ManifestInvalid { problems, .. } => problems,
+            other => panic!("expected ManifestInvalid, got {other}"),
+        };
+        assert!(
+            problems.iter().any(|p| p.contains("marketing")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_agent_class_is_refused() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"critic\"\nrole = \"Critic\"\nclasses = [\"judgey\"]\n",
+        );
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("classes") && p.contains("judgey")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn the_known_agent_classes_are_accepted() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"critic\"\nrole = \"Critic\"\nclasses = [\"judge\", \"evidence\", \"directive\"]\n",
+        );
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
+    /// A desk `tools` ceiling is optional and absent by default, so every
+    /// manifest written before desks could scope tools keeps its meaning.
+    #[test]
+    fn a_desk_tool_ceiling_defaults_to_empty() {
+        let manifest = parse(
+            "[company]\nname = \"X\"\n\n[[agent]]\nid = \"ceo\"\nrole = \"CEO\"\n\n[[group_chat]]\nid = \"d\"\nname = \"D\"\nmembers = [\"ceo\"]\n",
+        );
+        assert!(manifest.group_chats[0].tools.is_empty());
+        assert!(manifest.validate().is_empty());
     }
 
     /// A manifest naming no `[users].mode` signs people in by email, exactly as
@@ -1192,11 +1408,19 @@ mod tests {
         // not kernel code. This guards that the shipped manifest keeps passing
         // the same lint `opencompany check` runs — unique agent ids, priced +
         // described `[place].skills`, a `[policy]`, and a stated `human_role`.
+        // The company *directory*, not its `company.toml`: this template's
+        // roster lives in `agents/*.toml`, and loading the file alone would
+        // leave `manifest.agents` empty — making every roster assertion below
+        // pass by having nothing to check.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("companies/signals_opportunity_studio/company.toml");
-        let manifest = CompanyManifest::from_file(&path).expect("template manifest is valid");
+            .join("companies/signals_opportunity_studio");
+        let manifest = CompanyManifest::from_path(&path).expect("template manifest is valid");
 
         assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+        assert!(
+            !manifest.agents.is_empty(),
+            "the roster must actually load, or the assertions below check nothing"
+        );
         assert!(
             manifest.company.human_role.is_some(),
             "the template must name what the human keeps"

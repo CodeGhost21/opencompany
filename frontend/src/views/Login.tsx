@@ -11,7 +11,7 @@ import {
   verifyWalletSignature,
   type AuthConfig,
   type HubProvider,
-  type Me,
+  type SignIn,
 } from "@/api/auth";
 import { connectWallet, hasWallet, NoWalletError, signMessage } from "@/lib/wallet";
 import type { OpenCompanyClient } from "@/api/client";
@@ -55,8 +55,14 @@ interface Props {
    * it, which matters as soon as they invite anyone else to their own host.
    */
   suggestedEmail?: string;
-  /** A code lifted out of a magic-link URL, redeemed on mount by the caller. */
-  onSignedIn: (me: Me) => void;
+  /**
+   * Reports a completed sign-in.
+   *
+   * Handed the whole {@link SignIn}, not just the user, because a cross-origin
+   * sign-in returns a session the caller has to store — this view is not where
+   * a credential belongs, but it is the only place that sees one arrive.
+   */
+  onSignedIn: (result: SignIn) => void;
 }
 
 type Mode = "link" | "password";

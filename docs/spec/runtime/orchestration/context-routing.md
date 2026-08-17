@@ -71,9 +71,31 @@ working context at all.
 **Representation note.** `Agent.context` is `Option<Vec<String>>`, not a
 defaulted `Vec<String>`: `None` is an omitted key, `Some(vec![])` is an
 explicit `context = []`, and only that split lets the manifest layer carry
-the distinction above at all. The field is otherwise inert until the routing
-layer lands — `role_context` does not exist yet, so nothing reads either
-variant today.
+the distinction above at all.
+
+**Implemented** in `src/company/context_routing.rs`, always compiled and tested:
+`routed_documents` carries the table above and the exclusions below;
+`resolve_routed_documents` reads the selected notes out of a `WorkspaceStore`,
+skipping any that do not exist. Rendering is
+`crate::company::prompt::context_section`.
+
+**Wired into the harness.** `Harness::resolve_routed_context` resolves every
+roster member's documents ahead of the (synchronous) agent build — the same
+async-caller split the skill deltas use — and `build::build_agent` appends them
+**last**, after every tool brief, because they are the most volatile thing in the
+prompt and the prefix is what a provider cache reuses.
+
+Two properties, each closing a specific failure:
+
+- **An edit reaches the next turn, not the next restart.** The routed documents
+  join the roster staleness fingerprint, hashed over their **bodies** rather
+  than their names. A name-only hash would be inert exactly when it matters: the
+  routing table is manifest data and does not move when an operator edits a note.
+- **Resolution fails soft, per role.** A store error yields no documents for that
+  role rather than failing the rebuild. Routing enriches a prompt; a company
+  whose workspace read hiccuped should answer from a thinner prompt rather than
+  stop answering. An unwired store resolves to nothing, which is the pre-routing
+  behaviour exactly.
 
 ## Exclusions are load-bearing
 
@@ -115,9 +137,17 @@ into, not of the manifest text**:
 - Roster teammates default to **unclassified**, which imposes no exclusion and
   is the correct default: an ordinary teammate is not judging anything.
 - A company that wants an exclusion on a roster teammate states it, rather than
-  having it guessed. The manifest key for this is deliberately left to the
-  implementing change, but it MUST be an explicit declaration — a `classes`
-  list or equivalent — and never a match on `role`.
+  having it guessed. **The manifest key is `classes`**, a list taking any of
+  `evidence`, `judge` and `directive` — one per rule above, in that order. An
+  unrecognized entry is a validation error rather than an ignored string: a
+  typo'd exclusion is an exclusion that is not applied, and the whole point of
+  declaring the class is that it cannot be lost silently.
+
+An exclusion **outranks** both the tier default and an explicit `context` list.
+That is what makes a declared class a control rather than a routing line
+somebody can edit away. The universal method document is the one exemption — it
+is method, not assertion, so no class has cause to withhold it, and a role
+excluded from the method could not follow it.
 
 The rule this preserves: an exclusion applies because something *declared* the
 role's job, and a company can add one but cannot silently remove one by

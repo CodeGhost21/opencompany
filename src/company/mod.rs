@@ -5,6 +5,11 @@
 //! report its effective configuration. The cognition kernel (Brain, cycle
 //! loop, stores) lands in later phases; see `docs/spec/roadmap.md`.
 
+// Per-teammate roster files (`companies/<name>/agents/<id>.toml`) — the richer
+// alternative to inline `[[agent]]` entries, carrying a custom prompt and its
+// own briefing documents. Always compiled: it is part of parsing a company, and
+// `opencompany check` must report on it in every build.
+mod agent_file;
 /// Issue #552: the seam between a task artifact and the shared workspace tree.
 /// Always compiled — the console's workspace and artifact routes reach it in
 /// every build, and only the publish drain's half is behind `openhuman`.
@@ -13,6 +18,12 @@ pub mod company_key;
 pub mod composio;
 #[cfg(test)]
 mod content_test;
+// Which workspace documents each role is told to reason from
+// (`docs/spec/runtime/orchestration/context-routing.md`). Always compiled: the
+// per-tier default table and the class-based exclusions are pure decisions over
+// manifest data, and the exclusions are controls — they deserve tests in every
+// build, not only where the agent runtime links.
+pub mod context_routing;
 // The workflow copilot's thread convention (issues #303, #416). Always
 // compiled and openhuman-free: the chat handler reads it in every build to keep
 // a copilot question from opening a board card, and the harness reads the same
@@ -31,6 +42,12 @@ pub mod mcp;
 // primitive + `uuid`/`base64`/`url`, so it links only under the `mcp` feature.
 #[cfg(feature = "mcp")]
 pub mod mcp_oauth;
+// How an agent's system prompt is composed from its manifest definition and the
+// documents routed to it. Always compiled and runtime-free: the harness that
+// spends the prompt is behind `openhuman`, but the composition and budget-clamp
+// rules are ordinary text handling with real edge cases, and they are worth
+// testing in the default build rather than only where the agent runtime links.
+pub mod prompt;
 pub mod runtime;
 mod skill_file;
 // Steer (issue #111): pause / cancel / redirect an in-flight task or delegation
@@ -39,6 +56,11 @@ mod skill_file;
 pub mod steer;
 pub mod task_intent;
 pub mod telegram;
+// The one list of tools a company can grant — built-ins, MCP servers and
+// Composio toolkits in a single vocabulary. Always compiled: it is a projection
+// over the manifest, and the console route that renders it is in the default
+// build.
+pub mod tool_catalog;
 mod types;
 mod workflow_create;
 mod workflow_file;
@@ -91,12 +113,13 @@ pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md}
 pub use types::{
     Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, ComposioTools,
     Connection, DEFAULT_ALWAYS_APPROVE, DEFAULT_MAX_DELEGATION_DEPTH, DEFAULT_MAX_IN_FLIGHT_RUNS,
-    DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS,
-    Inference, KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, McpServer, ORCHESTRATOR_TIER,
-    PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule,
-    Skill, TIERS, TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit,
-    grants_repo_explicit, grants_repo_write_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, orchestrator_id,
+    DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES, GroupChat, INFERENCE_PROVIDERS,
+    INFERENCE_TIERS, Inference, KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, McpServer,
+    ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROMPT_CLASSES,
+    PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
+    TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit, grants_repo_explicit,
+    grants_repo_write_explicit, grants_search_explicit, grants_workspace_write_explicit,
+    orchestrator_id,
 };
 pub use workflow_file::{
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
@@ -131,7 +154,7 @@ pub(crate) use workflow_create::{
 #[cfg(feature = "openhuman")]
 pub(crate) use workflow_create::{
     courtesy_validate_draft, workflow_callable_tool_slugs, workflow_effective_tool_slugs,
-    workflow_granted_but_unwired_tool_slugs, workflow_graph_from_spec,
+    workflow_granted_but_unwired_tool_slugs, workflow_graph_from_spec, workflow_spec_from_graph,
 };
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 
@@ -172,7 +195,10 @@ pub fn run_check(path: &Path) -> bool {
         );
     }
 
-    match CompanyManifest::from_file(&located.path) {
+    // `from_located`, not `from_file`: a bundle whose roster lives in
+    // `agents/*.toml` must be validated with that roster loaded, or every desk
+    // member reads as "not an agent in the roster".
+    match CompanyManifest::from_located(&located) {
         Ok(manifest) => {
             println!("✓ {} — valid\n", located.path.display());
             print!("{}", manifest.effective_summary());
