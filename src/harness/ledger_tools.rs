@@ -486,6 +486,10 @@ impl Tool for RecordEntry {
             Ok(spec) => spec,
             Err(message) => return Ok(ToolResult::error(message)),
         };
+        if let Err(message) = require_access(&self.ledger_grants, &spec.slug, LedgerAccess::Record)
+        {
+            return Ok(ToolResult::error(message));
+        }
         let id = text(&arguments, "id");
         match ledgers::record(
             &self.ctx,
