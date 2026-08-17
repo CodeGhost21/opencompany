@@ -519,7 +519,10 @@ mod test {
         );
 
         drop(_guard);
-        assert!(rx.recv().expect("re-initialize completes").is_ok());
+        assert!(
+            rx.recv().expect("re-initialize completes"),
+            "re-initialize must succeed once the checkpoint lock is released"
+        );
         thread.join().expect("lock thread");
     }
 }
