@@ -298,6 +298,14 @@ async fn run_workflow_inner(
     // (and with it the bundle and its board claim) still leaves every row already
     // collected readable here: a card is real once written, so it must stay listed.
     let board = super::caps::RunBoard::default();
+    // Issue #881 / #880: the two sideways channels an agent node reports through
+    // — that it blocked, and what it parked. Owned out here for exactly the
+    // reason `board` is: a blocked node halts the run, which drops the engine
+    // future and the capability bundle with it, and both of these facts have to
+    // survive that. An approval card is durable the moment it is written, so a
+    // run that ended badly must still be able to say it opened one.
+    let blocks = super::caps::RunBlocks::default();
+    let approvals = super::caps::RunApprovals::default();
     let capabilities = super::caps::build_capabilities(
         pool,
         deps,
@@ -309,6 +317,8 @@ async fn run_workflow_inner(
             dry_run,
             notices: notices.clone(),
             board: board.clone(),
+            blocks: blocks.clone(),
+            approvals: approvals.clone(),
         },
     )
     .await?;
@@ -543,8 +553,43 @@ async fn run_workflow_inner(
     // `cancelled_run()` reports the stop with an empty body, and the trail is the
     // journal, not this return.
     let outcome = match outcome_opt {
-        Some(outcome) => outcome.map_err(map_engine_error)?,
-        None => return Ok(cancelled_run(notices.take(), board.take())),
+        Some(Ok(outcome)) => outcome,
+        // Issue #881: the engine failed the run. Before deciding that is what
+        // happened, ask whether every node that errored was one the host
+        // *blocked* on an approval — because `on_error` defaults to `"stop"`,
+        // a blocked agent node reaches the caller as exactly this `Err`.
+        //
+        // The containment check is what keeps this from hiding a real failure:
+        // a run whose blocked node is joined by a genuinely broken one still
+        // reports the error, and the block survives on the approval receipts.
+        Some(Err(err)) => {
+            let blocked = blocks.take();
+            if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
+                return Err(map_engine_error(err));
+            }
+            tracing::info!(
+                company = %record.id,
+                workflow = %workflow.id,
+                %run_id,
+                nodes = ?blocked.iter().map(|b| &b.node_id).collect::<Vec<_>>(),
+                "workflow: the run stopped because a node is waiting on an operator, not because \
+                 it failed"
+            );
+            return Ok(blocked_run(BlockedRun {
+                nodes,
+                blocked,
+                notices,
+                board: board.take(),
+                approvals: approvals.take(),
+            }));
+        }
+        None => {
+            return Ok(cancelled_run(
+                notices.take(),
+                board.take(),
+                approvals.take(),
+            ));
+        }
     };
 
     // Issue #398: the **clean** node-boundary cancel. The engine observed the
@@ -588,6 +633,18 @@ async fn run_workflow_inner(
             // were never drained, so it has no card and no row: consistent, and the
             // same judgement `park_gated_calls` documents for gated calls.)
             board: board.take(),
+            // Issue #881: a node the host blocked cannot be reached on this arm
+            // — a block halts the run, which is the `Err` arm above, not a
+            // clean node-boundary cancel. Taken rather than hard-coded empty so
+            // the claim stays a test's to make.
+            blocked_nodes: blocks.take(),
+            // Issue #880: NOT zeroed, unlike `deliveries` / `pending_approvals`
+            // one field up. Those describe what the run would still do; this
+            // describes what it already did. A run stopped after parking two
+            // approvals really did park them — the cards are on the operator's
+            // Approvals page right now — so dropping the rows would leave two
+            // cards no run admits to opening. Same argument as `board` above.
+            approvals: approvals.take(),
         });
     }
 
@@ -611,6 +668,11 @@ async fn run_workflow_inner(
             // rather than hard-coded empty so the claim is a *test's* to make (see
             // `a_dry_run_of_a_spawning_graph_writes_no_card`), following #542.
             board: board.take(),
+            // Issues #881 / #880: empty by the same construction. `DryRunAgent`
+            // runs no turn, so no tool call is gated, so nothing blocks and
+            // nothing parks. Taken rather than hard-coded for the same reason.
+            blocked_nodes: blocks.take(),
+            approvals: approvals.take(),
         });
     }
 
@@ -736,9 +798,27 @@ async fn run_workflow_inner(
     )
     .await;
 
+    // Issue #881: a node can block and the run still reach here — an author who
+    // wrote `on_error = "continue"` or `"route"` asked for the branch to survive
+    // the block, and gets it. The run-level record stays truthful either way, so
+    // the post-pass runs on this arm too rather than only on the halted one.
+    let mut nodes = nodes;
+    let mut pending_approvals = outcome.pending_approvals;
+    let blocked_nodes = blocks.take();
+    reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
+    // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
+    // via a `notices` sentence, not only via the node's own status — the
+    // per-node chip is easy to miss on a run that otherwise looks fine, and a
+    // continued run finishing "green" beside a blocked node is exactly that
+    // case. Same sentence, same source (`blocked_notice`), so the two arms
+    // cannot drift into disagreement about what a block reads as.
+    for b in &blocked_nodes {
+        notices.push(blocked_notice(b));
+    }
+
     Ok(WorkflowRun {
         output: outcome.output,
-        pending_approvals: outcome.pending_approvals,
+        pending_approvals,
         deliveries,
         cancelled: false,
         nodes,
@@ -749,7 +829,185 @@ async fn run_workflow_inner(
         // Issue #661 (M5): every card this run's nodes opened or re-owned. Empty
         // for every run whose nodes touched no card, which is nearly all of them.
         board: board.take(),
+        blocked_nodes,
+        // Issue #880: every approval this run's nodes parked, whether or not
+        // any node blocked. A run can park a card and still finish — the
+        // author's `on_error` decides — and the receipt is owed in both cases.
+        approvals: approvals.take(),
     })
+}
+
+/// Whether every node that reported an error is one the host blocked.
+///
+/// The guard on reclassifying an engine failure as a block (issue #881). A run
+/// where a blocked node is joined by a genuinely broken one must still report
+/// the failure: hiding a real error behind "waiting on approval" is the same
+/// class of lie #881 exists to remove, pointed the other way.
+///
+/// Requires **at least one** errored row before it will vouch for the
+/// reclassification (issue #900). `Iterator::all` is vacuously `true` on an
+/// empty iterator, so without this an engine failure that named no node at
+/// all — a setup or validation error the engine raised before any node ran —
+/// would satisfy the check by default and get relabelled as a plain block,
+/// dropping the real failure exactly as the doc comment above says this guard
+/// exists to prevent.
+fn only_blocked_nodes_errored(
+    nodes: &[crate::ports::WorkflowRunNodeRow],
+    blocked: &[crate::ports::WorkflowBlockedNode],
+) -> bool {
+    let mut errored = nodes
+        .iter()
+        .filter(|row| row.status == WorkflowNodeStatus::Error)
+        .peekable();
+    errored.peek().is_some() && errored.all(|row| blocked.iter().any(|b| b.node_id == row.node_id))
+}
+
+/// Reclassifies a blocked node's row and lists it as something the run is
+/// waiting on (issue #881).
+///
+/// Host-side on purpose. The engine reported `Error` and that report is honest —
+/// the capability *did* return an error, which is what halted the branch. What
+/// the engine cannot know is *why*, so the host, which does, relabels the row
+/// on the way out. The
+/// [`ExecutionStep` → `NodeProgress`](ProgressObserver::on_step_finish) mapping
+/// is deliberately left alone: it is the engine's own account of what happened,
+/// and rewriting it there would make the live progress frames disagree with the
+/// engine.
+///
+/// The blocked ids are **unioned into** `pending_approvals` rather than replacing
+/// it: a run can both pause at a `requires_approval` gate and block an agent
+/// node, and the console renders every entry as a node name.
+fn reclassify_blocked(
+    nodes: &mut [crate::ports::WorkflowRunNodeRow],
+    pending_approvals: &mut Vec<String>,
+    blocked: &[crate::ports::WorkflowBlockedNode],
+) {
+    if blocked.is_empty() {
+        return;
+    }
+    for row in nodes.iter_mut() {
+        if blocked.iter().any(|b| b.node_id == row.node_id) {
+            row.status = WorkflowNodeStatus::Blocked;
+        }
+    }
+    for b in blocked {
+        if !pending_approvals.contains(&b.node_id) {
+            pending_approvals.push(b.node_id.clone());
+        }
+    }
+}
+
+/// What a run halted by a blocked node settles with (issue #881).
+///
+/// Bundled rather than passed as five arguments to [`blocked_run`], the same
+/// choice [`super::caps::RunContext`] makes and for the same reason: every field
+/// is one run's, and none of them means anything without the others.
+struct BlockedRun {
+    nodes: Vec<crate::ports::WorkflowRunNodeRow>,
+    blocked: Vec<crate::ports::WorkflowBlockedNode>,
+    notices: super::caps::RunNotices,
+    board: Vec<crate::ports::WorkflowRunBoardRow>,
+    approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+}
+
+/// Settles a run that stopped because a node is waiting on an operator (issue
+/// #881).
+///
+/// **`Ok`, and no `error`.** The engine returned `Err`, because a capability
+/// error under the default `on_error = "stop"` is how a branch halts — but a
+/// node waiting for a human is not a node that failed, and journalling it as one
+/// would put every blocked run in the failure count and hide real failures among
+/// them. This is precisely the reclassification
+/// [`WorkflowRun::cancelled`](crate::ports::WorkflowRun) already performs for a
+/// deliberate stop: "a cancelled run is not a failed one", and neither is a
+/// blocked one.
+///
+/// Each emptiness below is a claim rather than a shrug:
+///
+/// * **no `output`** — the engine returned an error, not a final state. There is
+///   no partial state to report, and the per-node output snapshot the console
+///   inspector reads is likewise not written: nothing settled to persist. The
+///   blocked node in particular produced nothing, which is the entire point;
+/// * **no `deliveries`** — `deliver_outputs` runs off the settled output, which
+///   does not exist here. An absent row already means "not reached" everywhere
+///   else, and a run that stopped short must not mail anybody a report of work
+///   it did not finish.
+///
+/// `notices` carries the operator-facing sentence, composed from the structural
+/// blocked rows so the wording lives in one place and no model prose or store
+/// error text can ride it.
+fn blocked_run(settled: BlockedRun) -> WorkflowRun {
+    let BlockedRun {
+        mut nodes,
+        blocked,
+        notices,
+        board,
+        approvals,
+    } = settled;
+    for b in &blocked {
+        notices.push(blocked_notice(b));
+    }
+    let mut pending_approvals = Vec::new();
+    reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked);
+    WorkflowRun {
+        output: Value::Null,
+        pending_approvals,
+        deliveries: Vec::new(),
+        cancelled: false,
+        nodes,
+        notices: notices.take(),
+        board,
+        blocked_nodes: blocked,
+        approvals,
+    }
+}
+
+/// The operator's sentence for one blocked node (issue #881).
+///
+/// Composed here, from the structural row, rather than lifted off the
+/// capability's error string: that string reaches host logs, and the two
+/// audiences want different things. Worded as a **receipt** — "parked N
+/// approvals", never "waiting on N" — because a settle-time count of what is
+/// still outstanding is stale the moment the operator approves one, while a
+/// record of what this run parked is true forever.
+pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> String {
+    let tools = if blocked.tools.is_empty() {
+        "a tool call".to_string()
+    } else {
+        blocked
+            .tools
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let parked = blocked.approval_ids.len();
+    let mut tail = String::new();
+    if parked > 0 {
+        tail.push_str(&format!(
+            " It parked {parked} approval{}; decide {} in Approvals and run the workflow again.",
+            if parked == 1 { "" } else { "s" },
+            if parked == 1 { "it" } else { "them" }
+        ));
+    }
+    if blocked.unparkable > 0 {
+        tail.push_str(&format!(
+            " {} call{} could not be queued for approval at all, so you will not be asked about \
+             {}.",
+            blocked.unparkable,
+            if blocked.unparkable == 1 { "" } else { "s" },
+            if blocked.unparkable == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        ));
+    }
+    format!(
+        "The step \"{}\" needed your approval for {tools}, so it produced nothing and the steps \
+         after it did not run.{tail}",
+        blocked.node_id
+    )
 }
 
 /// Persists a settled run's per-node output to the durable, console-facing
@@ -1026,6 +1284,7 @@ async fn park_pending_gates(
 fn cancelled_run(
     notices: Vec<String>,
     board: Vec<crate::ports::WorkflowRunBoardRow>,
+    approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
 ) -> WorkflowRun {
     WorkflowRun {
         output: Value::Null,
@@ -1039,6 +1298,16 @@ fn cancelled_run(
         nodes: Vec::new(),
         notices,
         board,
+        // Issue #881: a hard abort drops the engine future mid-await, so no
+        // node ever reported a block — and a block is reported only by a node
+        // that finished its turn. Empty by construction, not by omission.
+        blocked_nodes: Vec::new(),
+        // Issue #880: threaded in, NOT emptied, for exactly the reason `board`
+        // is. An approval card is durable the moment it is written, so a run
+        // that parked two and was then hard-aborted really did park them —
+        // zeroing the rows would leave two cards on the operator's Approvals
+        // page that no run admits to opening.
+        approvals,
     }
 }
 
@@ -1446,9 +1715,26 @@ to = "done"
             title: Some("Reply to the auditor".to_string()),
             assignee: None,
         };
+        // Issue #880: a parked approval is threaded in for the same reason the
+        // board row is — the card is already on the operator's Approvals page,
+        // so a hard abort must not un-say that the run opened it.
+        let parked = crate::ports::WorkflowRunApprovalRow {
+            node_id: Some("work".to_string()),
+            tool: Some("publish_artifact".to_string()),
+            outcome: crate::ports::WorkflowApprovalOutcome::Parked,
+            approval_id: Some("appr-1".to_string()),
+        };
         let run = cancelled_run(
             vec!["something was discarded".to_string()],
             vec![row.clone()],
+            vec![parked.clone()],
+        );
+
+        assert_eq!(
+            run.approvals,
+            vec![parked],
+            "a run stopped after parking an approval really did park it; zeroing the receipt \
+             would leave a card no run admits to opening"
         );
 
         assert!(run.cancelled);
@@ -1467,6 +1753,77 @@ to = "done"
         assert!(run.deliveries.is_empty());
         assert!(run.pending_approvals.is_empty());
         assert!(run.nodes.is_empty());
+    }
+
+    /// Issue #900's regression: `Iterator::all` is vacuously `true` on an
+    /// empty iterator, so before this guard required at least one errored row,
+    /// an engine failure that named no node at all satisfied
+    /// `only_blocked_nodes_errored` by default and would have been
+    /// relabelled as a plain block — exactly the "hide a real error behind
+    /// waiting on approval" lie the function's own doc comment says it exists
+    /// to prevent.
+    #[test]
+    fn no_errored_nodes_never_counts_as_only_blocked_nodes_errored() {
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "work".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+        }];
+        // No node row reported `Error` at all — a setup/validation failure the
+        // engine raised before any node ran, for instance.
+        let nodes: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
+        assert!(
+            !only_blocked_nodes_errored(&nodes, &blocked),
+            "an engine error naming no errored node must never be waved through as \
+             a plain block"
+        );
+    }
+
+    /// The guard's positive case still holds: when every errored row is one the
+    /// host blocked, reclassification is safe.
+    #[test]
+    fn every_errored_node_blocked_counts_as_only_blocked_nodes_errored() {
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "work".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+        }];
+        let nodes = vec![crate::ports::WorkflowRunNodeRow {
+            node_id: "work".to_string(),
+            status: WorkflowNodeStatus::Error,
+            elapsed_ms: 10,
+        }];
+        assert!(only_blocked_nodes_errored(&nodes, &blocked));
+    }
+
+    /// The guard's whole reason to exist: a genuinely broken node alongside a
+    /// blocked one must still fail the check, so the real error is not hidden.
+    #[test]
+    fn a_genuinely_errored_node_alongside_a_blocked_one_fails_the_guard() {
+        let blocked = vec![crate::ports::WorkflowBlockedNode {
+            node_id: "work".to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: vec!["appr-1".to_string()],
+            unparkable: 0,
+        }];
+        let nodes = vec![
+            crate::ports::WorkflowRunNodeRow {
+                node_id: "work".to_string(),
+                status: WorkflowNodeStatus::Error,
+                elapsed_ms: 10,
+            },
+            crate::ports::WorkflowRunNodeRow {
+                node_id: "other".to_string(),
+                status: WorkflowNodeStatus::Error,
+                elapsed_ms: 5,
+            },
+        ];
+        assert!(
+            !only_blocked_nodes_errored(&nodes, &blocked),
+            "a genuinely broken node must not be masked by an unrelated block"
+        );
     }
 
     /// A dry run writes NOTHING durable — no output snapshot, matching its "the

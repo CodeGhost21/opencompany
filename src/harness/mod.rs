@@ -921,6 +921,19 @@ pub struct HarnessPool {
     /// declare no ceilings keeps a stable fingerprint and never rebuilds on this
     /// axis.
     desk_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the routed workspace documents — hashed over
+    /// their **bodies**, not merely their names.
+    ///
+    /// A persona is assembled once per roster, so without this axis an operator
+    /// editing a routed note would leave every other fingerprint stable and the
+    /// fast path would keep serving a prompt quoting the old text until the
+    /// process restarted. Hashing the names alone would have exactly that bug,
+    /// since the routing table does not move when a document's contents do —
+    /// which is the whole reason the routing layer is worth having.
+    ///
+    /// A company with no workspace store wired, or whose roles route nothing,
+    /// keeps a stable fingerprint and never rebuilds on this axis.
+    context_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
     /// failure has already been reported (issue #449).
     ///
@@ -969,6 +982,7 @@ impl HarnessPool {
             budget_fingerprints: RwLock::new(HashMap::new()),
             policy_fingerprints: RwLock::new(HashMap::new()),
             desk_fingerprints: RwLock::new(HashMap::new()),
+            context_fingerprints: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
     }
@@ -1100,6 +1114,18 @@ impl HarnessPool {
         };
         let skill_fp = skill_delta_fingerprint(&skill_deltas);
 
+        // Resolve the routed workspace documents (context routing) before the
+        // fast-path check, and fingerprint their *content*. Both halves matter:
+        // resolving here is what lets the synchronous `build_agent` fold them
+        // into a persona at all, and hashing the bodies rather than the file
+        // names is what makes an operator's edit to a routed note rebuild the
+        // roster. A name-only hash would leave an edited note invisible until a
+        // restart — the same staleness bug `skill_fp` above exists to close.
+        let routed_context = self
+            .resolve_routed_context(company, deps, &overlay.agents)
+            .await;
+        let context_fp = routed_context_fingerprint(&routed_context);
+
         {
             let agents = self.agents.read().await;
             let mcp_fingerprints = self.mcp_fingerprints.read().await;
@@ -1111,6 +1137,7 @@ impl HarnessPool {
             let budget_fingerprints = self.budget_fingerprints.read().await;
             let policy_fingerprints = self.policy_fingerprints.read().await;
             let desk_fingerprints = self.desk_fingerprints.read().await;
+            let context_fingerprints = self.context_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
@@ -1121,6 +1148,7 @@ impl HarnessPool {
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
                 && policy_fingerprints.get(&company.id) == Some(&policy_fp)
                 && desk_fingerprints.get(&company.id) == Some(&desk_fp)
+                && context_fingerprints.get(&company.id) == Some(&context_fp)
             {
                 return Ok(());
             }
@@ -1181,7 +1209,7 @@ impl HarnessPool {
         // repair path if boot's create ever fail-softed, since the minter
         // creates the root it needs. A rebuild-time call would now be a tree
         // read that can only ever find its work already done.
-        let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas)?;
+        let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas, &routed_context)?;
 
         let mut agents = self.agents.write().await;
         agents.insert(company.id.clone(), roster);
@@ -1221,6 +1249,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), desk_fp);
+        self.context_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), context_fp);
         Ok(())
     }
 
@@ -1371,6 +1403,75 @@ impl HarnessPool {
     /// The two collections share **one** store round-trip deliberately: they
     /// come off the same record, and splitting them would double the per-turn
     /// read for no gain.
+    /// Resolves every roster member's routed workspace documents, keyed by agent
+    /// id (`docs/spec/runtime/orchestration/context-routing.md`).
+    ///
+    /// Runs here, in the async caller, because `build_roster` is synchronous and
+    /// the [`WorkspaceStore`](crate::ports::WorkspaceStore) is not — the same
+    /// split as the skill deltas beside it.
+    ///
+    /// **Fails soft, per agent.** A store error yields no documents for that
+    /// role rather than failing the rebuild: routing enriches a prompt, and a
+    /// company whose workspace read hiccuped should answer from a thinner prompt
+    /// rather than stop answering. An unwired store (`None`) resolves to an
+    /// empty map, which is the pre-routing behaviour exactly.
+    ///
+    /// Overlay teammates are included: they are real roster agents that
+    /// [`build_roster`] builds the same way, so leaving them out would give a
+    /// console-added teammate a silently different prompt from a manifest one.
+    async fn resolve_routed_context(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+        overlay_agents: &[OverlayAgent],
+    ) -> HashMap<String, Vec<(String, String)>> {
+        let Some(workspace) = deps.workspace.as_ref() else {
+            return HashMap::new();
+        };
+
+        // A manifest agent wins an id collision, exactly as `build_roster`
+        // resolves one, so the overlay half skips any id already claimed.
+        let manifest_ids: HashSet<&str> = company
+            .manifest
+            .agents
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        let overlay_as_manifest: Vec<ManifestAgent> = overlay_agents
+            .iter()
+            .filter(|overlay| !manifest_ids.contains(overlay.id.as_str()))
+            .map(overlay_agent_to_manifest)
+            .collect();
+
+        let mut routed = HashMap::new();
+        for agent in company.manifest.agents.iter().chain(&overlay_as_manifest) {
+            match crate::company::context_routing::resolve_routed_documents(
+                workspace.as_ref(),
+                &company.id,
+                agent,
+            )
+            .await
+            {
+                // An agent that resolved nothing is left out of the map rather
+                // than stored as an empty vec: `build_roster` reads an absent id
+                // as "no routed documents", so the two are the same answer and
+                // the map stays the size of what actually routed.
+                Ok(documents) if documents.is_empty() => {}
+                Ok(documents) => {
+                    routed.insert(agent.id.clone(), documents);
+                }
+                Err(err) => tracing::warn!(
+                    company = %company.id,
+                    agent = %agent.id,
+                    error = %err,
+                    "[context] could not read this role's routed documents; its prompt \
+                     goes out without them"
+                ),
+            }
+        }
+        routed
+    }
+
     async fn resolve_effective_overlay(
         &self,
         company: &CompanyRecord,
@@ -1451,6 +1552,14 @@ impl HarnessPool {
     #[cfg(test)]
     pub async fn desk_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
         self.desk_fingerprints.read().await.get(company).copied()
+    }
+
+    /// The current routed-context fingerprint for a company (test-only), so a
+    /// routing test can assert that editing a routed workspace note actually
+    /// rebuilt the roster rather than inferring it from a reply.
+    #[cfg(test)]
+    pub async fn context_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.context_fingerprints.read().await.get(company).copied()
     }
 
     /// Routes a message to one agent and returns its reply, recording the turn's
@@ -2146,6 +2255,38 @@ pub(crate) struct EffectiveOverlay {
     pub desk_tools: std::collections::BTreeMap<String, Vec<String>>,
 }
 
+/// Fingerprints the routed workspace documents a roster's personas are built
+/// from — **over their bodies**, not their names.
+///
+/// Hashing the content is the whole point. The routing table is manifest data
+/// and does not move when an operator edits a note, so a name-only hash would
+/// leave the edit invisible: the persona is assembled once per roster, and the
+/// fast path would keep serving a prompt quoting the old text until the process
+/// restarted. That is precisely the staleness the routing layer exists to avoid.
+///
+/// Sorted by agent id before hashing, for the reason [`budget_fingerprint`]
+/// documents — a `HashMap` has no order, and an order-sensitive hash would drop
+/// every live agent session on a rebuild that changed nothing.
+fn routed_context_fingerprint(routed: &HashMap<String, Vec<(String, String)>>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut ordered: Vec<(&String, &Vec<(String, String)>)> = routed.iter().collect();
+    ordered.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut hasher = DefaultHasher::new();
+    ordered.len().hash(&mut hasher);
+    for (agent_id, documents) in ordered {
+        agent_id.hash(&mut hasher);
+        documents.len().hash(&mut hasher);
+        for (path, body) in documents {
+            path.hash(&mut hasher);
+            body.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 /// Fingerprints the desk scoping a roster's grants are resolved through: which
 /// desks exist, who sits on them, and what each one's tool ceiling is.
 ///
@@ -2312,10 +2453,18 @@ fn repo_binding_fingerprint(bindings: &[crate::runtime::repo_manager::types::Rep
 ///
 /// `skill_deltas` are the company's operator skill overrides (fetched once by
 /// the async caller); every agent folds them into its effective skill set.
+///
+/// `routed_context` maps an agent id to the workspace documents routed into its
+/// system prompt, resolved by the async caller for the same reason
+/// `skill_deltas` is — this function is synchronous and the `WorkspaceStore` is
+/// not. An agent absent from the map gets no routed documents, which is the
+/// correct reading for a company with no workspace store wired: fail closed to
+/// the pre-routing prompt rather than to a half-populated one.
 pub(crate) fn build_roster(
     company: &CompanyRecord,
     deps: &HarnessDeps,
     skill_deltas: &[SkillState],
+    routed_context: &HashMap<String, Vec<(String, String)>>,
 ) -> crate::Result<Vec<Arc<CompanyAgent>>> {
     // Issue #562: the policy in force, not the one the manifest shipped with —
     // the same relationship `effective_budget` (issue #343) has to the manifest
@@ -2370,6 +2519,10 @@ pub(crate) fn build_roster(
             deps,
             &grants,
             skill_deltas,
+            routed_context
+                .get(&manifest_agent.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
             is_orchestrator,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -2421,6 +2574,10 @@ pub(crate) fn build_roster(
             deps,
             &grants,
             skill_deltas,
+            routed_context
+                .get(&manifest_agent.id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
             /* is_orchestrator */ false,
         )?;
         roster.push(Arc::new(CompanyAgent {
@@ -2910,10 +3067,141 @@ description = "Builds the product."
     #[tokio::test]
     async fn roster_builds_every_manifest_agent() {
         let fx = fixture();
-        let roster = build_roster(&record(), &fx.deps, &[]).expect("roster builds");
+        let roster =
+            build_roster(&record(), &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(ids, vec!["ceo", "engineer"]);
         assert_eq!(roster[0].role, "Chief Executive");
+    }
+
+    /// Context routing: the resolution that feeds a persona, and the fingerprint
+    /// that decides whether an edit reaches the next turn.
+    mod routed_context {
+        use super::*;
+        use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+
+        fn docs(entries: &[(&str, &[(&str, &str)])]) -> HashMap<String, Vec<(String, String)>> {
+            entries
+                .iter()
+                .map(|(agent, documents)| {
+                    (
+                        (*agent).to_string(),
+                        documents
+                            .iter()
+                            .map(|(p, b)| ((*p).to_string(), (*b).to_string()))
+                            .collect(),
+                    )
+                })
+                .collect()
+        }
+
+        /// The property the whole axis exists for. The routing table is manifest
+        /// data and does not move when an operator edits a note, so a
+        /// name-only hash would leave the edit invisible until a restart.
+        #[test]
+        fn the_fingerprint_moves_when_a_documents_body_changes() {
+            let before = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "old")])]));
+            let after = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "new")])]));
+            assert_ne!(
+                before, after,
+                "an edited routed note must rebuild the roster"
+            );
+        }
+
+        /// A `HashMap` has no order, so an order-sensitive hash would drop every
+        /// live agent session on a rebuild that changed nothing.
+        #[test]
+        fn the_fingerprint_is_stable_across_map_iteration_order() {
+            let one = docs(&[
+                ("ceo", &[("BRIEF.md", "b")]),
+                ("engineer", &[("CLAIMS.md", "c")]),
+            ]);
+            let two = docs(&[
+                ("engineer", &[("CLAIMS.md", "c")]),
+                ("ceo", &[("BRIEF.md", "b")]),
+            ]);
+            assert_eq!(
+                routed_context_fingerprint(&one),
+                routed_context_fingerprint(&two)
+            );
+        }
+
+        /// Renaming a document is a real change even when its text is identical:
+        /// the persona quotes the path as the section heading.
+        #[test]
+        fn the_fingerprint_moves_when_a_document_is_renamed() {
+            let before = routed_context_fingerprint(&docs(&[("ceo", &[("BRIEF.md", "same")])]));
+            let after = routed_context_fingerprint(&docs(&[("ceo", &[("GOAL.md", "same")])]));
+            assert_ne!(before, after);
+        }
+
+        /// A company with no workspace store keeps a stable fingerprint and never
+        /// rebuilds on this axis — the pre-routing behaviour exactly.
+        #[tokio::test]
+        async fn no_workspace_store_resolves_to_nothing() {
+            let fx = fixture();
+            assert!(fx.deps.workspace.is_none(), "fixture has no store wired");
+
+            let pool = HarnessPool::new();
+            let routed = pool.resolve_routed_context(&record(), &fx.deps, &[]).await;
+            assert!(routed.is_empty(), "{routed:?}");
+            assert_eq!(
+                routed_context_fingerprint(&routed),
+                routed_context_fingerprint(&HashMap::new()),
+                "a company that routes nothing must not rebuild on this axis"
+            );
+        }
+
+        /// The real path: a routed document that exists in the tree is read and
+        /// keyed to the agent whose manifest asked for it.
+        #[tokio::test]
+        async fn a_routed_document_is_resolved_per_agent() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let ws: Arc<dyn crate::ports::WorkspaceStore> =
+                Arc::new(crate::store::FsOps::new(dir.path()));
+            let company = CompanyId::new("acme");
+            ws.create(
+                &company,
+                &WorkspaceNode {
+                    id: "n-brief".to_string(),
+                    name: "BRIEF.md".to_string(),
+                    kind: NodeKind::File,
+                    parent_id: None,
+                    updated_at_millis: 1,
+                    created_by: WorkspaceOrigin::Operator,
+                    updated_by: WorkspaceOrigin::Operator,
+                    mime: None,
+                    size: None,
+                    sha256: None,
+                },
+                Some("What the company established."),
+            )
+            .await
+            .expect("create");
+
+            let mut fx = fixture();
+            fx.deps.workspace = Some(ws);
+
+            let pool = HarnessPool::new();
+            let routed = pool.resolve_routed_context(&record(), &fx.deps, &[]).await;
+
+            // Both fixture agents default to the `reasoning` row, which routes
+            // BRIEF — so both resolve it, and neither invents the notes that do
+            // not exist in the tree.
+            for agent in ["ceo", "engineer"] {
+                let documents = routed
+                    .get(agent)
+                    .unwrap_or_else(|| panic!("no routed documents for {agent}: {routed:?}"));
+                assert_eq!(
+                    documents,
+                    &vec![(
+                        "BRIEF.md".to_string(),
+                        "What the company established.".to_string()
+                    )],
+                    "{agent}"
+                );
+            }
+        }
     }
 
     /// The roster builds end-to-end with the skill read surface wired: the
@@ -2976,7 +3264,8 @@ description = "Builds the product."
             checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
 
-        let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
+        let roster = build_roster(&record(), &deps, &[], &HashMap::new())
+            .expect("roster builds with skills");
         assert_eq!(roster.len(), 2);
         // The scratch skill tree was materialized for the first roster agent.
         assert!(
@@ -3006,7 +3295,7 @@ description = "Builds the product."
             tools: Vec::new(),
         });
 
-        let roster = build_roster(&rec, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(ids, vec!["ceo", "engineer", "growth"], "got {ids:?}");
         let overlay_agent = roster
@@ -3030,7 +3319,7 @@ description = "Builds the product."
             tools: Vec::new(),
         });
 
-        let roster = build_roster(&rec, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&rec, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -3106,7 +3395,7 @@ description = "Builds the product."
         let saved = store.load(&company).await.unwrap().expect("record");
         assert_eq!(saved.overlay_agents[0].id, "engineer_2");
 
-        let roster = build_roster(&saved, &fx.deps, &[]).expect("roster builds");
+        let roster = build_roster(&saved, &fx.deps, &[], &HashMap::new()).expect("roster builds");
         let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -3661,7 +3950,7 @@ description = "Builds the product."
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
-        let roster = build_roster(&record(), &deps, &[]).expect("roster");
+        let roster = build_roster(&record(), &deps, &[], &HashMap::new()).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
         // test's lifetime — the process ends the test anyway.
         std::mem::forget(dir);
@@ -5487,6 +5776,7 @@ budget_usd_daily = 0.0
             &deps,
             &grants,
             &[],
+            &[],
             is_orchestrator,
         )
         .expect("agent builds");
@@ -5599,6 +5889,7 @@ budget_usd_daily = 0.0
             ApprovalPolicy::new(&Policy::default(), None),
             &deps,
             &["*".to_string()],
+            &[],
             &[],
             true,
         )

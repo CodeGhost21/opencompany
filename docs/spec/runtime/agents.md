@@ -95,12 +95,10 @@ Static material first, volatile last. The prompt prefix is what a provider cache
 reuses across turns, so a workspace note the operator edits between two turns
 must not invalidate the briefing behind it.
 
-> **Step 5 is not yet wired into the harness.** The selection
-> (`routed_documents`), the workspace read (`resolve_routed_documents`) and the
-> rendering (`context_section`) are implemented and tested; carrying the result
-> through `HarnessDeps` into `build::build_agent` is the remaining step. See
-> [context-routing.md](orchestration/context-routing.md#the-rule). Steps 1–4
-> are live.
+Step 5 is resolved by the async caller before the (synchronous) agent build and
+fingerprinted over document **bodies**, so editing a routed note reaches the next
+turn rather than the next restart. See
+[context-routing.md](orchestration/context-routing.md).
 
 **`prompt` is appended, never substituted.** The generated line is what binds the
 agent to *this* role at *this* company; a prompt that replaced it would silently

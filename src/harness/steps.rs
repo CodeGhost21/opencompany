@@ -507,6 +507,10 @@ const INTRINSIC_TOOLS: &[&str] = &[
     "query_company",
     "spawn_task",
     "delegate_to_desk",
+    // #884's sibling of `delegate_to_desk`. Its refusals are the same shape —
+    // whole sentences naming the teammates the caller may actually reach — and
+    // one collapsed to a bare failure class is a refusal the agent cannot act on.
+    "delegate_to_teammate",
     "run_workflow",
     // #418's `run_workflow` companion — its full-output pages are the same kind
     // of OC-authored, agent-facing text as the other intrinsics, safe to surface
@@ -906,12 +910,15 @@ mod tests {
             WORKSPACE_CREATE_TOOL, WORKSPACE_DELETE_TOOL, WORKSPACE_LIST_TOOL, WORKSPACE_READ_TOOL,
             WORKSPACE_RENAME_TOOL, WORKSPACE_SEARCH_TOOL, WORKSPACE_WRITE_TOOL,
         };
-        use crate::runtime::delegation_tools::{DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL};
+        use crate::runtime::delegation_tools::{
+            DELEGATE_TO_DESK_TOOL, DELEGATE_TO_TEAMMATE_TOOL, SPAWN_TASK_TOOL,
+        };
 
         let expected = [
             QUERY_COMPANY_TOOL,
             SPAWN_TASK_TOOL,
             DELEGATE_TO_DESK_TOOL,
+            DELEGATE_TO_TEAMMATE_TOOL,
             RUN_WORKFLOW_TOOL,
             READ_RUN_OUTPUT_TOOL,
             CREATE_WORKFLOW_TOOL,
