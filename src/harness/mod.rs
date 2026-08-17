@@ -6252,12 +6252,14 @@ budget_usd_daily = 0.0
     // integration on one transient store hiccup.
 
     /// A secret store that reads back what was seeded, or fails every read.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
     #[derive(Default)]
     struct BillingSecrets {
         map: StdMutex<std::collections::HashMap<String, String>>,
         fail: bool,
     }
 
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
     #[async_trait]
     impl SecretStore for BillingSecrets {
         async fn get(
