@@ -532,6 +532,27 @@ pub struct Agent {
     /// here rather than having it guessed from the free-text `role`.
     #[serde(default)]
     pub classes: Vec<String>,
+    /// Whether this teammate came from the global baseline ([`crate::globals`])
+    /// rather than the company's own roster.
+    ///
+    /// Provenance, not configuration: no author writes it, and the merge sets it
+    /// on every teammate it appends. It exists because a manifest is serialized
+    /// back into the store with the merged roster in it, so without a marker a
+    /// global teammate becomes indistinguishable from one the company wrote —
+    /// and the baseline could then never be updated, retired, or opted out of
+    /// for that company again. With it,
+    /// [`apply_globals`](CompanyManifest::apply_globals) is idempotent: it drops
+    /// every previously-merged global and re-appends the current baseline, so a
+    /// company picks up baseline changes and honours `[globals].disable` on the
+    /// very next read.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub global: bool,
+}
+
+/// `#[serde(skip_serializing_if)]` predicate: keeps `global = false` — which is
+/// every hand-authored teammate — out of the serialized manifest.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The `[[agent]].tier` value that marks a roster's orchestrator.
