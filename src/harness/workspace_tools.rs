@@ -352,6 +352,11 @@ pub struct CompanyWorkspace {
     /// default, and every construction site but the agent builder's — means the
     /// write tool behaves exactly as it did before #552.
     artifacts: Option<Arc<dyn ArtifactStore>>,
+    /// This agent's `workspace_write`/`workspace_create` scope — see
+    /// [`crate::company::Agent::write_scope`]. `None` (the default, and every
+    /// construction site but the agent builder's) is unconfined, the behaviour
+    /// this module had before per-path write scope existed.
+    write_scope: Option<Vec<String>>,
 }
 
 impl CompanyWorkspace {
@@ -362,6 +367,7 @@ impl CompanyWorkspace {
             company,
             agent_id,
             artifacts: None,
+            write_scope: None,
         }
     }
 
@@ -375,6 +381,35 @@ impl CompanyWorkspace {
     pub fn with_artifacts(mut self, artifacts: Option<Arc<dyn ArtifactStore>>) -> Self {
         self.artifacts = artifacts;
         self
+    }
+
+    /// Confine `workspace_write`/`workspace_create` to `scope` (see
+    /// [`crate::company::Agent::write_scope`]) — another builder for the same
+    /// reason `with_artifacts` is: irrelevant to the read tools, and every
+    /// existing construction site should keep the unconfined default.
+    pub fn with_write_scope(mut self, scope: Option<Vec<String>>) -> Self {
+        self.write_scope = scope;
+        self
+    }
+
+    /// Whether `path` is inside this agent's write scope.
+    ///
+    /// `None` scope is unconfined — every path is in scope, matching the
+    /// behaviour every agent had before this existed. `Some(paths)` allows an
+    /// exact match against a declared path, or anything under this agent's own
+    /// `Agents/<id>/` home, which stays writable regardless of scope: a role
+    /// narrowed to a real access list must not also lose the ability to
+    /// produce and revise its own work.
+    fn write_allowed(&self, path: &str) -> bool {
+        let Some(scope) = &self.write_scope else {
+            return true;
+        };
+        if let Ok(segments) = super::workspace_paths::split_logical_path(path)
+            && self.is_own_home(&segments) || self.is_strictly_inside_own_home(&segments)
+        {
+            return true;
+        }
+        scope.iter().any(|allowed| allowed.trim() == path.trim())
     }
 
     /// This agent's origin, for stamping [`WorkspaceNode::created_by`] /
