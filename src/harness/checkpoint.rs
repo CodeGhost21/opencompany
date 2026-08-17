@@ -48,6 +48,21 @@ impl WorkspaceCheckpointer {
         std::fs::create_dir_all(workspace)?;
         let out_of_band = workspace.with_extension("git");
 
+        // The in-workspace `.git` is checkpoint scaffolding, not agent data: it
+        // exists only so ordinary `git` commands run inside the workspace
+        // discover the out-of-band repository. Normalize it, dropping anything
+        // (a pointer file or a planted directory) an agent left there — a
+        // planted pointer could make `git init --separate-git-dir` refuse to
+        // run or redirect ordinary `git` commands at a decoy repository.
+        let dot_git = workspace.join(".git");
+        if let Ok(meta) = std::fs::symlink_metadata(&dot_git) {
+            if meta.is_dir() {
+                std::fs::remove_dir_all(&dot_git)?;
+            } else {
+                std::fs::remove_file(&dot_git)?;
+            }
+        }
+
         if !out_of_band.join("HEAD").is_file() {
             // Global options (`-c`, env) must precede the subcommand, so the
             // isolation is applied before `init` is named.
