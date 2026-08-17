@@ -111,7 +111,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { effectDone } from "@/lib/language";
-import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
+import { PRIORITY_STYLES } from "@/lib/tasks-sample";
+import { labelFor, type TaskColumn } from "@/lib/board-columns";
+import { useBoardColumns } from "@/hooks/use-board-columns";
 import { toast } from "sonner";
 import { ArtifactsTab } from "./ArtifactsTab";
 import { TaskPlanBrief, tallyPrerequisites } from "./TaskPlanBrief";
@@ -129,9 +131,16 @@ function priorityStyle(priority: string): string {
   );
 }
 
-/** The column id → human label ("in_progress" → "In progress"), tolerating unknowns. */
-function columnLabel(column: string): string {
-  return TASK_COLUMNS.find((c) => c.id === column)?.label ?? column;
+/**
+ * The column id → human label ("in_progress" → "In progress").
+ *
+ * Takes the columns because they come from the `tasks` ledger now rather than
+ * from a list this module could read at import time. `labelFor` humanises an
+ * id the host has not named, so a card whose column predates this build still
+ * reads as words.
+ */
+function columnLabel(columns: TaskColumn[], column: string): string {
+  return labelFor(columns, column);
 }
 
 /**
