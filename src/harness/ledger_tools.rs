@@ -225,6 +225,7 @@ fn ledger_argument() -> Value {
 
 struct ListLedgers {
     ctx: Ledgers,
+    ledger_grants: Option<Vec<LedgerGrant>>,
 }
 
 #[async_trait]
