@@ -129,18 +129,18 @@ pub fn excluded_documents(classes: &[String]) -> Vec<&'static str> {
 ///
 /// Resolution order:
 ///
-/// 1. the universal document, always;
+/// 1. [`UNIVERSAL_DOCUMENTS`], always;
 /// 2. the agent's explicit `context` list if it declared one, else its tier's
 ///    default row;
 /// 3. minus anything its classes exclude.
 ///
 /// `Some(vec![])` (an explicit `context = []`) and `None` (an omitted key) are
-/// deliberately different: the first means "the universal document and nothing
-/// else", the second means "take the default". `Agent::context` is
-/// `Option<Vec<String>>` precisely so that distinction is representable.
+/// deliberately different: the first means "the universal documents and
+/// nothing else", the second means "take the default". `Agent::context` is
+/// `Option<Vec<ContextEntry>>` precisely so that distinction is representable.
 ///
 /// Returned in routing order with duplicates removed, so a manifest that lists
-/// the universal document explicitly does not get it twice.
+/// a universal document explicitly does not get it twice.
 pub fn routed_documents(agent: &Agent) -> Vec<String> {
     let excluded = excluded_documents(&agent.classes);
 
@@ -152,17 +152,19 @@ pub fn routed_documents(agent: &Agent) -> Vec<String> {
             .collect(),
     };
 
-    let mut routed = Vec::with_capacity(chosen.len() + 1);
+    let mut routed = Vec::with_capacity(chosen.len() + UNIVERSAL_DOCUMENTS.len());
     let mut seen = std::collections::HashSet::new();
-    for document in std::iter::once(UNIVERSAL_DOCUMENT.to_string()).chain(chosen) {
+    let universal = UNIVERSAL_DOCUMENTS.iter().map(|doc| doc.to_string());
+    for document in universal.chain(chosen) {
         let document = document.trim().to_string();
         if document.is_empty() {
             continue;
         }
-        // The universal document is exempt from exclusion: it is method, not
-        // assertion, so no class has a reason to withhold it — and a role
-        // excluded from the method could not follow it.
-        if document != UNIVERSAL_DOCUMENT && excluded.contains(&document.as_str()) {
+        // The universal documents are exempt from exclusion: neither asserts
+        // anything about the work in progress, so no class has a reason to
+        // withhold either — and a role excluded from the method or the
+        // working agreement could not follow it.
+        if !UNIVERSAL_DOCUMENTS.contains(&document.as_str()) && excluded.contains(&document.as_str()) {
             continue;
         }
         if seen.insert(document.clone()) {
