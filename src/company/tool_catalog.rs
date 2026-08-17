@@ -91,9 +91,7 @@ const BUILTIN_DESCRIPTIONS: &[(&str, &str)] = &[
 /// toolkits, each in a stable order so a console list does not reshuffle between
 /// reads.
 pub fn catalog(manifest: &CompanyManifest) -> Vec<CatalogEntry> {
-    // The catalog reports what the company actually has, which is its own
-    // grants plus the global tool floor — see `Tools::effective_allow`.
-    let allow = &manifest.tools.effective_allow();
+    let allow = &manifest.tools.allow;
     let mut entries = Vec::new();
 
     for (namespace, description) in BUILTIN_DESCRIPTIONS {
