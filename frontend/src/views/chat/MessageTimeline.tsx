@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
 import { Avatar } from "./Avatar";
@@ -17,6 +18,11 @@ interface Props {
    * message — see {@link TimelineItem}.
    */
   items: TimelineItem[];
+  /**
+   * This channel's persisted history has not arrived yet, so the absence of
+   * rows is not evidence of anything (issue #934).
+   */
+  historyPending?: boolean;
   /** The message whose thread is open, if any — that row stays highlighted. */
   openThreadId: string | null;
   /** Someone on the company side is composing a reply. */
@@ -72,6 +78,7 @@ const BOTTOM_SLACK_PX = 32;
 export function MessageTimeline({
   channel,
   items,
+  historyPending = false,
   openThreadId,
   typing,
   liveSteps,
@@ -85,6 +92,10 @@ export function MessageTimeline({
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
+  // Rows that arrived locally — a message sent before hydration landed — are
+  // still worth showing while the rest of the history is in flight. It is only
+  // the *claim of emptiness* that has to wait.
+  const loading = historyPending && items.length === 0;
   /**
    * Is the view parked at the bottom, and therefore still following?
    *
@@ -139,7 +150,11 @@ export function MessageTimeline({
   return (
     <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
       <div className="flex min-h-full flex-col justify-end pb-4">
-        <ChannelIntro channel={channel} empty={items.length === 0} />
+        {/* `empty` only drives the top padding, and the skeleton fills the
+            same space real rows will — so a loading channel is spaced like a
+            full one and the intro does not jump down and back up. */}
+        <ChannelIntro channel={channel} empty={items.length === 0 && !loading} loading={loading} />
+        {loading && <HistorySkeleton />}
         {items.map((item) =>
           item.kind === "message" ? (
             <div key={item.key}>
@@ -228,7 +243,15 @@ function DayDivider({ label }: { label: string }) {
  * above the first message rather than only showing when the channel is empty —
  * scrolling to the beginning of a channel should tell you where you are.
  */
-function ChannelIntro({ channel, empty }: { channel: Channel; empty: boolean }) {
+function ChannelIntro({
+  channel,
+  empty,
+  loading,
+}: {
+  channel: Channel;
+  empty: boolean;
+  loading: boolean;
+}) {
   return (
     <div className={cn("px-4 pb-3", empty ? "pt-16" : "pt-6")}>
       <Avatar
@@ -238,11 +261,44 @@ function ChannelIntro({ channel, empty }: { channel: Channel; empty: boolean }) 
         className="mb-3 size-12 rounded-lg text-base"
       />
       <h2 className="text-xl font-semibold tracking-tight">{channelTitle(channel)}</h2>
+      {/* Both of these sentences are positive claims that the channel has no
+          history — "the start of", "the very beginning of". Neither may render
+          until the host has answered, or a reload of a busy DM reads as lost
+          conversation (issue #934). The identity block above is not a claim
+          and stays either way, so the pane still says where you are. */}
       <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-        {channel.kind === "dm"
-          ? `This is the start of your direct message with ${channel.name} — ${lower(channel.purpose)}.`
-          : `This is the very beginning of ${channelTitle(channel)}. ${sentence(channel.purpose)}`}
+        {loading
+          ? sentence(channel.purpose)
+          : channel.kind === "dm"
+            ? `This is the start of your direct message with ${channel.name} — ${lower(channel.purpose)}.`
+            : `This is the very beginning of ${channelTitle(channel)}. ${sentence(channel.purpose)}`}
       </p>
+    </div>
+  );
+}
+
+/**
+ * Placeholder rows while a channel's history is on the wire.
+ *
+ * Shaped like the message rows it stands in for — avatar gutter, a name line,
+ * two lines of body — so the pane does not jump when the real transcript
+ * replaces it. `role="status"` is what makes the wait legible to a screen
+ * reader, which cannot see that anything is pulsing.
+ */
+function HistorySkeleton() {
+  return (
+    <div role="status" aria-busy="true" className="space-y-1">
+      <span className="sr-only">Loading messages…</span>
+      {[0, 1, 2].map((row) => (
+        <div key={row} className="flex items-start gap-2.5 px-4 py-1">
+          <Skeleton className="size-9 shrink-0 rounded-full" />
+          <div className="min-w-0 flex-1 space-y-2 py-1">
+            <Skeleton className="h-3 w-28" />
+            <Skeleton className="h-3 w-full max-w-prose" />
+            <Skeleton className={cn("h-3", row === 1 ? "w-1/2" : "w-3/4")} />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
