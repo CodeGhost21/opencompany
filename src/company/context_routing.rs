@@ -33,6 +33,21 @@ use crate::company::Agent;
 /// about the work in progress, so no exclusion can apply to it.
 pub const UNIVERSAL_DOCUMENT: &str = "METHOD.md";
 
+/// The company's per-workspace working agreement, routed to every role
+/// alongside [`UNIVERSAL_DOCUMENT`].
+///
+/// Distinct from `METHOD.md`: `METHOD.md` is the company's method policy,
+/// authored per company; `AGENTS.md` is the bundle-level agreement every
+/// teammate in the roster shares — which files exist and what they are for,
+/// how work is expected to be handed off, conventions a person and every
+/// agent are both bound by. Also asserts nothing about work in progress, so it
+/// is exempt from class exclusions the same way `METHOD.md` is.
+pub const AGENTS_DOC: &str = "AGENTS.md";
+
+/// Every document routed to every role, whatever its tier, classes, or
+/// explicit `context` list — in the order they are placed in the prompt.
+pub const UNIVERSAL_DOCUMENTS: &[&str] = &[UNIVERSAL_DOCUMENT, AGENTS_DOC];
+
 /// The company's summarized picture: what is established, what is ruled out.
 pub const BRIEF: &str = "BRIEF.md";
 /// The evidence ledger — what already holds true, with its derivation.
