@@ -318,12 +318,43 @@ mod tests {
     // event filter, or a company cycle. This is the one surface here that
     // accepts input from outside the host.
 
+    /// Every event the company's brain was actually driven with.
+    ///
+    /// The route answers `200` whether or not it raised anything, so the HTTP
+    /// response cannot distinguish a working webhook from a handler that
+    /// acknowledges and does nothing. This is the seam that can: it sits where
+    /// the cycle actually lands.
+    type Delivered = Arc<std::sync::Mutex<Vec<CompanyEvent>>>;
+
+    /// A brain that records what it was asked to run, then behaves as the
+    /// default one does.
+    ///
+    /// Delegating to [`EchoBrain`](crate::brain::EchoBrain) rather than
+    /// returning a hand-built `CycleResult` keeps the cycle on the path it takes
+    /// in these tests already — the recorder observes, it does not substitute.
+    struct RecordingBrain(Delivered);
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for RecordingBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            self.0
+                .lock()
+                .expect("lock")
+                .extend(req.events.iter().cloned());
+            crate::brain::EchoBrain::new().run_cycle(req, host).await
+        }
+    }
+
     /// A host with one company, and the webhook credential `credential` stored
     /// when it is `Some`.
     async fn state_with(
         home: &std::path::Path,
         credential: Option<&str>,
-    ) -> (AppState, Arc<CompanyRuntime>) {
+    ) -> (AppState, Arc<CompanyRuntime>, Delivered) {
         use crate::ports::{CompanyStore, types::CompanyRecord};
         use crate::store::FsCompanyStore;
 
@@ -351,9 +382,11 @@ mod tests {
             .await
             .expect("save company");
 
+        let delivered: Delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
         let runtime = Arc::new(
             crate::runtime::RuntimeBuilder::new(home.to_path_buf(), manifest)
                 .with_id(id.clone())
+                .with_brain(Arc::new(RecordingBrain(delivered.clone())))
                 .build()
                 .await
                 .expect("runtime"),
@@ -371,7 +404,7 @@ mod tests {
         }
         let state = AppState::new(crate::AppConfig::default());
         state.registry().insert(id, runtime.clone());
-        (state, runtime)
+        (state, runtime, delivered)
     }
 
     /// Posts `body` to the route, with `auth` verbatim as the header value.
@@ -415,7 +448,7 @@ mod tests {
     async fn an_unverifiable_delivery_is_refused_and_never_becomes_an_event() {
         let home = tempfile::tempdir().expect("tempdir");
         // base64("cbuser:cbpass")
-        let (state, _runtime) = state_with(home.path(), Some("cbuser:cbpass")).await;
+        let (state, _runtime, delivered) = state_with(home.path(), Some("cbuser:cbpass")).await;
 
         for (label, auth) in [
             ("no header at all", None),
@@ -427,6 +460,15 @@ mod tests {
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
             assert_eq!(body["code"], "unauthorized", "{label}");
         }
+
+        // The `401` is the visible half. The half that matters is that none of
+        // those four reached a cycle: an unverifiable POST must not be able to
+        // drive the company at all.
+        assert!(
+            delivered.lock().expect("lock").is_empty(),
+            "an unverifiable delivery drove a cycle: {:?}",
+            delivered.lock().expect("lock"),
+        );
     }
 
     #[tokio::test]
@@ -435,7 +477,7 @@ mod tests {
         // Without the stored-secret check, "no credential" would be the one
         // state in which any caller could drive a company cycle.
         let home = tempfile::tempdir().expect("tempdir");
-        let (state, runtime) = state_with(home.path(), None).await;
+        let (state, runtime, _delivered) = state_with(home.path(), None).await;
 
         let (status, _) =
             post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
@@ -458,9 +500,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_verified_delivery_is_accepted() {
+    async fn a_verified_delivery_is_accepted_and_actually_raises_the_event() {
+        // The `200` proves almost nothing on its own: this route answers `200`
+        // for an ignored event, an unparseable body, and a paused company too. A
+        // handler that dropped the `CompanyEvent::WebhookReceived` construction
+        // or the `run_cycle` call entirely would still satisfy it — and the push
+        // is the ONLY thing this route does that a live read cannot, so a
+        // regression there silently removes the whole point of the endpoint.
+        //
+        // So the assertion is on what reached the brain.
         let home = tempfile::tempdir().expect("tempdir");
-        let (state, _runtime) = state_with(home.path(), Some("cbuser:cbpass")).await;
+        let (state, _runtime, delivered) = state_with(home.path(), Some("cbuser:cbpass")).await;
 
         let (status, body) =
             post_event(&state, Some("Basic Y2J1c2VyOmNicGFzcw=="), paid_event()).await;
@@ -471,6 +521,52 @@ mod tests {
             Value::Null,
             "an acted-on event is not ignored"
         );
+
+        let events = delivered.lock().expect("lock").clone();
+        let raised = events
+            .iter()
+            .find_map(|event| match event {
+                CompanyEvent::WebhookReceived { channel, body } if channel == CHANNEL => {
+                    Some(body.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!("no WebhookReceived on the `{CHANNEL}` channel reached a cycle: {events:?}")
+            });
+
+        // And it carries the summary the brain is meant to relay, not the raw
+        // Chargebee payload — the projection is part of the contract, since the
+        // whole event would spend a great deal of context to say "Alan paid".
+        assert_eq!(raised["event_type"], "payment_succeeded", "{raised}");
+        let summary = raised["summary"].as_str().unwrap_or_default();
+        assert!(summary.contains("inv_1"), "{summary}");
+        assert!(summary.contains("PAID"), "{summary}");
+        // The customer id, never their email — this body is persisted in the
+        // journal and replayed into model prompts.
+        assert!(summary.contains("cus_1"), "{summary}");
+        assert!(!raised.to_string().contains("alan@"), "{raised}");
+    }
+
+    #[tokio::test]
+    async fn a_verified_but_unsubscribed_event_never_reaches_a_cycle() {
+        // The `ignored` field in the response says the route decided to skip it.
+        // This says it actually did: an over-subscribed dashboard must not wake
+        // the company on every subscription change it happens to send.
+        let home = tempfile::tempdir().expect("tempdir");
+        let (state, _runtime, delivered) = state_with(home.path(), Some("cbuser:cbpass")).await;
+
+        post_event(
+            &state,
+            Some("Basic Y2J1c2VyOmNicGFzcw=="),
+            json!({"event_type": "subscription_created", "content": {}}),
+        )
+        .await;
+        assert!(
+            delivered.lock().expect("lock").is_empty(),
+            "an unsubscribed event drove a cycle: {:?}",
+            delivered.lock().expect("lock"),
+        );
     }
 
     #[tokio::test]
@@ -478,7 +574,7 @@ mod tests {
         // 2xx on purpose: answering non-2xx would make Chargebee retry, then
         // disable the endpoint, over an event we simply had no interest in.
         let home = tempfile::tempdir().expect("tempdir");
-        let (state, _runtime) = state_with(home.path(), Some("cbuser:cbpass")).await;
+        let (state, _runtime, _delivered) = state_with(home.path(), Some("cbuser:cbpass")).await;
 
         let (status, body) = post_event(
             &state,
