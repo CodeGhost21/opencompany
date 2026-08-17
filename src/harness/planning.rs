@@ -687,8 +687,7 @@ async fn gather_evidence(
             crate::error::OpenCompanyError::CompanyNotFound(runtime.id().to_string())
         })?;
 
-    // `effective_allow`: the company's grants plus the global tool floor.
-    let allow = record.manifest.tools.effective_allow();
+    let allow = record.manifest.tools.allow.clone();
     let teammates: Vec<TeammateBrief> = record
         .manifest
         .agents

@@ -189,8 +189,7 @@ pub async fn build_capabilities(
     // would leave a workflow run on the shipped tier while the roster ran on the
     // operator's, which is the disagreement `effective_policy` exists to prevent.
     let mode = PolicyMode::parse(&record.effective_policy().mode);
-    // Plus the global tool floor — see `Tools::effective_allow`.
-    let grants = record.manifest.tools.effective_allow();
+    let grants = record.manifest.tools.allow.clone();
     let wiring = workflow_tool_wiring(&deps);
 
     // sub_workflow-by-id resolves children from the union of the company's seed
