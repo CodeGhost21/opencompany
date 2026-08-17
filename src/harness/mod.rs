@@ -73,6 +73,7 @@ pub mod cost;
 /// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
 #[cfg(feature = "tinycortex")]
 pub mod embeddings;
+pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;
 pub mod mcp_probe;
@@ -233,6 +234,12 @@ pub struct HarnessDeps {
     /// written either way, so an unwired artifact store loses nothing that
     /// existed previously.
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
+    /// The company's ledgers, so an agent can read what has already been
+    /// decided, goaled or ruled out, record what it decides, and declare an axis
+    /// nobody anticipated. `None` builds no ledger tools at all — which is right
+    /// for a path with no company behind it, and is what every construction site
+    /// that predates them does.
+    pub ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
     /// The company's skill-delta store, so a built agent can see its effective
     /// skill set (company-dir skills ∪ operator deltas ∪ custom docs) as read
     /// tools + a prompt catalogue. `None` leaves the agent skill-less (the chat
