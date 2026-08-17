@@ -35,6 +35,7 @@ import {
   SidebarRail,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { Button } from "@/components/ui/button";
 import { FeedbackDialog } from "@/components/feedback-dialog";
 import {
   AutoCollapse,
