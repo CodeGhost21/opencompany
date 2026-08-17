@@ -429,15 +429,24 @@ async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflo
 /// an operator has just toggled it.
 async fn workflow_state(
     company: &ScopedCompany,
-) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ApiError> {
+) -> Result<(Vec<OverlayWorkflow>, Vec<String>, Vec<String>), ApiError> {
     let record: Option<CompanyRecord> = company
         .runtime
         .store()
         .load(company.id())
         .await
         .map_err(ApiError)?;
+    // The company's `[globals].disable` rides along for the same reason the
+    // other two do: a route that resolved a global graph without it would serve
+    // one this company opted out of.
     Ok(record
-        .map(|r| (r.overlay_workflows, r.disabled_workflows))
+        .map(|r| {
+            (
+                r.overlay_workflows,
+                r.disabled_workflows,
+                r.manifest.globals.disable,
+            )
+        })
         .unwrap_or_default())
 }
 
@@ -452,9 +461,9 @@ async fn workflow_state(
 /// does this return `200 []`, so the console renders "no workflows yet" rather
 /// than a failure.
 async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSummary>>, ApiError> {
-    let (overlays, disabled) = workflow_state(&company).await?;
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
     let source_dir = company.runtime.source_dir();
-    let files = list_workflows_union(source_dir, &overlays);
+    let files = list_workflows_with_globals(source_dir, &overlays, &globals_disable);
     let mut seen: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
     let mut summaries: Vec<WorkflowSummary> = files
         .into_iter()
@@ -511,8 +520,8 @@ async fn get_workflow(
         ))));
     }
     let source_dir = company.runtime.source_dir();
-    let (overlays, disabled) = workflow_state(&company).await?;
-    let file = load_workflow_union(source_dir, &overlays, &wid)
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
+    let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
     // Issue #259: the version token rides out with the graph, so the console
@@ -713,7 +722,7 @@ async fn graph_with_version(
     file: WorkflowFile,
 ) -> Result<WorkflowGraph, ApiError> {
     let source_dir = company.runtime.source_dir();
-    let (overlays, disabled) = workflow_state(company).await?;
+    let (overlays, disabled, globals_disable) = workflow_state(company).await?;
     let editable = is_editable(source_dir, &overlays, &file.id);
     let version = editable
         .then(|| overlay_toml(&overlays, &file.id).map(workflow_version))
@@ -893,9 +902,9 @@ async fn set_workflow_enabled(
     // Answer with the graph, re-read, rather than a bare 204: the console
     // renders the row from this shape, and reading it back means the `enabled`
     // it shows is what the store holds rather than what the request asked for.
-    let (overlays, disabled) = workflow_state(&company).await?;
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
     let source_dir = company.runtime.source_dir();
-    let file = load_workflow_union(source_dir, &overlays, &wid)
+    let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
     let editable = is_editable(source_dir, &overlays, &wid);
@@ -1298,7 +1307,8 @@ async fn run_workflow(
     let overlays = overlay_workflows(&company)
         .await
         .map_err(IntoResponse::into_response)?;
-    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
+    let file =
+        load_workflow_with_globals(company.runtime.source_dir(), &overlays, &globals_disable, &wid)
         .map_err(|e| ApiError(e).into_response())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
@@ -1908,7 +1918,8 @@ async fn fix_from_run(
         )))
         .into_response());
     }
-    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
+    let file =
+        load_workflow_with_globals(company.runtime.source_dir(), &overlays, &globals_disable, &wid)
         .map_err(|e| ApiError(e).into_response())?
         .ok_or_else(|| {
             ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
