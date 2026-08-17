@@ -33,3 +33,7 @@ This company keeps the three built-in ledgers — `tasks` (the task board), `goa
 - Every other teammate is granted `record` on `tasks` and `read` on `goals` and `decisions`: each owns its own work on the board, and can see — but not unilaterally redefine — what the company has decided and is aiming for.
 - Read the relevant ledger with `read_ledger` before proposing or re-answering something; a closed row's reason is the cheapest way to avoid repeating a decision already made.
 
+## Write scope
+
+No agent here declares a write-scoped `context` entry — the seeded workspace has no single shared active-work document to confine to, so every teammate keeps the unconfined `workspace_write`/`workspace_create` default.
+

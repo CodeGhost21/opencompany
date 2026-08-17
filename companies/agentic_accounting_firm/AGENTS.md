@@ -32,3 +32,7 @@ This company keeps the three built-in ledgers — `tasks` (the task board), `goa
 - Every other teammate is granted `record` on `tasks` and `read` on `goals` and `decisions`: each owns its own work on the board, and can see — but not unilaterally redefine — what the company has decided and is aiming for.
 - Read the relevant ledger with `read_ledger` before proposing or re-answering something; a closed row's reason is the cheapest way to avoid repeating a decision already made.
 
+## Write scope
+
+Every specialist but `bookkeeper` declares an explicit `context` confining `workspace_write`/`workspace_create` to `Books/Q2 close.md` — this company's one shared active-work document — plus its own `Agents/<id>/` home, which stays writable regardless. `Standards/` and `Playbooks/` are left out of that grant: governance documents, read by everyone but reserved for the operator and `bookkeeper` (unconfined) to change.
+
