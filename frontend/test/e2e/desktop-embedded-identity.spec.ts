@@ -196,7 +196,7 @@ test("a relaunch at a new port re-addresses the connection instead of adding one
   });
 
   // Launch 1.
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
   await expect.poll(async () => (await embedded(page))[0]?.baseUrl, { timeout: 30_000 }).toBe(
     CLOSED_PORTS[0],
   );
@@ -266,7 +266,7 @@ test("the rows an older version left behind collapse on the next launch", async 
     ].map((p) => ({ ...p, defaultCompany: null, credential: { kind: "cookie" } })),
   });
 
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
   await expect.poll(async () => (await embedded(page)).length, { timeout: 30_000 }).toBe(1);
 
   const [adopted] = await embedded(page);

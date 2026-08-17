@@ -207,7 +207,7 @@ test("a desktop opens on its embedded host, not on its own origin", async ({
   // packaged run.
   await asDesktop(page, { embedded: new URL(baseURL ?? "http://127.0.0.1:8080").origin });
   await seedSameOriginProfile(page);
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
 
   // THE assertion, and the whole issue: no error panel. Before the fix this
   // read "Couldn't reach a company host at this origin" on every launch.
@@ -256,7 +256,7 @@ test("a remembered host does not take the launch just by being older", async ({
       ]),
     );
   }, DEAD_REMOTE);
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
 
   // Both hosts are registered, so the rail is drawn and there is a choice.
   await expect(page.locator('[data-testid^="connection-row-"]')).toHaveCount(2, {
@@ -307,7 +307,7 @@ test("a desktop waits for its own host rather than borrowing a remembered one", 
       ]),
     );
   }, DEAD_REMOTE);
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
 
   // The startup state, held rather than skipped past. The remembered host is
   // registered by now — it is restored at first paint — so this is a choice not
@@ -356,7 +356,7 @@ test("a paired host on plain http is refused, and says why", async ({ page, base
       ]),
     );
   }, INSECURE_REMOTE);
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
 
   // The embedded host still opens, and the console is usable. Refusing one row
   // must not cost the others — that is the property the whole multi-connection
@@ -403,7 +403,7 @@ test("an unencrypted host with no credential still connects", async ({ page, bas
       ]),
     );
   }, host);
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
 
   await expect(page.getByTestId("connection-row-conn-anonymous-http")).toHaveAttribute(
     "data-status",

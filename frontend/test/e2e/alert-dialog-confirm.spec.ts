@@ -90,7 +90,7 @@ async function holdNextRequest(
 test("confirming a task delete dismisses the dialog before the request lands", async ({
   page,
 }) => {
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
 
   // Create a card of our own so the test never deletes somebody else's row.
   const title = `e2e confirm-closes ${Date.now()}`;
@@ -98,11 +98,9 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   await page.locator("#new-prompt").fill(title);
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  // A board card is a real `<button draggable>` now that the board renders as
-  // the `tasks` ledger's columns. The old locator was the CSS selector
-  // `[role="button"]`, which matches an explicit *attribute* and not an
-  // implicit ARIA role — it found the previous markup's `<div role="button">`
-  // and finds nothing here. `draggable` is what identifies a card either way.
+  // `draggable` identifies a card whichever board is rendering it: the shared
+  // `LedgerBoard` puts the attribute on the wrapper it drags, so this holds for
+  // the task board and for a declared ledger's columns alike.
   const card = page.locator("[draggable=true]").filter({ hasText: title });
   await expect(card).toBeVisible({ timeout: 30_000 });
 
@@ -133,7 +131,7 @@ test("confirming a task delete dismisses the dialog before the request lands", a
   // Let the delete through and confirm the handler really did run: closing the
   // dialog must not have cost us the action.
   release("continue");
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
   await expect(page.locator("[draggable=true]").filter({ hasText: title })).toHaveCount(
     0,
     { timeout: 30_000 },

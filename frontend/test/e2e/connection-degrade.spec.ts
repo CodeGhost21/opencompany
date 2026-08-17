@@ -70,7 +70,7 @@ test("a host that is down reddens its own row and leaves the others working", as
   page,
 }) => {
   await seedSecondHost(page);
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
 
   // Both hosts are present, so the rail is showing.
   const rail = page.getByTestId("connection-rail");
@@ -100,7 +100,7 @@ test("selecting the dead host shows its failure without disturbing the live one"
   page,
 }) => {
   await seedSecondHost(page);
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
   await expect(page.getByTestId("connection-rail")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1);
 

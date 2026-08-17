@@ -141,7 +141,7 @@ test("a signed-out desktop offers the operator its own host admits", async ({
     // relaunch does anyway — see the note above.
     discoveryDelayMs: 750,
   });
-  await page.goto("/#/ledgers/tasks");
+  await page.goto("/#/tasks");
 
   const email = page.getByLabel("Email");
   await expect(email).toBeVisible({ timeout: 30_000 });
