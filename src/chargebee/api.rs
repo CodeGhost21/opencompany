@@ -847,9 +847,7 @@ mod tests {
         // would be a confident false negative about the billing ledger.
         let (result, _seen) = stub(
             vec![("GET /invoices", 200, r#"{"site":"acme"}"#)],
-            |client| async move {
-                list_invoices(&client, ListInvoicesArgs::default()).await
-            },
+            |client| async move { list_invoices(&client, ListInvoicesArgs::default()).await },
         )
         .await;
 
