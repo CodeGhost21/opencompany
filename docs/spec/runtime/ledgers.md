@@ -265,7 +265,7 @@ place of a compose box, rather than offering a form whose save the host refuses.
 The compose form reads `needsReason` off the declaration and asks for the reason
 *before* the save — the same rule the host enforces, met earlier.
 
-### The board renders here, and the standalone screen is unmounted
+### The board renders here, and the standalone screen is gone
 
 Any ledger with statuses renders as columns — one per status, in declaration
 order, labelled by the host. That falls out rather than being designed: a status
@@ -275,10 +275,30 @@ hiring pipeline is which call a drop makes. A native ledger's drop goes through
 ordinary `record_entry` merge. A drop into a status that demands a reason opens
 the compose form instead of writing, since the host refuses a silent close.
 
-The Tasks nav entry is gone and `#/tasks` is **unmounted, not retired** — the
-convention issue #302 set for Brain, Inbox and Finances. It stays routable
-because a *card* carries far more than a ledger row: a timeline, a plan brief, a
-discussion, attempts, a workflow proposal, steer controls. Reproducing any of
-that in the Ledgers screen would be a worse second copy, so a board card links
-to `#/tasks/<id>` and that screen keeps doing what it already does well.
-Re-listing `tasks` in the console's `NAV` brings the standalone board back.
+`TasksView` is **deleted**, not unmounted. What it did splits three ways:
+
+| what it did | where it is now |
+| --- | --- |
+| the Kanban board | the `tasks` ledger's columns, in Ledgers |
+| the "Add task" prompt box | `views/CreateTaskDialog.tsx`, offered by Ledgers on the board only |
+| hosting the card detail | the shell, at `#/tasks/<id>` |
+
+**`#/tasks/<id>` survives and is the point.** A card carries far more than a
+ledger row — a timeline, a plan brief, a discussion, its attempts, a workflow
+proposal, the steer controls — and none of that has anywhere to live on a
+column. Reproducing it in Ledgers would be a worse second copy, so the detail
+screen kept its route and lost its host; a board card links to it. `#/tasks`
+with no id forwards to the board's new address rather than rendering an empty
+frame, because an operator with the old bookmark should be told where it went.
+
+Creation keeps its own dialog rather than becoming a ledger compose form: the
+board's compose path is `POST …/tasks`, and `record_entry` is refused for this
+ledger precisely because entering a column fires work. Its labels and element
+ids are unchanged (`Add task`, `New task`, `#new-prompt`) — moving a dialog
+between screens should not rewrite the vocabulary an operator, or a test,
+already knows.
+
+The board's own e2e specs went with the screen (`board-columns`, `board-drag`).
+Specs that merely navigated through `#/tasks` on their way to testing something
+else were repointed to `#/ledgers/tasks`; the ones that drive `#/tasks/<id>` are
+untouched.
