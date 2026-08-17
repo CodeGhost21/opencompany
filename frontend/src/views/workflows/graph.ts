@@ -74,12 +74,27 @@ export interface InFlightRun {
  * not a partial trail, nothing — for the whole run, because the fold's only
  * way to learn a run's id was a `workflow_run_started` frame it had missed.
  * The window still wins when it has a start of its own: a live start is newer
- * than any history read, and a rerun must supersede the run before it. */
+ * than any history read, and a rerun must supersede the run before it.
+ *
+ * Issue #921: `settledRunIds` is the one thing the window does NOT get to win.
+ * A run is active here only while NO `workflow_run_finished` frame for it has
+ * arrived — so a stream that dies mid-run leaves the fold reporting `active`
+ * forever, with the node it was on stuck pulsing and the header still reading
+ * "running" three minutes after the host finished. The frame that would clear
+ * it is exactly the one that did not arrive, so waiting for it is waiting for
+ * the thing that broke.
+ *
+ * The host's run history is the authority on *settled*, and it is reachable by
+ * polling rather than by a frame: a run the host lists as no longer `running`
+ * IS finished, whatever the window still shows. The reported ok/error marks
+ * survive — `settle` only clears the orphaned `running` ones — so the canvas
+ * keeps its honest "how far did it get?" answer rather than blanking. */
 export function foldLiveRun(
   events: CompanyStreamEvent[],
   selectedId: string | null,
   graph: WorkflowGraph | null,
   inFlight?: InFlightRun | null,
+  settledRunIds?: ReadonlySet<string>,
 ): LiveRun | null {
   if (!selectedId || !graph) return null;
 
@@ -93,7 +108,9 @@ export function foldLiveRun(
     }
   }
   if (startIndex === -1)
-    return inFlight ? foldFromHistory(events, graph, inFlight) : null;
+    return inFlight
+      ? foldFromHistory(events, graph, inFlight, settledRunIds)
+      : null;
   const started = events[startIndex];
   if (started.type !== "workflow_run_started") return null;
 
@@ -104,14 +121,9 @@ export function foldLiveRun(
   // host from here (#382), not derived.
   const states = initialRunState(graph);
   const elapsed: Record<string, number> = {};
-  const active = applyFrames(
-    events,
-    startIndex + 1,
-    runId,
-    selectedId,
-    states,
-    elapsed,
-  );
+  const active =
+    applyFrames(events, startIndex + 1, runId, selectedId, states, elapsed) &&
+    !settledRunIds?.has(runId);
 
   settle(states, active);
   return { runId, states, elapsed, active, scheduled };
@@ -131,6 +143,7 @@ function foldFromHistory(
   events: CompanyStreamEvent[],
   graph: WorkflowGraph,
   inFlight: InFlightRun,
+  settledRunIds?: ReadonlySet<string>,
 ): LiveRun {
   const states = { ...initialRunState(graph), ...inFlight.states };
   const elapsed = { ...inFlight.elapsed };
@@ -139,7 +152,9 @@ function foldFromHistory(
   // (no run id) is deliberately NOT honoured here — with no start frame to pair
   // it with, "the run on screen" is a guess, and guessing a run settled would
   // clear a live node on a console that is watching it correctly.
-  const active = applyFrames(events, 0, inFlight.runId, null, states, elapsed);
+  const active =
+    applyFrames(events, 0, inFlight.runId, null, states, elapsed) &&
+    !settledRunIds?.has(inFlight.runId);
 
   settle(states, active);
   return {
