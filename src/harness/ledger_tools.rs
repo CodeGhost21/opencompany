@@ -320,6 +320,7 @@ impl Tool for ListLedgers {
 
 struct ReadLedger {
     ctx: Ledgers,
+    ledger_grants: Option<Vec<LedgerGrant>>,
 }
 
 #[async_trait]
