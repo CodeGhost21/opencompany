@@ -243,7 +243,7 @@ fn check(entries: &mut Entries, spec: &LedgerSpec) {
 ///
 /// Ordering happens here rather than in [`fold`], so the fold keeps saying one
 /// thing (first-seen order) and every reader picks its own view of it.
-pub fn ordered<'a>(entries: &'a [Entry], order: Order) -> Vec<&'a Entry> {
+pub fn ordered(entries: &[Entry], order: Order) -> Vec<&Entry> {
     let mut out: Vec<&Entry> = entries.iter().collect();
     if order == Order::Recent {
         out.sort_by_key(|entry| std::cmp::Reverse(entry.touched));

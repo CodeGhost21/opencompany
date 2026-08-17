@@ -100,7 +100,7 @@ pub fn ledger_brief(registry: &crate::ledger::Registry) -> String {
         brief.push_str(&format!("- `{}` — {purpose}", spec.slug));
         if spec.source == LedgerSource::Native {
             brief.push_str(&format!(" _(read-only here: {})_", spec.written_by));
-        } else if !spec.writable_by(&String::new()) {
+        } else if !spec.writable_by("") {
             brief.push_str(" _(writable by a named few; try it and the refusal says who)_");
         }
         brief.push('\n');
