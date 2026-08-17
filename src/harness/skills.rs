@@ -74,6 +74,12 @@ impl EffectiveSkills {
     /// [`SkillStateStore`](crate::ports::SkillStateStore).
     ///
     /// Resolution rules:
+    /// * the global baseline ([`crate::globals::skills`]) is the bottom layer:
+    ///   installed in every company, superseded by any same-slug company-dir
+    ///   bundle or `custom_doc` delta, and dropped by a disabling delta — which
+    ///   is how a company's `[globals].disable = ["skill:…"]` reaches here, as a
+    ///   synthesized disable beside the operator's own (see
+    ///   `harness::globals_skill_disables`);
     /// * a company-dir skill is included unless a delta disables it;
     /// * an enabled delta carrying a `custom_doc` supersedes any same-slug
     ///   company-dir body (and installs a console-authored skill outright);
@@ -90,27 +96,6 @@ impl EffectiveSkills {
         registry: &[SkillDoc],
         deltas: &[SkillState],
     ) -> crate::Result<Self> {
-        Self::materialize_with_globals(workspace_dir, source_dir, registry, deltas, &[])
-    }
-
-    /// [`materialize`](Self::materialize), honouring a company's
-    /// `[globals].disable`.
-    ///
-    /// The always-installed skills of the global baseline
-    /// ([`crate::globals::skills`]) are the **bottom** layer: a company-bundle
-    /// skill of the same slug supersedes one, an enabled delta carrying a
-    /// `custom_doc` supersedes one, and a disabled delta drops one — so a
-    /// company that has its own `web-research` gets its own, and one that wants
-    /// none gets none. Unlike the shared registry beside them, these are
-    /// installed rather than offered: every company has them without anybody
-    /// installing anything.
-    pub fn materialize_with_globals(
-        workspace_dir: PathBuf,
-        source_dir: Option<&Path>,
-        registry: &[SkillDoc],
-        deltas: &[SkillState],
-        disable: &[String],
-    ) -> crate::Result<Self> {
         // Parsed effective docs, and where an on-disk bundle can be copied from
         // (company-dir skills only). Custom docs carry their SKILL.md inline.
         let mut docs: BTreeMap<String, SkillDoc> = BTreeMap::new();
@@ -122,9 +107,6 @@ impl EffectiveSkills {
         //    are embedded in the binary, because a platform-provisioned tenant
         //    has no repository checkout to copy from.
         for doc in crate::globals::skills() {
-            if crate::globals::disabled(disable, "skill", &doc.slug) {
-                continue;
-            }
             custom_docs.insert(doc.slug.clone(), render_skill_md(doc));
             docs.insert(doc.slug.clone(), doc.clone());
         }
