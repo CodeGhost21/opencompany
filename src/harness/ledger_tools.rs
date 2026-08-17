@@ -692,6 +692,13 @@ impl Tool for DefineLedger {
     }
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<ToolResult> {
+        if !self.can_declare_ledgers {
+            return Ok(ToolResult::error(
+                "Refused: your manifest sets `can_declare_ledgers = false`. Ask the operator to \
+                 declare this axis, or to grant you `define_ledger`."
+                    .to_string(),
+            ));
+        }
         match ledgers::define(&self.ctx, &arguments).await {
             Ok(spec) => Ok(ToolResult::success(format!(
                 "Declared `{}`. It renders into `{}` and takes `record_entry` with \
