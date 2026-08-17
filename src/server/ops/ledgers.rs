@@ -179,16 +179,17 @@ struct RetireQuery {
     purge: bool,
 }
 
+/// The ledger context for this request's company.
+fn ctx(scope: &ScopedCompany) -> ledgers::Ledgers {
+    scope.runtime.as_ref().into()
+}
+
 /// The caller, named honestly.
 ///
 /// A signed-in person becomes a [`LedgerAuthor::human`]; the machine principal
 /// becomes a system author, which the service refuses every deletion from. That
 /// is deliberate and not an oversight: the platform credential is a tenant, not
 /// a person, and *only a person deletes* has to mean a person.
-fn ctx(scope: &ScopedCompany) -> ledgers::Ledgers {
-    scope.runtime.as_ref().into()
-}
-
 fn author(scope: &ScopedCompany) -> LedgerAuthor {
     match &scope.actor {
         Some(actor) if matches!(actor.kind, ActorKind::Operator | ActorKind::User) => {
