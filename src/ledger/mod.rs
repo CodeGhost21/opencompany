@@ -40,6 +40,7 @@
 //! ([`budget`]), so a declaration cannot grow its own file past what a reader —
 //! or a turn carrying it — is asked to hold.
 
+pub mod board;
 pub mod budget;
 pub mod derived;
 pub mod engine;
@@ -48,6 +49,7 @@ pub mod registry;
 pub mod spec;
 pub mod types;
 
+pub use board::{BoardColumn, COLUMNS as BOARD_COLUMN_TABLE};
 pub use engine::{Entries, Entry, fold, index, ordered, render};
 pub use registry::{MAX_DECLARED, Registry, builtins};
 pub use spec::{

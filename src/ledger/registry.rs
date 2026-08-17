@@ -56,11 +56,53 @@ pub const MAX_DECLARED: usize = 12;
 /// goes through the board's own routes and tools, which is where the dispatch
 /// edge, the planning pass and the run settle all live.
 ///
-/// The statuses are the board's columns verbatim
-/// ([`BOARD_COLUMNS`](crate::ports::tasks::BOARD_COLUMNS)). `done` is the only
-/// closed one: a card in review or paused is stopped, not finished, and calling
-/// either closed would make *what is still outstanding* answer wrong.
+/// Its statuses and sections are **built from** [`super::board::COLUMNS`]
+/// rather than written out again beside it. That table is the one declaration
+/// of the board's vocabulary; a column added there gains a status here, a
+/// section in the rendered file, an entry in
+/// [`BOARD_COLUMNS`](crate::ports::tasks::BOARD_COLUMNS), and a labelled column
+/// in the console, with no second list to remember.
+///
+/// `done` is the only closed one: a card in review or paused is stopped, not
+/// finished, and calling either closed would make *what is still outstanding*
+/// answer wrong.
 fn tasks() -> Value {
+    // One status per column, in board order, each carrying the label the
+    // console renders. `closed` is the table's, not a guess made here.
+    let statuses: Vec<Value> = super::board::COLUMNS
+        .iter()
+        .map(|column| {
+            json!({
+                "name": column.id,
+                "label": column.label,
+                "closed": column.closed,
+            })
+        })
+        .collect();
+    // One section per distinct heading, holding every column that named it.
+    // The file groups where the board does not: a reader wants *in flight* and
+    // *waiting on a person*, not six lists of one.
+    let sections: Vec<Value> = super::board::sections()
+        .into_iter()
+        .map(|first| {
+            let members: Vec<&str> = super::board::COLUMNS
+                .iter()
+                .filter(|column| column.section == first.section)
+                .map(|column| column.id)
+                .collect();
+            json!({
+                "heading": first.section,
+                "blurb": first.blurb,
+                "statuses": members,
+                "order": "recent",
+                // The archive is the one bounded section. "Recently done" is
+                // what it says and what it was not: unbounded, it becomes the
+                // largest thing in the file and answers a question — what did
+                // we just finish — that five rows answer as well as ninety do.
+                "cap": if first.closed { 5 } else { super::budget::MAX_LISTED },
+            })
+        })
+        .collect();
     json!({
         "slug": "tasks",
         "title": "Tasks",
@@ -85,43 +127,8 @@ fn tasks() -> Value {
             { "name": "note", "role": "prose",
               "description": "The card's running history." }
         ],
-        "statuses": [
-            { "name": "todo" },
-            { "name": "planning" },
-            { "name": "in_progress" },
-            { "name": "paused" },
-            { "name": "in_review" },
-            { "name": "done", "closed": true }
-        ],
-        "sections": [
-            {
-                "heading": "In flight",
-                "blurb": "Work a teammate is on, or that a pass is planning.",
-                "statuses": ["planning", "in_progress"],
-                "order": "recent"
-            },
-            {
-                "heading": "Waiting on a person",
-                "blurb": "Stopped, not finished. Each of these needs somebody to decide something.",
-                "statuses": ["paused", "in_review"],
-                "order": "recent"
-            },
-            {
-                "heading": "Not started",
-                "blurb": "Waiting for a person to say it should start. Most recently added or \
-                          returned first.",
-                "statuses": ["todo"],
-                "order": "recent"
-            },
-            {
-                "heading": "Recently done",
-                "blurb": "The five most recently finished. Kept, because a company that cannot \
-                          see what it already did repeats it.",
-                "statuses": ["done"],
-                "order": "recent",
-                "cap": 5
-            }
-        ],
+        "statuses": statuses,
+        "sections": sections,
         "checks": ["required-field", "known-status"]
     })
 }
