@@ -78,6 +78,7 @@ import {
   AWAITING_APPROVAL_LABEL,
   ApiError,
   STEP_FAILURE_LABEL,
+  type ApprovalSummary,
 } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { hasFocus, type TaskFocus } from "@/lib/task-output";
@@ -110,7 +111,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { effectDone } from "@/lib/language";
+import { approvalAction, effectDone } from "@/lib/language";
 
 import { labelFor, PRIORITY_STYLES, type TaskColumn } from "@/lib/board-columns";
 import { useBoardColumns } from "@/hooks/use-board-columns";
@@ -204,6 +205,13 @@ export function waitingBandHeight(millis: number): number {
   return Math.round(Math.min(112, Math.max(12, raw)));
 }
 
+/**
+ * A stable empty default for the `parked` prop (issue #883). A `[]` literal in
+ * the parameter list is a new array every render, which would re-run the memo
+ * that reads it on a screen with a 1s clock.
+ */
+const EMPTY_PARKED: readonly ApprovalSummary[] = [];
+
 /** `1h 04m 09s` / `4m 09s` / `9s`. */
 function formatDuration(millis: number): string {
   const s = Math.floor(millis / 1000);
@@ -265,6 +273,7 @@ export function TaskDetailView({
   company,
   taskId,
   focus,
+  parked = EMPTY_PARKED,
   onBack,
   onNavigate,
   onOpenThread,
@@ -274,6 +283,12 @@ export function TaskDetailView({
   client: OpenCompanyClient;
   company: string | null;
   taskId: string;
+  /**
+   * The company's parked approvals, for naming what this card is waiting on
+   * (issue #883). Optional and defaulting to empty, which renders the pre-#883
+   * row — this screen's own read is what decides *whether* it is waiting.
+   */
+  parked?: readonly ApprovalSummary[];
   /**
    * What the address asked this screen to open (issue #339): a pinned artifact
    * or an attempt's trace. Empty — the ordinary "open the card" navigation —
@@ -491,7 +506,12 @@ export function TaskDetailView({
               columns={columns}
             />
 
-            <AwaitingApprovalRow approvals={detail.approvals} now={now} />
+            <AwaitingApprovalRow
+              approvals={detail.approvals}
+              parked={parked}
+              taskId={detail.task.id}
+              now={now}
+            />
 
             {/* Issue #580: the built workflow awaiting approval, shown only while
                 the card sits In Review with a proposal. Apply creates the
@@ -1836,22 +1856,58 @@ function RunDrawer({
  * Renders nothing when nothing is pending — an always-present "no approvals"
  * line is the clutter the tab was removed for.
  */
-function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; now: number }) {
+function AwaitingApprovalRow({
+  approvals,
+  parked,
+  taskId,
+  now,
+}: {
+  approvals: TaskApproval[];
+  /**
+   * The company's parked queue, for naming (issue #883). Deliberately **not**
+   * the source of truth for whether the card is waiting: `approvals` is, because
+   * the host computed it with an ownership rule (`approval_owner`) that has an
+   * attempt-level key this side cannot see. These rows are matched into it by
+   * id, so an approval the host counts and the feed has not caught up on is
+   * still counted — it just goes unnamed for one poll rather than disappearing.
+   */
+  parked: readonly ApprovalSummary[];
+  taskId: string;
+  now: number;
+}) {
   const pending = pendingApprovalWait(approvals, now);
+  const named = useMemo(() => {
+    if (!pending) return null;
+    const ids = new Set(approvals.filter((a) => a.status === "pending").map((a) => a.id));
+    const hits = parked.filter((p) => ids.has(p.id));
+    // Only when *every* pending row is named, and there is exactly one. Naming
+    // "the" blocked call while a second one the feed has not delivered sits
+    // beside it would tell the operator one decision clears the card when two
+    // do — the precise mistake issue #883 is about.
+    return hits.length === 1 && pending.count === 1 ? hits[0] : null;
+  }, [approvals, parked, pending]);
   if (!pending) return null;
   const { waited } = pending;
+  const href = `#/approvals/${encodeURIComponent(taskId)}`;
 
   return (
     <div className="flex items-center gap-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2 text-xs">
       <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
       <span className="min-w-0 flex-1 text-status-blocked-text">
-        {pending.count === 1
-          ? "Waiting on an approval"
-          : `Waiting on ${pending.count} approvals`}{" "}
+        {/* Issue #883: name the call, not the mechanism. "Waiting on an
+            approval" is true of every one of these rows and therefore answers
+            nothing — the same complaint #372 made of the chat card and #846 of
+            the workflow one. `approvalAction` is the function both of those were
+            fixed with, so all three surfaces say one thing about one approval. */}
+        {named
+          ? `Waiting on your approval — ${approvalAction(named).toLowerCase()}`
+          : pending.count === 1
+            ? "Waiting on an approval"
+            : `Waiting on ${pending.count} approvals`}{" "}
         <span className="tabular-nums">for {formatDuration(waited)}</span>
       </span>
       <a
-        href="#/approvals"
+        href={href}
         className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
         aria-label={
           pending.count === 1

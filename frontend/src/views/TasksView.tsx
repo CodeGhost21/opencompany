@@ -32,6 +32,7 @@ import {
   CircleHelp,
   ClipboardList,
   FileText,
+  Hourglass,
   ListTree,
   Paperclip,
   Play,
@@ -47,12 +48,15 @@ import {
   type TaskPlan,
 } from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
+import type { ApprovalSummary } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { labelFor, PRIORITY_STYLES } from "@/lib/board-columns";
+import { approvalAction, timeAgo } from "@/lib/language";
+import { taskApprovalBlock, type TaskApprovalBlock } from "@/lib/task-approvals";
 import { useBoardColumns } from "@/hooks/use-board-columns";
 import {
   extraOutputCount,
@@ -94,6 +98,14 @@ function readTaskDetailId(): string | null {
  */
 const POLL_MS = 4000;
 
+/**
+ * A stable empty default for {@link TasksView}'s `approvals` prop.
+ *
+ * A `[]` literal in the parameter list is a new array identity on every render.
+ * Hoisting it keeps the default stable for anything downstream that compares by
+ * reference, on a screen that re-renders on a 4s poll.
+ */
+const EMPTY_APPROVALS: readonly ApprovalSummary[] = [];
 
 function priorityStyle(priority: string): string {
   return PRIORITY_STYLES[priority as keyof typeof PRIORITY_STYLES] ?? PRIORITY_STYLES.low;
@@ -110,7 +122,10 @@ export function TasksView({
   client,
   company,
   taskEventTick,
+  approvals = EMPTY_APPROVALS,
+  now,
   onOpenThread,
+  onReviewApprovals,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -122,11 +137,28 @@ export function TasksView({
    * reload.
    */
   taskEventTick?: number;
+  /**
+   * The company's parked approvals (issue #883), from the shell's existing feed
+   * poll. A paused card is blocked until every approval its turn parked has
+   * been decided, and the board's own `…/tasks` read carries none of them — so
+   * without this a paused card can only show a Resume button and no reason.
+   * Defaults to empty, which renders exactly the pre-#883 card.
+   */
+  approvals?: readonly ApprovalSummary[];
+  /** The feed's clock, for "blocked for 4m". Falls back to the browser's. */
+  now?: number;
   /** Opens the chat thread a card came from (issue #246). */
   onOpenThread?: (threadId: string) => void;
+  /** Opens the Approvals page filtered to one card (issue #883). */
+  onReviewApprovals?: (taskId: string) => void;
 }) {
   // The board's shape, from the host. Nothing here declares a column.
   const columns = useBoardColumns(client, company);
+  // The clock the "blocked since" labels measure against (issue #883). The
+  // feed's is preferred because it is stamped at the same read the approvals
+  // came from, so a card cannot report a wait longer than the data behind it;
+  // the browser's is the fallback for a caller that passes approvals without one.
+  const clock = now ?? Date.now();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -254,6 +286,12 @@ export function TasksView({
 
   // Re-dispatch a paused card (issue #111): a Resume moves it back into
   // "In progress", which is what hands it to its assignee again.
+  //
+  // Issue #883: this is not reached while the card is blocked on its own
+  // undecided approvals — `TaskItem` disables the button from the same
+  // `taskApprovalBlock` read, which is deliberately the *only* place the rule
+  // lives. A second copy of it here would be a branch nothing can execute, and
+  // therefore a branch nothing keeps true.
   async function resume(task: Task) {
     setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column: "in_progress" } : t)));
     try {
@@ -276,6 +314,10 @@ export function TasksView({
         company={company}
         taskId={detailId}
         focus={focus}
+        // Issue #883: so the detail row can name the blocked call rather than
+        // only counting it. The screen's own read still decides whether the
+        // card is waiting; this only supplies the words.
+        parked={approvals}
         onBack={closeDetail}
         onNavigate={openDetail}
         onOpenThread={onOpenThread}
@@ -327,8 +369,14 @@ export function TasksView({
             <TaskItem
               task={task}
               dragging={dragging}
+              // Issue #883: what this card is stopped behind, derived from the
+              // shell's approvals feed. `null` for every card that is not
+              // blocked, which is what keeps the pre-#883 card unchanged.
+              block={taskApprovalBlock(approvals, task.id)}
+              now={clock}
               onOpen={() => openCard(task)}
               onResume={() => void resume(task)}
+              onReview={onReviewApprovals ? () => onReviewApprovals(task.id) : undefined}
             />
           )}
         />
@@ -356,17 +404,33 @@ export function TasksView({
  * what a *task* looks like. That split is what lets one board serve both this
  * and a ledger a company declared — see that module's docs for why the card is
  * a slot rather than something built from field roles.
+ *
+ * Exported for `test/unit/task-blocked-card.test.ts` (issue #883). The
+ * paused card's central claim — Resume is *disabled* while the card's own
+ * approvals are undecided, because pressing it re-runs work that parks again —
+ * exists only at the rendered button, so a pure test of the derivation cannot
+ * reach it. Same exception `approval-batch-card.test.ts` earns, on the same
+ * grounds: the thing under test is what reaches the operator's hand.
  */
-function TaskItem({
+export function TaskItem({
   task,
   dragging,
+  block,
+  now,
   onOpen,
   onResume,
+  onReview,
 }: {
   task: Task;
   dragging: boolean;
+  /** What this card is stopped behind, or `null` when nothing (issue #883). */
+  block: TaskApprovalBlock | null;
+  /** The clock `block` was derived against, for its relative label. */
+  now: number;
   onOpen: () => void;
   onResume: () => void;
+  /** Opens the Approvals page filtered to this card (issue #883). */
+  onReview?: () => void;
 }) {
   return (
     <div
@@ -416,20 +480,93 @@ function TaskItem({
       {task.plan && <PlanBadgeRow plan={task.plan} />}
       {SHOWS_OUTPUT_LINK.has(task.column) && <OutputLinkRow task={task} />}
       {task.column === "paused" && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="mt-3 h-7 w-full"
-          onClick={(e) => {
-            // Don't let the click bubble to the card's open handler.
-            e.stopPropagation();
-            onResume();
-          }}
-        >
-          <Play className="mr-1.5 size-3.5" />
-          Resume
-        </Button>
+        <>
+          {block && <BlockedRow block={block} now={now} onReview={onReview} />}
+          <Button
+            variant="outline"
+            size="sm"
+            className={cn("h-7 w-full", block ? "mt-2" : "mt-3")}
+            // Issue #883: the button is disabled rather than hidden while the
+            // card is blocked. Hiding it would leave the card looking like it
+            // had no next action at all, which is the ambiguity being fixed —
+            // the operator has to be able to see that Resume is the wrong click
+            // right now, not wonder where it went. `title` carries the reason
+            // for a pointer; the row above carries it for everyone else.
+            disabled={block !== null}
+            title={
+              block
+                ? "Blocked — decide its approvals first; resuming re-runs the work from the start."
+                : undefined
+            }
+            onClick={(e) => {
+              // Don't let the click bubble to the card's open handler.
+              e.stopPropagation();
+              onResume();
+            }}
+          >
+            <Play className="mr-1.5 size-3.5" />
+            Resume
+          </Button>
+        </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Why a paused card is stopped, on the card itself (issue #883).
+ *
+ * The card used to carry a Resume button and nothing else, so "decided one of
+ * five, still waiting on four" and "wedged" were the same pixels — and Resume
+ * was the natural next click from both. It is the wrong click from the first:
+ * the turn continues on its own when the last decision lands (#469), so
+ * re-dispatching only re-runs the work and parks the same calls again.
+ *
+ * Names the calls, not the mechanism. One blocked call is quoted in full —
+ * through {@link approvalAction}, the same function the Approvals page and the
+ * chat card label their rows with, so all three say "Fetch a web page" rather
+ * than three different things about one approval. Several are counted instead,
+ * because five tool names is not something to read on a Kanban card; the count
+ * plus the Review link is, and the page it links to lists them.
+ */
+function BlockedRow({
+  block,
+  now,
+  onReview,
+}: {
+  block: TaskApprovalBlock;
+  /** The same clock the block was derived against. */
+  now: number;
+  onReview?: () => void;
+}) {
+  const only = block.count === 1 ? block.approvals[0] : null;
+  return (
+    <div className="mt-2 rounded-md border border-status-blocked/30 bg-status-blocked-soft px-2 py-1.5">
+      <div className="flex items-center gap-1.5 text-2xs font-medium text-status-blocked-text">
+        <Hourglass className="size-3 shrink-0" />
+        <span className="min-w-0 truncate">
+          {only ? approvalAction(only) : `Blocked on ${block.count} approvals`}
+        </span>
+      </div>
+      <div className="mt-0.5 flex items-center justify-between gap-2 text-2xs text-muted-foreground">
+        <span className="truncate">
+          Waiting for your approval · {timeAgo(block.since, now)}
+        </span>
+        {onReview && (
+          <button
+            type="button"
+            className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
+            onClick={(e) => {
+              // The card's own click handler opens task detail; this goes
+              // somewhere else, so it must not also do that.
+              e.stopPropagation();
+              onReview();
+            }}
+          >
+            Review
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -1258,6 +1258,12 @@ export function AppShell({
               // counter the chat's in-flight strip reads, so a card opened from
               // chat lands on the board without a reload.
               taskEventTick={taskEventTick}
+              // Issue #883: a paused card is blocked until every approval its
+              // turn parked is decided, and the board's own read carries none
+              // of them. This is the feed the sidebar badge already polls, so
+              // the card says what it is waiting on without a second request.
+              approvals={feed.approvals}
+              now={feed.now}
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -1265,6 +1271,11 @@ export function AppShell({
                 setActiveThreadId(threadId);
                 setView("conversation");
               }}
+              // Issue #883: "Review" on a blocked card opens the queue narrowed
+              // to that card. Through `navigate` rather than `setView` so the
+              // filter lands in the hash and survives a refresh and the Back
+              // button, like every other sub-page.
+              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
             />
           )}
           {view === "ledgers" && (
@@ -1325,6 +1336,13 @@ export function AppShell({
               client={client}
               company={company}
               feed={feed}
+              // Issue #883: `#/approvals/<taskId>` narrows the queue to one
+              // card, so "Review" on a blocked card lands on its approvals
+              // rather than on a page the operator has to search. Same
+              // unvalidated second segment every other sub-page gets — only
+              // this view knows whether the id matches anything parked, so it
+              // does that check itself and says so when it does not.
+              sub={sub}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}
             />
