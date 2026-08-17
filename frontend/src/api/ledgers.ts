@@ -41,6 +41,15 @@ export interface LedgerField {
 
 export interface LedgerStatus {
   name: string;
+  /**
+   * What a person reads, when it differs from the wire word.
+   *
+   * Absent for a company-declared ledger, whose statuses are already written to
+   * be read; present on the board, whose columns are `in_progress` and
+   * `in_review`. Carrying it on the wire is what let the console delete its own
+   * copy of the board's label table.
+   */
+  label?: string;
   /** Whether this status ends a row's life. A closed row is kept, not deleted. */
   closed?: boolean;
   /** Whether closing into it demands a reason. The host refuses without one. */
