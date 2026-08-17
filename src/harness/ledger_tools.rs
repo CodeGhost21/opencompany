@@ -74,6 +74,9 @@ pub fn ledger_tools(ctx: Ledgers, agent_id: String) -> Vec<Box<dyn Tool>> {
 
 /// The prompt section describing the surface.
 ///
+/// Sync over an already-resolved registry, because the prompt is assembled
+/// synchronously — see [`HarnessDeps::ledger_registry`](crate::harness::HarnessDeps::ledger_registry).
+///
 /// A **catalogue**, not a sentence saying the tools exist. The reader brief
 /// riemann started with said "`list_ledgers` names every one" and stopped,
 /// which puts the answer behind a call a model has to think to make — and a
@@ -81,10 +84,7 @@ pub fn ledger_tools(ctx: Ledgers, agent_id: String) -> Vec<Box<dyn Tool>> {
 /// a hypothetical one. So every ledger is named here with its purpose, built
 /// from the registry at prompt-assembly time, and a ledger declared afterwards
 /// is named in the next prompt built.
-pub async fn ledger_brief(ctx: &Ledgers) -> String {
-    let Ok(registry) = ledgers::registry(ctx).await else {
-        return String::new();
-    };
+pub fn ledger_brief(registry: &crate::ledger::Registry) -> String {
     let mut brief = String::from(
         "\n\n## The company's ledgers\n\nA ledger is the company's durable record of one kind of \
          thing — rows with an id, a status and a reason each closed one closed. Read one with \

@@ -682,6 +682,22 @@ pub fn build_agent(
         tools.extend(workspace_tools);
     }
 
+    // The company's own record. Ungated, and deliberately: an agent that can
+    // read the task board but not what the company already decided is exactly
+    // the split these ledgers exist to close, and every *write* here is
+    // `PermissionLevel::Write`, so a supervised policy parks it like any other
+    // consequence. The one thing no grant can confer is deletion — there is no
+    // delete tool at all. See `ledger_tools`.
+    let ledger_granted = deps.ledgers.is_some();
+    if let Some(store) = &deps.ledgers {
+        tools.extend(crate::harness::ledger_tools::ledger_tools(
+            crate::company::ledgers::Ledgers::new(company.clone(), store.clone())
+                .with_tasks_opt(deps.tasks.clone())
+                .with_workspace_opt(deps.workspace.clone()),
+            manifest_agent.id.clone(),
+        ));
+    }
+
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
     // Includes the operator's inline `prompt`, appended to the generated framing.
@@ -701,6 +717,15 @@ pub fn build_agent(
     if workspace_granted {
         persona.push_str(&crate::harness::workspace_tools::workspace_brief(
             workspace_writes,
+        ));
+    }
+
+    // The catalogue, not a pointer to one. A tool granted, unmentioned and
+    // never called is the observed failure, so every ledger is named with what
+    // it holds — see `ledger_brief`.
+    if ledger_granted {
+        persona.push_str(&crate::harness::ledger_tools::ledger_brief(
+            &deps.ledger_registry,
         ));
     }
 

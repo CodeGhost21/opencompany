@@ -72,6 +72,27 @@ impl Ledgers {
         self
     }
 
+    /// [`with_tasks`](Self::with_tasks), for a caller holding an `Option`.
+    #[must_use]
+    pub fn with_tasks_opt(
+        mut self,
+        tasks: Option<Arc<dyn crate::ports::tasks::TaskStore>>,
+    ) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
+    /// [`with_workspace`](Self::with_workspace), for a caller holding an
+    /// `Option`.
+    #[must_use]
+    pub fn with_workspace_opt(
+        mut self,
+        workspace: Option<Arc<dyn crate::ports::workspace::WorkspaceStore>>,
+    ) -> Self {
+        self.workspace = workspace;
+        self
+    }
+
     /// Wires the workspace, so writes publish their `derived/` file.
     #[must_use]
     pub fn with_workspace(
