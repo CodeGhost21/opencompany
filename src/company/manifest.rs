@@ -610,6 +610,52 @@ pub(crate) fn is_snake_case(id: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// Problems from every agent's `[[agent]].ledgers` grants, checked against
+/// `builtin_ledgers`.
+///
+/// An `access = "record"` grant that a built-in ledger's `writers` excludes is
+/// a manifest error rather than a silent tool refusal at call time — the two
+/// sources of truth (the agent's grant, the ledger's `writers`) must not
+/// disagree for a slug the manifest can actually see. A company-declared
+/// ledger is not checked here: it may not exist yet when the manifest is
+/// validated (the same reasoning as `context`'s missing-document rule), so any
+/// disagreement there surfaces as an ordinary tool refusal at call time
+/// instead. A free function, not a `CompanyManifest` method, so it can be
+/// pointed at a synthetic ledger list in a test without a real registry.
+fn ledger_grant_problems(agents: &[crate::company::Agent], builtin_ledgers: &[LedgerSpec]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for agent in agents {
+        let label = if agent.id.is_empty() {
+            "an agent".to_string()
+        } else {
+            format!("agent `{}`", agent.id)
+        };
+        let Some(grants) = &agent.ledgers else {
+            continue;
+        };
+        for grant in grants {
+            if grant.access != crate::company::LedgerAccess::Record {
+                continue;
+            }
+            let Some(spec) = builtin_ledgers
+                .iter()
+                .find(|spec| spec.slug.eq_ignore_ascii_case(grant.name.trim()))
+            else {
+                continue;
+            };
+            if !spec.writable_by(&agent.id) {
+                problems.push(format!(
+                    "{label} declares `ledgers` access `record` to `{}`, but that ledger's \
+                     `writers` does not name this agent — the two must agree. Either add `{}` to \
+                     `{}`'s `writers`, or change this grant to `read`.",
+                    spec.slug, agent.id, spec.slug
+                ));
+            }
+        }
+    }
+    problems
+}
+
 /// Parses a decimal USD string, rejecting anything non-numeric or negative.
 fn parse_usd(value: &str) -> Option<f64> {
     match value.trim().parse::<f64>() {
