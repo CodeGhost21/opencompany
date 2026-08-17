@@ -82,6 +82,80 @@ fn the_boards_statuses_are_its_columns() {
     assert_eq!(tasks.closing_statuses(), [crate::ports::tasks::COLUMN_DONE]);
 }
 
+/// The point of the table: one edit adds a column to the port's list, the
+/// ledger's statuses, the rendered file's sections and the console's labels.
+/// This asserts the three host-side halves agree, item for item — the check the
+/// hand-maintained lists could never make.
+#[test]
+fn the_board_ledger_is_built_from_the_column_table() {
+    let registry = Registry::build([]);
+    let tasks = registry.find("tasks").expect("built in");
+    assert_eq!(tasks.statuses.len(), crate::ledger::board::COLUMNS.len());
+    for (status, column) in tasks.statuses.iter().zip(crate::ledger::board::COLUMNS) {
+        assert_eq!(status.name, column.id);
+        assert_eq!(status.closed, column.closed);
+        // The label is what let the console delete its own copy of this table.
+        assert_eq!(status.label, column.label, "`{}` lost its label", column.id);
+        assert!(
+            !status.label.is_empty(),
+            "`{}` reaches the console as a wire word",
+            column.id
+        );
+    }
+}
+
+/// Every column renders somewhere in `derived/TASKS.md`. A column that named a
+/// heading no section carried would leave its cards out of the file entirely —
+/// the silent disappearance the column vocabulary exists to prevent, arrived at
+/// from the file's side.
+#[test]
+fn every_column_lands_in_a_rendered_section() {
+    let registry = Registry::build([]);
+    let tasks = registry.find("tasks").expect("built in");
+    for column in crate::ledger::board::COLUMNS {
+        assert!(
+            tasks
+                .sections
+                .iter()
+                .any(|section| section.statuses.iter().any(|name| name == column.id)),
+            "`{}` renders in no section of the file",
+            column.id
+        );
+    }
+    // And every section says what it is for, since a heading alone tells a
+    // reader nothing about which of two similar lists they are looking at.
+    for section in &tasks.sections {
+        assert!(
+            !section.blurb.is_empty(),
+            "`{}` has no blurb",
+            section.heading
+        );
+    }
+}
+
+/// The archive is the one bounded section, and it must stay bounded: unbounded,
+/// "recently done" becomes the largest thing in the file and is re-read on every
+/// turn that carries it.
+#[test]
+fn the_boards_archive_is_the_one_capped_section() {
+    let registry = Registry::build([]);
+    let tasks = registry.find("tasks").expect("built in");
+    let done = tasks
+        .sections
+        .iter()
+        .find(|section| {
+            section
+                .statuses
+                .iter()
+                .any(|name| name == crate::ports::tasks::COLUMN_DONE)
+        })
+        .expect("the archive section exists");
+    assert_eq!(done.cap, 5);
+    for section in tasks.sections.iter().filter(|held| held.heading != done.heading) {
+        assert_eq!(section.cap, crate::ledger::budget::MAX_LISTED);
+    }
+}
+
 #[test]
 fn a_declared_ledger_joins_the_built_ins() {
     let registry = Registry::build([declared("risks")]);
