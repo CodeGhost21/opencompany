@@ -116,6 +116,12 @@ export function CreateTaskDialog({
   const [prompt, setPrompt] = useState("");
   const [deliverable, setDeliverable] = useState<TaskDeliverable>("once");
   const [busy, setBusy] = useState(false);
+  // Above the `!open` return, and it has to be: every hook runs on every
+  // render or none do. Reading the columns *below* it made this component call
+  // one hook while closed and two while open, which React ends the render with
+  // (error #310) — the dialog then never appeared and the console error was the
+  // only trace. Found by the e2e suite, not by the type checker.
+  const columns = useBoardColumns(client, company);
 
   useEffect(() => {
     if (open) {
@@ -146,7 +152,6 @@ export function CreateTaskDialog({
     }
   }
 
-  const columns = useBoardColumns(client, company);
   const columnLabel = labelFor(columns, ADD_TASK_COLUMN);
 
   return (
