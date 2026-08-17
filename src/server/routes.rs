@@ -559,6 +559,7 @@ mod tests {
             memory_driver: Some("supermemory".to_string()),
             memory_url: Some(ENDPOINT.to_string()),
             memory_api_key: Some(KEY.to_string()),
+            allow_unproven_remote: true,
             ..Default::default()
         })
         .expect("a fully configured remote engine binds")

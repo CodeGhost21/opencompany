@@ -354,6 +354,27 @@ pub struct StorageSettings {
     /// `[inference].provider` — the manifest travels with the company, the
     /// environment describes the host.
     pub memory_driver: Option<String>,
+    /// Operator's explicit acceptance that the hosted memory adapters are not
+    /// yet conformance-proven (`OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE`).
+    ///
+    /// `OPENCOMPANY_MEMORY=remote` routes a company's entire memory at a
+    /// third-party HTTP service through an adapter that upstream covers with a
+    /// handful of happy-path tests — no error mapping, no pagination, no taint
+    /// preservation, no `Unsupported` behaviour. tinymemory#18 §E1 names a
+    /// driver conformance suite as the gate for turning this on at all, and
+    /// until that suite runs against those adapters, "it compiled" is the
+    /// strongest thing anyone can say about them.
+    ///
+    /// So the mode exists, refuses by default, and lifts on an explicit
+    /// assertion — the same shape as
+    /// [`allow_ephemeral_memory`](Self::allow_ephemeral_memory), and for the
+    /// same reason: the failure is silent and lands on a tenant's memory.
+    /// `false` (the [`Default`]) keeps the guard.
+    ///
+    /// This is a gate on *confidence*, not on configuration, so it is expected
+    /// to be deleted rather than lived with. Once the conformance suite covers
+    /// the adapters, this field and its refusal go.
+    pub allow_unproven_remote: bool,
     /// The hosted engine's endpoint (`OPENCOMPANY_MEMORY_URL`).
     pub memory_url: Option<String>,
     /// The hosted engine's credential (`OPENCOMPANY_MEMORY_API_KEY`).
@@ -382,6 +403,7 @@ impl std::fmt::Debug for StorageSettings {
             .field("memory_backend", &self.memory_backend)
             .field("data_dir", &self.data_dir)
             .field("allow_ephemeral_memory", &self.allow_ephemeral_memory)
+            .field("allow_unproven_remote", &self.allow_unproven_remote)
             .field("memory_driver", &self.memory_driver)
             .field("memory_url", &self.memory_url.as_ref().map(|_| "<set>"))
             .field(
@@ -425,7 +447,8 @@ impl StorageSettings {
     /// Reads the CLI-surface storage env vars (`OPENCOMPANY_STORAGE`,
     /// `OPENCOMPANY_MONGODB_URI`, `OPENCOMPANY_MONGODB_DB`,
     /// `OPENCOMPANY_TENANT_ID`, `OPENCOMPANY_MEMORY`, `OPENCOMPANY_DATA_DIR`,
-    /// `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`).
+    /// `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`,
+    /// `OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE`).
     pub fn from_env() -> Result<Self> {
         let kind: StorageKind = parse_env("OPENCOMPANY_STORAGE")?.unwrap_or_default();
         let memory_backend: MemoryBackend = parse_env("OPENCOMPANY_MEMORY")?.unwrap_or_default();
@@ -438,6 +461,7 @@ impl StorageSettings {
             memory_backend,
             data_dir: Some(crate::app::config::data_dir_from_env()),
             allow_ephemeral_memory: env_flag("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"),
+            allow_unproven_remote: env_flag("OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE"),
             memory_driver: non_empty("OPENCOMPANY_MEMORY_DRIVER"),
             memory_url: non_empty("OPENCOMPANY_MEMORY_URL"),
             memory_api_key: non_empty("OPENCOMPANY_MEMORY_API_KEY"),
@@ -483,6 +507,19 @@ pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOv
 fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     use crate::store::memory::{BoundMemory, MemoryDriverConfig, MemoryMode, open_driver};
 
+    if settings.memory_backend == MemoryBackend::Remote && !settings.allow_unproven_remote {
+        return Err(OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY=remote routes this company's entire memory at a hosted service \
+             through an adapter that is not yet covered by a driver conformance suite \
+             (tinymemory#18 §E1): its error mapping, pagination, and provenance preservation are \
+             untested, and a memory engine that loses provenance or silently drops a page fails \
+             in ways nothing surfaces until the memory is needed. If you accept that for this \
+             deployment, set OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE=1 to assert it. Otherwise \
+             use OPENCOMPANY_MEMORY=embedded for the durable in-pod engine, or the default \
+             OPENCOMPANY_MEMORY=store."
+                .to_string(),
+        ));
+    }
     let mode = match settings.memory_backend {
         MemoryBackend::Remote => MemoryMode::Remote,
         MemoryBackend::Null => MemoryMode::Null,
@@ -908,12 +945,74 @@ mod test {
         let settings = StorageSettings {
             memory_backend: MemoryBackend::Remote,
             memory_driver: Some("supermemory".into()),
+            // Past the confidence gate, so this asserts the *configuration*
+            // refusal rather than tripping over the one before it.
+            allow_unproven_remote: true,
             ..StorageSettings::default()
         };
         let error = open_memory_overlay(&settings)
             .expect_err("remote without an endpoint must refuse")
             .to_string();
         assert!(error.contains("OPENCOMPANY_MEMORY_URL"), "{error}");
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn remote_refuses_until_the_operator_accepts_an_unproven_adapter() {
+        // The hosted adapters have no conformance coverage yet
+        // (tinymemory#18 §E1). Routing a tenant's whole memory at one is a
+        // decision an operator makes deliberately, not one they arrive at by
+        // setting a single variable.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Remote,
+            memory_driver: Some("supermemory".into()),
+            memory_url: Some("https://memory.example".into()),
+            memory_api_key: Some("k".into()),
+            ..StorageSettings::default()
+        };
+        let error = open_memory_overlay(&settings)
+            .expect_err("a fully configured remote engine still needs the assertion")
+            .to_string();
+        assert!(
+            error.contains("OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE"),
+            "the refusal must name the knob: {error}"
+        );
+        // And it must name a way forward that is not "give up".
+        assert!(error.contains("OPENCOMPANY_MEMORY=embedded"), "{error}");
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn remote_opens_once_the_operator_has_accepted_it() {
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Remote,
+            memory_driver: Some("supermemory".into()),
+            memory_url: Some("https://memory.example".into()),
+            memory_api_key: Some("k".into()),
+            allow_unproven_remote: true,
+            ..StorageSettings::default()
+        };
+        let overlay = open_memory_overlay(&settings)
+            .expect("an accepted, fully configured remote engine binds")
+            .expect("remote yields an overlay");
+        assert_eq!(overlay.descriptor.backend, MemoryBackend::Remote);
+        assert_eq!(overlay.descriptor.driver_id, "supermemory");
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn the_gate_applies_only_to_remote() {
+        // `null` retains nothing by design, and `embedded` is the incumbent
+        // durable path — neither is routing memory at an unproven third party,
+        // so neither is behind this gate.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Null,
+            ..StorageSettings::default()
+        };
+        assert!(
+            open_memory_overlay(&settings).is_ok(),
+            "null must not be gated on the remote-adapter assertion"
+        );
     }
 
     #[cfg(feature = "tinymemory")]

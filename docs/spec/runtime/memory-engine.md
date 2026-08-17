@@ -32,9 +32,30 @@ back out (`/spec` says `embedded`), so a client never has to know both.
 
 | Env var | Required | Notes |
 |---|---|---|
+| `OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE` | yes | The operator accepting that the hosted adapters are not conformance-proven. See below. |
 | `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, or `cognee`. No default — see below. |
 | `OPENCOMPANY_MEMORY_URL` | yes | The engine's endpoint. |
 | `OPENCOMPANY_MEMORY_API_KEY` | yes | The outbound credential. |
+
+### `remote` refuses until you accept an unproven adapter
+
+`remote` routes a company's **entire memory** at a third-party HTTP service.
+The adapters that speak to those services are covered upstream by a handful of
+happy-path tests — no error mapping, no pagination, no taint preservation, no
+`Unsupported` behaviour. tinymemory#18 §E1 names a driver conformance suite as
+the gate for turning this on at all, and until that suite runs against those
+adapters, "it compiled" is the strongest available claim about them.
+
+So the mode exists, refuses by default, and lifts on
+`OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE=1`. Same shape as
+`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`, and for the same reason: a memory engine
+that loses provenance or silently drops a page fails in ways nothing surfaces
+until the memory is needed, which is far too late to notice.
+
+This is a gate on *confidence*, not on configuration, so it is meant to be
+deleted rather than lived with. When the conformance suite covers the hosted
+adapters, the flag and its refusal go — and `remote` becomes an ordinary choice
+needing only a driver, a URL, and a credential.
 
 **Every one of these refuses at boot when missing, naming the knob.** There is
 deliberately no fall back to the embedded engine. A company that believes it is
