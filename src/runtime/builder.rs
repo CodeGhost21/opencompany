@@ -3728,7 +3728,11 @@ mod test {
             let manifest = CompanyManifest::from_path(&path)
                 .unwrap_or_else(|e| panic!("{company} manifest must parse: {e}"));
 
-            for agent in &manifest.agents {
+            // The company's own roster only: the global baseline is appended to
+            // every manifest, and what it is granted is the company-wide belt
+            // like any teammate that requests nothing — not something this
+            // bundle's author decided, so not something this test pins.
+            for agent in manifest.agents.iter().filter(|agent| !agent.global) {
                 let grants = agent_effective_grants(&manifest.tools.allow, &agent.tools);
                 assert!(
                     grants_cover(&grants, "workspace"),

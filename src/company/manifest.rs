@@ -750,8 +750,15 @@ mod tests {
             &[],
         );
         let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
-        assert_eq!(manifest.agents.len(), 1);
-        assert_eq!(manifest.agents[0].id, "ceo");
+        // The global baseline is appended to every roster, so this asserts the
+        // company's own teammates — the thing this test is about.
+        let own: Vec<&str> = manifest
+            .agents
+            .iter()
+            .filter(|agent| !agent.global)
+            .map(|agent| agent.id.as_str())
+            .collect();
+        assert_eq!(own, ["ceo"]);
     }
 
     /// The bundle roster replaces the inline one — so a company that has moved
@@ -766,8 +773,15 @@ mod tests {
             ],
         );
         let manifest = CompanyManifest::from_path(dir.path()).expect("parses");
-        let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+        let ids: Vec<&str> = manifest
+            .agents
+            .iter()
+            .filter(|a| !a.global)
+            .map(|a| a.id.as_str())
+            .collect();
         assert_eq!(ids, ["ceo", "writer"]);
+        // The globals are appended after the company's own roster and none is
+        // tagged `orchestrator`, so who orchestrates is unchanged by them.
         assert_eq!(super::super::orchestrator_id(&manifest.agents), Some("ceo"));
     }
 
