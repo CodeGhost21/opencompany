@@ -266,9 +266,8 @@ plants is ignored for the checkpointer's own commands (which pass an explicit
 invocations are isolated from inherited config and hooks. Checkpoint failures
 are warned about but never replace a tool's successful result. The setting
 defaults to `false`, preserving existing workspaces unless an operator
-explicitly opts in. See
-[sandbox.md](orchestration/sandbox.md#-before-firing-a-command) for the security
-rationale.
+explicitly opts in. See [sandbox.md](orchestration/sandbox.md#checkpointing) for
+the security rationale.
 
 **The first two quotas are soft/advisory in the binary.** At boot `serve`
 measures the workspace (and `tmp/`) and emits an operator-visible
