@@ -259,7 +259,11 @@ impl Tool for ListLedgers {
             }
         };
         let mut out = String::new();
-        for spec in registry.specs() {
+        for spec in registry
+            .specs()
+            .iter()
+            .filter(|spec| ledger_access(&self.ledger_grants, &spec.slug).is_some())
+        {
             let entries = ledgers::entries(&self.ctx, spec).await.unwrap_or_default();
             out.push_str(&format!(
                 "- `{}` — {}\n  statuses: {}\n  {} open, {} closed\n",
