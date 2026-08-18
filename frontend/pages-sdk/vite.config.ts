@@ -1,0 +1,40 @@
+import path from "node:path";
+
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+
+// Builds `@opencompany/site` — the component subset + postMessage `client`
+// every agent-authored page imports — to `dist/pages-sdk/index.mjs` plus its
+// compiled CSS. Reuses the console's own `@/*` alias so the re-exported
+// `src/components/ui/*` files and `src/index.css` need no edits to build
+// here too.
+//
+// React/ReactDOM stay external: the host serves an import map that resolves
+// "react" and "react-dom/client" to a separately-built bundle (`react.mjs`,
+// from `vite.react.config.ts`), so a page's module graph never pulls in a
+// second copy of React alongside the one the import map already provides.
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "../src"),
+    },
+  },
+  build: {
+    outDir: path.resolve(__dirname, "../dist/pages-sdk"),
+    // The react.mjs build (a separate `vite build` invocation) writes into
+    // this same directory; each must leave the other's output alone.
+    emptyOutDir: false,
+    cssMinify: true,
+    lib: {
+      entry: path.resolve(__dirname, "index.ts"),
+      formats: ["es"],
+      fileName: () => "index.mjs",
+      cssFileName: "index",
+    },
+    rollupOptions: {
+      external: ["react", "react-dom", "react-dom/client", "react/jsx-runtime"],
+    },
+  },
+});
