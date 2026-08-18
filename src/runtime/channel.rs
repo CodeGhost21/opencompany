@@ -250,6 +250,30 @@ mod test {
         );
     }
 
+    /// The console's own pre-flight tells an author the same thing the host
+    /// does, and this fails if either side is reworded alone — the same
+    /// contract `destination_messages_match_the_console` holds for the other
+    /// destination rules (issue #260).
+    ///
+    /// It matters more here than elsewhere: the console's list and the host's
+    /// refusal disagreeing about which channels are real is exactly issue #981.
+    #[test]
+    fn the_consoles_pre_flight_says_the_same_thing() {
+        const CONSOLE_DIALOG: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/views/WorkflowCreateDialog.tsx"
+        ));
+        const TAIL: &str = "is not a workflow delivery channel — this runtime has:";
+
+        assert!(undeliverable_channel_message("operator", &["engineering"]).contains(TAIL));
+        assert!(
+            CONSOLE_DIALOG.contains(TAIL),
+            "frontend/src/views/WorkflowCreateDialog.tsx no longer says `{TAIL}` — the console's \
+             client-side pre-flight has drifted from the host's rule. Reword both sides together, \
+             or drop the pre-flight and surface the host's message on the failed save."
+        );
+    }
+
     #[tokio::test]
     async fn buffers_sent_messages() {
         let channel = OperatorChannel::new();

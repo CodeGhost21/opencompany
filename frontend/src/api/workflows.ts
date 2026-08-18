@@ -78,8 +78,9 @@ export interface WorkflowNode {
  * `owner` is resolved server-side from the company's admins and carries no
  * target — the graph names nobody, which is what keeps it safe by construction.
  * `email` names an address and only sends when the company grants `email` AND
- * the recipient has already written in. `channel` must name a channel the
- * deployment already wired.
+ * the recipient has already written in. `channel` must name a channel this
+ * company can deliver to — a desk chat or a connected channel, never the
+ * operator surface (issue #981).
  */
 export interface WorkflowDestination {
   kind: "owner" | "email" | "channel";
@@ -505,12 +506,21 @@ interface WiredChannelsResponse {
 
 /**
  * The chat channels this running company can deliver to — the real targets an
- * output node's `channel` destination may name (issue #813). `operator` is
- * always present; the rest are the enabled OpenHuman-provider manifest channels.
+ * output node's `channel` destination may name (issue #813): its desk chats and
+ * its enabled OpenHuman-provider manifest channels.
+ *
+ * **`operator` is not one of them** (issue #981). It is an in-memory response
+ * surface with no durable reader, so workflow delivery refuses it by name; the
+ * host used to include it here anyway, which offered authors the one target
+ * guaranteed to fail.
+ *
  * The console reads this to offer a picker instead of a free-text box that only
- * fails at delivery with `ChannelNotWired`. A host predating the route 404s; the
- * caller degrades to an empty list (the picker then falls back to free text)
- * rather than blocking authoring.
+ * fails at delivery with `ChannelNotWired`. An empty list has two causes and the
+ * fallback is the same for both: a host predating the route 404s, and a company
+ * with no desks and no connected channels genuinely has nowhere to deliver. The
+ * caller degrades to an empty list (the picker falls back to free text, and the
+ * save is refused server-side if the target is not deliverable) rather than
+ * blocking authoring.
  */
 export function listWiredChannels(
   client: OpenCompanyClient,
