@@ -325,8 +325,11 @@ describe("the consolidated approval card", () => {
   it("keeps a settled single approval natural", async () => {
     await render([ESPN], { a1: "approve" });
 
+    // Unlike the multi-item receipts above, a single-item card cannot know the
+    // turn's stillAwaiting count is zero — #561's neutral "recorded" wording,
+    // not a "picking it up now" claim this card has no basis for.
     expect(receipts()).toHaveLength(1);
-    expect(receipts()[0].textContent).toBe("Approved — the agent is picking it up now");
+    expect(receipts()[0].textContent).toBe("Approved — recorded");
     expect(receipts()[0].querySelector("details")).toBeNull();
   });
 

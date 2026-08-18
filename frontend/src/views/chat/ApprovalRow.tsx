@@ -75,9 +75,12 @@ function settledReceipt(approvals: ApprovalSummary[], decided: Record<string, Ve
   const declined = approvals.length - approved;
 
   // Preserve #561's established singular wording exactly. A one-action turn
-  // earns no extra count or disclosure furniture.
+  // earns no extra count or disclosure furniture. `undefined`, not `0`: this
+  // card only knows its own item settled, not that the turn's stillAwaiting
+  // count is zero — a sibling approval elsewhere in the same turn could still
+  // be open, and claiming "picking it up now" here would be a guess.
   if (approvals.length === 1) {
-    return approved === 1 ? approvedLine(0) : "Declined — recorded, and nothing will run";
+    return approved === 1 ? approvedLine(undefined) : "Declined — recorded, and nothing will run";
   }
   if (approved === approvals.length) {
     return `Approved ${actionCount(approved)} — the agent is picking it up now`;
