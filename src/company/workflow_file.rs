@@ -3339,6 +3339,32 @@ to = "done"
         assert_eq!(ids, vec!["good"]);
     }
 
+    /// A malformed overlay whose id collides with a global workflow must not
+    /// let the global slip into the list: `load_workflow_with_globals`
+    /// resolves the company's (broken) definition first and errors, so a list
+    /// entry backed by the global instead would be one the loader can never
+    /// actually return.
+    #[test]
+    fn list_with_globals_reserves_a_malformed_overlays_id_against_the_global() {
+        let taken = crate::globals::workflows()[0].id.clone();
+        let overlays = vec![OverlayWorkflow {
+            id: taken.clone(),
+            toml: "id = \"broken\"\nname =".to_string(),
+        }];
+
+        let listed = list_workflows_with_globals(None, &overlays, &[]);
+        assert!(
+            listed.iter().all(|f| f.id != taken),
+            "the global must not appear in place of the company's malformed definition: {listed:?}"
+        );
+
+        let loaded = load_workflow_with_globals(None, &overlays, &[], &taken);
+        assert!(
+            loaded.is_err(),
+            "the loader must surface the malformed overlay's error, not the global"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Console drift guard (issue #260)
     // -----------------------------------------------------------------------
