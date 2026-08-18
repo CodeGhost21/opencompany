@@ -428,6 +428,28 @@ test("a failed turn leaves a durable line, not a spinner", async ({ page }) => {
       ]),
     }),
   );
+
+  // The harness host cannot actually fail a turn on demand, so the journal
+  // read stands in for the `TurnFailed` line the runtime would otherwise have
+  // written — in the exact shape `chat/history` serves. What is asserted below
+  // is that the console renders that line, which is the durable-record
+  // behaviour the title promises rather than a status it invented.
+  await page.route("**/chat/history", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify([
+        {
+          id: "turn-e2e-2-failed",
+          channel: ENGINEERING.id,
+          author: "engineering",
+          text: "the turn did not finish",
+          atMillis: Date.now(),
+          mine: false,
+        },
+      ]),
+    }),
+  );
   await page.route("**/runs/turn-e2e-2", (route) =>
     route.fulfill({
       status: 200,
@@ -454,4 +476,9 @@ test("a failed turn leaves a durable line, not a spinner", async ({ page }) => {
   // It is allowed to show the row first — what it is not allowed to do is keep
   // showing it once the turn is known to be over.
   await expect(workingRow(page)).toHaveCount(0, { timeout: 30_000 });
+  // …and the journaled failure line is what took its place: the console shows
+  // what the durable record says instead of leaving a spinner behind.
+  await expect(
+    bubbles(page).filter({ hasText: "the turn did not finish" }),
+  ).toBeVisible({ timeout: 30_000 });
 });
