@@ -112,10 +112,7 @@ fn build() -> Baseline {
 fn build_agents(faults: &mut Vec<String>) -> Vec<Agent> {
     let files = generated::EMBEDDED_GLOBAL_AGENTS;
     let names = crate::company::agent_file::embedded_roster_names(files);
-    match crate::company::agent_file::load_agents_from(
-        // Only ever used to label a parse failure; the authored path is what a
-        // reader needs, and no filesystem path exists in a packaged install.
-        std::path::Path::new("globals"),
+    agents_from(
         &names,
         &|rel| {
             files
@@ -124,29 +121,49 @@ fn build_agents(faults: &mut Vec<String>) -> Vec<Agent> {
                 .map(|(_, body)| (*body).to_string())
                 .ok_or(std::io::ErrorKind::NotFound)
         },
-    ) {
-        Ok(agents) => agents
+        faults,
+    )
+}
+
+/// [`build_agents`], reading through `read` instead of the embedded table —
+/// separated out so a test can hand it one malformed file and one valid file
+/// without touching the shipped baseline.
+///
+/// Parses each file independently via
+/// [`parse_agents`](crate::company::agent_file::parse_agents) rather than
+/// [`load_agents_from`](crate::company::agent_file::load_agents_from)'s
+/// all-or-nothing [`Result`]: a company's roster fails the whole bundle on one
+/// bad file, but the global baseline must keep every global that *did* parse
+/// — the fault-isolation contract this module's docs promise.
+fn agents_from(
+    names: &[String],
+    read: &dyn Fn(&str) -> std::result::Result<String, std::io::ErrorKind>,
+    faults: &mut Vec<String>,
+) -> Vec<Agent> {
+    let (agents, problems) = crate::company::agent_file::parse_agents(names, read);
+    faults.extend(
+        problems
             .into_iter()
-            .filter(|agent| {
-                // A global tagged `orchestrator` would take the company's own
-                // roster's job in every company at once, since `orchestrator_id`
-                // prefers a tagged agent over declaration order. Refused here
-                // rather than trusted to review.
-                let tagged = agent.tier.as_deref() == Some(crate::company::ORCHESTRATOR_TIER);
-                if tagged {
-                    faults.push(format!(
-                        "global agent `{}` is tagged `tier = \"orchestrator\"` — a global teammate cannot orchestrate a company it has never seen, so it is dropped.",
-                        agent.id
-                    ));
-                }
-                !tagged
-            })
-            .collect(),
-        Err(err) => {
-            faults.push(format!("a global agent is malformed: {err}"));
-            Vec::new()
-        }
-    }
+            .map(|problem| format!("a global agent is malformed: {problem}")),
+    );
+
+    agents
+        .into_iter()
+        .filter(|agent| {
+            // A global tagged `orchestrator` would take the company's own
+            // roster's job in every company at once, since `orchestrator_id`
+            // prefers a tagged agent over declaration order. Refused here
+            // rather than trusted to review.
+            let tagged = agent.tier.as_deref() == Some(crate::company::ORCHESTRATOR_TIER);
+            if tagged {
+                faults.push(format!(
+                    "global agent `{}` is tagged `tier = \"orchestrator\"` — a global teammate cannot orchestrate a company it has never seen, so it is dropped.",
+                    agent.id
+                ));
+            }
+            !tagged
+        })
+        .collect()
 }
 
 fn build_workflows(faults: &mut Vec<String>) -> Vec<WorkflowFile> {
