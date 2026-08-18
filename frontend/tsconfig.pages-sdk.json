@@ -2,8 +2,7 @@
   "extends": "./tsconfig.app.json",
   "compilerOptions": {
     "composite": false,
-    "noEmit": true,
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.pages-sdk.tsbuildinfo"
+    "noEmit": true
   },
   "include": ["pages-sdk", "src"]
 }

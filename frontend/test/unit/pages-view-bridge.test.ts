@@ -181,18 +181,18 @@ describe("PagesView bridge", () => {
     const frame = iframe();
     expect(frame).not.toBeNull();
 
-    const cap = mintedCapability(frame as HTMLIFrameElement);
-    expect(cap).toBeTruthy();
+    const contentWindow = frame!.contentWindow as Window;
+    const postMessage = vi.spyOn(contentWindow, "postMessage").mockImplementation(() => {});
+    const caps: string[] = [];
+    loadFrame(frame as HTMLIFrameElement);
+    loadFrame(frame as HTMLIFrameElement);
+    for (const call of postMessage.mock.calls) {
+      const msg = call[0] as { type?: string; capability?: string };
+      if (msg?.type === "oc:init") caps.push(msg.capability as string);
+    }
+    expect(caps.length).toBe(2);
+    expect(caps[0]).toBeTruthy();
     // A second load must rotate the token — a stale one must not stay live.
-    postMessageSpyToContent(frame as HTMLIFrameElement);
+    expect(caps[0]).not.toEqual(caps[1]);
   });
 });
-
-function postMessageSpyToContent(frame: HTMLIFrameElement): void {
-  const contentWindow = frame.contentWindow as Window;
-  const first = mintedCapability(frame);
-  const second = mintedCapability(frame);
-  expect(first).toBeTruthy();
-  expect(second).toBeTruthy();
-  expect(first).not.toEqual(second);
-}
