@@ -1,9 +1,12 @@
 /**
  * What an approve actually promises (issue #561).
  *
- * Approving does not resume a suspended call — the host refuses a gated call,
- * mints a single-use grant and re-dispatches the agent (issue #243). Since
- * issue #469 it does that **once per turn, when the last decision that turn was
+ * Approving does not resume a suspended call in place — the host refuses a
+ * gated call, mints a single-use grant and re-dispatches (issue #243): a chat
+ * turn re-dispatches the agent, and since issue #899 (Stage 1) a blocked
+ * workflow run re-dispatches the run itself, so approving now continues that run
+ * automatically rather than leaving it for a manual re-run. Since issue #469 the
+ * re-dispatch happens **once per turn, when the last decision that turn was
  * blocked on lands**. So on a turn that parked four calls, three of the
  * operator's four clicks release nothing at all, and the console said "the
  * agent is completing the action" for every one of them. Measured on staging:
