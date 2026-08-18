@@ -654,4 +654,59 @@ mod tests {
         );
         assert!(!rendered.contains("mongodb://"), "no connection strings");
     }
+
+    #[tokio::test]
+    async fn spec_reports_the_default_memory_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        let body = spec_body(state).await;
+        // No overlay: the base storage backend serves memory, so there is no
+        // separate engine to name.
+        assert_eq!(body["memory"]["backend"], "store");
+        assert!(body["memory"]["driver_id"].is_null());
+        assert_eq!(body["memory"]["capabilities"], serde_json::json!([]));
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn spec_names_the_bound_memory_engine_but_never_its_endpoint_or_key() {
+        // The acceptance criterion from issue #914: `driver_id` is safe to
+        // surface, the URL and the credential are not — and `/spec` is
+        // unauthenticated, so this is the route where that matters most.
+        const KEY: &str = "sk-memory-super-secret-value";
+        const ENDPOINT: &str = "https://memory.internal.example";
+
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
+            memory_backend: crate::store::MemoryBackend::Remote,
+            memory_driver: Some("supermemory".to_string()),
+            memory_url: Some(ENDPOINT.to_string()),
+            memory_api_key: Some(KEY.to_string()),
+            allow_unproven_remote: true,
+            ..Default::default()
+        })
+        .expect("a fully configured remote engine binds")
+        .expect("remote yields an overlay");
+
+        let state = AppState::new(AppConfig::default())
+            .with_home(dir.path().to_path_buf())
+            .with_memory_overlay(overlay);
+
+        let body = spec_body(state).await;
+        assert_eq!(body["memory"]["backend"], "remote");
+        assert_eq!(body["memory"]["driver_id"], "supermemory");
+        // The mandatory three a hosted adapter advertises, so an operator can
+        // see the tree/graph families it does not have.
+        let caps = body["memory"]["capabilities"].to_string();
+        assert!(caps.contains("core"), "{caps}");
+        assert!(caps.contains("recall"), "{caps}");
+        assert!(caps.contains("portability"), "{caps}");
+
+        let rendered = body.to_string();
+        assert!(!rendered.contains(KEY), "/spec leaked the memory key");
+        assert!(
+            !rendered.contains("memory.internal.example"),
+            "/spec leaked the memory endpoint: {rendered}"
+        );
+    }
 }

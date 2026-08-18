@@ -1237,7 +1237,14 @@ async fn async_main() -> Result<()> {
             // the storage backend.
             if let Some(overlay) = opencompany::store::open_memory_overlay(&storage_settings)? {
                 state = state.with_memory_overlay(overlay);
-                println!("memory backend: {:?}", storage_settings.memory_backend);
+                // `as_str`, not `{:?}`: the enum's Debug name is `Tinycortex`
+                // while `/spec` and the docs call that engine `embedded`. An
+                // operator comparing a boot log against a status response should
+                // not have to work out that those are the same thing.
+                println!(
+                    "memory backend: {}",
+                    storage_settings.memory_backend.as_str()
+                );
             }
             // Platform (multi-tenant) auth: either credential enables the
             // provisioning/lifecycle surface. Without both the prosumer operator
