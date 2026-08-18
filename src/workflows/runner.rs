@@ -2583,6 +2583,72 @@ to = "done"
         );
     }
 
+    /// A run context with the dry flag set. `WorkflowRunContext::new` takes
+    /// `scheduled`, not `dry_run` — the dry flag defaults to false and is
+    /// flipped after construction, exactly as the run route does.
+    fn dry_context() -> WorkflowRunContext {
+        let mut ctx = WorkflowRunContext::new(false);
+        ctx.dry_run = true;
+        ctx
+    }
+
+    /// **Issue #1048.** The same graph as `t5`, dry-run: a target the real run
+    /// refuses must not report `ok`.
+    ///
+    /// Test run is the one control an operator has for checking a graph before
+    /// arming it on a schedule, so a green dry run followed by a real run that
+    /// cannot start is worse than no dry run at all — it converts "I checked it"
+    /// into a false belief.
+    ///
+    /// A loopback target is the lever because the upstream guard refuses
+    /// private/loopback addresses *regardless of the company's allowlist*
+    /// (see `t5_http_request_to_loopback_is_ssrf_denied`), so the verdict is
+    /// decidable from the URL alone — no DNS, no request, nothing performed.
+    #[tokio::test]
+    async fn a_dry_run_refuses_a_target_the_real_run_would_refuse() {
+        let src = r#"
+id = "dry-ssrf"
+name = "Dry SSRF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "http_request"
+name = "Fetch"
+[node.config]
+method = "GET"
+url = "http://127.0.0.1:9/"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "fetch"
+[[edge]]
+from = "fetch"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(src).expect("parses");
+        let err = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &dry_context(),
+        )
+        .await
+        .expect_err("a dry run must refuse a target the real run refuses");
+        assert!(
+            err.to_string().contains("http_request"),
+            "the dry refusal should name the node, as the live one does: {err}"
+        );
+    }
+
     // --- P2: the six new node kinds, end to end through the engine -----------
 
     /// Runs `src` through the full translate → compile → engine pipeline with a
