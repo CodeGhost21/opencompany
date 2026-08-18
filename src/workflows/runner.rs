@@ -297,6 +297,26 @@ async fn run_workflow_inner(
     // *outside* the capability bundle, so a hard abort that drops the engine future
     // (and with it the bundle and its board claim) still leaves every row already
     // collected readable here: a card is real once written, so it must stay listed.
+    // Issue #976: a graph whose only node is its trigger has nothing to execute.
+    // The engine runs it happily — there is no stage to fail — so it settles as
+    // an ordinary finished run, and a run row that says nothing is its own small
+    // lie: `QA Test Pipeline` on staging banked six of them. Said here, through
+    // the channel #638 built for exactly this shape of fact.
+    //
+    // A notice rather than an error, for the reason `notices` exists at all: an
+    // empty graph is not a failure. Nothing broke, nothing was attempted, and
+    // marking it failed would put a half-authored stub into the failure count
+    // next to runs that genuinely went wrong. Same call `NoDestinationConfigured`
+    // makes one level down (#925) — state the reason instead of leaving it to be
+    // inferred from an absence.
+    if !workflow.has_runnable_node() {
+        notices.push(crate::company::STAGELESS_WORKFLOW_NOTICE.to_string());
+        tracing::warn!(
+            company = %record.id,
+            workflow = %workflow.id,
+            "workflow run: the graph has no runnable node, so this run could not do anything"
+        );
+    }
     let board = super::caps::RunBoard::default();
     // Issue #881 / #880: the two sideways channels an agent node reports through
     // — that it blocked, and what it parked. Owned out here for exactly the

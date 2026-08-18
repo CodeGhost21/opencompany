@@ -131,9 +131,10 @@ pub use types::{
     grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
-    WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
-    WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef, list_source_workflows,
-    list_workflows_union, list_workflows_with_globals, load_company_workflows, load_workflow_union,
+    STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, WORKFLOW_DESTINATION_KINDS,
+    WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef,
+    WorkflowNodeKind, WorkflowRetryDef, list_source_workflows, list_workflows_union,
+    list_workflows_with_globals, load_company_workflows, load_workflow_union,
     load_workflow_with_globals, parse_workflow,
 };
 // Crate-internal only: the workflow creator (issue #69) builds a `RawWorkflow`
