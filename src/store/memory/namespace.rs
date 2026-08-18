@@ -73,8 +73,13 @@ impl Scope {
             Self::TaskResults => "task-results".to_string(),
             Self::Context => "context".to_string(),
             Self::Scratch => SCRATCH_SEGMENT.to_string(),
-            Self::Agent(id) => format!("agent/{}", sanitize_segment(id)),
-            Self::Desk(id) => format!("desk/{}", sanitize_segment(id)),
+            // `scope_member` rather than `sanitize_segment` directly: an empty
+            // id would otherwise yield `agent/`, and `child` would build a
+            // namespace ending in a separator — one that names the scope kind
+            // rather than any member of it. The company segment has its own
+            // empty-case handling in `workspace_segment`; these do not.
+            Self::Agent(id) => format!("agent/{}", scope_member(id)),
+            Self::Desk(id) => format!("desk/{}", scope_member(id)),
         }
     }
 }
@@ -156,6 +161,21 @@ fn workspace_segment(company: &str) -> String {
     }
 }
 
+/// An agent or desk id as a namespace segment, never empty.
+///
+/// `_` stands in for an id that sanitizes to nothing, so a scope always names a
+/// member rather than the scope kind itself. `Namespace::contains` is
+/// boundary-aware and would not over-match a sibling either way, but a namespace
+/// nothing can legitimately own should not be constructible.
+fn scope_member(raw: &str) -> String {
+    let cleaned = sanitize_segment(raw);
+    if cleaned.is_empty() {
+        "_".to_owned()
+    } else {
+        cleaned
+    }
+}
+
 /// Maps a raw identifier to the path-safe alphabet, without the hash suffix.
 ///
 /// Used for agent and desk segments, which sit *inside* an already-injective
@@ -164,8 +184,7 @@ fn workspace_segment(company: &str) -> String {
 /// single tenant's own data, not a cross-tenant leak, so it does not warrant
 /// making every namespace unreadable.
 fn sanitize_segment(raw: &str) -> String {
-    let cleaned: String = raw
-        .chars()
+    raw.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
                 c
@@ -173,17 +192,7 @@ fn sanitize_segment(raw: &str) -> String {
                 '_'
             }
         })
-        .collect();
-    // An empty id would yield the segment `agent/`, so `child` would build a
-    // namespace ending in a separator — a degenerate value that names the scope
-    // kind rather than any member of it. `contains` is boundary-aware and would
-    // not over-match a normal sibling, but a namespace nothing can legitimately
-    // own should not be constructible at all.
-    if cleaned.is_empty() {
-        "_".to_owned()
-    } else {
-        cleaned
-    }
+        .collect()
 }
 
 /// SHA-256 over the raw bytes, truncated to 128 bits. Stable across processes
