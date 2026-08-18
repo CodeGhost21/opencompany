@@ -30,6 +30,7 @@ import {
   SidebarInset,
   SidebarMenu,
   SidebarMenuBadge,
+  SidebarMenuDot,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -1192,7 +1193,20 @@ export function AppShell({
                     <span>{item.label}</span>
                   </SidebarMenuButton>
                   {item.view === "approvals" && pending > 0 && (
-                    <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                    <>
+                      <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                      {/* Issue #1018: the badge is the sidebar's only attention
+                          signal and `SidebarMenuBadge` hides itself on the
+                          collapsed rail, so a collapsed sidebar said nothing was
+                          waiting. The dot is the same `pending` value rendered
+                          so it survives 32px — not a second source, so it cannot
+                          disagree with the badge or fork the count contract
+                          #932 pins. Exactly one of the two is visible at a
+                          time. */}
+                      <SidebarMenuDot
+                        label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
+                      />
+                    </>
                   )}
                 </SidebarMenuItem>
               ))}
