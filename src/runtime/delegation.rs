@@ -1072,8 +1072,9 @@ impl<'a> DelegationRunner<'a> {
     ///
     /// The card is stamped with a [`TaskOutput`] whose source is
     /// [`TaskOutputSource::ChatTurn`] — the conversation this turn happened in,
-    /// which is `chat_id`, not the card's `origin_chat_id` (always `None` on an
-    /// adopted handler card) — carrying the workflows this turn authored.
+    /// which is `chat_id`, not the card's `origin_chat_id` (which since issue
+    /// #982 may carry the same thread, and never a different one) — carrying the
+    /// workflows this turn authored.
     /// The note stays — it is prose a person reads — but the *link* is what the
     /// board's contract is written in terms of (#339), and until #806 this card
     /// could not have one: `TaskOutput` required a `run_id` and an operator chat
@@ -1146,9 +1147,11 @@ impl<'a> DelegationRunner<'a> {
         // is the weakest producer, never one that outranks an attempt.
         //
         // The TURN's own `chat_id` is what addresses it — deliberately not the
-        // card's `origin_chat_id`, which is always `None` here by construction:
-        // `chat_handler_card` only adopts a card whose `origin_chat_id.is_none()`,
-        // so the #463 handler card this settles can never carry one. A turn with
+        // card's `origin_chat_id`. Since issue #982 an adopted handler card may
+        // carry one, and when it does it is this same thread by construction
+        // (adoption requires it), so the two agree; reading the turn's is still
+        // the honest source, because it is the conversation this stamp is about
+        // and it is defined even for a card that carries no origin. A turn with
         // no thread at all (a dispatched path) keeps the note-only behaviour
         // rather than getting a stamp pointing nowhere.
         match chat_id {
@@ -1889,8 +1892,9 @@ impl<'a> DelegationRunner<'a> {
     /// runs the same detector over the same words moments earlier. The match is
     /// deliberately narrow, and every clause is a property of a card **that
     /// handler** writes: its landing column, an assignee it is entitled to have,
-    /// no origin chat. `list` is newest-first, so the first match is the one just
-    /// written rather than a months-old card that happens to share a title.
+    /// and an origin thread that is this one. `list` is newest-first, so the
+    /// first match is the one just written rather than a months-old card that
+    /// happens to share a title.
     ///
     /// # The assignee clause is no longer "blank" (issue #982)
     ///
@@ -1909,6 +1913,11 @@ impl<'a> DelegationRunner<'a> {
     /// [`assignment_matches`] — the comparator the direct-card path already uses
     /// (issue #176) rather than a second one that could drift. A card assigned to
     /// somebody *else* is still refused, which is what the clause was protecting.
+    ///
+    /// The origin clause moved for the same reason and reads the same way: the
+    /// handler now stamps the thread it opened the card from, so `None` (an
+    /// unaddressed message) **or** this very thread is the handler's write, and
+    /// a card carrying somebody else's thread is still not ours to adopt.
     ///
     /// **Two landing columns, not one** (issue #576). The handler opens a
     /// person's card directly in Planning and a machine's in To-do, so pinning
@@ -1945,7 +1954,7 @@ impl<'a> DelegationRunner<'a> {
                 card.title == title
                     && (card.column == COLUMN_TODO || card.column == COLUMN_PLANNING)
                     && (card.assignee.is_empty() || self.addressed_to(chat_id, &card.assignee))
-                    && card.origin_chat_id.is_none()
+                    && (card.origin_chat_id.is_none() || card.origin_chat_id.as_deref() == chat_id)
             })
             .map(|card| card.id))
     }
@@ -4119,11 +4128,11 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let title = crate::company::task_intent::detect_task_intent(imperative)
             .expect("fixture must be a message the chat handler cards");
         let fx = Fixture::new();
-        // NOTE: no `origin_chat_id` on the seeded card, and that is not an
-        // oversight — `chat_handler_card` only adopts a card whose
-        // `origin_chat_id.is_none()`, so setting one here makes the card
-        // unadoptable and nothing settles at all. The conversation the stamp
-        // addresses is the TURN's, passed to `handle_operator_message` below.
+        // NOTE: no `origin_chat_id` on the seeded card. Since issue #982 one
+        // naming THIS turn's thread would be adopted too, but a card carrying a
+        // different thread is still unadoptable and nothing would settle at all.
+        // The conversation the stamp addresses is the TURN's, passed to
+        // `handle_operator_message` below.
         let handler = handler_card_in(title, COLUMN_TODO);
         TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
             .await
@@ -4525,6 +4534,95 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
             .expect("operator message handled");
 
         assert_eq!(turn.spawned_task.as_deref(), Some("handler-card"));
+    }
+
+    /// Issue #982 again, and the same shape one field over: the handler now
+    /// stamps the thread it opened the card from, so the origin clause has to
+    /// accept **this** thread as well as none. Without it the chip disappears
+    /// on exactly the messages the stamp was added for.
+    #[tokio::test]
+    async fn a_handler_card_stamped_with_this_turns_thread_is_adopted() {
+        let imperative = "draft the launch plan for next quarter";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        fx.tasks
+            .upsert(
+                &fx.record.id,
+                &TaskRecord {
+                    id: "handler-card".to_string(),
+                    title,
+                    note: None,
+                    column: COLUMN_PLANNING.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "engineer".to_string(),
+                    updated_at_millis: now_millis(),
+                    origin_chat_id: Some("dm:engineer".to_string()),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .expect("seed the handler's card");
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("engineer", imperative, Some("dm:engineer"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(turn.spawned_task.as_deref(), Some("handler-card"));
+    }
+
+    /// …and a card opened from a *different* conversation is still not ours,
+    /// which is the property that clause has always been holding.
+    #[tokio::test]
+    async fn a_handler_card_from_another_thread_is_not_adopted() {
+        let imperative = "draft the launch plan for next quarter";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        fx.tasks
+            .upsert(
+                &fx.record.id,
+                &TaskRecord {
+                    id: "another-threads-card".to_string(),
+                    title,
+                    note: None,
+                    column: COLUMN_PLANNING.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: "".to_string(),
+                    updated_at_millis: now_millis(),
+                    origin_chat_id: Some("eng_desk".to_string()),
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .expect("seed the card");
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", imperative, Some("dm:engineer"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turn.spawned_task, None,
+            "another conversation's card is not this message's card"
+        );
     }
 
     /// …and the relaxation is exactly as wide as it needs to be: a card

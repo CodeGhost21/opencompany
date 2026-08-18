@@ -1374,7 +1374,14 @@ async fn run_chat(
             priority: "medium".to_string(),
             assignee,
             updated_at_millis: crate::ports::now_millis(),
-            origin_chat_id: None,
+            // Issue #982: the thread this card was opened from, so the settle
+            // marker lands back in the conversation that asked for the work
+            // rather than only on the board. This is the field #151 added for
+            // exactly that (`relay_reply` answers in the origin thread), and the
+            // console already renders a marker in a DM channel — nothing there
+            // changes. `None` for an unaddressed message, which is every card
+            // this site opened before and therefore no change for one.
+            origin_chat_id: message.chat.clone(),
             parent_task_id: None,
             // Nothing has run yet, so there is no deliverable to point at
             // (issue #339). The first successful settle stamps it.
@@ -2887,6 +2894,51 @@ mode = "full"
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "…and the card is still opened");
         assert_eq!(tasks[0].assignee, "", "…with nobody guessed onto it");
+    }
+
+    /// The card remembers the thread it was opened from, so the marker that says
+    /// it settled lands back in the conversation that asked for the work.
+    ///
+    /// `origin_chat_id` is the field issue #151 added for exactly this, and the
+    /// console already renders the marker in whatever channel it names — the
+    /// route was simply never filling it in. An unaddressed message still opens
+    /// a card with no origin, which is every card this route opened before.
+    #[tokio::test]
+    async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .clone()
+            .oneshot(chat_to(CROSSED, Some("dm:designer")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(
+            tasks[0].origin_chat_id.as_deref(),
+            Some("dm:designer"),
+            "the thread as the console addressed it"
+        );
+
+        let r = app
+            .oneshot(chat_to("draft the investor update", None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        let unaddressed = tasks
+            .iter()
+            .find(|c| c.title == "Draft the investor update")
+            .expect("the second card");
+        assert_eq!(
+            unaddressed.origin_chat_id, None,
+            "an unaddressed message has no thread to answer in"
+        );
     }
 
     /// The console mints a DM channel id as `dm:<teammate-id>`, and that form is
