@@ -12,6 +12,7 @@ import {
   visibleProviderRows,
   type ProviderCategory,
 } from "@/lib/composio-catalog";
+import { accountSummary, tallyAccounts } from "@/lib/provider-grid";
 import type { GridProvider } from "@/lib/provider-grid";
 import { cn } from "@/lib/utils";
 
@@ -362,9 +363,21 @@ function ProviderTile({
   // answer than the tile's badge.
   const openable =
     row.route.kind === "composio" && (!row.connected || row.accounts.length > 0);
+  // One rule for counting accounts, shared with the detail panel (issue #923).
+  // Two reads used to meet here and disagree: the count was
+  // `row.accounts.length` — every account, whatever its state — while the badge
+  // gating it was `row.connected`, which the host defines as *at least one
+  // account ACTIVE*. So a Gmail holding one live account and five mid-handshake
+  // ones said "6 accounts connected", and a Notion holding three mid-handshake
+  // ones and no live one said "not connected" two inches above the three
+  // accounts it holds. Both now count through `tallyAccounts`.
+  const { live, pending } = tallyAccounts(row.accounts);
   const state = row.connected
-    ? row.accounts.length > 1
-      ? `${row.accounts.length} accounts connected`
+    ? live > 1
+      ? // Only the live ones. A host predating #404 sends no accounts at all
+        // while still reporting the toolkit connected, which is why the `via`
+        // wording below stays the answer for "connected, nothing to count".
+        (accountSummary(row.accounts) ?? "connected")
       : row.via.length > 0
         ? `connected via ${row.via.join(" + ")}`
         : "connected"
@@ -376,7 +389,12 @@ function ProviderTile({
           ? "managed by the platform"
           : row.route.kind === "unavailable"
             ? "not available here"
-            : "not connected";
+            : pending > 0
+              ? // Accounts held, none of them usable. "not connected" here is
+                // what contradicted the list below — an account mid-handshake
+                // is not the absence of an account.
+                (accountSummary(row.accounts) ?? "not connected")
+              : "not connected";
 
   const shell = cn(
     "flex size-full flex-col items-start justify-between gap-1 rounded-lg border p-2.5 text-left",

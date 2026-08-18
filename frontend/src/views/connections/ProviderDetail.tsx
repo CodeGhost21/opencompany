@@ -22,6 +22,7 @@ import {
   probedOn,
 } from "@/lib/connection-detail";
 import { toolkitSlug } from "@/lib/connections";
+import { accountSummary, tallyAccounts } from "@/lib/provider-grid";
 import type { GridProvider } from "@/lib/provider-grid";
 
 /**
@@ -269,7 +270,9 @@ function ComposioBody({
 }) {
   const { provider, noCredential, onConnectAnother, onDisconnectAccount } = subject;
   const accounts = provider.accounts ?? [];
-  const live = accounts.filter((a) => a.connected);
+  // Counted through the shared rule so this panel, the tile that opened it,
+  // and the summary line above all mean one thing by "connected" (issue #923).
+  const { live } = tallyAccounts(accounts);
 
   return (
     <>
@@ -285,13 +288,12 @@ function ComposioBody({
                 panel opened at all. */}
             Composio
           </Badge>
-          <span>
-            {live.length === 0
-              ? "not connected"
-              : live.length === 1
-                ? "1 account connected"
-                : `${live.length} accounts connected`}
-          </span>
+          {/* The same rule the tile grid states, so the panel and the tile that
+              opened it cannot describe one set of accounts two ways (issue
+              #923). This counted only live accounts already — correctly — but
+              collapsed "holds accounts, none usable" to "not connected", which
+              is the half the grid got wrong too. */}
+          <span>{accountSummary(accounts) ?? "not connected"}</span>
         </SheetDescription>
       </SheetHeader>
 
@@ -318,7 +320,7 @@ function ComposioBody({
           )}
         </section>
 
-        {live.length > 1 && (
+        {live > 1 && (
           // #819 wrote this paragraph to say the choice did not exist —
           // "`composio_execute` sends no connection id, so Composio resolves
           // it. Disconnect the one you do not want an agent to use." #820 is
