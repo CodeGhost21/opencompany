@@ -333,12 +333,7 @@ export function TasksView({
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold">Board</h2>
           <Badge variant="secondary">{tasks.length}</Badge>
-          <Button
-            size="sm"
-            variant="outline"
-            className="ml-1 h-7"
-            onClick={() => setCreating(true)}
-          >
+          <Button size="sm" className="ml-1 h-7" onClick={() => setCreating(true)}>
             <Plus className="size-4" />
             Add task
           </Button>
@@ -362,7 +357,7 @@ export function TasksView({
           rows={tasks}
           statusOf={(task) => task.column}
           loading={loading}
-          emptyHint="No cards"
+          emptyHint="Drop tasks here"
           onMove={(task, column) => void moveTo(task, column)}
           onMiss={() => toast.error("Drop the card on a column to move it.")}
           renderCard={(task, dragging) => (
