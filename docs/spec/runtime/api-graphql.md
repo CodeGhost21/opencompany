@@ -142,10 +142,16 @@ conversational surface) and the `/events` work feed
   the orchestrator — a DM, or any addressed thread — the runner also calls
   `open_direct_work_card`, which defers to `is_trackable_work` rather than to
   `triage_message`. That detector asks "is there any reason NOT to track this?"
-  and so accepts everything except an empty string, a syntactic question, and a
-  short acknowledgement. A message the documented Layer A classified as
-  `Chatter` could therefore still become a card by this door, which is how a
-  board came to hold 78 chat lines in review.
+  and so accepts everything except an empty string, a question **that names no
+  recognised work verb**, and a short acknowledgement.
+
+  The order of those rungs matters and is deliberate: a `WORK_VERBS` hit is
+  checked **before** question syntax, so *"Can you write up the incident
+  review?"* is tracked — it is a question in shape and a request for work in
+  substance, and the substance wins. Only a question with no work verb is
+  excluded. A message the documented Layer A classified as `Chatter` could
+  therefore still become a card by this door, which is how a board came to hold
+  78 chat lines in review.
 
   What closes it is the escalation verdict, which already ran and was
   discarded. On the abstention set only, the model is asked; an `Answer`

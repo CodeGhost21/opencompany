@@ -5197,6 +5197,114 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         );
     }
 
+    /// **Issue #984, the second caller.** `open_work_card` has two callers, and
+    /// the test above this one only drives the direct path. This drives the
+    /// hand-off path: the orchestrator queues `delegate_to_desk` on a message
+    /// the lexical layer abstained on and the model read as `chatter`.
+    ///
+    /// The shape mirrors `a_hand_off_runs_on_a_question_turn_but_opens_no_card`
+    /// exactly, because the requirement is the same one: only the **card**
+    /// stands down. The hand-off is not refused, the desk lead's turn really
+    /// runs, and the relayed answer still reaches the operator — a verdict that
+    /// silenced the company instead of the board would be a worse bug than the
+    /// one #984 reports.
+    ///
+    /// This is the test that would have caught #442's mistake, which put a
+    /// stand-down in one caller and left the other opening cards.
+    #[tokio::test]
+    async fn a_hand_off_of_a_message_the_model_calls_chatter_opens_no_card() {
+        let residue = "the deck looks good to me";
+        assert!(
+            crate::company::task_intent::triage_message_detailed(residue).abstained(),
+            "fixture must be a message no lexical rule decides"
+        );
+        assert!(
+            is_trackable_work(residue),
+            "and one the card detector would otherwise track, or this proves nothing"
+        );
+        let fx = Fixture::new();
+        let escalation = ScriptedTriage::new(crate::harness::triage::TriageVerdict::Chatter);
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling(
+                    "asking engineering",
+                    vec![handoff("take a look at the deck")],
+                ),
+                Turn::reply("looks fine to me too"),
+                Turn::reply("engineering agrees the deck is fine"),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .with_triage(&escalation)
+            .handle_operator_message("chief", residue, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued],
+            "a chatter verdict must NOT refuse the hand-off — it does not gate tools"
+        );
+        let calls = turns.calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "the orchestrator, the desk lead and the relay all ran: {calls:?}"
+        );
+        assert_eq!(
+            calls[1].0, "engineer",
+            "the desk lead really ran: {calls:?}"
+        );
+        assert_eq!(
+            turn.reply, "engineering agrees the deck is fine",
+            "and the operator still gets the relayed answer"
+        );
+        assert!(
+            fx.cards().await.is_empty(),
+            "but the hand-off card stands down: the model read this as conversation"
+        );
+        assert!(
+            turn.spawned_task.is_none(),
+            "and nothing is linked to a card"
+        );
+    }
+
+    /// The paired opposite, for the same reason the question pair is paired: a
+    /// "fix" that simply stopped opening hand-off cards would satisfy the test
+    /// above. A `work` verdict on the same abstaining message still cards.
+    #[tokio::test]
+    async fn the_same_hand_off_on_a_work_verdict_still_opens_its_card() {
+        let residue = "the deck looks good to me";
+        let fx = Fixture::new();
+        let escalation = ScriptedTriage::new(crate::harness::triage::TriageVerdict::Work);
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling(
+                    "asking engineering",
+                    vec![handoff("take a look at the deck")],
+                ),
+                Turn::reply("looks fine to me too"),
+                Turn::reply("engineering agrees the deck is fine"),
+            ],
+        );
+        fx.runner(&turns)
+            .with_triage(&escalation)
+            .handle_operator_message("chief", residue, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(
+            cards.len(),
+            1,
+            "a work verdict leaves the hand-off card the abstention would have opened"
+        );
+        assert_eq!(cards[0].assignee, "engineer");
+    }
+
     /// The same hand-off on a message that is NOT a question still opens its
     /// card, so the suppression above is keyed on the triage rather than having
     /// quietly disabled the #442 card path.
