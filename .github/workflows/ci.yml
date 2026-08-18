@@ -163,9 +163,8 @@ jobs:
       # `Report vendored openhuman drift` step's `git -C vendor/openhuman
       # rev-parse|fetch|merge-base|rev-list` — a different command that belongs
       # inline — nor `deploy-staging.yml`'s root-level `git submodule update
-      # --init --recursive`, which is a different shape fetching a different set
-      # (it also takes `vendor/tinyagents`, and runs against a `submodules:
-      # false` checkout).
+      # --init`, which is a different shape fetching the top-level OpenHuman
+      # checkout before the shared helper fills its nested vendor tree.
       - name: Vendored submodule init is not inlined
         run: |
           set -euo pipefail
@@ -675,9 +674,9 @@ jobs:
       # `--no-deps` is LOAD-BEARING — do not "simplify" it away. Cargo treats the
       # vendored `[patch]` crates as local packages, so an unscoped `-D warnings`
       # hard-fails on lints this repo neither owns nor can fix here (today:
-      # `large_enum_variant` in `vendor/tinyagents`), and the gate would never
-      # reach first-party code. Scoping to the primary package is what makes it
-      # meaningful.
+      # `large_enum_variant` in OpenHuman's nested `vendor/tinyagents`), and the
+      # gate would never reach first-party code. Scoping to the primary package
+      # is what makes it meaningful.
       - name: Clippy (openhuman, tinycortex)
         run: cargo clippy --locked --no-deps --features openhuman,tinycortex --all-targets -- -D warnings
 
@@ -1045,13 +1044,18 @@ jobs:
           # No `submodules` — unlike the Rust jobs this one resolves no vendored
           # manifests, and `vendor/openhuman` is a large checkout to skip.
 
-      # Node 22 tracks `frontend/Dockerfile`, which builds the shipped console
+      # Issue #858. `node-version-file`, NOT a literal — `frontend/.nvmrc` is
+      # the single place the console's Node version is written, and this is one
+      # of four jobs that used to hold their own copy of `22`. A literal here
+      # is a copy that can silently disagree with the one a contributor runs.
+      #
+      # It still tracks `frontend/Dockerfile`, which builds the shipped console
       # `FROM node:22-slim`. CI must compile on the version that produces the
-      # artifact; bump both together or this job stops being evidence for the
-      # thing that deploys.
+      # artifact; that file cannot read `.nvmrc`, so those two are the only pair
+      # left to bump together — and the Dockerfile carries a comment saying so.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -1131,8 +1135,125 @@ jobs:
       # Node-only and cheap; the rule itself is repository-wide.
       - run: ./scripts/ci/assert-md-line-cap.sh
 
+      # Issue #858. `pnpm-lock.yaml`, read by nothing until now.
+      #
+      # `npm ci` above is the fidelity guard for `package-lock.json`. There is a
+      # SECOND lockfile in that directory and it had no guard at all: nothing in
+      # this file mentions pnpm, and the `Desktop` job runs `npm ci` plus
+      # `npm run build` directly rather than `tauri build`, so it never reaches
+      # Tauri's `beforeBuildCommand` either. The file is not vestigial —
+      # `frontend/src-tauri/tauri.conf.json` declares `pnpm dev` / `pnpm build`,
+      # so a developer running `npm run tauri:dev` locally resolves through it.
+      # It went out of sync on `main` and stayed there until #857 regenerated
+      # it; the person who would have found out is whoever next built the
+      # desktop app.
+      #
+      # `--lockfile-only` installs NOTHING — no `node_modules`, ~200ms. It is a
+      # consistency check between two committed files, which is why it can ride
+      # this job without being able to flake on upstream availability the way a
+      # lane that actually resolved ranges would.
+      #
+      # `--trust-lockfile` skips pnpm 11's supply-chain policy pass, which
+      # re-verifies every entry against the registry — 15s and a network
+      # dependency, for an answer this step is not asking for. Without it this
+      # check would redden for reasons outside the diff, which is the exact
+      # property the `npm ci` note above exists to defend.
+      #
+      # Pinned `pnpm@11` via npx rather than a `packageManager` field: that
+      # field would make a corepack-enabled contributor's `npm ci` refuse to
+      # run, and npm is this project's primary resolver. The floor pnpm 9 fails
+      # to clear is declared in `engines.pnpm` instead — `pnpm-workspace.yaml`
+      # uses `allowBuilds`, and pnpm 9 rejects the whole file for having no
+      # `packages` key.
+      - name: Validate pnpm-lock.yaml against package.json
+        run: npx --yes pnpm@11 install --frozen-lockfile --lockfile-only --trust-lockfile
+        working-directory: frontend
+
+      # ...and again on the floor `engines.pnpm` declares. pnpm 11 is what a
+      # contributor who types `npx pnpm` gets today; 10 is what the manifest
+      # and `frontend/README.md` promise still works, and a floor nothing
+      # exercises is a claim rather than a contract — the same gap this change
+      # exists to close for Node. It is not hypothetical in the other
+      # direction: pnpm 9 does fail, on `pnpm-workspace.yaml`.
+      #
+      # A STEP, not a job. 147ms, and a separate job would mint a check name
+      # for something that cannot fail independently of the step above it.
+      #
+      # No `--trust-lockfile`: that flag is pnpm 11's, and 10 exits with
+      # `Unknown option`. Nothing is lost — `--lockfile-only` never reaches the
+      # registry pass the flag exists to skip.
+      - name: Validate pnpm-lock.yaml on the declared pnpm floor
+        run: npx --yes pnpm@10 install --frozen-lockfile --lockfile-only
+        working-directory: frontend
+
       # No lint step: the package declares no lint script. Adding one is a
       # separate decision, not something to smuggle in here.
+
+  # Issue #858. The console suite on whatever Node is current, ADVISORY.
+  #
+  # Every lane above pins the version in `frontend/.nvmrc`, so a break that only
+  # exists on a newer Node is invisible to all of CI while being the first thing
+  # a contributor hits — they get whatever they have installed. That is not
+  # hypothetical: #852 filed 57 failing tests as a `jsdom` caret-range bug and
+  # proposed pinning the dependency. jsdom was innocent on both axes. Node 25
+  # exposes WebStorage as an unflagged global, vitest's `populateGlobal` then
+  # skips `localStorage`, and `window.localStorage` resolves to an empty object
+  # (#857). The proposed pin would have closed the issue with the bug live.
+  #
+  # A version mismatch surfaces deep inside a dependency's surface area, nowhere
+  # near the thing that is wrong, so the honest fix is to make CI able to SEE
+  # the newer runtime rather than to keep guessing from the failure's shape.
+  #
+  # `continue-on-error: true` — deliberately advisory, and the trade is stated
+  # rather than assumed. Required, this lane would let a Node release redden
+  # pull requests that have nothing to do with it: the version it installs
+  # changes without anybody in this repo touching anything, which breaks the
+  # property that a red run is attributable to the diff. Advisory, it is
+  # ignorable — that is the cost. It is the right side of that trade only
+  # because the pinned lane above is what gates merges; this one exists to name
+  # a Node-skew break as one, early, in the place where it is cheap to read.
+  #
+  # A SEPARATE JOB rather than a matrix leg on `Console`: a matrix renames the
+  # check to `Console (22)` / `Console (current)`, and branch protection pins
+  # the name `Console`. Adding a version axis must not silently unpin the
+  # required check.
+  #
+  # Deliberately NOT the whole `Console` job's step list: no `build`, no policy
+  # greps. Those cannot fail for Node-version reasons — the typechecks and the
+  # unit suite are the steps where a runtime difference actually shows up, and
+  # they are the fast ones.
+  console-current-node:
+    name: Console (current Node, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `current` is setup-node's alias for the latest release line — the whole
+      # point of this lane is that it is NOT pinned, so `.nvmrc` is exactly what
+      # it must not read.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: current
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `--ignore-engines` has no npm equivalent, and none is wanted: `engines`
+      # declares `>=22`, so a newer Node satisfies it and `npm ci` is quiet.
+      # If this step ever fails on the engine check, the declaration is what is
+      # wrong, not the runner.
+      - run: npm ci
+        working-directory: frontend
+
+      - run: npm run typecheck
+        working-directory: frontend
+      - run: npm run typecheck:unit
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
 
   # Issue #428. The Playwright suite was type-checked by the `Console` job above
   # and executed by NOTHING, which is a worse blind spot than having no suite at
@@ -1173,9 +1294,11 @@ jobs:
           # `rust` job and nothing here resolves a cargo manifest, so the large
           # `vendor/openhuman` checkout would be pure cost.
 
+      # Node version from `frontend/.nvmrc`, like every other lane here —
+      # see the `Console` job's note (issue #858).
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -1267,9 +1390,11 @@ jobs:
           # No `submodules`, for the same reason as the lane above: the binary
           # arrives prebuilt and nothing here resolves a cargo manifest.
 
+      # Node version from `frontend/.nvmrc`, like every other lane here —
+      # see the `Console` job's note (issue #858).
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -1362,9 +1487,11 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev libsoup-3.0-dev
 
+      # Node version from `frontend/.nvmrc`, like every other lane here —
+      # see the `Console` job's note (issue #858).
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version-file: frontend/.nvmrc
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 

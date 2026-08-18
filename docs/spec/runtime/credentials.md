@@ -217,3 +217,20 @@ is `managed`, and even then they are the same value for different reasons.
 - **Two companies pasting the same key share one entity.** That cannot be
   prevented client-side; it is a deployment caveat, the same one the BYO Composio
   token already carries.
+- **Media generation does not read the projected tier.** `web_search`, chat
+  inference and embeddings all resolve through `TinyhumansTokenSource`, so a
+  hosted tenant's rotating pod token reaches them. `media_backend_from_env` does
+  not: it reads `OPENCOMPANY_MEDIA_KEY`, else a static `TINYHUMANS_API_KEY`, and
+  a projected token file alone leaves media unwired. This is a migration miss
+  from #189 rather than a decision, but it cannot be closed here — the upstream
+  media client takes a `String` bearer for the life of the process, so flattening
+  a 600-second projected token into it would trade "never works" for "works for
+  ten minutes". Fixing it properly means giving that client a resolvable
+  credential upstream, the same shape `SearchBackend` already has. Until then a
+  hosted deployment that wants media must also carry a **non-projected** key, and
+  `PlatformCredentialStatus::boot_warning` says so at boot (#879). That key
+  should be `OPENCOMPANY_MEDIA_KEY`, the supported per-surface override. A static
+  `TINYHUMANS_API_KEY` would also work, but it is the `docker compose` credential
+  and the explicitly unsupported self-host hatch; reaching for it here would make
+  that hatch load-bearing on the hosted path, which is a decision for whoever
+  closes the upstream gap rather than a workaround to settle by default.

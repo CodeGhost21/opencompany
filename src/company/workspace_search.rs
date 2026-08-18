@@ -57,6 +57,7 @@ use std::num::NonZeroUsize;
 
 use crate::Result;
 use crate::company::workspace_paths::{render_path, split_logical_path};
+use crate::company::workspace_scaffold::is_agent_hidden_path;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
@@ -179,6 +180,36 @@ pub async fn search_workspace(
     prefix: Option<&str>,
     limit: NonZeroUsize,
 ) -> Result<SearchOutcome> {
+    search_workspace_with_visibility(store, company, query, prefix, limit, |_| true).await
+}
+
+/// Search the workspace subset exposed to agents.
+///
+/// Operator REST and GraphQL search use [`search_workspace`] and retain the
+/// complete tree. Agent tools use this function so the operator-only
+/// `secrets/` subtree is discarded before either names or note bodies are
+/// considered.
+pub async fn search_workspace_for_agent(
+    store: &dyn WorkspaceStore,
+    company: &CompanyId,
+    query: &str,
+    prefix: Option<&str>,
+    limit: NonZeroUsize,
+) -> Result<SearchOutcome> {
+    search_workspace_with_visibility(store, company, query, prefix, limit, |path| {
+        !is_agent_hidden_path(path)
+    })
+    .await
+}
+
+async fn search_workspace_with_visibility(
+    store: &dyn WorkspaceStore,
+    company: &CompanyId,
+    query: &str,
+    prefix: Option<&str>,
+    limit: NonZeroUsize,
+    visible: impl Fn(&str) -> bool,
+) -> Result<SearchOutcome> {
     let needle = query.trim();
     if needle.is_empty() {
         return Err(OpenCompanyError::InvalidRequest(
@@ -214,6 +245,9 @@ pub async fn search_workspace(
         let Some(path) = render_path(node, &by_id) else {
             continue;
         };
+        if !visible(&path) {
+            continue;
+        }
         if let Some(scope) = &scope
             && !(path == *scope || path.starts_with(&format!("{scope}/")))
         {

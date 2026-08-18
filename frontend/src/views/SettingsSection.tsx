@@ -3,6 +3,7 @@ import {
   Blocks,
   ChartColumnBig,
   CreditCard,
+  Globe,
   Plug,
   type LucideIcon,
   Settings2,
@@ -15,6 +16,7 @@ import type { CompanyFeed } from "@/hooks/use-company";
 import { cn } from "@/lib/utils";
 import { BillingView } from "@/views/BillingView";
 import { ConnectionsView } from "@/views/ConnectionsView";
+import { HostingView } from "@/views/HostingView";
 import { McpServersView } from "@/views/McpServersView";
 import { PeopleView } from "@/views/PeopleView";
 import { SkillsView } from "@/views/SkillsView";
@@ -33,6 +35,9 @@ export const SETTINGS_PAGES = [
   // "where do I put my Chargebee key" searches for billing, not for a
   // third-party-accounts drawer.
   { id: "billing", label: "Billing", icon: CreditCard, hint: "Invoicing through Chargebee" },
+  // Beside Billing for the same reason it sits beside Connections: an operator
+  // looking for "where do I put my Vercel token" searches for hosting.
+  { id: "hosting", label: "Hosting", icon: Globe, hint: "Where this company's sites go live" },
   // "What this company knows how to do" read as capability the company performs
   // — the implication issue #569 exists to remove, set here *before* the tab
   // gets a chance to correct it. The siblings describe their content; so does
@@ -130,6 +135,12 @@ export function SettingsSection({ client, company, feed, sub, onNavigate, onFlag
             the note above `load` in BillingView. */}
         {page === "billing" && (
           <BillingView key={company ?? "self"} client={client} company={company} />
+        )}
+        {/* Same `key` remount as Billing, and for the same reason: a hosting
+            token typed for one company must not survive a company switch into
+            another company's Save. */}
+        {page === "hosting" && (
+          <HostingView key={company ?? "self"} client={client} company={company} />
         )}
         {page === "skills" && <SkillsView client={client} company={company} />}
         {page === "usage" && (

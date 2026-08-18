@@ -1,51 +1,63 @@
-import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
+// The task board — restored, and now driven by the `tasks` ledger.
+//
+// # What "ported to the ledger" actually changed
+//
+// The board used to carry its own column vocabulary: a `TASK_COLUMNS` literal
+// that had to be kept in step with the host's `BOARD_COLUMNS` by hand, and whose
+// own comment admitted a Rust test could not see it. It now asks. Columns, their
+// order, their labels and which of them ends a card's life all come from the
+// `tasks` ledger's statuses, which the host builds from one table
+// (`src/ledger/board.rs`). A column added there appears here, correctly
+// labelled, with no console release.
+//
+// What did **not** change is where a card's *content* comes from. A task is a
+// `Task`: a priority, an assignee, a plan brief, a published output, a
+// deliverable kind, a resume affordance for a paused run. None of that is a
+// ledger field, and the ledger's projection of the board deliberately does not
+// carry it — so this screen still reads `…/tasks` for its rows and renders them
+// itself. The ledger supplies the *shape* of the board; the task store supplies
+// what is on it.
+//
+// # And why the board itself is not here
+//
+// The columns, the counts, the drag mechanics and the three fixes behind issue
+// #334 live in [`LedgerBoard`](./LedgerBoard), which this screen hands a
+// `renderCard`. That is what stopped the Ledgers section growing a second,
+// thinner board that lost all three the moment it was written — which is exactly
+// what happened the first time.
+
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   CircleHelp,
   ClipboardList,
   FileText,
+  Hourglass,
   ListTree,
-  Loader2,
   Paperclip,
   Play,
   Plus,
   ScrollText,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import {
-  createTask,
   listTasks,
   patchTask,
-  type CreateTask,
   type Task,
-  type TaskDeliverable,
   type TaskPlan,
 } from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
+import type { ApprovalSummary } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { startVisiblePolling } from "@/lib/visible-poll";
-import { ADD_TASK_COLUMN, PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
+import { labelFor, PRIORITY_STYLES } from "@/lib/board-columns";
+import { approvalAction, timeAgo } from "@/lib/language";
+import { taskApprovalBlock, type TaskApprovalBlock } from "@/lib/task-approvals";
+import { useBoardColumns } from "@/hooks/use-board-columns";
 import {
   extraOutputCount,
   primaryLink,
@@ -53,15 +65,11 @@ import {
   type TaskFocus,
   type TaskLink,
 } from "@/lib/task-output";
-import { toast } from "sonner";
+import { LedgerBoard } from "./LedgerBoard";
+import { CreateTaskDialog } from "./CreateTaskDialog";
 import { TaskDetailView } from "./TaskDetailView";
 import { tallyPrerequisites } from "./TaskPlanBrief";
 
-/**
- * Reads the `#/tasks/<id>` sub-hash, or null on the bare board. The app shell's
- * `useHashView` only inspects the first path segment (`tasks`), so this second
- * segment is ours to own — no app-shell change needed to route the detail.
- */
 function readTaskDetailId(): string | null {
   try {
     const parts = window.location.hash.replace(/^#\/?/, "").split(/[/?]/);
@@ -91,57 +99,33 @@ function readTaskDetailId(): string | null {
 const POLL_MS = 4000;
 
 /**
- * The MIME type a dragged card stamps its id onto (issue #334).
+ * A stable empty default for {@link TasksView}'s `approvals` prop.
  *
- * The drop used to read the dragged id out of React state alone. That is a
- * silent single point of failure: a drag that began on anything other than a
- * card leaves the state null, and the drop handler then returned without a
- * word. Putting the id on the drag itself makes a drop self-describing.
- *
- * Filling the data store at all matters for a second reason: a drag whose store
- * is empty is aborted outright by Firefox and Safari, so the board's one
- * documented gesture never even started there.
- *
- * Every read and write of it is optional-chained. A real drag always carries a
- * `dataTransfer`; a synthesized `DragEvent` — which is how the e2e suite drives
- * these handlers — does not, and the `dragId` fallback covers that case.
+ * A `[]` literal in the parameter list is a new array identity on every render.
+ * Hoisting it keeps the default stable for anything downstream that compares by
+ * reference, on a screen that re-renders on a 4s poll.
  */
-const CARD_MIME = "application/x-opencompany-task";
-
-/**
- * How near the board's left or right edge a drag has to come before the board
- * starts scrolling itself, and how fast it goes once hard against that edge.
- *
- * The board is a horizontal scroller and, at six columns, wider than an
- * ordinary window: the last column sits off the right edge. HTML5
- * drag-and-drop does not scroll a nested scroll container on its own — a drag
- * parked on the edge moves it zero pixels — so without this the far column
- * cannot be reached by the very gesture the board's own hint recommends.
- */
-const EDGE_BAND_PX = 72;
-const EDGE_SPEED_PX = 16;
+const EMPTY_APPROVALS: readonly ApprovalSummary[] = [];
 
 function priorityStyle(priority: string): string {
   return PRIORITY_STYLES[priority as keyof typeof PRIORITY_STYLES] ?? PRIORITY_STYLES.low;
 }
 
-/** A column's board label, for messages the operator reads. */
-function columnLabel(id: string): string {
-  return TASK_COLUMNS.find((c) => c.id === id)?.label ?? id;
-}
+
 
 /**
- * The live Kanban board. Cards are read from and written to the host's
- * `…/tasks` routes; dragging a card into a column PATCHes it (moving one into
- * "In progress" is what dispatches it to its assignee on the embedded runtime),
- * and clicking a card opens its detail — where the agent's result shows up in
- * the note once the turn completes.
+ * The live task board. Cards are read from and written to the host's `…/tasks`
+ * routes; dragging a card into a column PATCHes it (moving one into
+ * "In progress" is what hands it to its assignee).
  */
 export function TasksView({
   client,
   company,
   taskEventTick,
+  approvals = EMPTY_APPROVALS,
+  now,
   onOpenThread,
+  onReviewApprovals,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -151,38 +135,34 @@ export function TasksView({
    * board re-reads itself whenever it changes, which is what makes *ask for
    * something in chat, watch it become work on the board* true without a
    * reload.
-   *
-   * A **counter, not the payload**, and that is the whole design. The board's
-   * cards come from one place (`GET …/tasks`); a frame only ever says
-   * "something moved". So this cannot suffer the frame-loss the workflow canvas
-   * had to fold an event *window* to avoid — two bumps collapsing inside one
-   * React batch still means exactly one thing: re-read. Carrying payloads here
-   * would inherit that problem for no gain, and would give the board's contents
-   * a second source that could disagree with the first.
-   *
-   * Absent when the board is rendered without a shell to subscribe for it, in
-   * which case the fallback poll is the only refresh — the same degradation a
-   * host with no `{scope}/events` gets.
    */
   taskEventTick?: number;
   /**
-   * Opens the chat thread a card came from (issue #246). Absent when the board
-   * is rendered somewhere with no conversation pane to jump to, in which case
-   * the detail screen states the origin without offering the jump.
+   * The company's parked approvals (issue #883), from the shell's existing feed
+   * poll. A paused card is blocked until every approval its turn parked has
+   * been decided, and the board's own `…/tasks` read carries none of them — so
+   * without this a paused card can only show a Resume button and no reason.
+   * Defaults to empty, which renders exactly the pre-#883 card.
    */
+  approvals?: readonly ApprovalSummary[];
+  /** The feed's clock, for "blocked for 4m". Falls back to the browser's. */
+  now?: number;
+  /** Opens the chat thread a card came from (issue #246). */
   onOpenThread?: (threadId: string) => void;
+  /** Opens the Approvals page filtered to one card (issue #883). */
+  onReviewApprovals?: (taskId: string) => void;
 }) {
+  // The board's shape, from the host. Nothing here declares a column.
+  const columns = useBoardColumns(client, company);
+  // The clock the "blocked since" labels measure against (issue #883). The
+  // feed's is preferred because it is stamped at the same read the approvals
+  // came from, so a card cannot report a wait longer than the data behind it;
+  // the browser's is the fallback for a caller that passes approvals without one.
+  const clock = now ?? Date.now();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [dragId, setDragId] = useState<string | null>(null);
-  const [overCol, setOverCol] = useState<string | null>(null);
-  // The open card's id, mirrored in `#/tasks/<id>` so the detail survives a
-  // refresh and honors back/forward.
   const [detailId, setDetailId] = useState<string | null>(readTaskDetailId);
-  // What the address asks the detail screen to open (issue #339): a pinned
-  // artifact, or an attempt's trace. Empty for a plain `#/tasks/<id>`, which is
-  // the ordinary "open the card" navigation and lands on the default tab.
   const [focus, setFocus] = useState<TaskFocus>(() =>
     readTaskFocus(window.location.hash),
   );
@@ -191,14 +171,6 @@ export function TasksView({
   // A real HTML5 drag fires a trailing click; suppress it so a drag never also
   // opens the detail dialog.
   const dragged = useRef(false);
-  // The horizontal scroller holding the columns, so a drag near its edge can
-  // scroll it (issue #334).
-  const boardRef = useRef<HTMLDivElement | null>(null);
-  // Pixels per frame the board is currently scrolling itself by, and the frame
-  // that is doing it. Both refs rather than state: this is driven by dragover
-  // at pointer rate and must not re-render the board on every move.
-  const edgeSpeed = useRef(0);
-  const edgeFrame = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -234,26 +206,16 @@ export function TasksView({
   //
   // Its own effect rather than a dependency of the one above, on purpose:
   // folding the tick in there would tear down and restart the fallback timer on
-  // every event, so a busy company — one event every few seconds — would keep
-  // resetting the interval and the fallback would effectively stop existing on
-  // exactly the companies that need it most.
-  //
-  // The ref is what keeps this to *changes*. The shell's counter starts at 0
-  // and keeps counting across route changes, so without it every mount — and
-  // every company switch, since `refresh` is a dependency — would fire a second
-  // load on top of the mount fetch above for a card nothing had announced.
+  // every event, so a busy company would keep resetting the interval and the
+  // fallback would effectively stop existing on exactly the companies that need
+  // it most.
   const seenTick = useRef(taskEventTick);
   useEffect(() => {
     if (taskEventTick === undefined || taskEventTick === seenTick.current) return;
     // Issue #581: the push half is gated too, or the poll gate above buys
-    // nothing on a busy company — a hidden tab would still re-read the whole
-    // board on every frame the stream delivers.
-    //
-    // The tick is deliberately NOT consumed on the way out. Marking it seen
-    // here would drop it: this effect does not re-run on a visibility change,
-    // so nothing would ever come back for it. Leaving it unseen means the
-    // board's staleness is settled by the poller's load-on-visible read
-    // instead, and the next frame after that still counts as a change.
+    // nothing on a busy company. The tick is deliberately NOT consumed on the
+    // way out — marking it seen here would drop it, since this effect does not
+    // re-run on a visibility change.
     if (document.visibilityState === "hidden") return;
     seenTick.current = taskEventTick;
     void refresh();
@@ -264,138 +226,20 @@ export function TasksView({
     const onHash = () => {
       setDetailId(readTaskDetailId());
       // Re-read the focus too, so a card link clicked while the detail is
-      // already open (a `+N more` row, or a second card's link) actually moves
-      // the screen rather than only changing the address bar.
+      // already open actually moves the screen rather than only changing the
+      // address bar.
       setFocus(readTaskFocus(window.location.hash));
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  const stopEdgeScroll = useCallback(() => {
-    edgeSpeed.current = 0;
-    if (edgeFrame.current !== null) {
-      cancelAnimationFrame(edgeFrame.current);
-      edgeFrame.current = null;
-    }
-  }, []);
-
-  /**
-   * Aims the board's self-scroll at wherever the drag currently is: full speed
-   * hard against an edge, easing to nothing at the band's inner lip, and off
-   * entirely across the middle of the board.
-   */
-  const edgeScrollTo = useCallback(
-    (clientX: number) => {
-      const board = boardRef.current;
-      if (!board) return;
-      const { left, right } = board.getBoundingClientRect();
-      const ramp = (depth: number) => Math.min(1, Math.max(0, 1 - depth / EDGE_BAND_PX));
-      let speed = 0;
-      if (clientX < left + EDGE_BAND_PX) speed = -EDGE_SPEED_PX * ramp(clientX - left);
-      else if (clientX > right - EDGE_BAND_PX) speed = EDGE_SPEED_PX * ramp(right - clientX);
-      if (speed === 0) {
-        stopEdgeScroll();
-        return;
-      }
-      edgeSpeed.current = speed;
-      if (edgeFrame.current !== null) return;
-      const step = () => {
-        const el = boardRef.current;
-        if (!el || edgeSpeed.current === 0) {
-          edgeFrame.current = null;
-          return;
-        }
-        el.scrollLeft += edgeSpeed.current;
-        edgeFrame.current = requestAnimationFrame(step);
-      };
-      edgeFrame.current = requestAnimationFrame(step);
-    },
-    [stopEdgeScroll],
-  );
-
-  // A drag interrupted by a view change (the detail screen replaces the board
-  // in place) must not leave a frame running against a detached node.
-  useEffect(() => stopEdgeScroll, [stopEdgeScroll]);
-
-  const openDetail = useCallback((id: string) => {
-    window.location.hash = `/tasks/${encodeURIComponent(id)}`;
-    setDetailId(id);
-    // An ordinary open carries no focus, and must clear any it inherited —
-    // otherwise opening a second card would re-apply the first card's artifact
-    // pin to a screen that has never heard of it.
-    setFocus({});
-  }, []);
-  const closeDetail = useCallback(() => {
-    window.location.hash = "/tasks";
-    setDetailId(null);
-    setFocus({});
-  }, []);
-
-  /**
-   * Lands a dropped card in `column`. `dropped` is the id the drag carried on
-   * its dataTransfer, which is authoritative; `dragId` is the fallback for a
-   * drop that arrives without one.
-   *
-   * Every exit from here now says something (issue #334). A drop that goes
-   * nowhere and reports nothing is indistinguishable from a frozen app, and
-   * that is what made one failed gesture read as "there is no way to do this".
-   * The one deliberate silence is a card landing back in its own column: that
-   * is a no-op, not a refusal.
-   */
-  async function moveTo(column: string, dropped: string | null) {
-    const id = dropped || dragId;
-    setDragId(null);
-    setOverCol(null);
-    if (!id) {
-      toast.error("That drop did not carry a card, so nothing moved.");
-      return;
-    }
-    const current = tasks.find((t) => t.id === id);
-    if (!current) {
-      toast.error("That card is no longer on the board. Reloading it now.");
-      void refresh();
-      return;
-    }
-    if (current.column === column) return;
-    // Optimistic move; reconcile with the server's echo (and revert on error).
-    setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, column } : t)));
-    try {
-      const saved = await patchTask(client, company, id, { column });
-      setTasks((ts) => ts.map((t) => (t.id === id ? saved : t)));
-      if (column === "in_progress") {
-        toast.success("Dispatched — the assignee is working on it.");
-        // The turn runs server-side; poll a touch sooner so the result shows.
-        setTimeout(() => void refresh(), 1500);
-      }
-    } catch (e) {
-      setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, column: current.column } : t)));
-      // The card has already snapped back by the time this is read, so the
-      // message carries the whole story: which card, where it was going, and
-      // the host's own words for why it would not go. The board validates
-      // nothing itself — `BOARD_COLUMNS` is the host's list — so the reason for
-      // a refusal only ever exists in the response.
-      toast.error(`Could not move "${current.title}" to ${columnLabel(column)}.`, {
-        description: e instanceof Error ? e.message : "the host refused the move",
-      });
-    }
+  function openDetail(id: string) {
+    window.location.hash = `#/tasks/${id}`;
   }
 
-  // Re-dispatch a paused card (issue #111): a Resume moves it back into
-  // "In progress", which is what hands it to its assignee again. Optimistic,
-  // reconciled against the server echo — the same shape as a drag-move.
-  async function resume(task: Task) {
-    setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column: "in_progress" } : t)));
-    try {
-      const saved = await patchTask(client, company, task.id, { column: "in_progress" });
-      setTasks((ts) => ts.map((t) => (t.id === task.id ? saved : t)));
-      toast.success("Resumed — the assignee is working on it.");
-      // The turn runs server-side; poll a touch sooner so the result shows.
-      setTimeout(() => void refresh(), 1500);
-    } catch (e) {
-      setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column: task.column } : t)));
-      toast.error(e instanceof Error ? e.message : "could not resume the card");
-    }
+  function closeDetail() {
+    window.location.hash = "#/tasks";
   }
 
   function openCard(task: Task) {
@@ -404,6 +248,61 @@ export function TasksView({
       return;
     }
     openDetail(task.id);
+  }
+
+  /**
+   * Moves a card into `column`.
+   *
+   * Optimistic, reconciled against the server echo, and **reverted out loud**.
+   * Every exit says something (issue #334): a drop that goes nowhere and
+   * reports nothing is indistinguishable from a frozen app, and that is what
+   * made one failed gesture read as "there is no way to do this". The one
+   * deliberate silence — a card landing back in its own column — never reaches
+   * here, because the board filters a no-op before it calls.
+   */
+  async function moveTo(task: Task, column: string) {
+    const was = task.column;
+    setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column } : t)));
+    try {
+      const saved = await patchTask(client, company, task.id, { column });
+      setTasks((ts) => ts.map((t) => (t.id === task.id ? saved : t)));
+      if (column === "in_progress") {
+        toast.success("Dispatched — the assignee is working on it.");
+        // The turn runs server-side; poll a touch sooner so the result shows.
+        setTimeout(() => void refresh(), 1500);
+      }
+    } catch (e) {
+      setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column: was } : t)));
+      // The card has already snapped back by the time this is read, so the
+      // message carries the whole story: which card, where it was going, and
+      // the host's own words for why it would not go. The board validates
+      // nothing itself — the columns are the host's — so the reason for a
+      // refusal only ever exists in the response.
+      toast.error(`Could not move "${task.title}" to ${labelFor(columns, column)}.`, {
+        description: e instanceof Error ? e.message : "the host refused the move",
+      });
+    }
+  }
+
+  // Re-dispatch a paused card (issue #111): a Resume moves it back into
+  // "In progress", which is what hands it to its assignee again.
+  //
+  // Issue #883: this is not reached while the card is blocked on its own
+  // undecided approvals — `TaskItem` disables the button from the same
+  // `taskApprovalBlock` read, which is deliberately the *only* place the rule
+  // lives. A second copy of it here would be a branch nothing can execute, and
+  // therefore a branch nothing keeps true.
+  async function resume(task: Task) {
+    setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column: "in_progress" } : t)));
+    try {
+      const saved = await patchTask(client, company, task.id, { column: "in_progress" });
+      setTasks((ts) => ts.map((t) => (t.id === task.id ? saved : t)));
+      toast.success("Resumed — the assignee is working on it.");
+      setTimeout(() => void refresh(), 1500);
+    } catch (e) {
+      setTasks((ts) => ts.map((t) => (t.id === task.id ? { ...t, column: task.column } : t)));
+      toast.error(e instanceof Error ? e.message : "could not resume the card");
+    }
   }
 
   // The detail screen replaces the board in place; the board keeps polling
@@ -415,6 +314,10 @@ export function TasksView({
         company={company}
         taskId={detailId}
         focus={focus}
+        // Issue #883: so the detail row can name the blocked call rather than
+        // only counting it. The screen's own read still decides whether the
+        // card is waiting; this only supplies the words.
+        parked={approvals}
         onBack={closeDetail}
         onNavigate={openDetail}
         onOpenThread={onOpenThread}
@@ -453,123 +356,38 @@ export function TasksView({
         </div>
       )}
 
-      <div
-        ref={boardRef}
-        onDragOver={(e) => {
-          // The columns preventDefault as well; this handler also covers the
-          // pixels between and around them, so the board keeps scrolling while
-          // a drag crosses a gap on its way to a far column.
-          e.preventDefault();
-          edgeScrollTo(e.clientX);
-        }}
-        onDragLeave={(e) => {
-          // Only when the pointer has genuinely left the board, not while it
-          // moves between two of the board's own children.
-          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) stopEdgeScroll();
-        }}
-        onDrop={(e) => {
-          // Columns claim their own drops and stop them here, so anything that
-          // reaches this handler landed on dead board pixels: the gap between
-          // two columns, the leading padding, the trailing gutter. Those used
-          // to swallow the whole gesture without a word (issue #334).
-          e.preventDefault();
-          stopEdgeScroll();
-          const id = e.dataTransfer?.getData(CARD_MIME) || dragId;
-          setDragId(null);
-          setOverCol(null);
-          if (id) toast.error("Drop the card on a column to move it.");
-        }}
-        className="flex min-h-0 flex-1 gap-4 overflow-x-auto py-4 pl-4"
-      >
-        {TASK_COLUMNS.map((col) => {
-          const items = tasks.filter((t) => t.column === col.id);
-          return (
-            <div
-              key={col.id}
-              onDragOver={(e) => {
-                e.preventDefault();
-                // Runs before the board's own dragover (this is the inner
-                // handler), and the board leaves it alone — so the cursor says
-                // "move" over a column and nothing over the dead pixels.
-                if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-                setOverCol(col.id);
-              }}
-              onDragLeave={() => setOverCol((c) => (c === col.id ? null : c))}
-              onDrop={(e) => {
-                e.preventDefault();
-                // Claim the drop, so anything still reaching the board's own
-                // handler is known to have missed every column.
-                e.stopPropagation();
-                stopEdgeScroll();
-                void moveTo(col.id, e.dataTransfer?.getData(CARD_MIME) ?? null);
-              }}
-              className={cn(
-                "flex min-h-0 w-72 shrink-0 flex-col rounded-xl border bg-card/40 transition-colors",
-                overCol === col.id && "border-primary/40 bg-accent/40",
-              )}
-            >
-              {/* New work enters the board in one place only (issue #206), and
-                  that entry point now lives in the board header rather than on
-                  this column. */}
-              <div className="flex items-center gap-2 px-3 py-2.5">
-                <span className="text-sm font-medium">{col.label}</span>
-                <span className="text-xs text-muted-foreground">{items.length}</span>
-              </div>
-              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
-                {loading && items.length === 0 ? (
-                  <Skeleton className="h-20 rounded-lg" />
-                ) : (
-                  items.map((t) => (
-                    <TaskItem
-                      key={t.id}
-                      task={t}
-                      dragging={dragId === t.id}
-                      onOpen={() => openCard(t)}
-                      onResume={() => void resume(t)}
-                      onDragStart={(e) => {
-                        dragged.current = true;
-                        setDragId(t.id);
-                        if (e.dataTransfer) {
-                          e.dataTransfer.effectAllowed = "move";
-                          // The id is what the drop reads back. The
-                          // `text/plain` copy is what makes the drag
-                          // well-formed for the browsers that abort one
-                          // carrying no data at all.
-                          e.dataTransfer.setData(CARD_MIME, t.id);
-                          e.dataTransfer.setData("text/plain", t.title);
-                        }
-                      }}
-                      onDragEnd={() => {
-                        setDragId(null);
-                        setOverCol(null);
-                        stopEdgeScroll();
-                        // Clear the drag-suppression shortly after, so a genuine
-                        // click that follows is honored.
-                        setTimeout(() => (dragged.current = false), 0);
-                      }}
-                    />
-                  ))
-                )}
-                {!loading && items.length === 0 && (
-                  <div className="rounded-lg border border-dashed py-6 text-center text-xs text-muted-foreground">
-                    Drop tasks here
-                  </div>
-                )}
-              </div>
-            </div>
-          );
-        })}
-        {/* Trailing gutter: flex scroll containers drop their padding-inline-end,
-            so this spacer keeps ~16px of breathing room past the last column. */}
-        <div aria-hidden className="w-4 shrink-0" />
+      <div className="flex min-h-0 flex-1 flex-col px-4 py-4">
+        <LedgerBoard
+          columns={columns}
+          rows={tasks}
+          statusOf={(task) => task.column}
+          loading={loading}
+          emptyHint="No cards"
+          onMove={(task, column) => void moveTo(task, column)}
+          onMiss={() => toast.error("Drop the card on a column to move it.")}
+          renderCard={(task, dragging) => (
+            <TaskItem
+              task={task}
+              dragging={dragging}
+              // Issue #883: what this card is stopped behind, derived from the
+              // shell's approvals feed. `null` for every card that is not
+              // blocked, which is what keeps the pre-#883 card unchanged.
+              block={taskApprovalBlock(approvals, task.id)}
+              now={clock}
+              onOpen={() => openCard(task)}
+              onResume={() => void resume(task)}
+              onReview={onReviewApprovals ? () => onReviewApprovals(task.id) : undefined}
+            />
+          )}
+        />
       </div>
 
       <CreateTaskDialog
         open={creating}
         onClose={() => setCreating(false)}
         onCreated={(created) => {
-          setTasks((ts) => [created, ...ts]);
           setCreating(false);
+          setTasks((ts) => [created, ...ts]);
         }}
         client={client}
         company={company}
@@ -578,27 +396,44 @@ export function TasksView({
   );
 }
 
-function TaskItem({
+/**
+ * One card on the task board.
+ *
+ * It no longer carries the drag handlers: [`LedgerBoard`](./LedgerBoard) wraps
+ * every card in the draggable element and owns the gesture, so this is purely
+ * what a *task* looks like. That split is what lets one board serve both this
+ * and a ledger a company declared — see that module's docs for why the card is
+ * a slot rather than something built from field roles.
+ *
+ * Exported for `test/unit/task-blocked-card.test.ts` (issue #883). The
+ * paused card's central claim — Resume is *disabled* while the card's own
+ * approvals are undecided, because pressing it re-runs work that parks again —
+ * exists only at the rendered button, so a pure test of the derivation cannot
+ * reach it. Same exception `approval-batch-card.test.ts` earns, on the same
+ * grounds: the thing under test is what reaches the operator's hand.
+ */
+export function TaskItem({
   task,
   dragging,
+  block,
+  now,
   onOpen,
   onResume,
-  onDragStart,
-  onDragEnd,
+  onReview,
 }: {
   task: Task;
   dragging: boolean;
+  /** What this card is stopped behind, or `null` when nothing (issue #883). */
+  block: TaskApprovalBlock | null;
+  /** The clock `block` was derived against, for its relative label. */
+  now: number;
   onOpen: () => void;
   onResume: () => void;
-  /** Takes the event so the card can stamp its id onto the drag (issue #334). */
-  onDragStart: (e: DragEvent<HTMLDivElement>) => void;
-  onDragEnd: () => void;
+  /** Opens the Approvals page filtered to this card (issue #883). */
+  onReview?: () => void;
 }) {
   return (
     <div
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
       onClick={onOpen}
       role="button"
       tabIndex={0}
@@ -645,20 +480,93 @@ function TaskItem({
       {task.plan && <PlanBadgeRow plan={task.plan} />}
       {SHOWS_OUTPUT_LINK.has(task.column) && <OutputLinkRow task={task} />}
       {task.column === "paused" && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="mt-3 h-7 w-full"
-          onClick={(e) => {
-            // Don't let the click bubble to the card's open handler.
-            e.stopPropagation();
-            onResume();
-          }}
-        >
-          <Play className="mr-1.5 size-3.5" />
-          Resume
-        </Button>
+        <>
+          {block && <BlockedRow block={block} now={now} onReview={onReview} />}
+          <Button
+            variant="outline"
+            size="sm"
+            className={cn("h-7 w-full", block ? "mt-2" : "mt-3")}
+            // Issue #883: the button is disabled rather than hidden while the
+            // card is blocked. Hiding it would leave the card looking like it
+            // had no next action at all, which is the ambiguity being fixed —
+            // the operator has to be able to see that Resume is the wrong click
+            // right now, not wonder where it went. `title` carries the reason
+            // for a pointer; the row above carries it for everyone else.
+            disabled={block !== null}
+            title={
+              block
+                ? "Blocked — decide its approvals first; resuming re-runs the work from the start."
+                : undefined
+            }
+            onClick={(e) => {
+              // Don't let the click bubble to the card's open handler.
+              e.stopPropagation();
+              onResume();
+            }}
+          >
+            <Play className="mr-1.5 size-3.5" />
+            Resume
+          </Button>
+        </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Why a paused card is stopped, on the card itself (issue #883).
+ *
+ * The card used to carry a Resume button and nothing else, so "decided one of
+ * five, still waiting on four" and "wedged" were the same pixels — and Resume
+ * was the natural next click from both. It is the wrong click from the first:
+ * the turn continues on its own when the last decision lands (#469), so
+ * re-dispatching only re-runs the work and parks the same calls again.
+ *
+ * Names the calls, not the mechanism. One blocked call is quoted in full —
+ * through {@link approvalAction}, the same function the Approvals page and the
+ * chat card label their rows with, so all three say "Fetch a web page" rather
+ * than three different things about one approval. Several are counted instead,
+ * because five tool names is not something to read on a Kanban card; the count
+ * plus the Review link is, and the page it links to lists them.
+ */
+function BlockedRow({
+  block,
+  now,
+  onReview,
+}: {
+  block: TaskApprovalBlock;
+  /** The same clock the block was derived against. */
+  now: number;
+  onReview?: () => void;
+}) {
+  const only = block.count === 1 ? block.approvals[0] : null;
+  return (
+    <div className="mt-2 rounded-md border border-status-blocked/30 bg-status-blocked-soft px-2 py-1.5">
+      <div className="flex items-center gap-1.5 text-2xs font-medium text-status-blocked-text">
+        <Hourglass className="size-3 shrink-0" />
+        <span className="min-w-0 truncate">
+          {only ? approvalAction(only) : `Blocked on ${block.count} approvals`}
+        </span>
+      </div>
+      <div className="mt-0.5 flex items-center justify-between gap-2 text-2xs text-muted-foreground">
+        <span className="truncate">
+          Waiting for your approval · {timeAgo(block.since, now)}
+        </span>
+        {onReview && (
+          <button
+            type="button"
+            className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
+            onClick={(e) => {
+              // The card's own click handler opens task detail; this goes
+              // somewhere else, so it must not also do that.
+              e.stopPropagation();
+              onReview();
+            }}
+          >
+            Review
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -785,168 +693,6 @@ function OutputLinkRow({ task }: { task: Task }) {
   );
 }
 
-/** How long a derived title may run before the full prompt moves to the note. */
-const TITLE_CAP = 80;
-
-/**
- * Splits a prompt into the card's `{title, note}` (issue #301).
- *
- * The dialog asks for one thing — what needs doing — so the card's two text
- * fields are derived rather than collected. The rule mirrors the host's own
- * chat task-intent derivation (`src/server/operator.rs`) and `delegate_to_desk`'s
- * `first_line(…, 80)`: the title is the prompt's first line, capped; the note
- * carries the **full** prompt only when the title was shortened from it, so a
- * one-liner does not duplicate itself onto its own card.
- *
- * The invariant that matters: the operator's full text always survives on the
- * card, in the title or the note. Epic #183 §4's planner reads it from there.
- */
-export function derivePromptCard(prompt: string): { title: string; note?: string } {
-  const full = prompt.trim();
-  const firstLine = full.split("\n")[0].trim();
-  const title =
-    firstLine.length > TITLE_CAP ? `${firstLine.slice(0, TITLE_CAP).trimEnd()}…` : firstLine;
-  return { title, note: title === full ? undefined : full };
-}
-
-/**
- * The once-vs-workflow options, in review order (issue #580). Shared by the
- * create dialog here and the edit dialog, so the two pickers can never offer a
- * different vocabulary than the wire's {@link TaskDeliverable}.
- */
-export const DELIVERABLE_OPTIONS: { value: TaskDeliverable; label: string; hint: string }[] = [
-  { value: "once", label: "Do it once", hint: "A one-off result." },
-  {
-    value: "workflow",
-    label: "Build me the workflow",
-    hint: "A reusable workflow you can open, edit and re-run.",
-  },
-];
-
-/**
- * New work enters the board through one prompt box (issue #301).
- *
- * Title/Note/Priority/Assignee used to be collected up front. They are not gone,
- * only moved: priority and assignee default on the host (`medium`, unassigned →
- * orchestrator) and are edited on the card afterwards, where #278 put the
- * picker. `column` is omitted on purpose so the *server's* intake default
- * decides where the card lands — the same spend gate the transcript's "Add to
- * board" relies on, keeping the human drag into In progress the only thing that
- * spends an agent turn.
- *
- * The one field it does collect beyond the prompt is the deliverable (issue
- * #580): once versus workflow is a decision about *what kind of thing* the card
- * produces, not a default the host can pick, so the operator states it here. It
- * still lands in To-do like any card — the builder pass fires only on the drag
- * into In progress.
- */
-function CreateTaskDialog({
-  open,
-  onClose,
-  onCreated,
-  client,
-  company,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onCreated: (t: Task) => void;
-  client: OpenCompanyClient;
-  company: string | null;
-}) {
-  const [prompt, setPrompt] = useState("");
-  const [deliverable, setDeliverable] = useState<TaskDeliverable>("once");
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (open) {
-      setPrompt("");
-      setDeliverable("once");
-    }
-  }, [open]);
-
-  if (!open) return null;
-
-  async function create() {
-    const { title, note } = derivePromptCard(prompt);
-    if (!title) return;
-    setBusy(true);
-    try {
-      const body: CreateTask = { title, note };
-      // Only `"workflow"` reaches the wire; `"once"` is the host default and is
-      // sent as nothing, so a one-off card's body is byte-identical to a
-      // pre-#580 one.
-      if (deliverable === "workflow") body.deliverable = "workflow";
-      const created = await createTask(client, company, body);
-      onCreated(created);
-      toast.success("Task created.");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not create the task");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const columnLabel =
-    TASK_COLUMNS.find((c) => c.id === ADD_TASK_COLUMN)?.label ?? ADD_TASK_COLUMN;
-
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      {/* `sm:` — DialogContent's own `sm:max-w-sm` beats an unprefixed width. */}
-      <DialogContent className="sm:max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>New task</DialogTitle>
-          <DialogDescription>Added to “{columnLabel}”.</DialogDescription>
-        </DialogHeader>
-
-        <div className="grid gap-1.5">
-          <Label htmlFor="new-prompt">What needs doing?</Label>
-          <Textarea
-            id="new-prompt"
-            autoFocus
-            // Textarea is `field-sizing-content`, so `rows` is inert — a
-            // min-height is what actually gives the box room.
-            className="min-h-32 resize-y"
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Describe the work. The first line becomes the card's title."
-          />
-        </div>
-
-        <div className="grid gap-1.5">
-          <Label htmlFor="new-deliverable">Deliverable</Label>
-          <Select
-            value={deliverable}
-            onValueChange={(v) => setDeliverable((v as TaskDeliverable) ?? "once")}
-          >
-            <SelectTrigger id="new-deliverable" data-testid="create-deliverable">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {DELIVERABLE_OPTIONS.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-2xs text-muted-foreground">
-            {DELIVERABLE_OPTIONS.find((o) => o.value === deliverable)?.hint}
-          </p>
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={busy}>
-            Cancel
-          </Button>
-          <Button onClick={() => void create()} disabled={busy || !prompt.trim()}>
-            {busy && <Loader2 className="mr-1.5 size-4 animate-spin" />}
-            Create
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 function initials(name: string): string {
   return name

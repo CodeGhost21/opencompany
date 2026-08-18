@@ -42,7 +42,7 @@ use tinyflows::caps::WorkflowResolver;
 use tinyflows::error::{EngineError, Result as TfResult};
 use tinyflows::model::WorkflowGraph;
 
-use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_union};
+use crate::company::{WorkflowFile, WorkflowNodeKind, load_workflow_with_globals};
 use crate::ports::CompanyStore;
 use crate::ports::types::{CompanyId, OverlayWorkflow};
 
@@ -202,6 +202,7 @@ impl StoreWorkflowResolver {
     fn guard_cycle(
         source_dir: Option<PathBuf>,
         overlays: Vec<OverlayWorkflow>,
+        globals_disable: Vec<String>,
         root_id: String,
         start_id: String,
         start_file: WorkflowFile,
@@ -231,8 +232,12 @@ impl StoreWorkflowResolver {
             }
             // An unresolvable / invalid child is not itself a cycle — it will
             // fail loudly when the engine resolves it. Skip it in the scan.
-            let Ok(Some(file)) = load_workflow_union(source_dir.as_deref(), &overlays, &current)
-            else {
+            let Ok(Some(file)) = load_workflow_with_globals(
+                source_dir.as_deref(),
+                &overlays,
+                &globals_disable,
+                &current,
+            ) else {
                 continue;
             };
             for referenced in Self::static_refs(&file) {
@@ -271,19 +276,25 @@ impl WorkflowResolver for StoreWorkflowResolver {
                     "sub_workflow '{workflow_id}': could not read saved workflows: {err}"
                 ))
             })?
-            .map(|record| record.overlay_workflows)
+            .map(|record| (record.overlay_workflows, record.manifest.globals.disable))
             .unwrap_or_default();
+        let (overlays, globals_disable) = overlays;
 
         // (c) Load the child from the seed ∪ overlay union, re-running full
         // OpenCompany parse + validation on it (the same rules a hand-authored
         // or console-created graph passes).
-        let file = load_workflow_union(self.source_dir.as_deref(), &overlays, workflow_id)
-            .map_err(|err| EngineError::Capability(format!("sub_workflow '{workflow_id}': {err}")))?
-            .ok_or_else(|| {
-                EngineError::Capability(format!(
-                    "sub_workflow '{workflow_id}' is not a saved workflow on this company"
-                ))
-            })?;
+        let file = load_workflow_with_globals(
+            self.source_dir.as_deref(),
+            &overlays,
+            &globals_disable,
+            workflow_id,
+        )
+        .map_err(|err| EngineError::Capability(format!("sub_workflow '{workflow_id}': {err}")))?
+        .ok_or_else(|| {
+            EngineError::Capability(format!(
+                "sub_workflow '{workflow_id}' is not a saved workflow on this company"
+            ))
+        })?;
 
         // (d) Static cycle guard over the same union, before the child is handed
         // back to the engine to compile + run.
@@ -292,7 +303,14 @@ impl WorkflowResolver for StoreWorkflowResolver {
         let start_id = workflow_id.to_string();
         let start_file = file.clone();
         tokio::task::spawn_blocking(move || {
-            Self::guard_cycle(source_dir, overlays, root_id, start_id, start_file)
+            Self::guard_cycle(
+                source_dir,
+                overlays,
+                globals_disable,
+                root_id,
+                start_id,
+                start_file,
+            )
         })
         .await
         .map_err(|err| {
@@ -348,6 +366,39 @@ mod tests {
         async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> OcResult<()> {
             Ok(())
         }
+    }
+
+    /// A store whose record carries `overlays` and a `[globals].disable` list —
+    /// [`store_with`] with the disable list always empty.
+    fn store_with_globals_disable(
+        overlays: Vec<OverlayWorkflow>,
+        disable: Vec<String>,
+    ) -> Arc<dyn CompanyStore> {
+        let entries = disable
+            .iter()
+            .map(|d| format!("\"{d}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest: CompanyManifest = toml::from_str(&format!(
+            "[company]\nname = \"Acme\"\n\n[globals]\ndisable = [{entries}]\n"
+        ))
+        .expect("valid manifest");
+        Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: overlays,
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        }))))
     }
 
     /// A store whose record carries `overlays` as its runtime-authored graphs.
@@ -471,6 +522,63 @@ to = "sub"
         let resolver = seed_resolver(dir.path(), "root");
         let err = resolver.resolve("ghost").await.unwrap_err();
         assert!(err.to_string().contains("ghost"), "{err}");
+    }
+
+    /// A global workflow the company disabled via `[globals].disable` must
+    /// fail resolution as a `sub_workflow` child, exactly like an unknown id —
+    /// the same contract `crate::globals::test`'s
+    /// `a_disabled_global_workflow_neither_lists_nor_loads` pins at the
+    /// `load_workflow_with_globals` layer this resolver calls into.
+    #[tokio::test]
+    async fn a_company_disabled_global_child_fails_resolution() {
+        let dropped = crate::globals::workflows()[0].id.clone();
+        let store = store_with_globals_disable(Vec::new(), vec![format!("workflow:{dropped}")]);
+        let resolver = StoreWorkflowResolver::new(
+            None,
+            store,
+            CompanyId::new("acme"),
+            "root".to_string(),
+            None,
+        );
+
+        let err = resolver.resolve(&dropped).await.unwrap_err();
+        assert!(
+            err.to_string().contains(&dropped),
+            "the error names the disabled child: {err}"
+        );
+        assert!(
+            err.to_string().contains("not a saved workflow"),
+            "a disabled global reads the same as an unknown id, not a cycle or a parse error: {err}"
+        );
+    }
+
+    /// A disabled global is excluded from the cycle scan the same way an
+    /// unresolvable child is (per `guard_cycle`'s own doc comment): `middle`
+    /// runs the disabled global as a `sub_workflow`, and if the scan tried to
+    /// load it the same way it loads a live child, it would hit the same
+    /// company-disabled refusal `a_company_disabled_global_child_fails_resolution`
+    /// pins — instead the disabled id is skipped as unresolvable, so resolving
+    /// `middle` itself succeeds rather than failing with an unrelated
+    /// "workflow not found" surfaced through the cycle guard.
+    #[tokio::test]
+    async fn a_disabled_global_in_the_closure_is_skipped_not_treated_as_a_cycle() {
+        let dropped = crate::globals::workflows()[0].id.clone();
+        let dir = tempfile::tempdir().unwrap();
+        write_wf(dir.path(), "middle", &parent_of("middle", &dropped));
+        let store = store_with_globals_disable(Vec::new(), vec![format!("workflow:{dropped}")]);
+        let resolver = StoreWorkflowResolver::new(
+            Some(dir.path().to_path_buf()),
+            store,
+            CompanyId::new("acme"),
+            "root".to_string(),
+            None,
+        );
+
+        let graph = resolver
+            .resolve("middle")
+            .await
+            .expect("the disabled global in the closure is skipped, not fatal");
+        assert_eq!(graph.id.as_deref(), Some("middle"));
     }
 
     #[tokio::test]

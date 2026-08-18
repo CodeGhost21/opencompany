@@ -1,0 +1,45 @@
+# A global workflow — see `weekly_review.toml` for what that means.
+
+id = "research_request"
+name = "Research request"
+description = "Answer a question from sources and return a cited write-up."
+
+[[node]]
+id = "asked"
+kind = "trigger"
+name = "A question arrives"
+summary = "Someone asks the company something it cannot answer offhand."
+
+[[node]]
+id = "research"
+kind = "agent"
+name = "Research it"
+summary = "Find independent sources, read them, and record what they say."
+agent = "researcher"
+
+[[node]]
+id = "write_up"
+kind = "agent"
+name = "Write it up"
+summary = "Turn the findings into an answer with its sources under it."
+agent = "writer"
+
+[[node]]
+id = "answer"
+kind = "output"
+name = "Return the answer"
+summary = "Deliver the write-up to whoever asked."
+[node.destination]
+kind = "owner"
+
+[[edge]]
+from = "asked"
+to = "research"
+
+[[edge]]
+from = "research"
+to = "write_up"
+
+[[edge]]
+from = "write_up"
+to = "answer"

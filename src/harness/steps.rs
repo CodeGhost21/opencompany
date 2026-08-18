@@ -65,6 +65,14 @@
 //! * **Result on failure** is the classifier's plain-language
 //!   [`cause_plain`](oh::tools::status::ClassifiedFailure::cause_plain), or an
 //!   intrinsic tool's own message — never the remote error text.
+//! * **One upstream verdict is re-read** (issue #924). `ENOENT` is the same
+//!   operating-system error whether a binary is not installed or a file is not
+//!   there, and upstream classifies on message text alone, so it calls both
+//!   [`MissingApp`](oh::tools::status::ToolFailureClass::MissingApp) — telling a
+//!   server operator to "install or open the app" when a note is simply absent.
+//!   For a tool that resolves a path in this process there is no app to install,
+//!   so [`PATH_ONLY_TOOLS`] names those and [`refine_missing_app`] reports
+//!   [`TurnStepFailure::NotFound`] instead. Nothing else is re-classified.
 //!
 //! The unit test `planted_secret_never_reaches_serialized_steps` proves it end
 //! to end: a secret planted in a tool's output, its nested arguments, and its
@@ -667,11 +675,13 @@ fn complete(
         None => oh::tools::status::classify(output, false),
     };
 
+    let (failure, cause_override) = refine_missing_app(tool_name, &classified);
+
     Completed {
         status: TurnStepStatus::Error,
         detail,
-        result: failure_result(tool_name, output, &classified),
-        failure: Some(failure_of(classified.class)),
+        result: failure_result(tool_name, output, &classified, cause_override),
+        failure: Some(failure),
         truncated: false,
     }
 }
@@ -694,6 +704,70 @@ fn failure_of(class: ToolFailureClass) -> TurnStepFailure {
         }
         ToolFailureClass::Unknown => TurnStepFailure::Failed,
     }
+}
+
+/// Tools that resolve a caller-supplied path **in this process** and can never
+/// invoke an external program.
+///
+/// The list exists because one operating-system error means two different
+/// things. `ENOENT` — "No such file or directory (os error 2)" — is what the
+/// kernel says both when a binary you tried to spawn is not installed and when
+/// a file you tried to read is not there. Upstream's classifier sees only the
+/// message text, so it routes every `ENOENT` to
+/// [`ToolFailureClass::MissingApp`], whose remediation copy is "Install or open
+/// the app, then try again."
+///
+/// For a tool on this list there is no app to install: it opens a path and
+/// returns bytes. So its `ENOENT` is re-read as
+/// [`TurnStepFailure::NotFound`] here (issue #924, where `grep` on a company
+/// note path and `read_skill_resource` on an absent `references/` file both
+/// rendered as "App unavailable" on a server tenant with nothing installable).
+///
+/// **Keyed on the tool, not on the message.** Six of upstream's seven
+/// `MissingApp` needles ("command not found", "executable not found", …) name a
+/// program unambiguously; only the bare `ENOENT` string is shared. But sniffing
+/// for those needles cannot separate the cases either, because
+/// `Command::new(program)` on a missing binary yields the bare `ENOENT` with
+/// none of them — a genuinely missing `git` would then be relabelled a missing
+/// file. Which tool ran is the signal that actually distinguishes them.
+///
+/// **Under-inclusive by design.** A path tool missing from this list keeps
+/// today's behaviour rather than gaining a new wrong one, so the failure mode of
+/// drift is a stale label, never a false `NotFound` on a real missing program.
+/// [`every_path_tool_on_the_belt_is_listed`] fails when the belt grows one this
+/// list does not name.
+const PATH_ONLY_TOOLS: &[&str] = &[
+    "file_read",
+    "file_write",
+    "edit",
+    "list",
+    "glob",
+    "grep",
+    crate::harness::skills::READ_SKILL_RESOURCE_TOOL,
+];
+
+/// Whether `tool_name` reads a path in-process, per [`PATH_ONLY_TOOLS`].
+fn is_path_only_tool(tool_name: &str) -> bool {
+    PATH_ONLY_TOOLS.contains(&tool_name)
+}
+
+/// Re-read a `MissingApp` verdict that came from a path tool as `NotFound`.
+///
+/// Returns the class to report and the plain-language cause to show, so the
+/// label and the sentence beside it can never disagree. Every other verdict is
+/// returned untouched — this narrows one misrouted class, it does not
+/// re-classify.
+fn refine_missing_app<'a>(
+    tool_name: &str,
+    classified: &'a ClassifiedFailure,
+) -> (TurnStepFailure, Option<&'a str>) {
+    if matches!(classified.class, ToolFailureClass::MissingApp) && is_path_only_tool(tool_name) {
+        return (
+            TurnStepFailure::NotFound,
+            Some("The file or folder this action asked for does not exist."),
+        );
+    }
+    (failure_of(classified.class), None)
 }
 
 /// Whether the model was handed OpenHuman's *approval-required* refusal by
@@ -721,12 +795,24 @@ fn output_was_truncated(output: &str) -> bool {
 /// problem ("a workflow needs exactly one trigger"), where the classifier can
 /// only offer a category. Everything else gets the classifier's `cause_plain`,
 /// never the raw output.
-fn failure_result(tool_name: &str, output: &str, classified: &ClassifiedFailure) -> Option<String> {
+///
+/// `cause_override` replaces `cause_plain` when this crate re-read the upstream
+/// verdict ([`refine_missing_app`]); it ranks below an intrinsic tool's own
+/// message for the same reason `cause_plain` does.
+fn failure_result(
+    tool_name: &str,
+    output: &str,
+    classified: &ClassifiedFailure,
+    cause_override: Option<&str>,
+) -> Option<String> {
     if INTRINSIC_TOOLS.contains(&tool_name) {
         let message = output.trim();
         if !message.is_empty() {
             return Some(truncate(message, RESULT_MAX));
         }
+    }
+    if let Some(cause) = cause_override {
+        return Some(cause.to_string());
     }
     let cause = classified.cause_plain.trim();
     (!cause.is_empty()).then(|| cause.to_string())
@@ -964,10 +1050,10 @@ mod tests {
                       failed (store_io).";
         let classified = oh::tools::status::classify(output, false);
 
-        let intrinsic = failure_result("workspace_read", output, &classified);
+        let intrinsic = failure_result("workspace_read", output, &classified, None);
         assert_eq!(intrinsic.as_deref(), Some(output));
 
-        let remote = failure_result("mcp_call_tool", output, &classified);
+        let remote = failure_result("mcp_call_tool", output, &classified, None);
         assert_eq!(remote.as_deref(), Some(classified.cause_plain.trim()));
         assert_ne!(
             remote.as_deref(),
@@ -1287,6 +1373,140 @@ mod tests {
         ] {
             assert_eq!(failure_of(class), expected, "class {class:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // #924: a missing path is not a missing app
+    // -----------------------------------------------------------------------
+
+    /// The bare operating-system `ENOENT` string, which is what both tools in
+    /// issue #924 actually returned. Upstream's classifier routes this to
+    /// `MissingApp` on text alone.
+    const ENOENT: &str = "No such file or directory (os error 2)";
+
+    /// **The two failures issue #924 reports**, verbatim in the shape their
+    /// producers emit, driven end to end through the fold.
+    ///
+    /// `grep`'s comes from openhuman's `validate_path`, which joins the
+    /// caller's sub-path onto the agent's *own* workspace and canonicalizes it —
+    /// so a company note path like `Agents/…`, which the sandboxed file tools
+    /// cannot see, fails here rather than anywhere more informative.
+    /// `read_skill_resource`'s comes from its `symlink_metadata` pre-check on a
+    /// `references/` file that the skill does not bundle.
+    ///
+    /// Neither host has an app to install, which is what made "App unavailable"
+    /// unactionable on a server tenant.
+    #[test]
+    fn a_path_tools_missing_file_is_not_reported_as_a_missing_app() {
+        for (tool, output) in [
+            (
+                "grep",
+                format!("Failed to resolve path 'Agents/Product Manager/notes': {ENOENT}"),
+            ),
+            (
+                crate::harness::skills::READ_SKILL_RESOURCE_TOOL,
+                format!(
+                    "read_skill_resource: failed to stat resource \
+                     /data/companies/acme/skills/feature-spec/references/spec.md: {ENOENT}"
+                ),
+            ),
+        ] {
+            // Precondition: upstream really does call this a missing app, so
+            // this test is exercising the re-read and not a changed upstream.
+            assert!(
+                matches!(
+                    oh::tools::status::classify(&output, false).class,
+                    ToolFailureClass::MissingApp
+                ),
+                "upstream no longer calls `{tool}`'s ENOENT a missing app; \
+                 the re-read in `refine_missing_app` may be obsolete"
+            );
+
+            let step = one(tool, false, &output, None);
+            assert_eq!(
+                step.failure,
+                Some(TurnStepFailure::NotFound),
+                "`{tool}` reads a path in this process; there is nothing to install: {step:?}"
+            );
+            let result = step.result.expect("a failed step states its cause");
+            assert!(
+                result.contains("does not exist"),
+                "the cause must name the real problem: {result:?}"
+            );
+            assert!(
+                !result.to_lowercase().contains("install"),
+                "a server operator cannot install anything to fix a missing note: {result:?}"
+            );
+        }
+    }
+
+    /// The other half of the same `ENOENT`, and the reason this is keyed on the
+    /// tool rather than the message: `Command::new` on a binary that is not
+    /// installed yields the *same* string with none of upstream's
+    /// program-specific needles. `shell` can genuinely be missing an app, so its
+    /// verdict must survive untouched.
+    #[test]
+    fn a_missing_program_is_still_a_missing_app() {
+        for tool in ["shell", "git_operations", "apply_patch"] {
+            let step = one(
+                tool,
+                false,
+                &format!("failed to spawn `git`: {ENOENT}"),
+                None,
+            );
+            assert_eq!(
+                step.failure,
+                Some(TurnStepFailure::MissingApp),
+                "`{tool}` can invoke an external program, so its ENOENT may well \
+                 be a missing app and must not be relabelled: {step:?}"
+            );
+        }
+    }
+
+    /// The wire value the console keys on.
+    ///
+    /// `STEP_FAILURE_LABEL` in `frontend/src/api/types.ts` is a
+    /// `Record<TurnStepFailure, string>`, so TypeScript fails its own build if
+    /// the label is missing — but nothing checks that the *string* on each side
+    /// is the same one. This pins this side of that seam.
+    #[test]
+    fn not_found_serializes_as_the_snake_case_the_console_indexes_on() {
+        assert_eq!(
+            serde_json::to_value(TurnStepFailure::NotFound).expect("serializes"),
+            serde_json::json!("not_found")
+        );
+    }
+
+    /// **The drift guard.** [`PATH_ONLY_TOOLS`] is a `const`, so it is memory;
+    /// this derives the truth from the same constructor the belt uses
+    /// ([`crate::harness::build::file_tools`]) and fails when the belt grows a
+    /// path tool the list does not name.
+    ///
+    /// Without it the list rots silently: a new sandboxed file tool would go on
+    /// reporting "App unavailable" for a missing file and nothing would say so.
+    #[test]
+    fn every_path_tool_on_the_belt_is_listed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing: Vec<String> = crate::harness::build::file_tools(dir.path())
+            .iter()
+            .map(|t| t.name().to_string())
+            .filter(|name| !PATH_ONLY_TOOLS.contains(&name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these sandboxed file tools resolve a path in this process but are not in \
+             `PATH_ONLY_TOOLS`, so a missing file from them still renders as \
+             \"App unavailable\": {missing:?}"
+        );
+        // Vacuity guard: an empty belt would satisfy the filter above.
+        assert!(
+            PATH_ONLY_TOOLS.contains(&"grep"),
+            "`grep` is one of the two tools #924 is about"
+        );
+        assert!(
+            PATH_ONLY_TOOLS.contains(&crate::harness::skills::READ_SKILL_RESOURCE_TOOL),
+            "`read_skill_resource` is the other"
+        );
     }
 
     /// An unauthorized call reads as unauthorized end to end — through the fold,

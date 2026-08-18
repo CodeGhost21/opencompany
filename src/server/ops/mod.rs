@@ -25,10 +25,15 @@ pub mod composio_toolkits;
 pub mod connections_read;
 pub mod domain;
 pub mod finances;
+pub mod hosting;
 pub mod imap;
 pub mod inbox;
 pub mod inference;
 pub mod language;
+/// The dynamic-ledger surface: list, declare, read, record, delete, retire.
+/// Reads and writes route through [`crate::company::ledgers`], which is where
+/// the one deletion rule lives.
+pub mod ledgers;
 pub mod mail;
 pub mod mailer;
 pub mod mcp;
@@ -167,6 +172,7 @@ pub fn router() -> Router<AppState> {
         .merge(connections_read::router())
         .merge(channels::router())
         .merge(billing::router())
+        .merge(hosting::router())
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())
@@ -175,6 +181,7 @@ pub fn router() -> Router<AppState> {
         .merge(smtp::router())
         .merge(inbox::router())
         .merge(tasks::router())
+        .merge(ledgers::router())
         .merge(task_export::router())
         .merge(runs::router())
         .merge(artifacts::router())

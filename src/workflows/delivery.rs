@@ -6,6 +6,14 @@
 //! way to send it anywhere. A node's
 //! [`destination`](crate::company::WorkflowDestinationDef) closes that gap.
 //!
+//! `destination` is **optional**, and a node without one is the pre-#170 shape
+//! rather than a deliberate "route nothing": every graph authored before it
+//! existed still has one, including all 21 seeded company templates. Such a node
+//! is not delivered from, but it does now produce a `Skipped` /
+//! [`NoDestinationConfigured`](crate::ports::DeliveryReason::NoDestinationConfigured)
+//! row (issue #925) so that an unconfigured destination is distinguishable from
+//! a run that genuinely had nothing to route. Silence made those two identical.
+//!
 //! # Where this runs, and why here
 //!
 //! Delivery is **host-side and post-engine**: [`deliver_outputs`] is called from
@@ -307,12 +315,14 @@ pub async fn deliver_outputs(
         if node.kind != WorkflowNodeKind::Output {
             continue;
         }
-        let Some(destination) = &node.destination else {
-            continue;
-        };
         // An output node the run never reached (untaken branch, or a path that
         // paused for approval) is not a delivery that failed — it is a delivery
         // that was never owed. No attempt, no row.
+        //
+        // Checked BEFORE the destination arm below, and that order is the whole
+        // of issue #925: a node with no destination still has to be reached
+        // before its absence is worth reporting. An unreached node contributes
+        // nothing either way, exactly as before.
         if !node_was_reached(output, &node.id) {
             tracing::debug!(
                 company = %record.id,
@@ -322,6 +332,60 @@ pub async fn deliver_outputs(
             );
             continue;
         }
+        // Issue #925: the run reached a terminal report-back node that names
+        // nowhere to report to. This used to be a bare `continue` — no row, no
+        // log, nothing — which is why every run of a graph authored before
+        // destinations existed ends `Finished — this run routed no reports.`
+        // That sentence is true and useless: it reads identically whether the
+        // author routed nothing deliberately or never configured a destination,
+        // and the second is a fixable mistake nobody could see.
+        let Some(destination) = &node.destination else {
+            // An output node that exists to PAUSE is control flow, not a
+            // report-back that lost its address: `requires_approval` makes the
+            // engine stop on it, and a graph can use an `output` node for
+            // nothing else (`DELIVER_THEN_GATE` in `workflows::runner` is
+            // exactly that shape). Telling its author to "give the node a
+            // destination" would be wrong advice on every run of a correct
+            // workflow, and a row nobody should act on is how a row everybody
+            // should act on gets ignored.
+            //
+            // The trade-off, stated plainly: an author who forgets a destination
+            // on an approval-gated output node is not warned about that node.
+            // Every ungated output node in the same graph still reports, and a
+            // false alarm on every gated run is the worse of the two.
+            if node.requires_approval.unwrap_or(false) {
+                tracing::debug!(
+                    company = %record.id,
+                    workflow = %workflow.id,
+                    node = %node.id,
+                    "workflow delivery: approval-gated output node has no destination; \
+                     treated as a gate, not a missing address"
+                );
+                continue;
+            }
+            tracing::info!(
+                company = %record.id,
+                workflow = %workflow.id,
+                node = %node.id,
+                "workflow delivery: output node has no destination; nothing was routed"
+            );
+            reports.push(DeliveryReport {
+                node: node.id.clone(),
+                // No destination was authored, so there is no kind to echo. The
+                // literal reads correctly in the operator's row (`→ none — …`)
+                // and keeps the field a plain token rather than an empty string
+                // the console would render as a gap.
+                kind: "none".to_string(),
+                target: None,
+                status: DeliveryStatus::Skipped,
+                detail: "this output node has no destination, so its report was not sent \
+                         anywhere — open the workflow and give the node a destination to \
+                         deliver it"
+                    .to_string(),
+                reason: DeliveryReason::NoDestinationConfigured,
+            });
+            continue;
+        };
 
         // Issue #438: a run earlier in this approval lineage already delivered
         // this node's report. The continuation reached the node again because
@@ -411,10 +475,13 @@ pub async fn deliver_outputs(
 ///
 /// For every reached `output` node that carries a destination it pushes one
 /// `Skipped` / [`DeliveryReason::DryRun`] row naming where the report *would*
-/// have gone. Nothing leaves the process: no transport, no cold-recipient park,
-/// no journal write. A node the run never reached contributes no row, exactly as
-/// in the live path — so the rows are an honest map of the reached output
-/// destinations, which is what a test run exists to prove.
+/// have gone; a reached node that names **no** destination pushes a `Skipped` /
+/// [`DeliveryReason::NoDestinationConfigured`] row instead (issue #925), because
+/// "nowhere" is the answer a test run most needs to give. Nothing leaves the
+/// process: no transport, no cold-recipient park, no journal write. A node the
+/// run never reached contributes no row, exactly as in the live path — so the
+/// rows are an honest map of the reached output destinations, which is what a
+/// test run exists to prove.
 ///
 /// Takes no [`WorkflowDeliveryDeps`] and needs none: a dry run wires no delivery
 /// ports (and no journal write is owed), so this is a pure function of the graph
@@ -431,9 +498,6 @@ pub fn deliver_outputs_dry(
         if node.kind != WorkflowNodeKind::Output {
             continue;
         }
-        let Some(destination) = &node.destination else {
-            continue;
-        };
         // The routing half: an output node the run never reached is not a
         // delivery that was skipped, it is one that was never owed — no row, the
         // same rule the live path takes.
@@ -446,6 +510,33 @@ pub fn deliver_outputs_dry(
             );
             continue;
         }
+        // Issue #925, same rule as the live path. A test run exists to answer
+        // "where would this go?", and "nowhere, because the node names no
+        // destination" is the answer an author most needs to see *before*
+        // scheduling it.
+        let Some(destination) = &node.destination else {
+            // A gate is control flow, not a report — same rule as the live path.
+            if node.requires_approval.unwrap_or(false) {
+                continue;
+            }
+            tracing::info!(
+                company = %record.id,
+                workflow = %workflow.id,
+                node = %node.id,
+                "workflow dry delivery: output node has no destination; nothing would be routed"
+            );
+            reports.push(DeliveryReport {
+                node: node.id.clone(),
+                kind: "none".to_string(),
+                target: None,
+                status: DeliveryStatus::Skipped,
+                detail: "this output node has no destination, so a real run would not send its \
+                         report anywhere — give the node a destination to deliver it"
+                    .to_string(),
+                reason: DeliveryReason::NoDestinationConfigured,
+            });
+            continue;
+        };
         let where_to = match destination
             .target
             .as_deref()
@@ -1247,6 +1338,7 @@ async fn post_to_channel(
             message_id: None,
             task_id: None,
             channel: channel_id.to_string(),
+            agent: None,
             text: format!("{subject}\n\n{text}"),
             steps: Vec::new(),
             reply_to: None,
@@ -1384,6 +1476,27 @@ to = "done"
 "#
         );
         parse_workflow(&src).expect("test graph is valid")
+    }
+
+    /// The same graph with **no** `[node.destination]` stanza at all — the
+    /// pre-#170 shape every seeded company template still ships (issue #925).
+    fn graph_without_destination() -> WorkflowFile {
+        let src = r#"
+id = "report_flow"
+name = "Report flow"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Owner summary"
+[[edge]]
+from = "start"
+to = "done"
+"#;
+        parse_workflow(src).expect("a graph whose output node names no destination is still valid")
     }
 
     /// A run output in which `done` produced one text item — the reached case.
@@ -2886,10 +2999,17 @@ mode = "full"
         assert!(h.channel.sent().is_empty());
     }
 
-    /// An `output` node with no `destination` is the pre-#170 shape: it still
-    /// shows in the run drawer and produces no delivery row.
+    /// An `output` node with no `destination` is the pre-#170 shape. It still
+    /// shows in the run drawer, still sends nothing, and — since #925 — says so
+    /// with a `Skipped` row instead of contributing nothing at all.
+    ///
+    /// **This assertion is inverted from what it was.** It previously read
+    /// `reports.is_empty()`, which is the behaviour #925 was filed against:
+    /// silence made "the author routed nothing on purpose" and "the author never
+    /// configured a destination" the same observation. The transport assertions
+    /// below are the part that must not change — nothing is sent either way.
     #[tokio::test]
-    async fn an_output_node_without_a_destination_produces_no_row() {
+    async fn an_output_node_without_a_destination_reports_the_gap_and_sends_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let h = Harness::new(dir.path(), true, true);
         let plain = parse_workflow(
@@ -2920,7 +3040,13 @@ to = "done"
             &[],
         )
         .await;
-        assert!(reports.is_empty(), "{reports:?}");
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped);
+        assert_eq!(reports[0].reason, DeliveryReason::NoDestinationConfigured);
+        assert!(
+            h.mail.sent().is_empty() && h.channel.sent().is_empty(),
+            "the row is a statement about configuration; nothing may leave the process"
+        );
     }
 
     /// The #169 lesson: an unwired delivery bundle must be LOUD. It writes a
@@ -3333,6 +3459,123 @@ to = "done"
             "the row should name where it would have gone: {}",
             reports[0].detail
         );
+    }
+
+    // --- issue #925: an unconfigured destination is not the same as no report --
+
+    /// **The regression.** A run that reaches an output node naming no
+    /// destination used to return an empty `deliveries` list, which the console
+    /// renders as `Finished — this run routed no reports.` — the same sentence
+    /// it shows a workflow that deliberately routed nothing. The row is what
+    /// tells the two apart, and it carries the reason as a closed token so a
+    /// reader does not have to parse prose.
+    ///
+    /// Deps are `None` here on purpose: the check must land *before* anything
+    /// touches a transport, so this passes on a runtime with no delivery ports
+    /// and would fail with a `NotWired` row if the arms were ever reordered.
+    #[tokio::test]
+    async fn a_reached_output_node_with_no_destination_says_so() {
+        let reports = deliver_outputs(
+            None,
+            &record(&["*"]),
+            &graph_without_destination(),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].node, "done");
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped);
+        assert_eq!(reports[0].reason, DeliveryReason::NoDestinationConfigured);
+        assert_eq!(
+            reports[0].target, None,
+            "there is no destination, so there is no target to name"
+        );
+        assert!(
+            reports[0].detail.contains("no destination"),
+            "the row has to say what is missing: {}",
+            reports[0].detail
+        );
+    }
+
+    /// The other half of the same rule: an output node with no destination that
+    /// the run never reached still contributes nothing. "Never configured" is
+    /// only worth reporting about a node the run actually arrived at — otherwise
+    /// every untaken branch would file a complaint.
+    #[tokio::test]
+    async fn an_unreached_output_node_with_no_destination_stays_silent() {
+        let output = serde_json::json!({ "nodes": { "start": { "items": [] } } });
+        let reports = deliver_outputs(
+            None,
+            &record(&["*"]),
+            &graph_without_destination(),
+            "run-1",
+            &output,
+            &[],
+        )
+        .await;
+
+        assert!(
+            reports.is_empty(),
+            "an unreached node owes no report either way: {reports:?}"
+        );
+    }
+
+    /// An `output` node that only exists to pause for approval is control flow,
+    /// not a report-back that lost its address. It contributes no row, so a
+    /// correct gated workflow does not grow a "not delivered" badge on every
+    /// continuation run.
+    #[tokio::test]
+    async fn an_approval_gate_with_no_destination_is_not_reported_as_misconfigured() {
+        let gate = parse_workflow(
+            r#"
+id = "gated"
+name = "Gated"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Gate"
+requires_approval = true
+[[edge]]
+from = "start"
+to = "done"
+"#,
+        )
+        .expect("a gate graph is valid");
+        let reports = deliver_outputs(
+            None,
+            &record(&["*"]),
+            &gate,
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+        assert!(
+            reports.is_empty(),
+            "a gate is not a report-back with a missing address: {reports:?}"
+        );
+    }
+
+    /// A test run is where an author most wants to find this, so the dry router
+    /// takes the same rule.
+    #[test]
+    fn deliver_outputs_dry_reports_a_node_with_no_destination() {
+        let reports = deliver_outputs_dry(
+            &record(&["email"]),
+            &graph_without_destination(),
+            &reached_output(),
+        );
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].node, "done");
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped);
+        assert_eq!(reports[0].reason, DeliveryReason::NoDestinationConfigured);
     }
 
     /// An output node the dry run never reached contributes no row at all —

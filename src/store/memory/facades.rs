@@ -7,7 +7,7 @@
 //!
 //! ## Why the records are JSON, not provider-native structure
 //!
-//! [`MemoryCore::store`] takes `content: &str`. The contract does have a
+//! `MemoryCore::store` takes `content: &str`. The contract does have a
 //! documents family that could carry structure natively — but it is optional,
 //! and the composition every driver we can actually bind goes through
 //! (`MemoryTraitProvider`) advertises exactly the three mandatory families and
@@ -22,7 +22,7 @@
 //! Asking for a namespace and trusting the answer to be within it is exactly
 //! the assumption a hosted engine is in a position to violate, by bug or
 //! otherwise. So every decode path drops entries whose reported namespace falls
-//! outside the one this facade owns ([`Namespace::contains`]). The filter should
+//! outside the one this facade owns (`Namespace::contains`). The filter should
 //! never fire; if it does, the alternative was serving one tenant another's
 //! memory.
 
@@ -557,6 +557,19 @@ impl MemoryStore for ProviderMemoryStore {
     /// dies in between. Archive-then-delete leaves a trace in both places — a
     /// duplicate the next read reconciles. Delete-then-archive loses it. For a
     /// port whose whole promise is "not destroyed", that asymmetry decides it.
+    ///
+    /// The returned count is **traces this call removed from the live set**, not
+    /// traces archived. Those differ when `forget` reports a key was already
+    /// gone: the archive write has happened by then, so the archive can hold an
+    /// entry this call did not remove. That is a concurrent eviction having got
+    /// there first, and the entry is archived either way — which is the
+    /// behaviour the port promises. Reporting it as removed *here* would be the
+    /// lie, so the count stays narrow.
+    ///
+    /// The same asymmetry appears if a `put` or `forget` fails mid-loop: the
+    /// error propagates and the traces already processed stay archived. That is
+    /// the archive-then-delete order behaving as designed under partial failure
+    /// — a duplicate the next read reconciles, never a loss.
     async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
         let traces = self.ordered_traces(id).await?;
         let doomed: Vec<CompressedTrace> = match policy {

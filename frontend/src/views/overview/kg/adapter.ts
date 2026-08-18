@@ -57,7 +57,7 @@ import type { MemoryEntry } from "@/api/memory";
 import type { DeskDto } from "@/api/types";
 import type { WorkflowGraph } from "@/api/workflows";
 import type { TeamMember } from "@/lib/team";
-import { TASK_COLUMNS } from "@/lib/tasks-sample";
+import { humanizeStatus } from "@/lib/board-columns";
 import type { BrainGraphEdge, BrainGraphNode, MemoryGraph } from "./memory-core";
 import { distillMemoryGraph } from "./memory-core";
 import { isOpen } from "../pulse";
@@ -325,7 +325,11 @@ export function adapt(input: AdaptInput): Adapted {
       title: task.title,
       summary: task.note ?? "",
       steps: [
-        `Column: ${TASK_COLUMNS.find((c) => c.id === task.column)?.label ?? task.column}`,
+        // Humanised rather than read off the ledger: this adapter is a pure
+        // function over what the graph was handed, and threading an async
+        // column read through it would buy "In progress" instead of "In
+        // progress" — the two agree on every column but `todo`.
+        `Column: ${humanizeStatus(task.column)}`,
         `Priority: ${task.priority}`,
         `Owner: ${task.assignee}`,
       ],

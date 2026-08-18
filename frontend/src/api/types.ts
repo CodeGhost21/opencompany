@@ -67,6 +67,7 @@ export type TurnStepFailure =
   | "unauthorized"
   | "missing_permission"
   | "missing_app"
+  | "not_found"
   | "timeout"
   | "unavailable"
   | "failed";
@@ -115,6 +116,7 @@ export const STEP_FAILURE_LABEL: Record<TurnStepFailure, string> = {
   unauthorized: "Unauthorized",
   missing_permission: "Missing permission",
   missing_app: "App unavailable",
+  not_found: "Not found",
   timeout: "Timed out",
   unavailable: "Service unavailable",
   failed: "Failed",
@@ -871,6 +873,23 @@ export interface McpHealth {
 }
 
 /**
+ * One roster agent named on a console coverage line — {@link
+ * McpServer.reachableBy} ("Reachable by") and the repositories card's
+ * `grantedAgents` ("Readable by"), both computed from one roster walk on the
+ * host.
+ *
+ * `name` is the display label the rest of the console uses for that teammate (a
+ * manifest teammate's role, an operator-added teammate's name) and is the only
+ * thing worth showing a reader: an operator-added teammate's `id` is a minted
+ * internal string, which both lines used to print raw (issue #931). The id is
+ * still carried so a client can key or link on it.
+ */
+export interface RosterAgent {
+  id: string;
+  name: string;
+}
+
+/**
  * One effective MCP tool server (issue #50), as `.../mcp/servers` returns it.
  * The credential is never present — only the non-secret `authConfigured` flag
  * and the last (scrubbed) probe `health`.
@@ -888,16 +907,18 @@ export interface McpServer {
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;
   /**
-   * Ids of the company's agents whose effective tool grants cover this server —
-   * who can actually call it (issue #568). On an **enabled** server an empty
-   * array means no teammate can reach it, a probable misconfiguration the
-   * console flags loudly. A **disabled** server is always empty (the harness
-   * hands out no tool for it whatever the grants say), so the console reads the
-   * empty case against `enabled` and stays quiet there. Optional only for
-   * forward-compat with an older backend that does not send the field;
-   * `undefined` (unknown) is treated differently from `[]` (known-empty).
+   * The company's agents whose effective tool grants cover this server — who can
+   * actually call it (issue #568). On an **enabled** server an empty array means
+   * no teammate can reach it, a probable misconfiguration the console flags
+   * loudly. A **disabled** server is always empty (the harness hands out no tool
+   * for it whatever the grants say), so the console reads the empty case against
+   * `enabled` and stays quiet there. Optional only for forward-compat with an
+   * older backend that does not send the field; `undefined` (unknown) is treated
+   * differently from `[]` (known-empty).
+   *
+   * Render {@link RosterAgent.name}, never the id (issue #931).
    */
-  reachableBy?: string[];
+  reachableBy?: RosterAgent[];
   /** The last recorded (scrubbed) probe outcome, when the server has been probed. */
   health?: McpHealth;
 }

@@ -18,6 +18,8 @@
 //!
 //! [`MemoryProvider`]: tinymemory_api::provider::MemoryProvider
 
+use sha2::{Digest, Sha256};
+
 use crate::ports::CompanyId;
 
 /// Root segment prefixing every namespace this host mints.
@@ -30,7 +32,7 @@ const ROOT: &str = "oc";
 /// The namespace segment holding provisional working-out.
 ///
 /// Named here rather than inline because the scratch firewall
-/// ([`super::CompanyMemory::recall`]) filters recall hits against it, and a
+/// (`super::BoundMemory::recall`) filters recall hits against it, and a
 /// firewall whose two halves can drift apart is not a firewall.
 pub(super) const SCRATCH_SEGMENT: &str = "scratch";
 
@@ -122,7 +124,8 @@ impl Namespace {
     }
 }
 
-/// Maps a raw company id to a path-safe, **injective** namespace segment.
+/// Maps a raw company id to a path-safe, **collision-resistant** namespace
+/// segment.
 ///
 /// Sanitizing alone is not injective: mapping every character outside
 /// `[A-Za-z0-9-_]` to `_` collapses `acme:1`, `acme/1`, and `acme_1` onto one
@@ -132,10 +135,16 @@ impl Namespace {
 /// two sanitized prefixes collide their raw ids still differ, and so do their
 /// hashes.
 ///
+/// "Collision-resistant" rather than "injective", deliberately: any finite-width
+/// hash maps unbounded input onto a fixed range, so distinct outputs cannot be
+/// *guaranteed*. What can be guaranteed is that finding two ids that collide is
+/// computationally infeasible — which is the property that matters, because
+/// company ids can be chosen by a caller.
+///
 /// This mirrors `EngineCortex::workspace_name`, which solved the same problem
 /// for on-disk workspace directories. The two are intentionally separate —
 /// that one names a filesystem path, this one names a namespace inside a
-/// possibly-remote engine — but the injectivity argument is identical, and a
+/// possibly-remote engine — but the collision argument is identical, and a
 /// change to one should prompt a look at the other.
 fn workspace_segment(company: &str) -> String {
     let prefix = sanitize_segment(company);
@@ -155,7 +164,8 @@ fn workspace_segment(company: &str) -> String {
 /// single tenant's own data, not a cross-tenant leak, so it does not warrant
 /// making every namespace unreadable.
 fn sanitize_segment(raw: &str) -> String {
-    raw.chars()
+    let cleaned: String = raw
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
                 c
@@ -163,20 +173,35 @@ fn sanitize_segment(raw: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    // An empty id would yield the segment `agent/`, so `child` would build a
+    // namespace ending in a separator — a degenerate value that names the scope
+    // kind rather than any member of it. `contains` is boundary-aware and would
+    // not over-match a normal sibling, but a namespace nothing can legitimately
+    // own should not be constructible at all.
+    if cleaned.is_empty() {
+        "_".to_owned()
+    } else {
+        cleaned
+    }
 }
 
-/// FNV-1a over the raw bytes. Stable across processes and releases, which is
-/// what durability needs — a company's namespace must not move under it.
+/// SHA-256 over the raw bytes, truncated to 128 bits. Stable across processes
+/// and releases, which is what durability needs — a company's namespace must not
+/// move under it.
+///
+/// Cryptographic on purpose. This was FNV-1a, which is fine for a hash map and
+/// wrong here: a company id is not operator-only — `POST /api/v1/companies`
+/// accepts an explicit one — so an id that collides with another tenant's is
+/// something a caller can *choose*, and FNV-1a is trivial to collide by
+/// construction. The suffix is the only thing keeping two sanitized ids apart,
+/// so it has to resist a deliberate collision, not just an accidental one.
+///
+/// 128 bits keeps the segment short while putting a chosen collision out of
+/// reach.
 fn stable_hash_hex(s: &str) -> String {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = FNV_OFFSET;
-    for byte in s.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    format!("{hash:016x}")
+    let digest = Sha256::digest(s.as_bytes());
+    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

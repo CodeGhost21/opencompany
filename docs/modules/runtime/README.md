@@ -161,6 +161,10 @@ an unmanaged root is never inspected, deduplicated, warned about or removed.
 The builder threads that same `WorkspaceStore` handle onto `HarnessDeps`
 (`workspace`), so agents read and write the shared note tree through the tools
 in `harness::workspace_tools` (issues #237, #551) rather than being blind to it.
+Boot also provisions lowercase `secrets/README.md`; agent workspace tools omit
+that whole subtree while console and operator APIs keep ordinary access. It is
+for operator-only workspace notes, not credentials consumed by providers or
+tools, which remain in the dedicated secret/connection stores.
 One handle, three writers — console REST, GraphQL, and a granted agent — so an
 operator edit is what the next turn reads, with no rebuild, and an agent's note
 is in the tab the operator is already looking at. Each write records its author

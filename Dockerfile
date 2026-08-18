@@ -22,10 +22,20 @@ RUN apt-get update \
        libx11-dev libxi-dev libxtst-dev libxrandr-dev libxcb1-dev libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# The whole workspace is copied (examples/*/Cargo.toml load the workspace;
-# vendor/tinyagents backs the [patch.crates-io] entry). vendor/openhuman,
-# target/, and node_modules are trimmed via .dockerignore.
-COPY . .
+# Copy only inputs read by the Rust build, rather than the whole checkout.
+# Keeping frontend, docs, scripts, and deployment files out of this layer lets
+# their changes reuse the compiled Cargo cache.
+#
+# `build.rs` embeds the shipped company agents and `src/desktop.rs` embeds each
+# preset manifest, so the complete companies tree remains a real build input.
+# `vendor/` backs the path dependencies and Cargo patch table.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
+COPY src ./src
+COPY benches ./benches
+COPY tests ./tests
+COPY examples ./examples
+COPY vendor ./vendor
+COPY companies ./companies
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \

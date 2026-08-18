@@ -72,9 +72,12 @@ describe("what a repository approval says", () => {
 
 describe("which half of the repository setup is missing", () => {
   it("says nothing when bound repositories have a reader", () => {
-    expect(repoCoverage({ repos: [BOUND], grantedAgents: ["ceo"], repoGranted: true })).toEqual({
+    // The reader is carried as id + display label (issue #931): the card prints
+    // the label, because an operator-added teammate's id is minted internally.
+    const ceo = { id: "ceo", name: "Chief" };
+    expect(repoCoverage({ repos: [BOUND], grantedAgents: [ceo], repoGranted: true })).toEqual({
       notice: null,
-      readableBy: ["ceo"],
+      readableBy: [ceo],
     });
   });
 

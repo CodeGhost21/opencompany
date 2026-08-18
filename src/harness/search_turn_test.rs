@@ -259,6 +259,8 @@ async fn harness(
 ) -> (HarnessPool, HarnessDeps, CompanyRecord, Arc<RecordingMeter>) {
     let meter = Arc::new(RecordingMeter::default());
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
             base_url: model_url,
             credential: Credential::from_value("stub-key"),
@@ -269,6 +271,7 @@ async fn harness(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(meter.clone()),
         workspace_root: dir.to_path_buf(),
+        workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
         tasks: None,
@@ -303,6 +306,7 @@ async fn harness(
         chargebee: None,
         #[cfg(feature = "paypal")]
         paypal: None,
+        hosting: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,

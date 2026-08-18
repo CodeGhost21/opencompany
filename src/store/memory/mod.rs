@@ -6,7 +6,7 @@
 //!
 //! # The decorator is the whole point
 //!
-//! [`CompanyMemory`] is the **only** public way to obtain a memory port from a
+//! [`BoundMemory`] is the **only** public way to obtain a memory port from a
 //! provider. That is a deliberate constraint, not an ergonomic accident.
 //!
 //! The three ports take `&CompanyId` as an explicit first argument — a
@@ -18,7 +18,7 @@
 //! thing separating tenants inside somebody else's database.
 //!
 //! So: [`Namespace`](namespace::Namespace) has no public constructor,
-//! `CompanyMemory::bind` requires a `&CompanyId`, and every facade is handed a
+//! `BoundMemory::bind` requires a `&CompanyId`, and every facade is handed a
 //! namespace that a `CompanyId` produced. There is no `pub fn` in this module
 //! tree that accepts a namespace string.
 //!
@@ -35,7 +35,7 @@
 //!   move between namespaces rather than a delete. See
 //!   [`facades::ProviderMemoryStore::evict`].
 //! - **Taint.** Inbound-channel writes are stamped
-//!   [`MemoryTaint::ExternalSync`] via [`CompanyMemory::inbound_context`].
+//!   [`MemoryTaint::ExternalSync`] via [`BoundMemory::inbound_context`].
 //!   Note the contract's `MemoryCore::store` requires taint on every call and
 //!   has no dropping default — the defaulted `store_with_taint` lives on the
 //!   *engine* trait, which is exactly why nothing here wraps a bare `Memory`.
@@ -48,7 +48,7 @@
 //! [`DriverClass`] is taken from *configuration*, never from the driver. The
 //! contract crate excludes it on purpose: a driver that self-reported its class
 //! could claim to be embedded and skip the egress and trust checks that class
-//! gates. [`bind`](CompanyMemory::bind) therefore takes the class as an
+//! gates. [`bind`](BoundMemory::bind) therefore takes the class as an
 //! argument rather than asking the provider for it.
 
 pub mod driver;
@@ -75,7 +75,7 @@ pub use driver::{MemoryDriverConfig, MemoryDriverError, MemoryMode, open_driver}
 ///
 /// Process-scoped, like the `MemoryOverlay` it is opened into: one engine serves
 /// every company this host runs, and each port method derives its namespace from
-/// the `&CompanyId` it is given. See [`facades::Bound`] for why the company is a
+/// the `&CompanyId` it is given. See `facades::Bound` for why the company is a
 /// per-call argument rather than a field — briefly, a namespace fixed at
 /// construction would be one tenant's namespace serving all of them.
 ///

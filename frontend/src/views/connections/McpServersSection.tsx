@@ -548,7 +548,10 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                           <p data-testid="mcp-reachability" className="text-xs text-muted-foreground">
                             Reachable by:{" "}
                             <span className="font-medium text-foreground">
-                              {server.reachableBy.join(", ")}
+                              {/* Names, not ids (issue #931): an operator-added teammate's
+                                  id is a minted internal string and tells the reader
+                                  nothing about who can reach the server. */}
+                              {server.reachableBy.map((agent) => agent.name).join(", ")}
                             </span>
                           </p>
                         ))}

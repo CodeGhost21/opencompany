@@ -280,7 +280,8 @@ frontend/               Company-agnostic operator console (Vite + React)
 docs/spec/              Architecture reference
 docs/modules/           Per-package design docs
 vendor/openhuman/       OpenHuman git submodule
-vendor/tinyagents/      TinyAgents git submodule
+vendor/openhuman/vendor/tinyagents/
+                        TinyAgents inherited from OpenHuman
 ```
 
 Package surfaces: **`app`** (config + shared state), **`company`** (manifest

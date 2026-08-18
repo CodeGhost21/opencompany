@@ -529,6 +529,24 @@ pub enum DeliveryReason {
     /// The destination kind is not one this runtime knows how to deliver to
     /// (unreachable through `parse_workflow`, which rejects unknown kinds).
     UnknownDestinationKind,
+    /// The run reached this `output` node and the node names no destination, so
+    /// there was nowhere to send its report (issue #925).
+    ///
+    /// `destination` is optional on the model because it postdates the node kind
+    /// — an `output` node without one is the shape every graph had before
+    /// [`WorkflowDestinationDef`](crate::company::WorkflowDestinationDef)
+    /// existed, and its report surfaced only in the console's run drawer. That
+    /// made "the author routed nothing on purpose" and "the author never
+    /// configured a destination" the *same* observation: an empty `deliveries`
+    /// list and a run summary reading `Finished — this run routed no reports.`
+    ///
+    /// This row is what tells them apart. It is deliberately a
+    /// [`Skipped`](DeliveryStatus::Skipped) rather than a
+    /// [`Failed`](DeliveryStatus::Failed): nothing broke and nothing was
+    /// attempted, so this is the same class as
+    /// [`AlreadyDelivered`](Self::AlreadyDelivered) — a report that was never
+    /// owed to an address, stated with its reason instead of by omission.
+    NoDestinationConfigured,
     /// This was a **dry run** (issue #542): the report was routed as far as its
     /// destination but deliberately not dispatched, so an operator can see
     /// *where* a report would have gone without anything actually leaving the
@@ -584,6 +602,9 @@ impl std::fmt::Display for DeliveryReason {
             Self::ChannelRefused => "the channel refused the message",
             Self::UnknownDestinationKind => {
                 "the destination kind is not one this runtime can deliver to"
+            }
+            Self::NoDestinationConfigured => {
+                "this output node has no destination, so there was nowhere to send its report"
             }
             Self::DryRun => {
                 "this was a test run, so the report was not sent — its destination is shown so you \

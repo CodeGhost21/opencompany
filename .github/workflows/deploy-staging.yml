@@ -85,7 +85,9 @@ jobs:
       # desktop-only submodules (tauri-cef is a heavy CEF checkout) that no
       # server build compiles.
       - name: Fetch build vendor submodules
-        run: git submodule update --init --recursive vendor/openhuman vendor/tinyagents
+        run: |
+          git submodule update --init vendor/openhuman
+          scripts/ci/init-vendored-submodules.sh
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3

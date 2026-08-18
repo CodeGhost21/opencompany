@@ -226,9 +226,11 @@ test("#370 an unknown channel opens the first one and says so", async ({ page })
   await mockApi(page, () => "ok");
   await openChannel(page, "does-not-exist");
 
-  const notice = page.getByRole("status");
+  // Scoped to the notice rather than "the page's one status region": the
+  // timeline raises a second one while a channel's history is still loading
+  // (issue #934), and an unqualified `getByRole("status")` matches both.
+  const notice = page.getByRole("status").filter({ hasText: /isn't a channel here/ });
   await expect(notice).toContainText("#does-not-exist");
-  await expect(notice).toContainText("isn't a channel here");
   await expect(notice).toContainText("#engineering");
   // The hash is left alone deliberately — rewriting it needs replace-semantics
   // the shell does not thread through yet, and a push would fight the back
@@ -237,7 +239,7 @@ test("#370 an unknown channel opens the first one and says so", async ({ page })
 
   // It is derived from the hash, so navigating clears it with no dismiss.
   await page.getByRole("complementary").first().getByRole("button", { name: /content/i }).click();
-  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(notice).toHaveCount(0);
 });
 
 test("#370 a broken /desks is a retryable error, not invented channels", async ({ page }) => {

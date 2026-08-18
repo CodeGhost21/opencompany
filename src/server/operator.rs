@@ -25,6 +25,7 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
 
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
@@ -36,7 +37,8 @@ use crate::ports::types::{
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
-    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, history_for_desk,
+    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, channel_attributed_replies,
+    history_for_desk,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
@@ -52,6 +54,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/companies/{id}", get(company_status))
         .route("/api/v1/companies/{id}/chat", post(operator_chat))
         .route("/api/v1/companies/{id}/chat/history", get(chat_history))
+        .route(
+            "/api/v1/companies/{id}/chat/attribution-audit",
+            get(attribution_audit),
+        )
         // Set or clear one reaction on one message (issue #364). Not registered
         // through `scoped` because the two forms take different path tuples.
         .route(
@@ -66,6 +72,10 @@ pub fn router() -> Router<AppState> {
         // Single-company aliases (no id; resolved via the sole registered company).
         .route("/api/v1/company/chat", post(operator_chat_single))
         .route("/api/v1/company/chat/history", get(chat_history_single))
+        .route(
+            "/api/v1/company/chat/attribution-audit",
+            get(attribution_audit_single),
+        )
         .route(
             "/api/v1/company/chat/messages/{seq}/reactions",
             post(react_to_message_single),
@@ -1357,11 +1367,108 @@ async fn chat_and_emit(
         Some(raw) => Some(parse_message_id(raw)?),
         None => None,
     };
-    let (mut report, feedback_note) = run_chat(runtime.clone(), message, by, parent).await?;
+    // The turn runs on its own task, and the replies are journaled there too
+    // (issue #882). Both used to sit in this handler's future, which hyper drops
+    // the moment the peer goes away — and a reverse proxy in front of a hosted
+    // tenant goes away the moment it decides the upstream is too slow. A turn
+    // slower than that timeout was therefore cancelled mid-flight: tokens spent,
+    // side effects half-applied, and no `AgentReply` ever appended, so the
+    // operator's DM history held their question and no answer and the turn could
+    // neither be read back nor resumed.
+    //
+    // Awaiting the handle is drop-safe — dropping it abandons the *waiting*, not
+    // the work — so this answers exactly as it did before and needs no wire
+    // change to survive the disconnect. Same shape as the approval path
+    // (`CompanyRuntime::resolve_approval_spawned`, issue #380 defect 3) and the
+    // workflow runner (`WorkflowSpawn::spawn_admitted`), which is why a 504'd
+    // workflow run kept executing while a 504'd chat turn did not.
+    let (report, feedback_note) = join_chat_turn(spawn_chat_turn(ChatTurn {
+        runtime,
+        company: id.clone(),
+        desk,
+        message,
+        by,
+        parent,
+    }))
+    .await?;
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
     }
+    Ok(Json(ChatResponse {
+        // The operator's own message is the cycle's single input event, so its
+        // sequence is the first the cycle journaled (issue #364).
+        message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
+        responses: report.responses,
+        // A chat turn is nobody's sign-off, so this stays absent here.
+        still_awaiting: None,
+    }))
+}
+
+/// Everything a chat turn needs once it is off the request's future.
+///
+/// A struct rather than six positional arguments because the spawn boundary is
+/// exactly where a mis-ordered pair of `String`s would compile and then journal
+/// replies against the wrong desk.
+struct ChatTurn {
+    runtime: Arc<CompanyRuntime>,
+    company: CompanyId,
+    desk: String,
+    message: ChatMessage,
+    by: Option<Actor>,
+    parent: Option<EventSeq>,
+}
+
+/// Runs a chat turn and journals its replies on a task of its own (issue #882).
+///
+/// The journal write belongs on this side of the spawn, not back in the handler.
+/// Spawning only the cycle would still lose the answer: the turn would finish,
+/// and the `AgentReply` append that makes it readable — and that the `agent_reply`
+/// SSE frame is derived from — would die with the dropped handler future. The
+/// work is not recorded until it is journaled, so both halves move together.
+fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<String>), ApiError>> {
+    tokio::spawn(async move {
+        let ChatTurn {
+            runtime,
+            company,
+            desk,
+            message,
+            by,
+            parent,
+        } = turn;
+        let (mut report, feedback_note) =
+            run_chat(Arc::clone(&runtime), message, by, parent).await?;
+        journal_chat_replies(&runtime, &company, &desk, parent, &mut report).await;
+        Ok((report, feedback_note))
+    })
+}
+
+/// Awaits a spawned chat turn, turning a task that never finished into an error.
+///
+/// Mirrors [`crate::company::runtime::join_follow_up`]: a panicked or aborted
+/// task is a background-task failure rather than a silent empty reply.
+async fn join_chat_turn(
+    turn: JoinHandle<Result<(CycleReport, Option<String>), ApiError>>,
+) -> Result<(CycleReport, Option<String>), ApiError> {
+    match turn.await {
+        Ok(result) => result,
+        Err(err) => Err(ApiError(OpenCompanyError::BackgroundTask(format!(
+            "the chat turn did not finish: {err}"
+        )))),
+    }
+}
+
+/// Journals each reply against the addressed desk.
+///
+/// Runs inside the spawned turn (issue #882) so the record survives a client or
+/// proxy that gave up waiting.
+async fn journal_chat_replies(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    desk: &str,
+    parent: Option<EventSeq>,
+    report: &mut CycleReport,
+) {
     // Journal each reply against the addressed desk so desk history can be read
     // back (GraphQL `Chat.history`, WS2c). Single-responder in v1.
     //
@@ -1389,8 +1496,16 @@ async fn chat_and_emit(
                     // which is the lineage an operator wants and costs no
                     // schema change.
                     task_id: response.task_id.clone(),
-                    chat_id: desk.clone(),
-                    agent_id: response.channel.clone(),
+                    chat_id: desk.to_string(),
+                    // Issue #885: the author, falling back to the channel only
+                    // when the producer did not name one. `agent_id`'s contract
+                    // is "the agent that produced the reply"; `channel` is the
+                    // destination, so copying it here journaled every bubble on
+                    // the operator channel as though the operator wrote it.
+                    agent_id: response
+                        .agent
+                        .clone()
+                        .unwrap_or_else(|| response.channel.clone()),
                     text: response.text.clone(),
                     // Persist the per-bubble timeline so a history reload
                     // rehydrates the tool calls, not just the text.
@@ -1410,14 +1525,6 @@ async fn chat_and_emit(
             ),
         }
     }
-    Ok(Json(ChatResponse {
-        // The operator's own message is the cycle's single input event, so its
-        // sequence is the first the cycle journaled (issue #364).
-        message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
-        responses: report.responses,
-        // A chat turn is nobody's sign-off, so this stays absent here.
-        still_awaiting: None,
-    }))
 }
 
 /// Parses a message id from the wire into the sequence position it names.
@@ -1711,6 +1818,78 @@ async fn chat_history_single(
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     chat_history_response(&state, &id, runtime, &headers, peer, query).await
+}
+
+/// The wire shape of `GET {scope}/chat/attribution-audit` (issue #885).
+#[derive(Debug, serde::Serialize)]
+struct AttributionAuditDto {
+    /// Every `AgentReply` in the journal.
+    replies: usize,
+    /// Those whose stored author names no roster teammate.
+    affected: usize,
+    /// The distinct bad values with a count each, so an operator can see whether
+    /// they are all `operator` (the #885 shape) or whether something else is
+    /// also writing a non-agent into the field.
+    by_agent_id: std::collections::BTreeMap<String, usize>,
+}
+
+/// `GET {scope}/chat/attribution-audit` — the blast radius of issue #885.
+///
+/// Exists because "we do not know how many rows are wrong" is not an acceptable
+/// end state for a data-integrity bug, and the answer needs a journal to count
+/// against — which no test fixture and no source checkout has.
+///
+/// **Counts, never repairs.** The overwritten author is not recoverable from
+/// anything on disk; see [`channel_attributed_replies`] for the full argument.
+///
+/// Gated by the same reader check the sibling transcript route uses, and returns
+/// strictly less: counts and agent-id strings, never message text.
+async fn attribution_audit_response(
+    state: &AppState,
+    company: &CompanyId,
+    runtime: Arc<CompanyRuntime>,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<Json<AttributionAuditDto>, Response> {
+    let _viewer = history_viewer(headers, state, company, peer).await?;
+    let record = runtime
+        .store()
+        .load(runtime.id())
+        .await
+        .map_err(|e| ApiError(e).into_response())?
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::CompanyNotFound(company.to_string())).into_response()
+        })?;
+    let audit = channel_attributed_replies(&runtime, &record)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
+    Ok(Json(AttributionAuditDto {
+        replies: audit.replies,
+        affected: audit.affected,
+        by_agent_id: audit.by_agent_id,
+    }))
+}
+
+async fn attribution_audit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+) -> Result<Json<AttributionAuditDto>, Response> {
+    let company = CompanyId::new(&id);
+    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    attribution_audit_response(&state, &company, runtime, &headers, peer).await
+}
+
+/// `GET /api/v1/company/chat/attribution-audit` (single-company alias).
+async fn attribution_audit_single(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+) -> Result<Json<AttributionAuditDto>, Response> {
+    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+    let id = runtime.id().clone();
+    attribution_audit_response(&state, &id, runtime, &headers, peer).await
 }
 
 /// Body for `POST {scope}/chat/messages/{seq}/reactions` (issue #364).
@@ -2626,6 +2805,8 @@ mod test {
             .unwrap();
 
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
@@ -2633,6 +2814,7 @@ mod test {
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: home.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -2664,6 +2846,7 @@ mod test {
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
@@ -4809,6 +4992,139 @@ mod test {
         );
     }
 
+    /// The reply a stalled chat turn produces once released.
+    const SLOW_TURN_REPLY: &str = "the slow turn's answer";
+
+    /// A brain that stalls on the operator's **first** turn — the chat lane,
+    /// rather than the approval follow-up `StalledContinuationBrain` stalls on.
+    struct StalledChatBrain {
+        /// Fires once the turn is under way, which is the moment the field
+        /// report's proxy gave up and closed the connection.
+        entered: Arc<tokio::sync::Notify>,
+        /// The test's permission for that turn to finish.
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for StalledChatBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            let mut channel_responses = Vec::new();
+            for event in &req.events {
+                if matches!(event, CompanyEvent::OperatorMessage { .. }) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                    channel_responses.push(crate::ports::types::OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: None,
+                        text: SLOW_TURN_REPLY.into(),
+                        steps: Vec::new(),
+                        reply_to: None,
+                    });
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses,
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "stalled chat",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// Whether the turn's answer reached the durable journal.
+    async fn reply_journaled(runtime: &Arc<CompanyRuntime>) -> bool {
+        runtime
+            .events()
+            .read_from(runtime.id(), EventSeq::new(0), 10_000)
+            .await
+            .unwrap()
+            .iter()
+            .any(|stored| {
+                matches!(
+                    &stored.event,
+                    CompanyEvent::AgentReply { text, .. } if text == SLOW_TURN_REPLY
+                )
+            })
+    }
+
+    /// Waits for the released turn to journal its reply.
+    async fn await_reply_journaled(runtime: &Arc<CompanyRuntime>) -> bool {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !reply_journaled(runtime).await {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// **Issue #882.** A chat turn whose caller walks away mid-flight must still
+    /// finish and still journal its answer.
+    ///
+    /// This is the chat-lane twin of
+    /// `a_dropped_connection_does_not_cancel_the_follow_up_cycle`. Both the
+    /// cycle and the `AgentReply` append used to live inside the request future,
+    /// so a turn slower than nginx's read timeout was cancelled mid-flight and
+    /// the answer was never written. The operator's DM history then held their
+    /// question and nothing else — the turn could not be read back on reload and
+    /// could not be resumed, which is what #882 reported. Workflow runs survived
+    /// the identical 504 precisely because they are spawned.
+    ///
+    /// `Router::oneshot` reproduces the cancellation by the same mechanism hyper
+    /// uses: the handler future is owned by the future the caller polls, so
+    /// dropping the latter drops the former.
+    #[tokio::test]
+    async fn a_dropped_connection_does_not_lose_the_chat_turns_work() {
+        let home_dir = home();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(Arc::new(StalledChatBrain {
+                entered: entered.clone(),
+                release: release.clone(),
+            })),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        // Send the turn, then let the connection die once it is under way —
+        // exactly what the proxy does when it decides the upstream is too slow.
+        let mut chatting = Box::pin(app.clone().oneshot(chat_request("run the seo audit")));
+        tokio::select! {
+            _ = &mut chatting => panic!("the chat answered before the turn began"),
+            _ = entered.notified() => {}
+        }
+        drop(chatting);
+
+        // Nothing is journaled yet: the turn is still stalled inside the brain.
+        assert!(
+            !reply_journaled(&runtime).await,
+            "the reply was journaled before the turn was released"
+        );
+
+        // The work must survive the caller giving up.
+        release.notify_one();
+        assert!(
+            await_reply_journaled(&runtime).await,
+            "the chat turn died with the dropped connection: the operator's \
+             message is journaled, the answer is not, and the turn can neither \
+             be read back nor resumed (issue #882)"
+        );
+    }
+
     /// The same proof over a **real socket**, so the keystone rests on hyper's
     /// actual behaviour rather than on `oneshot` being a good model of it.
     ///
@@ -6362,6 +6678,7 @@ mod test {
                             message_id: None,
                             task_id: None,
                             channel: grant.agent.clone(),
+                            agent: None,
                             text: format!("re-issued {approval_id}"),
                             steps: Vec::new(),
                             reply_to: None,

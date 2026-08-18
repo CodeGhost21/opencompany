@@ -7,20 +7,25 @@ under `src/`. Public module surfaces live in source module directories:
 
 - `src/app/`: runtime configuration and shared Axum state
 - `src/server/`: Axum router and HTTP handlers
+- `src/ledger/`: dynamic ledgers — declared record shapes, the append-only fold,
+  and the `derived/` folder they render into (`docs/spec/runtime/ledgers.md`)
+- `src/globals/`: the global baseline — the agents, workflows, skills and
+  starting tool belt every company gets whichever vertical it started from,
+  authored in `globals/` and embedded at build time
+  (`docs/spec/runtime/globals.md`)
 - `src/openhuman/`: launcher and integration seams for the vendored OpenHuman checkout
 - `src/tiny/`: optional TinyAgents crate feature/status surface
 
 The command-line entrypoint lives in `src/bin/opencompany.rs`. Business types
 are data-only definitions under `companies/` (a `company.toml` manifest plus a
 `README.md` — not Cargo crates), loaded at runtime via `opencompany serve
---company companies/<name>`. The operator console is a Vite/React app under
-`frontend/`. Design notes and module specifications live in `docs/`, with
+--company companies/<name>`. What every company has regardless of which of
+those it started from is authored beside them in `globals/`. The operator
+console is a Vite/React app under `frontend/`. Design notes and module specifications live in `docs/`, with
 `docs/spec/README.md` as the top-level architecture reference and
 `docs/modules/` holding per-surface design docs.
-Vendored runtime sources live under `vendor/` as Git submodules:
-
-- `vendor/openhuman/`
-- `vendor/tinyagents/`
+The vendored runtime source is the `vendor/openhuman/` Git submodule. TinyAgents
+is inherited from OpenHuman at `vendor/openhuman/vendor/tinyagents/`.
 
 Prefer small modules with focused responsibilities. Keep core type definitions
 in a dedicated `types.rs` file and package-local tests in the module file or a
@@ -35,11 +40,30 @@ dedicated `test.rs` file when they grow.
 - `cargo test`: run the full test suite.
 - `cargo run --bin opencompany`: run the CLI.
 - `cargo run --bin opencompany -- serve`: run the Axum HTTP server on `127.0.0.1:8080`.
-- `git submodule update --init --recursive`: initialize OpenHuman and TinyAgents.
-- `cargo check --features tiny`: compile against vendored TinyAgents.
+- `git submodule update --init vendor/openhuman`: initialize OpenHuman.
+- `scripts/ci/init-vendored-submodules.sh`: initialize its vendored crates.
+- `cargo check --features tiny`: compile against OpenHuman's TinyAgents pin.
 
 Run commands from the repository root unless a future workspace layout changes
 the module location.
+
+`.cargo/config.toml` sets `RUST_MIN_STACK = 8388608` for every cargo-invoked
+process (issue #895). Do not drop it. The gated suite exceeds libtest's 2 MiB
+default thread stack, and when it does the failure is a `SIGABRT` that aborts
+the **whole test binary** — so every test after it is skipped, and the symptom
+reads as "I broke the harness" rather than "this needs a bigger stack".
+
+8 MiB is 2.7x the measured floor: the whole gated suite aborts at 2 MiB and
+passes 4182/4182 at 3 MiB (aarch64-darwin, default parallelism). The margin
+covers x86-64 CI frame layout, higher CI parallelism, and growth. The depth is
+cumulative `async fn` composition in the vendored OpenHuman turn chain (~117 KiB
+for its largest single future, against ~32 KiB for the largest OpenCompany-owned
+one), so it is not bounded from this repo — `Box::pin` at our own seam was tried
+and moved it by nothing. Full evidence is in `.cargo/config.toml`.
+
+If you change the value, say what you measured; an unexplained ceiling is the
+ratchet #895 exists to complain about. Export `RUST_MIN_STACK` yourself to
+override it — the file does not use `force`.
 
 ## Coding Style & Naming Conventions
 

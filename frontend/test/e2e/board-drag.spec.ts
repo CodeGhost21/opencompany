@@ -21,9 +21,37 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
  *    a 64px target makes the common case, did nothing and said nothing.
  *
  * These tests are the guard for both, and for the third leg of the fix: the
- * board now scrolls itself while a drag sits on its edge, because HTML5
+ * board scrolls itself while a drag sits on its edge, because HTML5
  * drag-and-drop does not scroll a nested scroll container, so a column parked
  * off-screen could not be reached by the gesture at all.
+ *
+ * # Why this one drives `#/ledgers/tasks`
+ *
+ * There are two boards now, and they are the same component: `LedgerBoard`
+ * renders the task board at `#/tasks` and every ledger's columns under
+ * `#/ledgers/<slug>`, with the card as a slot. The drag mechanics — all three
+ * fixes above — live in that component, so testing either entry point tests
+ * them.
+ *
+ * This spec drives the **ledger** one deliberately. It is the newer path and the
+ * one whose layout differs (a nav beside it, the board inside a pane rather
+ * than filling the window), so it is where a geometry regression would show up
+ * first; `board-columns.spec.ts` covers the task board's own screen. Between
+ * them both entry points are exercised, and neither can regress silently.
+ *
+ * Two things about the port are worth stating, because both are places where a
+ * lazy rewrite would have quietly stopped testing anything:
+ *
+ * * The column labels come from the **host** now (the `tasks` ledger's statuses,
+ *   built from `src/ledger/board.rs`). `COLUMNS` below is still spelled out
+ *   rather than read from the API, deliberately: a test that asked the host what
+ *   to expect and then asserted the host said it would pass against any answer.
+ *   Rust pins the same literals in `the_labels_are_the_ones_every_surface_renders`.
+ * * The board is addressed by `data-testid`, not by a utility class. The old
+ *   spec located it as "the first `div.overflow-x-auto`", which was true of a
+ *   screen that held nothing else; the Ledgers screen has a nav and a detail
+ *   pane, and inferring the board from a Tailwind class would have made this
+ *   spec fail for reasons that have nothing to do with dragging.
  *
  * They drive a real browser against a live host, which the issue calls out as
  * the only way this is observable. CI does not run this suite.
@@ -31,13 +59,21 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
 
 const API = "/api/v1/company";
 
-/** Board order (issue #301), so a column can be addressed by position. */
+/** The board's address now that the standalone screen is gone. */
+const BOARD = "/#/ledgers/tasks";
+
+/**
+ * Board order (issue #301), so a column can be addressed by position.
+ *
+ * These are the host's labels — see the note above on why they are written out
+ * here rather than read back from the ledger.
+ */
 const COLUMNS = ["To-do", "Planning", "In progress", "Paused", "In review", "Done"];
 const IN_REVIEW = COLUMNS.indexOf("In review");
 const DONE = COLUMNS.indexOf("Done");
 
 test.beforeEach(async ({ page }) => {
-  // The first-run tour opens a modal over the board and swallows clicks.
+  // The first-run tour opens a modal over the console and swallows clicks.
   await page.addInitScript(() => {
     const seen = JSON.stringify({ skipped: true, seenAt: Date.now() });
     for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
@@ -56,8 +92,18 @@ async function dismissTour(page: Page) {
   await expect(skip).toHaveCount(0);
 }
 
-const column = (page: Page, index: number) => page.locator("div.w-72").nth(index);
-const board = (page: Page) => page.locator("div.overflow-x-auto").first();
+const board = (page: Page) => page.getByTestId("ledger-board");
+const column = (page: Page, index: number) => board(page).locator("div.w-72").nth(index);
+
+/** Opens the board and waits for the host's columns to arrive. */
+async function openBoard(page: Page) {
+  await page.goto(BOARD);
+  await dismissTour(page);
+  // The columns are a read, not a literal, so the board is not itself until it
+  // has one. Every assertion below measures a column's box; none of them mean
+  // anything against a board still showing none.
+  await expect(column(page, DONE)).toHaveCount(1, { timeout: 15_000 });
+}
 
 /** Seeds a card straight into In review and opens the board on it. */
 async function seedInReview(page: Page, request: APIRequestContext, title: string) {
@@ -67,9 +113,8 @@ async function seedInReview(page: Page, request: APIRequestContext, title: strin
   const moved = await request.patch(`${API}/tasks/${id}`, { data: { column: "in_review" } });
   expect(moved.ok()).toBeTruthy();
 
-  await page.goto("/#/tasks");
-  await dismissTour(page);
-  const card = page.locator("div[draggable=true]").filter({ hasText: title }).first();
+  await openBoard(page);
+  const card = page.locator("[draggable=true]").filter({ hasText: title }).first();
   await expect(card).toBeVisible({ timeout: 15_000 });
   return { id, card };
 }
@@ -100,9 +145,7 @@ async function handDrag(page: Page, card: Locator, toX: number, toY: number) {
 test("the whole board fits the window, so the last column is a full drop target", async ({
   page,
 }) => {
-  await page.goto("/#/tasks");
-  await dismissTour(page);
-  await expect(column(page, DONE)).toHaveCount(1);
+  await openBoard(page);
 
   // The regression this guards: the shell used to be a sidebar's width wider
   // than the window, and the overshoot was clipped by an ancestor that cannot
@@ -144,13 +187,26 @@ test("a card drags from In review to Done, and the board scrolls to get there", 
 
   const box = await card.boundingBox();
   if (!box) throw new Error("the seeded card has no box");
-  const viewport = page.viewportSize()!;
+  // The **board's** right edge, not the window's. On its own screen the board
+  // ran to the window edge and the two were the same pixel; inside Ledgers it
+  // sits past a nav and inside the section's padding. Riding the window edge
+  // here would hold the pointer over the page *outside* the board, where its
+  // `dragover` never fires — the test would fail for a reason that has nothing
+  // to do with the behaviour, and the band is defined relative to the board
+  // anyway.
+  const edge = await board(page).boundingBox();
+  if (!edge) throw new Error("the board has no box");
+  const rightEdge = edge.x + edge.width - 8;
 
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   // Ride the right edge and let the board bring Done to the pointer.
+  // Vertically at the board's middle, not a fixed offset below the card. The
+  // board is only as tall as the pane leaves it, and a pointer held below its
+  // bottom edge is a pointer off the board — where its `dragover` never fires.
+  const rideY = edge.y + edge.height / 2;
   for (let tick = 0; tick < 25; tick += 1) {
-    await page.mouse.move(viewport.width - 8 - (tick % 2), box.y + 160);
+    await page.mouse.move(rightEdge - (tick % 2), rideY);
     await page.waitForTimeout(60);
   }
   const rode = await board(page).evaluate((el) => el.scrollLeft);
@@ -163,7 +219,10 @@ test("a card drags from In review to Done, and the board scrolls to get there", 
   await page.mouse.up();
 
   // The host's own record, which is the only thing that settles whether the
-  // move happened rather than merely appeared to.
+  // move happened rather than merely appeared to. It is also the assertion the
+  // port could most easily have lost: the board writes through `patchTask` here
+  // exactly as it did on its own screen, because entering a column fires work
+  // and `record_entry` is refused for this ledger.
   await expect
     .poll(async () => (await (await request.get(`${API}/tasks/${id}`)).json()).task.column, {
       timeout: 15_000,
@@ -190,9 +249,13 @@ test("a drop that misses every column says so instead of doing nothing", async (
   // The trailing gutter past the last column: board pixels that belong to no
   // column. This is where a near miss lands, and it used to swallow the whole
   // gesture without a word.
-  const gutter = await page.locator("div[aria-hidden].w-4").first().boundingBox();
+  const gutter = await board(page).locator("div[aria-hidden].w-4").first().boundingBox();
   if (!gutter) throw new Error("no trailing gutter");
-  await handDrag(page, card, gutter.x + gutter.width / 2, gutter.y + 200);
+  // The gutter's own middle, rather than a fixed offset down it. It is a flex
+  // item stretched to the tallest column, so on a board holding a card or two
+  // it is short — and a fixed 200px would drop *below* the board entirely,
+  // which is a miss of a different kind than the one under test.
+  await handDrag(page, card, gutter.x + gutter.width / 2, gutter.y + gutter.height / 2);
 
   await expect(page.getByText("Drop the card on a column to move it.")).toBeVisible({
     timeout: 5_000,
@@ -229,6 +292,8 @@ test("a move the host refuses names the card, the column, and the reason", async
   if (!done) throw new Error("Done has no box");
   await handDrag(page, card, done.x + done.width / 2, done.y + done.height / 2);
 
+  // "Done" is the host's label for the column, reaching the toast through the
+  // ledger's statuses rather than through a list the console keeps.
   await expect(page.getByText(`Could not move "${title}" to Done.`)).toBeVisible({
     timeout: 5_000,
   });

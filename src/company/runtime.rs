@@ -124,6 +124,8 @@ use crate::server::ops::smtp::SmtpCredentials;
 pub struct OpsStores {
     /// The durable task board.
     pub tasks: Arc<dyn TaskStore>,
+    /// The company's declared ledgers and their append-only event logs.
+    pub ledgers: Arc<dyn crate::ports::ledgers::LedgerStore>,
     /// The durable workspace file tree.
     pub workspace: Arc<dyn WorkspaceStore>,
     /// The durable memory-facts view.
@@ -655,6 +657,11 @@ impl CompanyRuntime {
     /// This company's task board.
     pub fn tasks(&self) -> &Arc<dyn TaskStore> {
         &self.ops.tasks
+    }
+
+    /// The company's ledger store.
+    pub fn ledgers(&self) -> &Arc<dyn crate::ports::ledgers::LedgerStore> {
+        &self.ops.ledgers
     }
 
     /// Upserts a board task and edge-fires the board's two automatic entries:
@@ -1464,7 +1471,13 @@ impl CompanyRuntime {
                     CompanyEvent::AgentReply {
                         parent,
                         chat_id,
-                        agent_id: response.channel.clone(),
+                        // Issue #885: the author, not the destination. Same
+                        // fallback as the `/chat` path — a producer that names
+                        // no agent keeps the pre-#885 behaviour exactly.
+                        agent_id: response
+                            .agent
+                            .clone()
+                            .unwrap_or_else(|| response.channel.clone()),
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
@@ -1558,6 +1571,7 @@ impl CompanyRuntime {
                 message_id: None,
                 task_id: None,
                 channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                agent: None,
                 text: format!(
                     "Recorded. The agent picks this back up once the remaining {outstanding} \
                      sign-off{} on this step {} decided.",
@@ -1685,6 +1699,7 @@ impl CompanyRuntime {
                             message_id: None,
                             task_id: None,
                             channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                            agent: None,
                             text: text.clone(),
                             steps: Vec::new(),
                             reply_to: None,
@@ -1776,6 +1791,7 @@ impl CompanyRuntime {
                         message_id: None,
                         task_id: None,
                         channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                        agent: None,
                         text: text.to_string(),
                         steps: Vec::new(),
                         reply_to: None,
@@ -2303,12 +2319,15 @@ mod tests {
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> crate::harness::HarnessDeps {
         crate::harness::HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(crate::harness::provider::MockProvider::default()),
             provider_slug: "mock".to_string(),
             context: runtime.context.clone(),
             store: runtime.store.clone(),
             meter,
             workspace_root: std::env::temp_dir(),
+            workspace_git_enabled: false,
             audit_root: std::env::temp_dir(),
             model_override: None,
             tasks: None,
@@ -2340,6 +2359,7 @@ mod tests {
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             search: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),

@@ -67,7 +67,7 @@ pub mod tinycortex_engine;
 /// The TinyMemory `MemoryProvider` seam (issue #914): one engine-neutral driver
 /// contract behind the three memory ports, with the engine chosen by
 /// configuration — the embedded engine in-pod, a hosted service behind a URL and
-/// a credential, or nothing. [`memory::CompanyMemory`] is the only public way to
+/// a credential, or nothing. [`memory::BoundMemory`] is the only public way to
 /// get a port out of a provider, and it derives the namespace from the
 /// `CompanyId`, which is what keeps the tenant-isolation invariant the ports'
 /// `&CompanyId` argument gives us and the contract's bare `namespace: &str` does

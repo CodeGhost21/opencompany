@@ -74,6 +74,39 @@ describe("primaryLink", () => {
     expect(link.href).toBe("#/tasks/t-1");
   });
 
+  // --- issue #806: an output whose producer is a chat turn, not a run --------
+
+  it("opens the workflow a chat turn authored, with no run in the address", () => {
+    // The case #806 exists for: the card is settled by an operator chat turn,
+    // so there is no attempt — but there IS a deliverable, and the board's
+    // contract is written in terms of links. The workflow href must carry no
+    // `?run=`, because naming one would address an attempt that never happened.
+    const link = primaryLink(
+      task({
+        output: {
+          chatId: "chat-42",
+          atMillis: 0,
+          workflows: [{ workflowId: "w-1", action: "created" }],
+        },
+      }),
+    );
+    expect(link.kind).toBe("workflow");
+    expect(link.href).toBe("#/workflows/w-1");
+  });
+
+  it("never labels a chat turn as a run trace", () => {
+    // The last-resort arm. A chat-sourced output with nothing else to show must
+    // not reach `traceHref` — `#/tasks/t-1?run=undefined` is the shape of the
+    // bug this union prevents.
+    const link = primaryLink(
+      task({ output: { chatId: "chat-42", atMillis: 0 } }),
+    );
+    expect(link.kind).toBe("card");
+    expect(link.href).toBe("#/tasks/t-1");
+    expect(link.href).not.toContain("run=");
+    expect(link.label).not.toContain("attempt");
+  });
+
   it("escapes a task id that would otherwise break the address", () => {
     const link = primaryLink(task({ id: "t/1 2" }));
     expect(link.href).toBe("#/tasks/t%2F1%202");

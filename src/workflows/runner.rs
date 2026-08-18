@@ -1411,6 +1411,8 @@ description = "Runs Acme."
 
     fn deps(dir: &std::path::Path) -> HarnessDeps {
         HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
@@ -1418,6 +1420,7 @@ description = "Runs Acme."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -1449,6 +1452,7 @@ description = "Runs Acme."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
@@ -2002,6 +2006,7 @@ to = "done"
 
         let dir = tempfile::tempdir().unwrap();
         let file = WorkflowFile {
+            global: false,
             id: "bad".to_string(),
             name: "Bad".to_string(),
             description: None,

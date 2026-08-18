@@ -9,9 +9,9 @@ ceiling.
 ## Memory engine overlay (`OPENCOMPANY_MEMORY`)
 
 Memory is a separable concern. `OPENCOMPANY_STORAGE` picks the durable base for
-all fourteen ports; `OPENCOMPANY_MEMORY` optionally swaps **just** the two
-knowledge ports — `MemoryStore` + `ContextStore` — onto a dedicated memory
-engine layered on top of that base. The base still owns every other port
+all fourteen ports; `OPENCOMPANY_MEMORY` optionally swaps the three
+knowledge ports — `MemoryStore`, `ContextStore` and `FactStore` — onto a
+dedicated memory engine layered on top of that base. The base still owns every other port
 (companies, events, secrets, tasks, …).
 
 | Value | Engine | Feature flag | Notes |

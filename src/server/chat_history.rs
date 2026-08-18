@@ -12,10 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
-use crate::ports::tasks::{
-    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
+use crate::ports::types::{
+    Actor, ActorKind, CompanyEvent, CompanyRecord, EventSeq, StoredEvent, TurnStep,
 };
-use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq, StoredEvent, TurnStep};
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
 /// The console's default/orchestrator thread id
@@ -149,23 +148,20 @@ pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
 /// `harness::lifecycle::relay_text` takes — a newer host naming a column this
 /// build has not heard of should read a little raw, never render blank.
 ///
+/// The label is [`crate::ledger::board`]'s, not a fourth copy of it. This
+/// function used to carry its own `match` from id to label — one of three on
+/// the host and a fourth in the console — and each was a place a renamed column
+/// could half-land.
+///
 /// Pinned by tests on both sides of the wire: the console has its own
 /// `dispatchMarkerText` (`frontend/src/lib/chat.ts`), because the live SSE
-/// frame carries the raw column id rather than prose. Two spellings of one
-/// sentence can only *reword* a marker across a reload — never double it, since
-/// the dedupe is on identity — but the tests couple them anyway, on the same
-/// terms `BOARD_COLUMNS` and the console's `TASK_COLUMNS` are coupled.
+/// frame carries the raw column id rather than prose and a marker renders
+/// synchronously from it, with no ledger read to await. That copy is the one
+/// remaining exception, and it is the safe one: two spellings of a sentence can
+/// only *reword* a marker across a reload — never double it, since the dedupe
+/// is on identity, and never lose a card.
 pub fn dispatch_marker_text(column: &str) -> String {
-    let landing = match column {
-        COLUMN_TODO => "To-do",
-        COLUMN_PLANNING => "Planning",
-        COLUMN_IN_PROGRESS => "In progress",
-        COLUMN_PAUSED => "Paused",
-        COLUMN_IN_REVIEW => "In review",
-        COLUMN_DONE => "Done",
-        other => other,
-    };
-    format!("finished → {landing}")
+    format!("finished → {}", crate::ports::tasks::column_label(column))
 }
 
 /// Who is reading a desk history. `mine` is relative to this.
@@ -461,6 +457,104 @@ impl MessageView {
     }
 }
 
+/// The blast radius of issue #885, for one company.
+///
+/// Reported rather than repaired. See [`channel_attributed_replies`] for why a
+/// repair is not available.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AttributionAudit {
+    /// Every `AgentReply` inspected.
+    pub replies: usize,
+    /// Those whose stored `agent_id` names no roster teammate.
+    pub affected: usize,
+    /// The distinct bad `agent_id` values, with a count each — so an operator
+    /// can see at a glance whether they are all `operator` (the #885 shape) or
+    /// whether something else is also writing a non-agent into the field.
+    pub by_agent_id: std::collections::BTreeMap<String, usize>,
+}
+
+impl AttributionAudit {
+    /// Folds one page of journal events in.
+    ///
+    /// Split out from the paging so the rule itself is testable without a
+    /// `CompanyRuntime` — the classification is the part that can be silently
+    /// wrong, and a store fixture would only obscure it.
+    pub fn fold(&mut self, page: &[StoredEvent], is_roster_agent: impl Fn(&str) -> bool) {
+        for stored in page {
+            let CompanyEvent::AgentReply { agent_id, .. } = &stored.event else {
+                continue;
+            };
+            self.replies += 1;
+            if !is_roster_agent(agent_id) {
+                self.affected += 1;
+                *self.by_agent_id.entry(agent_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+}
+
+/// Counts desk replies whose author was overwritten with a destination (#885).
+///
+/// # The rule
+///
+/// [`CompanyEvent::AgentReply`]'s `agent_id` is documented as *"the agent that
+/// produced the reply"*, so a value naming no roster teammate is by definition
+/// not an author. That is the whole test, and it is deliberately not `== "operator"`:
+/// the same defect on any other channel — a Telegram chat id, a desk slug —
+/// produces a different wrong string and has to be counted too.
+///
+/// # Why this only counts, and never repairs
+///
+/// **The true author is not recoverable from what is on disk.** `agent_id` was
+/// the only field that carried it and it was overwritten in place. Nothing else
+/// on the event, and nothing beside it, records who spoke:
+///
+/// * `steps` — [`TurnStep`] has no agent field;
+/// * `task_id` — `None` on exactly these rows (it is set on the dispatch path,
+///   which is the one writer that was already correct);
+/// * `parent` — names the question, never the answerer;
+/// * `chat_id` — the desk, which yields *today's* desk lead. Desk membership is
+///   mutable (manifest members unioned with operator-added overlay members), so
+///   that is a re-derivation against current state, not a recovery — and it is
+///   silently wrong for any desk whose lead has changed since.
+/// * the metering store — bucketed per calendar **day** with per-agent
+///   aggregates, so it cannot name the author of one message.
+///
+/// So a backfill would synthesise an author rather than restore one, and a
+/// confident wrong name in a transcript is worse than an admitted gap. These
+/// rows are ambiguous, permanently, and this reports how many there are.
+///
+/// # One deliberate false positive
+///
+/// `CompanyRuntime::announce_continuation_failure` journals a **system** notice
+/// as `agent_id: "operator"` on purpose — it is the runtime telling the operator
+/// a continuation failed, not an agent speaking. It is indistinguishable from a
+/// #885 row on disk, so it is counted here. The count is therefore an upper
+/// bound; in practice that notice is rare enough not to move it.
+pub async fn channel_attributed_replies(
+    runtime: &CompanyRuntime,
+    record: &CompanyRecord,
+) -> Result<AttributionAudit, OpenCompanyError> {
+    const PAGE: usize = 512;
+    let mut audit = AttributionAudit::default();
+    let mut cursor = EventSeq::new(0);
+    loop {
+        let page = runtime
+            .events()
+            .read_from(runtime.id(), cursor, PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        let last = page[page.len() - 1].seq;
+        audit.fold(&page, |agent_id| {
+            record.resolve_roster_agent_id(agent_id).is_some()
+        });
+        cursor = EventSeq::new(last.value() + 1);
+    }
+    Ok(audit)
+}
+
 /// Loads roster display labels for a company: user id → label.
 ///
 /// Prefers a display name, and falls back to the email's *local part* rather
@@ -631,6 +725,10 @@ pub async fn history_total_for_desk(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::tasks::{
+        COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING,
+        COLUMN_TODO,
+    };
     use crate::ports::types::Actor;
 
     fn agent_reply(chat_id: &str) -> CompanyEvent {
@@ -1084,5 +1182,104 @@ mod test {
         );
         assert!(!view.text.contains("the run's prose"), "{}", view.text);
         assert_eq!(view.text, "finished → Paused");
+    }
+
+    /// Issue #885: the audit's classification rule.
+    ///
+    /// The rule is "an `agent_id` naming no roster teammate", not
+    /// `== "operator"`, so these pin both the shape actually observed and the
+    /// generalisation — the same writer bug on another channel produces a
+    /// different wrong string and still has to be counted.
+    mod attribution_audit {
+        use super::*;
+
+        fn reply(seq: u64, agent_id: &str) -> StoredEvent {
+            at(
+                seq,
+                CompanyEvent::AgentReply {
+                    chat_id: "engineering".to_string(),
+                    agent_id: agent_id.to_string(),
+                    text: "…".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                },
+            )
+        }
+
+        /// The roster for these: two real teammates and nothing else.
+        fn on_roster(agent_id: &str) -> bool {
+            matches!(agent_id, "engineer" | "product_manager")
+        }
+
+        #[test]
+        fn a_reply_authored_by_a_real_teammate_is_not_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, "engineer"), reply(2, "product_manager")],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+            assert!(audit.by_agent_id.is_empty());
+        }
+
+        /// The observed #885 shape: the operator channel copied into the author.
+        #[test]
+        fn a_reply_authored_by_the_operator_channel_is_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, "operator"),
+                    reply(2, "engineer"),
+                    reply(3, "operator"),
+                ],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 3);
+            assert_eq!(audit.affected, 2);
+            assert_eq!(audit.by_agent_id.get("operator"), Some(&2));
+        }
+
+        /// The generalisation. A Telegram chat id or a desk slug in the author
+        /// field is the same defect, and a rule keyed on the literal
+        /// `"operator"` would report a clean company.
+        #[test]
+        fn any_non_roster_author_is_counted_not_just_the_operator_channel() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, "operator"), reply(2, "-100123456789")],
+                on_roster,
+            );
+            assert_eq!(audit.affected, 2);
+            assert_eq!(audit.by_agent_id.get("-100123456789"), Some(&1));
+        }
+
+        /// Only replies. An operator's own message is not an `AgentReply` and
+        /// has no `agent_id` to be wrong, so counting it would inflate the
+        /// blast radius of a data-integrity bug — the one number that has to be
+        /// trustworthy here.
+        #[test]
+        fn a_non_reply_event_is_neither_scanned_nor_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    at(
+                        1,
+                        CompanyEvent::OperatorMessage {
+                            text: "hello".to_string(),
+                            by: None,
+                            chat: None,
+                            parent: None,
+                            deliverable: None,
+                        },
+                    ),
+                    reply(2, "operator"),
+                ],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 1);
+            assert_eq!(audit.affected, 1);
+        }
     }
 }

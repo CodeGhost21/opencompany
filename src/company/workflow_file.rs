@@ -134,6 +134,14 @@ pub struct WorkflowFile {
     pub nodes: Vec<WorkflowNodeDef>,
     /// Directed edges between nodes, in file order.
     pub edges: Vec<WorkflowEdgeDef>,
+    /// Whether this graph came from the global baseline ([`crate::globals`])
+    /// rather than the company's own `workflows/` directory or its saved
+    /// overlays.
+    ///
+    /// Provenance, for a console that has to say where a graph a company never
+    /// wrote came from. It changes no behaviour here: precedence is decided by
+    /// id, in [`load_workflow_union`] and [`list_workflows_union`].
+    pub global: bool,
 }
 
 impl WorkflowFile {
@@ -550,6 +558,9 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
         id: raw.id,
         name: raw.name,
         description: raw.description,
+        // Set by whoever merges the baseline in; this parser reads company
+        // graphs and global ones through the same path.
+        global: false,
         nodes: raw
             .nodes
             .into_iter()
@@ -673,6 +684,50 @@ pub fn load_workflow_union(
     overlays: &[crate::ports::types::OverlayWorkflow],
     id: &str,
 ) -> Result<Option<WorkflowFile>> {
+    load_company_workflow_union(source_dir, overlays, id)
+}
+
+/// [`load_workflow_union`], honouring a company's `[globals].disable`.
+///
+/// The same read, with the one thing the two-source form cannot see: whether
+/// this company opted out of the global graph it would otherwise resolve to.
+/// Callers that hold the record pass `record.manifest.globals.disable`; the
+/// shorter form exists for the ones that do not, and resolves globals as if
+/// nothing were disabled — which is what an operator who wrote no opt-out gets
+/// either way.
+///
+/// Precedence is seed file, then overlay, then global: the company's committed
+/// graph wins, its console-authored graph wins over the baseline, and the
+/// baseline fills what neither defines. A global graph is never *merged* into a
+/// same-id company graph — nobody designed the half of each.
+pub fn load_workflow_with_globals(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    disable: &[String],
+    id: &str,
+) -> Result<Option<WorkflowFile>> {
+    if let Some(file) = load_company_workflow_union(source_dir, overlays, id)? {
+        return Ok(Some(file));
+    }
+    if crate::globals::disabled(disable, "workflow", id) {
+        return Ok(None);
+    }
+    Ok(crate::globals::workflows()
+        .iter()
+        .find(|workflow| workflow.id == id)
+        .cloned()
+        .map(|mut workflow| {
+            workflow.global = true;
+            workflow
+        }))
+}
+
+/// The company's own two sources — seed file, then overlay — with no baseline.
+fn load_company_workflow_union(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    id: &str,
+) -> Result<Option<WorkflowFile>> {
     if let Some(dir) = source_dir {
         let path = dir.join("workflows").join(format!("{id}.toml"));
         // Only load ids that exist on disk, so a missing file falls through to
@@ -717,6 +772,76 @@ pub fn list_workflows_union(
     source_dir: Option<&Path>,
     overlays: &[crate::ports::types::OverlayWorkflow],
 ) -> Vec<WorkflowFile> {
+    list_company_workflows_union(source_dir, overlays)
+}
+
+/// [`list_workflows_union`], honouring a company's `[globals].disable`.
+///
+/// Global graphs are listed **last**, after the company's own seeds and saved
+/// overlays and only for ids neither of those already carries — the same
+/// precedence [`load_workflow_with_globals`] applies, so the picker and the
+/// loader can never disagree about which graph an id means.
+pub fn list_workflows_with_globals(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    disable: &[String],
+) -> Vec<WorkflowFile> {
+    let mut files = list_company_workflows_union(source_dir, overlays);
+    // Reserved by *claim*, not by successful parse: a malformed seed file or
+    // overlay still names an id the company owns, and `load_workflow_with_globals`
+    // resolves that company definition first — parse error and all — before it
+    // would ever fall through to a global. Using only `files`' ids here (the ones
+    // that parsed) would let a same-id global slip into the list even though the
+    // loader can never actually return it, exposing an entry this list cannot
+    // back.
+    let reserved = reserved_company_workflow_ids(source_dir, overlays);
+    for workflow in crate::globals::workflows() {
+        if reserved.contains(&workflow.id)
+            || crate::globals::disabled(disable, "workflow", &workflow.id)
+        {
+            continue;
+        }
+        let mut workflow = workflow.clone();
+        workflow.global = true;
+        files.push(workflow);
+    }
+    files
+}
+
+/// Every workflow id a company's own two sources claim, whether or not the
+/// file actually parses: `workflows/*.toml` file stems plus every saved
+/// overlay's `id`. See [`list_workflows_with_globals`] for why a malformed
+/// source must still reserve its id.
+fn reserved_company_workflow_ids(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+) -> std::collections::HashSet<String> {
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(dir) = source_dir
+        && let Ok(entries) = std::fs::read_dir(dir.join("workflows"))
+    {
+        ids.extend(
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+                .filter_map(|path| {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string)
+                }),
+        );
+    }
+    ids.extend(overlays.iter().map(|overlay| overlay.id.clone()));
+    ids
+}
+
+/// The company's own two sources — seed files, then saved overlays — and no
+/// baseline. [`list_workflows_union`] is exactly this, named for its callers.
+fn list_company_workflows_union(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+) -> Vec<WorkflowFile> {
     let mut files = list_source_workflows(source_dir);
     let mut seen: std::collections::HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
 
@@ -739,6 +864,7 @@ pub fn list_workflows_union(
             }
         }
     }
+
     files
 }
 
@@ -1358,8 +1484,9 @@ pub(crate) fn required_config_problems(
         }
         // `field` OR `expression` both satisfy a switch — the tinyflows engine
         // reads `config.expression` first and falls back to `config.field`
-        // (`vendor/tinyagents` `switch.rs`), so either is honoured downstream and
-        // requiring only that ONE is present matches the runtime.
+        // (`vendor/openhuman/vendor/tinyflows/.../switch.rs`), so either is
+        // honoured downstream and requiring only that ONE is present matches the
+        // runtime.
         WorkflowNodeKind::Switch if !non_empty("field") && !non_empty("expression") => {
             problems.push(format!(
                 "{label} is a switch node but names no discriminant — set `config.field` or \
@@ -3210,6 +3337,32 @@ to = "done"
         let files = list_workflows_union(None, &overlays);
         let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids, vec!["good"]);
+    }
+
+    /// A malformed overlay whose id collides with a global workflow must not
+    /// let the global slip into the list: `load_workflow_with_globals`
+    /// resolves the company's (broken) definition first and errors, so a list
+    /// entry backed by the global instead would be one the loader can never
+    /// actually return.
+    #[test]
+    fn list_with_globals_reserves_a_malformed_overlays_id_against_the_global() {
+        let taken = crate::globals::workflows()[0].id.clone();
+        let overlays = vec![OverlayWorkflow {
+            id: taken.clone(),
+            toml: "id = \"broken\"\nname =".to_string(),
+        }];
+
+        let listed = list_workflows_with_globals(None, &overlays, &[]);
+        assert!(
+            listed.iter().all(|f| f.id != taken),
+            "the global must not appear in place of the company's malformed definition: {listed:?}"
+        );
+
+        let loaded = load_workflow_with_globals(None, &overlays, &[], &taken);
+        assert!(
+            loaded.is_err(),
+            "the loader must surface the malformed overlay's error, not the global"
+        );
     }
 
     // -----------------------------------------------------------------------

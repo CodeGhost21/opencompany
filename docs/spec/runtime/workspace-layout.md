@@ -245,12 +245,49 @@ The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle
 
 ```toml
 [workspace]
+git_enabled = false           # opt in to automatic Git checkpoints per agent workspace
 clear_tmp_on_startup = true   # default; set false to preserve tmp/ across restarts
 storage_quota_gb = 5          # soft whole-workspace quota; omit or <= 0 = unlimited
 tmp_quota_gb = 1              # soft tmp/ quota; omit or <= 0 = unlimited
 tree_quota_gb = 2             # HARD cap on the note tree's binary payloads (#553)
 max_blob_mb = 64              # HARD cap on ONE binary write (default 64)
 ```
+
+When `git_enabled = true`, every private agent filesystem workspace under
+`harness/<company>/<agent>/workspace` is initialized as a Git working tree.
+OpenCompany creates a baseline commit and then commits changed files after each
+tool call, including shell commands, so redirects and generated files are not
+missed. Calls that leave the tree unchanged add no commit. Git history lives in
+the sibling `workspace.git/` directory; the working tree contains only Git's
+small `.git` pointer file, which keeps ordinary Git commands usable from inside
+the workspace. The pointer file is write-only scaffolding: a `.git` an agent
+plants is ignored for the checkpointer's own commands (which pass an explicit
+`--git-dir`) and rewritten to name the real repository, and checkpoint Git
+invocations are isolated from inherited config and hooks. Checkpoint failures
+are warned about but never replace a tool's successful result. The setting
+defaults to `false`, preserving existing workspaces unless an operator
+explicitly opts in. See [sandbox.md](orchestration/sandbox.md#checkpointing) for
+the security rationale.
+
+**Checkpoint history retains everything a workspace ever contained.** Because the
+checkpoint repository records the workspace tree state at each tool call, a file
+an agent writes and later deletes survives in `workspace.git/` history long after
+it leaves the working tree. Content an agent downloads, generates, or is handed
+by the operator can therefore accumulate there with no size bound — there are no
+ignore rules and `[workspace]` quotas do not apply to Git objects. Treat the
+feature as suitable for workspaces whose contents are not secrets, or purge
+history deliberately on the same schedule such data would otherwise be rotated.
+The supported purge path is to drop the checkpoint history from the host,
+because every checkpoint is committed to the `checkpoints` branch and remains
+reachable from it even after data leaves the working tree — reflog expiry and
+`gc` alone do **not** remove it. The clean purge is to delete the whole
+`<workspace>.git/` directory, after which the next tool call re-initializes the
+checkpointer from a fresh baseline. To keep a workspace but drop its prior
+history without fully resetting, delete the branch ref first so its commits
+become unreachable, then garbage-collect them: `git --git-dir=<workspace>.git update-ref -d refs/heads/checkpoints` followed by `git --git-dir=<workspace>.git gc --prune=now`. Either way, `<workspace>.git` must be removed or the `checkpoints` ref must be deleted before `gc --prune=now` will actually free the blobs. Deleting
+`<workspace>.git/` resets a workspace to its next checkpoint baseline. No
+retention is automatic: the checkpointer never rewrites history and leaves the
+repository alone between checkpoints.
 
 **The first two quotas are soft/advisory in the binary.** At boot `serve`
 measures the workspace (and `tmp/`) and emits an operator-visible

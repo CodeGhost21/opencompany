@@ -1115,9 +1115,25 @@ export function WorkflowsView({
     };
   }, [runs, runsFor, selectedId]);
 
+  // Issue #921: the runs the HOST reports as no longer in flight. This is the
+  // only authority that survives a dead stream — the `workflow_run_finished`
+  // frame the fold would otherwise wait on is precisely the one that goes
+  // missing when the console stops updating mid-run.
+  //
+  // Scoped to the selected workflow's own history for the same reason
+  // `inFlightSeed` is: a run id is unique, but a list read for another workflow
+  // cannot contain this run anyway, and pairing the two guards keeps one rule
+  // rather than two.
+  const settledRunIds = useMemo(() => {
+    if (!selectedId || runsFor !== selectedId) return undefined;
+    const ids = new Set<string>();
+    for (const r of runs) if (r.runId && !r.running) ids.add(r.runId);
+    return ids;
+  }, [runs, runsFor, selectedId]);
+
   const liveRun = useMemo(
-    () => foldLiveRun(runEvents, selectedId, graph, inFlightSeed),
-    [runEvents, selectedId, graph, inFlightSeed],
+    () => foldLiveRun(runEvents, selectedId, graph, inFlightSeed, settledRunIds),
+    [runEvents, selectedId, graph, inFlightSeed, settledRunIds],
   );
 
   // The optimistic frontier is only for the gap before the first frame. Once
@@ -1181,11 +1197,25 @@ export function WorkflowsView({
   // Polling stops on its own: the effect above clears `activeRunId` the moment
   // a settled row lands, and that unmounts this interval. With a working stream
   // the live fold clears it first, so at most one extra fetch is spent.
+  //
+  // Issue #921: it polls while the CANVAS believes a run is walking too, not
+  // only while `activeRunId` is set. Those are different states, and the gap
+  // between them is this bug: `activeRunId` is only ever adopted for a run this
+  // console STARTED (the `starting` guard above), so a run being watched — a
+  // cron fire, a run started from chat, a run adopted from history after a
+  // reload — polled nothing. When its stream then died mid-run there was no
+  // frame to settle the fold and no poll to correct it, so the canvas kept a
+  // node pulsing and the header kept reading "running" until someone reloaded.
+  //
+  // Same self-limiting shape as before: `settledRunIds` clears `liveRun.active`
+  // on the first settled row, which unmounts this interval. With a working
+  // stream the finish frame gets there first and this costs at most one fetch.
+  const watchingRun = Boolean(activeRunId) || Boolean(liveRun?.active);
   useEffect(() => {
-    if (!activeRunId || !historySupported) return;
+    if (!watchingRun || !historySupported) return;
     const timer = window.setInterval(() => setRunsTick((n) => n + 1), 2_000);
     return () => window.clearInterval(timer);
-  }, [activeRunId, historySupported]);
+  }, [watchingRun, historySupported]);
 
   // Switching workflow (or company) clears the canvas: another graph's node ids
   // are meaningless here, and a stale mark on a same-named node would be a lie.

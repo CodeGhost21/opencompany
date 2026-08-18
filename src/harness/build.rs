@@ -4,20 +4,22 @@
 //! [`Agent`], injecting the harness's provider, the [`OcMemory`] adapter, the
 //! [`ApprovalPolicy`] tool policy, and a workspace directory.
 //!
-//! * **Tools**: every agent gets the intrinsic [`memory_tools`] (`memory_store`
-//!   + `memory_recall`) over its own company memory. **File tools** (read,
-//!     write, edit, list, grep, glob) are granted per-agent when the effective
-//!     `tools ∩ agent.tools` grants cover the `files`/`docs` namespace, and are
-//!     sandboxed to the agent's own workspace via a `workspace_only`
-//!     [`SecurityPolicy`] ([`file_tools`]). **Exec-grade tools** (Cell A) now
-//!     slot in beside them via [`toolbelt`](crate::harness::toolbelt): `shell`
-//!     (shell + `read_workspace_state`) and `code` (`apply_patch`,
-//!     `git_operations`, `csv_export`) behind a strict [`toolbelt::exec_security`]
-//!     policy + native runtime + per-workspace audit; `web` (`web_fetch`,
-//!     `http_request`, `curl`, `image_info`) behind the same policy plus a
-//!     per-company SSRF domain allowlist. The `subagent` namespace is reserved
-//!     but empty in v1. Still deferred: browser automation (needs a backend)
-//!     and Node/NPM exec (need a managed bootstrap).
+//! * **Tools**: [`memory_tools`] (`memory_store` + `memory_recall`) is called
+//!   but currently returns nothing — see its doc comment for why openhuman's
+//!   API no longer gives embedders a way to point either tool at a company's
+//!   own memory. **File tools** (read, write, edit, list, grep, glob) are
+//!   granted per-agent when the effective `tools ∩ agent.tools` grants cover
+//!   the `files`/`docs` namespace, and are sandboxed to the agent's own
+//!   workspace via a `workspace_only` [`SecurityPolicy`] ([`file_tools`]).
+//!   **Exec-grade tools** (Cell A) now slot in beside them via
+//!   [`toolbelt`](crate::harness::toolbelt): `shell` (shell +
+//!   `read_workspace_state`) and `code` (`apply_patch`, `git_operations`,
+//!   `csv_export`) behind a strict [`toolbelt::exec_security`] policy + native
+//!   runtime + per-workspace audit; `web` (`web_fetch`, `http_request`,
+//!   `curl`, `image_info`) behind the same policy plus a per-company SSRF
+//!   domain allowlist. The `subagent` namespace is reserved but empty in v1.
+//!   Still deferred: browser automation (needs a backend) and Node/NPM exec
+//!   (need a managed bootstrap).
 //! * **Metered web search** (issue #238, [`search`](crate::harness::search)):
 //!   `web_search` over the managed backend, the discovery half the `web` tools
 //!   never had — they read a *known* URL and cannot find one. Two hard gates
@@ -89,8 +91,7 @@ use openhuman_core::openhuman as oh;
 
 use oh::agent::prompts::SystemPromptBuilder;
 use oh::agent::{Agent, AgentBuilder};
-use oh::memory::tools::{MemoryRecallTool, MemoryStoreTool};
-use oh::memory::traits::Memory;
+use oh::memory::Memory;
 use oh::security::SecurityPolicy;
 #[cfg(feature = "mcp")]
 use oh::tools::McpListToolsTool;
@@ -245,12 +246,11 @@ pub fn build_agent(
         }
     };
 
-    // Intrinsic memory tools: every agent can deliberately store and recall over
-    // its own company memory, complementing the automatic retrieve→inject→store
-    // loop. They are tenant-isolated (an agent's memory is its company's
-    // `ContextStore`) and granted to every agent — unlike the external tools
-    // below, which are scoped by the manifest `[tools]` allow-list.
-    let mut tools: Vec<Box<dyn Tool>> = memory_tools(memory.clone());
+    // Intrinsic memory tools are withheld for now — see `memory_tools`'s doc
+    // comment for why. `tools` still starts from that call so the moment
+    // openhuman gives embedders a way back in, wiring them is a one-line
+    // change here again rather than a rediscovery.
+    let mut tools: Vec<Box<dyn Tool>> = memory_tools(&memory);
     #[cfg(feature = "mcp")]
     {
         // These config-free tools read OpenHuman's live process registry, so
@@ -481,6 +481,38 @@ pub fn build_agent(
                 agent = %manifest_agent.id,
                 "[build] agent explicitly grants `paypal` but no per-company PayPal credentials \
                  are configured; wallet tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
+    // Hosting: put this agent's workspace on a real hosting provider. Same
+    // fail-closed shape as `chargebee` and `paypal` above, and for both of their
+    // reasons at once — a deployment publishes the company's files to the public
+    // internet under its own account, and provisioning a database is a bill it
+    // pays. Two conditions, both required:
+    //
+    //  1. an **EXPLICIT** `hosting` grant. The catch-all `*` does NOT confer it.
+    //  2. a resolved per-company connection on the deps (`deps.hosting`), read
+    //     from THAT company's secret store by the runtime builder — never from
+    //     an environment variable, which under multi-tenancy could only ever be
+    //     somebody else's account.
+    //
+    // The tools are pinned to `workspace`, the same sandbox directory the file
+    // tools get, so an agent can only ever deploy what it can already read.
+    #[cfg(feature = "openhuman")]
+    if crate::company::grants_hosting_explicit(grants) {
+        match &deps.hosting {
+            Some(config) => {
+                tools.extend(crate::harness::hosting::hosting_tools(
+                    config,
+                    workspace.clone(),
+                ));
+            }
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `hosting` but no per-company hosting \
+                 credential is configured; hosting tools NOT wired (fail-closed)"
             ),
         }
     }
@@ -718,6 +750,7 @@ pub fn build_agent(
                 company.clone(),
                 manifest_agent.id.clone(),
                 workspace_writes,
+                manifest_agent.write_scope(),
             ))
         }
         _ => None,
@@ -725,6 +758,24 @@ pub fn build_agent(
     let workspace_granted = workspace_tools.is_some();
     if let Some(workspace_tools) = workspace_tools {
         tools.extend(workspace_tools);
+    }
+
+    // The company's own record. Ungated, and deliberately: an agent that can
+    // read the task board but not what the company already decided is exactly
+    // the split these ledgers exist to close, and every *write* here is
+    // `PermissionLevel::Write`, so a supervised policy parks it like any other
+    // consequence. The one thing no grant can confer is deletion — there is no
+    // delete tool at all. See `ledger_tools`.
+    let ledger_granted = deps.ledgers.is_some();
+    if let Some(store) = &deps.ledgers {
+        tools.extend(crate::harness::ledger_tools::ledger_tools(
+            crate::company::ledgers::Ledgers::new(company.clone(), store.clone())
+                .with_tasks_opt(deps.tasks.clone())
+                .with_workspace_opt(deps.workspace.clone()),
+            manifest_agent.id.clone(),
+            manifest_agent.ledgers.clone(),
+            manifest_agent.can_declare_ledgers,
+        ));
     }
 
     // Persona over openhuman's own identity: `omit_identity = true` drops the
@@ -749,6 +800,15 @@ pub fn build_agent(
         ));
     }
 
+    // The catalogue, not a pointer to one. A tool granted, unmentioned and
+    // never called is the observed failure, so every ledger is named with what
+    // it holds — see `ledger_brief`.
+    if ledger_granted {
+        persona.push_str(&crate::harness::ledger_tools::ledger_brief(
+            &deps.ledger_registry,
+        ));
+    }
+
     // Issue #244: what a deliverable is, and how to hand one over. Only when
     // the tool was actually wired above — describing a tool the agent does not
     // have is how you get a turn spent calling something that does not exist.
@@ -760,21 +820,43 @@ pub fn build_agent(
     // harness is wired to a skills source; otherwise the agent stays skill-less
     // and the default path is untouched. The catalogue is folded into the
     // persona body because `omit_skills_catalog` is inert upstream.
-    if deps.skills_source_dir.is_some() || !skill_deltas.is_empty() {
+    // The global baseline installs skills in every company, including one with
+    // no source dir and no deltas — a platform-provisioned tenant is exactly
+    // that — so its presence arms this branch too. Without that clause the
+    // baseline would reach every company except the hosted ones.
+    if deps.skills_source_dir.is_some()
+        || !skill_deltas.is_empty()
+        || !crate::globals::skills().is_empty()
+    {
         let skill_ws = deps
             .workspace_root
             .join(company.as_ref())
             .join(&manifest_agent.id)
             .join("skill-catalog");
-        let effective = EffectiveSkills::materialize(
+        // Best-effort, not fatal. This ran only for a company with a skills
+        // source or an operator delta until the global baseline made it run for
+        // every company — including one whose workspace root is unusable, where
+        // failing here would turn "this agent has no skill catalogue" into "this
+        // company cannot build an agent at all". The agent still answers; it
+        // just answers without the catalogue, and the reason is logged.
+        match EffectiveSkills::materialize(
             skill_ws,
             deps.skills_source_dir.as_deref(),
             &deps.skills_registry,
             skill_deltas,
-        )?;
-        if !effective.is_empty() {
-            tools.extend(effective.read_tools());
-            persona.push_str(&effective.catalogue());
+        ) {
+            Ok(effective) => {
+                if !effective.is_empty() {
+                    tools.extend(effective.read_tools());
+                    persona.push_str(&effective.catalogue());
+                }
+            }
+            Err(err) => tracing::warn!(
+                company = %company.as_ref(),
+                agent = %manifest_agent.id,
+                error = %err,
+                "skill catalogue unavailable for this agent",
+            ),
         }
     }
 
@@ -920,6 +1002,25 @@ pub fn build_agent(
     // (memory/MCP/orchestrator/file/skill) have no mapped namespace and are
     // always kept.
     let tools = toolbelt::filter_by_capabilities(tools, &deps.capabilities);
+    let tools = if deps.workspace_git_enabled {
+        match crate::harness::checkpoint::WorkspaceCheckpointer::initialize_off_worker(&workspace) {
+            Ok(checkpointer) => {
+                crate::harness::checkpoint::CheckpointingTool::wrap_all(tools, checkpointer)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    company = %company,
+                    agent = %manifest_agent.id,
+                    workspace = %workspace.display(),
+                    %error,
+                    "[workspace-checkpoint] could not initialize Git; continuing without checkpoints"
+                );
+                tools
+            }
+        }
+    } else {
+        tools
+    };
 
     // Tool-calling transport follows the provider's advertised capability. A
     // provider that advertises native tool calling (`profile().tool_calling`,
@@ -969,19 +1070,40 @@ pub fn build_agent(
         .map_err(|e| OpenCompanyError::Harness(format!("build agent '{}': {e}", manifest_agent.id)))
 }
 
-/// The always-on memory tools every embedded agent receives: `memory_store` and
-/// `memory_recall` over the agent's own [`OcMemory`]. Backed by the same
-/// `ContextStore` the automatic loop and `OPENCOMPANY_MEMORY` overlay use, so
-/// deliberate and automatic memory share one store.
+/// The intrinsic `memory_store` / `memory_recall` tools — **withheld today**,
+/// pending a way to point them at a company's own [`OcMemory`] again.
 ///
-/// `MemoryForgetTool` is deliberately excluded — [`OcMemory`]'s append-only
-/// `ContextStore` cannot delete, so a forget tool would silently no-op.
-fn memory_tools(memory: Arc<dyn Memory>) -> Vec<Box<dyn Tool>> {
-    let security = Arc::new(SecurityPolicy::default());
-    vec![
-        Box::new(MemoryStoreTool::new(memory.clone(), security)),
-        Box::new(MemoryRecallTool::new(memory)),
-    ]
+/// Through openhuman's earlier API, `MemoryStoreTool::new` /
+/// `MemoryRecallTool::new` took the `Arc<dyn Memory>` directly, so each
+/// company's own `ContextStore` was exactly what the two tools read and wrote.
+/// The version this crate now vendors changed both constructors to
+/// `fn new(security: Arc<SecurityPolicy>)` / `fn new()` — no memory parameter
+/// — and moved resolution *inside* `execute()` to
+/// `active_memory_guard()`, which reaches an ambient `CoreContext`
+/// this crate's session/turn machinery never scopes (`rg CoreContext::scope`
+/// under `agent/harness/session` finds nothing), or — with no context bound —
+/// falls back to **one process-global workspace** resolved from
+/// `Config::load_or_init()`. Either path is disconnected from `.memory(memory)`
+/// on the session builder: `Tool::execute(&self, args)` takes no session or
+/// memory parameter at all, so there is no route left by which a per-company
+/// `Arc<dyn Memory>` could reach these two tools.
+///
+/// Wiring them anyway would mean every company's "deliberate" memory read and
+/// write lands in one shared, unconfigured store instead of that company's own
+/// `ContextStore` — silently wrong at best, a cross-company memory leak at
+/// worst under this crate's multi-tenant-in-one-process model. Withholding the
+/// tools is the safe default until either openhuman restores an injection seam
+/// for embedders that do not run its RPC/`CoreContext` dispatch, or this crate
+/// builds real per-company `CoreContext` scoping over its own per-company
+/// workspace directories (a materially larger change than this vendor bump).
+///
+/// `MemoryForgetTool` was already excluded before this — [`OcMemory`]'s
+/// append-only `ContextStore` cannot delete, so a forget tool would silently
+/// no-op — and stays excluded now for the same reason it would apply again the
+/// day these two return.
+fn memory_tools(memory: &Arc<dyn Memory>) -> Vec<Box<dyn Tool>> {
+    let _ = memory;
+    Vec::new()
 }
 
 /// The namespace separator for a `[tools].allow` grant: only `.`, because a
@@ -1120,12 +1242,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_tools_expose_store_and_recall() {
+    fn memory_tools_are_withheld_until_a_per_company_injection_seam_exists() {
+        // Regression lock for the finding behind `memory_tools`'s doc comment:
+        // openhuman's `MemoryStoreTool`/`MemoryRecallTool` no longer accept an
+        // `Arc<dyn Memory>` at construction, and `Tool::execute(&self, args)`
+        // takes no session/memory parameter either — so there is currently no
+        // route by which a company's own `Arc<dyn OcMemory>` reaches either
+        // tool. Wiring them anyway would point every company's "deliberate"
+        // memory read/write at one shared, unconfigured openhuman-internal
+        // store instead of that company's own `ContextStore`. Should this
+        // start failing because `memory_tools` grew tools again, the fix that
+        // flips it back on must first confirm each company's own `ContextStore`
+        // is genuinely what backs them — see the doc comment on
+        // `memory_tools` for what that requires.
         use crate::ports::ContextStore;
         use crate::ports::types::{ChunkAddr, ChunkHit, ChunkMeta, CompanyId, ContextChunk};
 
-        // The memory handle is never exercised here — we only assert the tool
-        // surface — so a no-op context suffices.
+        // The memory handle is never exercised — the tools are withheld
+        // unconditionally — so a no-op context suffices.
         struct NoopContext;
         #[async_trait::async_trait]
         impl ContextStore for NoopContext {
@@ -1158,10 +1292,12 @@ mod tests {
             "ceo",
             Arc::new(NoopContext),
         ));
-        let tools = memory_tools(memory);
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"memory_store"), "got {names:?}");
-        assert!(names.contains(&"memory_recall"), "got {names:?}");
+        let tools = memory_tools(&memory);
+        assert!(
+            tools.is_empty(),
+            "expected no intrinsic memory tools while withheld, got {:?}",
+            tools.iter().map(|t| t.name()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1378,6 +1514,7 @@ mod tests {
 
     fn manifest_agent(role: &str, description: Option<&str>) -> ManifestAgent {
         ManifestAgent {
+            global: false,
             id: "ceo".to_string(),
             role: role.to_string(),
             description: description.map(str::to_string),
@@ -1390,6 +1527,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         }
     }
 
@@ -1497,12 +1636,15 @@ mod tests {
         let workspace_root = root.join("harness");
         let audit_root = root;
         HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(PinContext),
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,
+            workspace_git_enabled: false,
             audit_root,
             model_override: None,
             tasks: None,
@@ -1534,6 +1676,7 @@ mod tests {
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -1568,6 +1711,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = pin_deps(dir.path().to_path_buf());
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1580,6 +1724,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1613,6 +1759,7 @@ mod tests {
             crate::company::DEFAULT_SEARCH_DAILY_CALLS,
         ));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1625,6 +1772,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1654,6 +1803,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.workspace = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1666,6 +1816,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1693,6 +1845,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.artifacts = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1705,6 +1858,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1891,6 +2046,7 @@ mod tests {
             })
             .collect();
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1906,6 +2062,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2295,12 +2453,15 @@ mod tests {
             "http_request",
             "image_info",
             "list",
-            "memory_recall",
-            "memory_store",
             "read_workspace_state",
             "shell",
             "web_fetch",
         ];
+        // The global baseline installs skills in every company (issue: global
+        // agents/skills/workflows), so the three skill read tools are on every
+        // belt now — including a company with no skills source of its own.
+        expected.extend(["describe_skill", "list_skills", "read_skill_resource"]);
+        expected.sort();
         // Mirrors the unconditional `#[cfg(feature = "mcp")]` push in
         // `build_agent`. These two are intrinsic (unmapped by `namespace_of`),
         // so no grant gates them — enabling the feature is the whole condition.
@@ -2489,5 +2650,105 @@ mod tests {
                 "deferred tool `{tool}` leaked into the dispatched belt: {names:?}"
             );
         }
+    }
+
+    /// [`pin_deps`] with automatic Git checkpoints enabled — the one switch
+    /// `HarnessDeps::workspace_git_enabled` flips inside `build_agent`.
+    fn enabled_git_deps(root: std::path::PathBuf) -> HarnessDeps {
+        let mut deps = pin_deps(root);
+        deps.workspace_git_enabled = true;
+        deps
+    }
+
+    /// `git log` inside the workspace, resolving through the checkpointer's
+    /// `.git` pointer, exactly as the existing checkpoint tests do.
+    fn git_log(workspace: &std::path::Path) -> String {
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(["log", "--format=%s"])
+                .current_dir(workspace)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+    }
+
+    /// The enabled Git path, end to end through `build_agent`: the `docs.*`
+    /// grant wires the sandboxed `file_write`, `workspace_git_enabled: true`
+    /// decorates every tool with the checkpointer, and a tool call that writes
+    /// the workspace yields the baseline commit plus a post-call checkpoint.
+    #[tokio::test]
+    async fn workspace_git_enabled_checkpoints_a_tool_write() {
+        use crate::company::Policy;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = enabled_git_deps(dir.path().to_path_buf());
+        let company = CompanyId::new("acme");
+        let manifest_agent = ManifestAgent {
+            global: false,
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            delegates_to: Vec::new(),
+            context: None,
+            budget_usd_daily: None,
+            prompt: None,
+            prompt_files: Vec::new(),
+            prompt_files_resolved: Vec::new(),
+            classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
+        };
+        // `full` so the sandboxed write executes without a supervised prompt.
+        let policy = ApprovalPolicy::new(
+            &Policy {
+                mode: "full".to_string(),
+                ..Policy::default()
+            },
+            None,
+        );
+        let grants = vec!["docs.*".to_string()];
+        let agent = build_agent(
+            &company,
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            &[],
+            false,
+        )
+        .expect("agent builds");
+
+        let workspace = agent_workspace(&deps.workspace_root, &company, "desk");
+        let write = agent
+            .tools()
+            .iter()
+            .find(|tool| tool.name() == "file_write")
+            .expect("docs.* wires file_write");
+        let result = write
+            .execute(json!({"path": "answer.txt", "content": "42"}))
+            .await
+            .expect("file_write runs");
+        assert!(!result.is_error, "unexpected failure: {result:?}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("answer.txt")).unwrap(),
+            "42"
+        );
+
+        let history = git_log(&workspace);
+        assert!(
+            history.contains("checkpoint: initialize workspace"),
+            "{history}"
+        );
+        assert!(
+            history.contains("checkpoint: after file_write"),
+            "{history}"
+        );
     }
 }
