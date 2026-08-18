@@ -188,6 +188,7 @@ pub fn router() -> Router<AppState> {
         .merge(artifacts::router())
         .merge(memory::router())
         .merge(workspace::router())
+        .merge(pages::router())
         .merge(skills::router())
         .merge(mcp::router())
         .merge(read_state::router())
