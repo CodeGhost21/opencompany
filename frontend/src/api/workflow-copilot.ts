@@ -307,7 +307,13 @@ export function composeCopilotMessage(
     `### Tools — the slugs a \`tool_call\` step may run`,
     `A \`tool_call\` node names its tool with \`config.slug\`, set to one of these EXACT slugs. Do not invent a slug (there is no \`github_integration\`, etc.).`,
   );
-  if (!toolSlugsKnown || toolSlugs === undefined) {
+  // The single predicate both the list and its advisory key off. Hoisted rather
+  // than spelled out twice: the advisory is only coherent directly under a list
+  // that was actually read, so the two conditions must be exact negations of one
+  // another — and two copies of `toolSlugsKnown && toolSlugs !== undefined` is
+  // precisely how they drift apart.
+  const slugsListed = toolSlugsKnown && toolSlugs !== undefined;
+  if (!slugsListed) {
     lines.push(
       `(The tools that can run here could not be listed. Do not invent a tool slug.)`,
     );
@@ -325,15 +331,15 @@ export function composeCopilotMessage(
   // should answer "search is not wired on this deployment" rather than either
   // proposing a node that dies at the first run or denying the tool exists.
   //
-  // Gated on `toolSlugsKnown` as well, so the pairing cannot come apart: the
-  // advisory is a NARROWING of the list above, and there is nothing to narrow
-  // when that list could not be read. Emitting it anyway would say "these are
-  // off-limits" directly under "the tools that can run here could not be
-  // listed", which is self-contradictory on its face — and, since the caller holds the
-  // two in separate state, the tools named would be whichever company was on
-  // screen last. The condition closes that by construction rather than by the
-  // caller remembering to clear one when it clears the other.
-  if (toolSlugsKnown && unwiredTools !== undefined && unwiredTools.length > 0) {
+  // Gated on `slugsListed`, so the pairing cannot come apart: the advisory is a
+  // NARROWING of the list above, and there is nothing to narrow when that list
+  // could not be read. Emitting it anyway would say "these are off-limits"
+  // directly under "the tools that can run here could not be listed", which is
+  // self-contradictory on its face — and, since the caller holds the two in
+  // separate state, the tools named would be whichever company was on screen
+  // last. The condition closes that by construction rather than by the caller
+  // remembering to clear one when it clears the other.
+  if (slugsListed && unwiredTools !== undefined && unwiredTools.length > 0) {
     lines.push(
       ``,
       `### Granted but NOT wired on this deployment — do NOT author these`,

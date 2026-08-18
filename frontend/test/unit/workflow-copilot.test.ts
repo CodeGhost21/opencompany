@@ -258,26 +258,35 @@ describe("composeCopilotMessage", () => {
    * both. See `workflow-copilot-company-switch` for the mounted half.
    */
   it("omits the unwired advisory when the tool set could not be listed", () => {
-    const message = composeCopilotMessage(
+    // Not `web_search`: the schema example above names that slug, so it is in
+    // the message either way and could not witness the omission.
+    const unwiredTools = [
       {
-        ...context,
-        toolSlugs: undefined,
-        toolSlugsKnown: false,
-        // Not `web_search`: the schema example above names that slug, so it is
-        // in the message either way and could not witness the omission.
-        unwiredTools: [
-          {
-            slug: "deep_research",
-            reason: "searchBackendNotConfigured",
-            detail: "granted, but no managed search backend is configured",
-          },
-        ],
+        slug: "deep_research",
+        reason: "searchBackendNotConfigured",
+        detail: "granted, but no managed search backend is configured",
       },
-      "add a research step",
-    );
-    expect(message).toMatch(/could not be listed/i);
-    expect(message).not.toMatch(/granted but NOT wired/i);
-    expect(message).not.toContain("deep_research");
+    ];
+    // BOTH ways the list can fail to be read. `toolSlugsKnown: false` is the
+    // old-host case; `toolSlugsKnown: true` with no `toolSlugs` is the one that
+    // used to slip through, because the advisory keyed off the flag alone while
+    // the list above keyed off the pair — so the message claimed the tools could
+    // not be listed and then named some as off-limits in the next breath.
+    for (const toolSlugsKnown of [false, true]) {
+      const message = composeCopilotMessage(
+        { ...context, toolSlugs: undefined, toolSlugsKnown, unwiredTools },
+        "add a research step",
+      );
+      expect(message, `toolSlugsKnown=${toolSlugsKnown}`).toMatch(
+        /could not be listed/i,
+      );
+      expect(message, `toolSlugsKnown=${toolSlugsKnown}`).not.toMatch(
+        /granted but NOT wired/i,
+      );
+      expect(message, `toolSlugsKnown=${toolSlugsKnown}`).not.toContain(
+        "deep_research",
+      );
+    }
   });
 
   /**
