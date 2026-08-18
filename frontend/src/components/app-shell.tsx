@@ -740,6 +740,85 @@ export function AppShell({
   }, [client, company]);
 
   /**
+   * Whether this shell is still mounted, for work that outlives the effect that
+   * started it.
+   *
+   * An effect-scoped `cancelled` flag answers "is this effect still current",
+   * which is the right question for a subscription and the wrong one for a
+   * request whose whole purpose is to react to the state change that retires
+   * that effect. {@link reReadSettledThread} is that case; see its doc.
+   */
+  const mountedRef = useRef(true);
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
+
+  /**
+   * Rebuild one thread's transcript from `chat/history` after its turn settled
+   * (issue #983), folding into both stores — the parked Conversation reads
+   * `threads`, the Chat workspace reads `transcripts`.
+   *
+   * ## Why this is not inside the poll effect, which is where it started
+   *
+   * It was, and there it never ran (issue #1000). The caller settles a turn by
+   * deleting it from `openTurns`, and `openTurns` is the poll effect's own
+   * dependency — so that delete re-renders, React tears the effect down, and
+   * its cleanup sets `cancelled = true` long before a network round trip can
+   * come back. The fold was guarded on that flag, so every durable re-read this
+   * console ever issued was fetched, parsed and thrown away.
+   *
+   * Nothing reported it because the live `agent_reply` frame had almost always
+   * drawn the same reply seconds earlier: a backstop that silently never fires
+   * is indistinguishable from one that is never needed. What made it visible is
+   * the hosted tenant, where the manager's proxy buffers whole response bodies
+   * and an SSE stream therefore never delivers a frame at all
+   * (`opencompany-microservice#23`). There the poll is not a backstop — it is
+   * the only delivery path — and a detached turn's reply simply never appeared.
+   *
+   * So the lifetime that governs this read is the component's, not the effect's.
+   * Unmount is the only thing that can make the answer unwanted, which is what
+   * {@link mountedRef} says and `cancelled` never did.
+   *
+   * Idempotent by construction: both folds drop entries whose message id is
+   * already present, so a second call for the same thread — a late poll tick, a
+   * settle racing a re-arm — adds nothing.
+   */
+  const reReadSettledThread = useCallback(
+    (threadId: string) => {
+      client
+        .getChatHistory(threadId, company)
+        .then((entries) => {
+          if (!mountedRef.current || entries.length === 0) return;
+          const hydrated = fromHistory(entries);
+          setThreads((ts) =>
+            ts.map((t) => {
+              if (t.id !== threadId) return t;
+              const known = new Set(t.messages.map((m) => m.id));
+              const fresh = hydrated.filter((m) => !known.has(m.id));
+              return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
+            }),
+          );
+          const channelId = chatChannelByThread[threadId];
+          if (!channelId) return;
+          setTranscripts((t) => {
+            const known = new Set((t[channelId] ?? []).map((m) => m.id));
+            const fresh = hydrated.filter((m) => !known.has(m.id));
+            return fresh.length === 0
+              ? t
+              : { ...t, [channelId]: [...(t[channelId] ?? []), ...fresh] };
+          });
+        })
+        .catch(() => {
+          /* offline — the next hydration pass still rebuilds it */
+        });
+    },
+    [client, company, chatChannelByThread],
+  );
+
+  /**
    * Watch each open turn to its end, and rebuild the transcript from the
    * durable record when it gets there (issue #983).
    *
@@ -770,35 +849,10 @@ export function AppShell({
         delete next[threadId];
         return next;
       });
-      // The durable re-read. Folded into both stores for the same reason every
-      // other injection is — the parked Conversation reads `threads`, the Chat
-      // workspace reads `transcripts`.
-      client
-        .getChatHistory(threadId, company)
-        .then((entries) => {
-          if (cancelled || entries.length === 0) return;
-          const hydrated = fromHistory(entries);
-          setThreads((ts) =>
-            ts.map((t) => {
-              if (t.id !== threadId) return t;
-              const known = new Set(t.messages.map((m) => m.id));
-              const fresh = hydrated.filter((m) => !known.has(m.id));
-              return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
-            }),
-          );
-          const channelId = chatChannelByThread[threadId];
-          if (!channelId) return;
-          setTranscripts((t) => {
-            const known = new Set((t[channelId] ?? []).map((m) => m.id));
-            const fresh = hydrated.filter((m) => !known.has(m.id));
-            return fresh.length === 0
-              ? t
-              : { ...t, [channelId]: [...(t[channelId] ?? []), ...fresh] };
-          });
-        })
-        .catch(() => {
-          /* offline — the next hydration pass still rebuilds it */
-        });
+      // Deliberately not awaited here, and deliberately not written inline —
+      // see `reReadSettledThread` for why the re-read cannot live inside this
+      // effect. The line above is what tears this effect down.
+      reReadSettledThread(threadId);
     };
 
     const poll = () => {
@@ -835,7 +889,7 @@ export function AppShell({
     };
     // `watching` is derived from `openTurns`; the transition that matters is a
     // turn opening or closing, which changes that map.
-  }, [client, company, openTurns, chatChannelByThread]);
+  }, [client, company, openTurns, reReadSettledThread]);
 
   /**
    * Unread per channel, for the channel rail's badges (issue #367 — the rail
