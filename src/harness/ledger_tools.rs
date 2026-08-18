@@ -39,6 +39,7 @@ use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
 use crate::company::ledgers::{self, Ledgers, Query};
+use crate::company::{LedgerAccess, LedgerGrant};
 use crate::ledger::{LedgerAuthor, LedgerSource, LedgerSpec, ORDERS};
 
 /// Names every ledger this company has.
@@ -52,21 +53,62 @@ pub const CLOSE_ENTRY_TOOL: &str = "close_entry";
 /// Declares a new ledger.
 pub const DEFINE_LEDGER_TOOL: &str = "define_ledger";
 
+/// This agent's access to slug `slug`, from its manifest-declared grants.
+///
+/// `None` grants (an omitted `[[agent]].ledgers` key) means every slug answers
+/// `Some(Record)` — unrestricted, the tool surface every agent had before this
+/// field existed. `Some(list)` answers only for the slugs it names, so an
+/// agent that declares a `ledgers` list at all is confined to exactly what it
+/// lists — the same opt-in-confinement shape as `Agent::write_scope`. Mirrors
+/// [`crate::company::Agent::ledger_access`], duplicated here rather than
+/// called through an `&Agent` because these tools are built once and held
+/// `'static`, past the manifest's own lifetime.
+fn ledger_access(grants: &Option<Vec<LedgerGrant>>, slug: &str) -> Option<LedgerAccess> {
+    match grants {
+        None => Some(LedgerAccess::Record),
+        Some(list) => list
+            .iter()
+            .find(|grant| grant.name.eq_ignore_ascii_case(slug.trim()))
+            .map(|grant| grant.access),
+    }
+}
+
 /// Builds the five tools for one agent.
-pub fn ledger_tools(ctx: Ledgers, agent_id: String) -> Vec<Box<dyn Tool>> {
+///
+/// `ledger_grants` and `can_declare_ledgers` are the manifest's
+/// `[[agent]].ledgers` and `.can_declare_ledgers` — see
+/// [`crate::company::Agent::ledger_access`] for what an omitted `ledgers` key
+/// means.
+pub fn ledger_tools(
+    ctx: Ledgers,
+    agent_id: String,
+    ledger_grants: Option<Vec<LedgerGrant>>,
+    can_declare_ledgers: bool,
+) -> Vec<Box<dyn Tool>> {
     let author = LedgerAuthor::agent(agent_id);
     vec![
-        Box::new(ListLedgers { ctx: ctx.clone() }),
-        Box::new(ReadLedger { ctx: ctx.clone() }),
+        Box::new(ListLedgers {
+            ctx: ctx.clone(),
+            ledger_grants: ledger_grants.clone(),
+        }),
+        Box::new(ReadLedger {
+            ctx: ctx.clone(),
+            ledger_grants: ledger_grants.clone(),
+        }),
         Box::new(RecordEntry {
             ctx: ctx.clone(),
             author: author.clone(),
+            ledger_grants: ledger_grants.clone(),
         }),
         Box::new(CloseEntry {
             ctx: ctx.clone(),
             author: author.clone(),
+            ledger_grants,
         }),
-        Box::new(DefineLedger { ctx }),
+        Box::new(DefineLedger {
+            ctx,
+            can_declare_ledgers,
+        }),
     ]
 }
 
@@ -128,6 +170,30 @@ async fn spec_for(ctx: &Ledgers, arguments: &Value) -> Result<LedgerSpec, String
         .map_err(|error| format!("{error}"))
 }
 
+/// Refuses `slug` when `grants` does not give at least `need`.
+///
+/// `Record` implies `Read` — recording requires reading nothing extra. Named
+/// so every ledger tool refuses in the same words, whether the reason is "not
+/// in your declared list" or "declared read-only for you".
+fn require_access(
+    grants: &Option<Vec<LedgerGrant>>,
+    slug: &str,
+    need: LedgerAccess,
+) -> Result<(), String> {
+    match ledger_access(grants, slug) {
+        Some(LedgerAccess::Record) => Ok(()),
+        Some(LedgerAccess::Read) if need == LedgerAccess::Read => Ok(()),
+        Some(LedgerAccess::Read) => Err(format!(
+            "Refused: your manifest grants only read access to `{slug}`. Recording or closing a \
+             row needs `record` access — ask the operator to change your `ledgers` grant."
+        )),
+        None => Err(format!(
+            "Refused: `{slug}` is not in your declared `ledgers` grant. `list_ledgers` names what \
+             you can reach."
+        )),
+    }
+}
+
 fn text(arguments: &Value, key: &str) -> String {
     arguments
         .get(key)
@@ -183,6 +249,7 @@ fn ledger_argument() -> Value {
 
 struct ListLedgers {
     ctx: Ledgers,
+    ledger_grants: Option<Vec<LedgerGrant>>,
 }
 
 #[async_trait]
@@ -216,7 +283,11 @@ impl Tool for ListLedgers {
             }
         };
         let mut out = String::new();
-        for spec in registry.specs() {
+        for spec in registry
+            .specs()
+            .iter()
+            .filter(|spec| ledger_access(&self.ledger_grants, &spec.slug).is_some())
+        {
             let entries = ledgers::entries(&self.ctx, spec).await.unwrap_or_default();
             out.push_str(&format!(
                 "- `{}` — {}\n  statuses: {}\n  {} open, {} closed\n",
@@ -249,6 +320,7 @@ impl Tool for ListLedgers {
 
 struct ReadLedger {
     ctx: Ledgers,
+    ledger_grants: Option<Vec<LedgerGrant>>,
 }
 
 #[async_trait]
@@ -306,6 +378,9 @@ impl Tool for ReadLedger {
             Ok(spec) => spec,
             Err(message) => return Ok(ToolResult::error(message)),
         };
+        if let Err(message) = require_access(&self.ledger_grants, &spec.slug, LedgerAccess::Read) {
+            return Ok(ToolResult::error(message));
+        }
         let query = Query {
             entry: optional(&arguments, "entry"),
             status: optional(&arguments, "status"),
@@ -365,6 +440,7 @@ impl Tool for ReadLedger {
 struct RecordEntry {
     ctx: Ledgers,
     author: LedgerAuthor,
+    ledger_grants: Option<Vec<LedgerGrant>>,
 }
 
 #[async_trait]
@@ -410,6 +486,10 @@ impl Tool for RecordEntry {
             Ok(spec) => spec,
             Err(message) => return Ok(ToolResult::error(message)),
         };
+        if let Err(message) = require_access(&self.ledger_grants, &spec.slug, LedgerAccess::Record)
+        {
+            return Ok(ToolResult::error(message));
+        }
         let id = text(&arguments, "id");
         match ledgers::record(
             &self.ctx,
@@ -443,6 +523,7 @@ impl Tool for RecordEntry {
 struct CloseEntry {
     ctx: Ledgers,
     author: LedgerAuthor,
+    ledger_grants: Option<Vec<LedgerGrant>>,
 }
 
 #[async_trait]
@@ -489,6 +570,10 @@ impl Tool for CloseEntry {
             Ok(spec) => spec,
             Err(message) => return Ok(ToolResult::error(message)),
         };
+        if let Err(message) = require_access(&self.ledger_grants, &spec.slug, LedgerAccess::Record)
+        {
+            return Ok(ToolResult::error(message));
+        }
         match ledgers::close(
             &self.ctx,
             &spec,
@@ -516,6 +601,7 @@ impl Tool for CloseEntry {
 
 struct DefineLedger {
     ctx: Ledgers,
+    can_declare_ledgers: bool,
 }
 
 #[async_trait]
@@ -606,6 +692,13 @@ impl Tool for DefineLedger {
     }
 
     async fn execute(&self, arguments: Value) -> anyhow::Result<ToolResult> {
+        if !self.can_declare_ledgers {
+            return Ok(ToolResult::error(
+                "Refused: your manifest sets `can_declare_ledgers = false`. Ask the operator to \
+                 declare this axis, or to grant you `define_ledger`."
+                    .to_string(),
+            ));
+        }
         match ledgers::define(&self.ctx, &arguments).await {
             Ok(spec) => Ok(ToolResult::success(format!(
                 "Declared `{}`. It renders into `{}` and takes `record_entry` with \

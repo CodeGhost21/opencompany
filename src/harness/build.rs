@@ -718,6 +718,7 @@ pub fn build_agent(
                 company.clone(),
                 manifest_agent.id.clone(),
                 workspace_writes,
+                manifest_agent.write_scope(),
             ))
         }
         _ => None,
@@ -740,6 +741,8 @@ pub fn build_agent(
                 .with_tasks_opt(deps.tasks.clone())
                 .with_workspace_opt(deps.workspace.clone()),
             manifest_agent.id.clone(),
+            manifest_agent.ledgers.clone(),
+            manifest_agent.can_declare_ledgers,
         ));
     }
 
@@ -1434,6 +1437,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         }
     }
 
@@ -1627,6 +1632,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1672,6 +1679,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1713,6 +1722,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1752,6 +1763,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -1953,6 +1966,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -2585,6 +2600,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         // `full` so the sandboxed write executes without a supervised prompt.
         let policy = ApprovalPolicy::new(

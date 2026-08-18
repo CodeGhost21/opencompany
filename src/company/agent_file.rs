@@ -86,7 +86,7 @@ struct AgentFile {
     #[serde(default)]
     delegates_to: Vec<String>,
     #[serde(default)]
-    context: Option<Vec<String>>,
+    context: Option<Vec<crate::company::ContextEntry>>,
     #[serde(default)]
     budget_usd_daily: Option<f64>,
     #[serde(default)]
@@ -95,6 +95,10 @@ struct AgentFile {
     prompt_files: Vec<String>,
     #[serde(default)]
     classes: Vec<String>,
+    #[serde(default)]
+    ledgers: Option<Vec<crate::company::LedgerGrant>>,
+    #[serde(default)]
+    can_declare_ledgers: Option<bool>,
 }
 
 /// Loads every agent definition under `<dir>/agents/`, in roster order.
@@ -237,6 +241,8 @@ fn parse_agent_file(
         prompt_files: file.prompt_files,
         prompt_files_resolved,
         classes: file.classes,
+        ledgers: file.ledgers,
+        can_declare_ledgers: file.can_declare_ledgers.unwrap_or(true),
     })
 }
 
@@ -491,7 +497,12 @@ classes = ["judge", "evidence"]
         );
         assert_eq!(
             agent.context.as_deref(),
-            Some(&["GOAL.md".to_string(), "CLAIMS.md".to_string()][..])
+            Some(
+                &[
+                    crate::company::ContextEntry::from("GOAL.md"),
+                    crate::company::ContextEntry::from("CLAIMS.md")
+                ][..]
+            )
         );
         assert_eq!(agent.classes, ["judge", "evidence"]);
     }

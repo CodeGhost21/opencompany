@@ -121,6 +121,8 @@ mod tests {
                 prompt_files: Vec::new(),
                 prompt_files_resolved: Vec::new(),
                 classes: Vec::new(),
+                ledgers: None,
+                can_declare_ledgers: true,
             },
             Agent {
                 id: "creative".into(),
@@ -135,6 +137,8 @@ mod tests {
                 prompt_files: Vec::new(),
                 prompt_files_resolved: Vec::new(),
                 classes: Vec::new(),
+                ledgers: None,
+                can_declare_ledgers: true,
             },
         ];
         let overlay = vec![OverlayAgent {
