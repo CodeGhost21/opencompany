@@ -31,9 +31,11 @@ import {
   changedFields,
   fieldsFor,
   getSetup,
+  proposeSetupRoster,
   submitSetup,
   type SetupApplied,
   type SetupField,
+  type SetupRoster,
   type SetupStatus,
 } from "@/api/setup";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -41,25 +43,50 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Stepper, type Step } from "@/components/ui/stepper";
+import {
+  AUTOMATE_EXAMPLES,
+  appendExample,
+  emptySetupDraft,
+  inferSignals,
+  type SetupDraft,
+} from "@/lib/company-setup";
 import { cn } from "@/lib/utils";
 
 /** The steps, in order. `fields` names the config keys each one owns. */
+/**
+ * The flow, question-first.
+ *
+ * The order is the whole design. Three cheap questions about *them* come before
+ * anything about the machine, because nobody abandons "what do you sell" and
+ * plenty abandon `bind`. The two asks that cost something — an address and a
+ * credential — arrive fourth and fifth, after enough investment that their
+ * purpose is self-evident rather than a wall on screen one.
+ *
+ * Everything else that used to be a step is now behind Advanced: sign-in mode,
+ * brain, host and tools all have defaults that work, and a knob with a working
+ * default is not a decision worth a screen.
+ */
 const STEPS: readonly (Step & { fields: readonly string[] })[] = [
-  { id: "template", label: "Company", fields: [] },
+  { id: "business", label: "Business", fields: [] },
+  { id: "team", label: "Team", fields: [] },
+  { id: "automate", label: "Automate", fields: [] },
+  { id: "account", label: "You", fields: [] },
+  { id: "power", label: "Power", fields: ["tinyhumans_api_key"] },
+  { id: "review", label: "Review", fields: [] },
+];
+
+/** The steps that used to be their own screens, now grouped under Advanced. */
+const ADVANCED_GROUPS: readonly { id: string; label: string; fields: readonly string[] }[] = [
   { id: "signin", label: "Sign-in", fields: ["auth_mode"] },
-  {
-    id: "brain",
-    label: "Brain",
-    fields: ["brain_mode", "tinyhumans_api_key", "api_url", "openhuman_url"],
-  },
+  { id: "brain", label: "Brain", fields: ["brain_mode", "api_url", "openhuman_url"] },
   { id: "tools", label: "Tools", fields: ["github_token"] },
   {
     id: "host",
     label: "Host",
     fields: ["bind", "public_url", "workspace.max_blob_mb", "workspace.storage_quota_gb"],
   },
-  { id: "review", label: "Review", fields: [] },
 ];
 
 /** How each sign-in mode is described, in consequences rather than mode names. */
@@ -78,23 +105,6 @@ const AUTH_MODE_COPY: Record<string, { label: string; hint: string }> = {
   },
 };
 
-/**
- * Headings for the steps that are otherwise a bare list of config keys.
- *
- * `tools` is absent on purpose: it renders its own heading above the build
- * status list, and a second one over the fields below would read as a new
- * section rather than the same one continuing.
- */
-const STEP_INTRO: Record<string, { title: string; hint: string }> = {
-  brain: {
-    title: "What powers your teammates",
-    hint: "Where the company's thinking runs, and the credential it uses. You can leave these on their defaults and set them later.",
-  },
-  host: {
-    title: "How this host runs",
-    hint: "The address it serves on and how much room its workspace gets. Defaults are fine for a laptop.",
-  },
-};
 
 interface Props {
   client: OpenCompanyClient;
@@ -112,10 +122,30 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [step, setStep] = useState(0);
   const [values, setValues] = useState<Record<string, string>>({});
-  const [template, setTemplate] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [applied, setApplied] = useState<SetupApplied | null>(null);
+
+  /** The three answers. */
+  const [draft, setDraft] = useState<SetupDraft>(emptySetupDraft);
+  /** The address that will be able to sign in. */
+  const [email, setEmail] = useState("");
+  /** Whether the operator has been shown a problem on the current step yet. */
+  const [touched, setTouched] = useState(false);
+  /** Whether the Advanced disclosure is open. */
+  const [advanced, setAdvanced] = useState(false);
+  /**
+   * The team, once the host has designed one — and `null` until then.
+   *
+   * Held as state rather than refetched per render because the operator edits
+   * it: what they approve on Review is exactly what gets built, and a second
+   * pass could return a different team.
+   */
+  const [roster, setRoster] = useState<SetupRoster | null>(null);
+  const [designing, setDesigning] = useState(false);
+  const [designError, setDesignError] = useState<string | null>(null);
+  /** How many teammates have landed, once the apply is building them. */
+  const [built, setBuilt] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -156,26 +186,72 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     );
   }, [status, changed]);
 
+  /**
+   * Ask the host to design a team, on the way into Review.
+   *
+   * Never throws upward: the host answers with its curated team rather than an
+   * error when it cannot reach a model, so a rejection here is a genuine
+   * transport failure — and even then the operator gets a roster to review,
+   * because being stranded five screens in is the one outcome worse than an
+   * imperfect team.
+   */
+  const design = useCallback(async () => {
+    setDesigning(true);
+    setDesignError(null);
+    try {
+      const proposed = await proposeSetupRoster(client, {
+        industry: draft.industry,
+        teamHint: draft.teamHint,
+        automate: draft.automate,
+        inferenceKey: values.tinyhumans_api_key || null,
+      });
+      // The host is contracted never to answer with an empty roster, so a
+      // missing or empty one is a failure rather than a team of nobody — and
+      // trusting the shape here crashed Review on `.map` of undefined.
+      if (!Array.isArray(proposed?.agents) || proposed.agents.length === 0) {
+        throw new Error("The host answered without a team to review.");
+      }
+      setRoster(proposed);
+    } catch (err: unknown) {
+      setDesignError(err instanceof Error ? err.message : String(err));
+      setRoster(null);
+    } finally {
+      setDesigning(false);
+    }
+  }, [client, draft, values.tinyhumans_api_key]);
+
   const submit = useCallback(async () => {
     if (!status) return;
-    // Mirrors the "Finish setup" button's `disabled`: a host with no
-    // companies and no template chosen must not complete setup into a
-    // configured dead end (see `noCompanyChosen` above the button).
-    if (status.companies.length === 0 && template === null) return;
+    // A host with no company and no designed roster would finish setup into
+    // exactly the dead end this flow exists to remove: a configured instance
+    // with nothing to sign in to and no way back into setup.
+    if (status.companies.length === 0 && !roster?.agents.length) return;
     setSaving(true);
     setSaveError(null);
+    setBuilt(roster?.agents.length ?? null);
     try {
       const result = await submitSetup(client, {
         fields: changed,
-        template: status.companies.length === 0 ? template : null,
+        company:
+          status.companies.length === 0 && roster
+            ? {
+                industry: draft.industry,
+                teamHint: draft.teamHint,
+                automate: draft.automate,
+                // As reviewed, not as proposed.
+                agents: roster.agents,
+                adminEmail: email.trim() || null,
+              }
+            : null,
       });
       setApplied(result);
     } catch (err: unknown) {
       setSaveError(err instanceof Error ? err.message : String(err));
+      setBuilt(null);
     } finally {
       setSaving(false);
     }
-  }, [client, status, changed, template]);
+  }, [client, status, changed, roster, draft, email]);
 
   if (loadError) {
     return (
@@ -208,7 +284,12 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
           </p>
           {applied.seeded_company && (
             <p className="text-sm text-muted-foreground">
-              Started <strong>{applied.seeded_company}</strong> from your chosen template.
+              {/* No template was chosen — the team was designed from the
+                  answers, and saying otherwise would credit a menu the
+                  operator never saw. */}
+              Built <strong>{applied.seeded_company}</strong> with{" "}
+              {roster?.agents.length ?? 0}{" "}
+              {roster?.agents.length === 1 ? "teammate" : "teammates"}.
             </p>
           )}
           {/* The button below cannot restart the host — it only re-enters the
@@ -246,77 +327,139 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
 
   const current = STEPS[step];
   const last = step === STEPS.length - 1;
-  // A host with no companies and no template chosen would finish setup into
-  // exactly the dead end this flow exists to remove: a configured instance
-  // with nothing to sign in to and no way back into setup. Block completion
-  // rather than let that state be reachable.
-  const noCompanyChosen = status.companies.length === 0 && template === null;
+  const needsCompany = status.companies.length === 0;
+  // The one thing that must never be reachable: a configured instance with
+  // nothing to sign in to and no way back into setup.
+  const noRoster = needsCompany && !roster?.agents.length;
+
+  /** Whether this step can be left, and why not when it cannot. */
+  const problem = (): string | undefined => {
+    if (current.id === "business" && !draft.industry.trim()) {
+      return "Tell us a little about the company first.";
+    }
+    if (current.id === "account" && needsCompany && !email.trim() && requiresSignIn(status, values)) {
+      return "We need an address, or nobody will be able to sign in to this company.";
+    }
+    return undefined;
+  };
+
+  const advance = () => {
+    if (problem()) {
+      setTouched(true);
+      return;
+    }
+    setTouched(false);
+    // Designing happens on the way into Review, so the wait sits between two
+    // screens rather than in front of one.
+    if (STEPS[step + 1]?.id === "review" && !roster && !designing) void design();
+    setStep((n) => n + 1);
+  };
 
   return (
     <Shell>
       <div className="space-y-6" data-testid="setup-wizard">
         <div className="space-y-1">
           <h1 className="text-xl font-semibold">
-            {status.complete ? "Reconfigure this instance" : "Set up this instance"}
+            {status.complete ? "Reconfigure this instance" : "Let's build your company"}
           </h1>
           <p className="text-sm text-muted-foreground">
-            Saved to <code className="font-mono text-xs">{status.config_path}</code>.
+            {status.complete
+              ? "Saved to "
+              : "A few questions, then we'll put a team together. Saved to "}
+            <code className="font-mono text-xs">{status.config_path}</code>.
           </p>
         </div>
 
         <Stepper steps={STEPS} current={step} onSelect={setStep} />
 
         <div className="min-h-64 space-y-4">
-          {current.id === "template" && (
-            <TemplateStep
-              status={status}
-              selected={template}
-              onSelect={setTemplate}
+          {current.id === "business" && (
+            <QuestionStep
+              title="What kind of company are you setting up?"
+              hint="A sentence is plenty. What you sell, or what you do."
+              placeholder="e.g. E-commerce — I sell homeware online"
+              value={draft.industry}
+              testId="industry"
+              onChange={(v) => setDraft((d) => ({ ...d, industry: v }))}
+              onEnter={advance}
+              signals={inferSignals(draft.industry)}
             />
           )}
 
-          {current.id === "signin" && (
-            <SignInStep
-              status={status}
-              value={values.auth_mode ?? ""}
-              onChange={(v) => set("auth_mode", v)}
+          {current.id === "team" && (
+            <QuestionStep
+              title="Anyone in particular you need on the team?"
+              hint="Optional. We'll suggest a team either way — this just adds to it."
+              placeholder="e.g. someone chasing the customers who go quiet"
+              value={draft.teamHint}
+              testId="teamHint"
+              multiline
+              onChange={(v) => setDraft((d) => ({ ...d, teamHint: v }))}
             />
           )}
 
-          {current.id === "tools" && <ToolsStep status={status} />}
+          {current.id === "automate" && (
+            <QuestionStep
+              title="What are you trying to automate?"
+              hint="List whatever comes to mind. This is what your team gets built around."
+              placeholder="e.g. Meta ads, order dispatch, daily sales reports"
+              value={draft.automate}
+              testId="automate"
+              multiline
+              onChange={(v) => setDraft((d) => ({ ...d, automate: v }))}
+              examples={AUTOMATE_EXAMPLES}
+              onExample={(ex) =>
+                setDraft((d) => ({ ...d, automate: appendExample(d.automate, ex) }))
+              }
+            />
+          )}
+
+          {current.id === "account" && (
+            <AccountStep
+              value={email}
+              onChange={setEmail}
+              onEnter={advance}
+              required={needsCompany && requiresSignIn(status, values)}
+            />
+          )}
+
+          {current.id === "power" && (
+            <PowerStep
+              status={status}
+              value={values.tinyhumans_api_key ?? ""}
+              onChange={(v) => set("tinyhumans_api_key", v)}
+              onEnter={advance}
+            />
+          )}
 
           {current.id === "review" && (
             <ReviewStep
+              designing={designing}
+              designError={designError}
+              roster={roster}
+              onRoster={setRoster}
+              onRetry={() => void design()}
               changed={changed}
               restartKeys={restartKeys}
-              template={template}
               status={status}
-              noCompanyChosen={noCompanyChosen}
+              email={email}
+              built={built}
             />
           )}
 
-          {/* The plain-field steps share one renderer. `tools` adds its fields
-              below its own build-status list rather than instead of it. */}
-          {(current.id === "brain" || current.id === "host" || current.id === "tools") && (
-            <div className="space-y-4">
-              {STEP_INTRO[current.id] && (
-                <div className="space-y-1">
-                  <h2 className="font-medium">{STEP_INTRO[current.id].title}</h2>
-                  <p className="text-sm text-muted-foreground">
-                    {STEP_INTRO[current.id].hint}
-                  </p>
-                </div>
-              )}
-              {fieldsFor(status, current.fields).map((f) => (
-                <FieldRow
-                  key={f.key}
-                  field={f}
-                  value={values[f.key] ?? ""}
-                  onChange={(v) => set(f.key, v)}
-                />
-              ))}
-            </div>
+          {problem() && touched && (
+            <p className="text-sm text-destructive" data-testid="setup-problem">
+              {problem()}
+            </p>
           )}
+
+          <AdvancedPanel
+            open={advanced}
+            onToggle={() => setAdvanced((v) => !v)}
+            status={status}
+            values={values}
+            set={set}
+          />
         </div>
 
         {saveError && (
@@ -336,20 +479,22 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
             )}
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" disabled={step === 0} onClick={() => setStep((s) => s - 1)}>
+            <Button variant="outline" disabled={step === 0} onClick={() => setStep((n) => n - 1)}>
               Back
             </Button>
             {last ? (
               <Button
                 onClick={() => void submit()}
-                disabled={saving || noCompanyChosen}
+                disabled={saving || noRoster || designing}
                 data-testid="setup-finish"
               >
                 {saving && <Loader2 className="animate-spin" />}
-                Finish setup
+                Build my company
               </Button>
             ) : (
-              <Button onClick={() => setStep((s) => s + 1)}>Next</Button>
+              <Button onClick={advance} data-testid="setup-next">
+                Next
+              </Button>
             )}
           </div>
         </div>
@@ -358,69 +503,22 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   );
 }
 
+/**
+ * Whether this host will ask anyone to sign in.
+ *
+ * On `none` there is nobody to invite and an address would be a field with no
+ * consequence; on every other mode the address is the only thing standing
+ * between the operator and a company they cannot get into.
+ */
+function requiresSignIn(status: SetupStatus, values: Record<string, string>): boolean {
+  const chosen =
+    values.auth_mode ?? status.fields.find((f) => f.key === "auth_mode")?.value ?? "email";
+  return chosen !== "none";
+}
+
 // ---------------------------------------------------------------------------
 // Steps
 // ---------------------------------------------------------------------------
-
-function TemplateStep({
-  status,
-  selected,
-  onSelect,
-}: {
-  status: SetupStatus;
-  selected: string | null;
-  onSelect: (id: string) => void;
-}) {
-  // A host that already has a company must not be handed a second starter one —
-  // the host refuses to seed in that case, so offering the choice would be a
-  // control that does nothing.
-  if (status.companies.length > 0) {
-    return (
-      <div className="space-y-2">
-        <h2 className="font-medium">Company</h2>
-        <p className="text-sm text-muted-foreground">
-          This host is already running <strong>{status.companies.join(", ")}</strong>, so setup
-          won&apos;t start another one. Everything else on this page still applies.
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-3">
-      <div className="space-y-1">
-        <h2 className="font-medium">Start from a template</h2>
-        <p className="text-sm text-muted-foreground">
-          This becomes your first company. You can change everything about it afterwards.
-        </p>
-      </div>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {status.templates.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => onSelect(t.id)}
-            data-testid={`template-${t.id}`}
-            aria-pressed={selected === t.id}
-            className={cn(
-              "rounded-lg border p-3 text-left transition-colors hover:bg-muted",
-              selected === t.id && "border-primary bg-muted",
-            )}
-          >
-            <div className="text-sm font-medium">{t.name}</div>
-            {t.output && (
-              <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{t.output}</div>
-            )}
-            <div className="mt-1.5 text-xs text-muted-foreground">
-              {t.agent_count} teammate{t.agent_count === 1 ? "" : "s"}
-            </div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function SignInStep({
   status,
   value,
@@ -546,91 +644,6 @@ function ToolsStep({ status }: { status: SetupStatus }) {
     </div>
   );
 }
-
-function ReviewStep({
-  changed,
-  restartKeys,
-  template,
-  status,
-  noCompanyChosen,
-}: {
-  changed: Record<string, string | null>;
-  restartKeys: string[];
-  template: string | null;
-  status: SetupStatus;
-  noCompanyChosen: boolean;
-}) {
-  const keys = Object.keys(changed);
-  const seeding = status.companies.length === 0 && template !== null;
-
-  return (
-    <div className="space-y-4">
-      <div className="space-y-1">
-        <h2 className="font-medium">Review</h2>
-        <p className="text-sm text-muted-foreground">Nothing is written until you finish.</p>
-      </div>
-
-      {noCompanyChosen && (
-        <Alert variant="destructive" data-testid="review-no-company-warning">
-          <AlertTriangle />
-          <AlertTitle>Pick a company template before finishing</AlertTitle>
-          <AlertDescription>
-            This host has no companies yet. Finishing without picking a template on the{" "}
-            <strong>Company</strong> step would leave a configured instance with nothing to sign
-            in to.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {seeding && (
-        <div className="rounded-lg border p-3 text-sm">
-          Start <strong>{status.templates.find((t) => t.id === template)?.name ?? template}</strong>{" "}
-          as this instance&apos;s first company.
-        </div>
-      )}
-
-      {keys.length === 0 ? (
-        <p className="text-sm text-muted-foreground" data-testid="review-no-changes">
-          No settings changed.
-        </p>
-      ) : (
-        <ul className="space-y-1.5">
-          {keys.map((k) => (
-            <li key={k} className="flex items-baseline justify-between gap-3 text-sm">
-              <span className="font-mono text-xs">{k}</span>
-              <span className="truncate text-muted-foreground">
-                {status.fields.find((f) => f.key === k)?.secret
-                  ? "•••••"
-                  : (changed[k] ?? "(cleared)")}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {/* An estimate, not the answer: the host decides what it can apply in
-          place, and the completion screen reports what it actually did. Some of
-          these (the sign-in mode) are applied live when the host can rebuild. */}
-      {restartKeys.length > 0 && (
-        <Alert>
-          <RotateCw />
-          <AlertTitle>Some of these may need a host restart</AlertTitle>
-          <AlertDescription>
-            The host reads settings like{" "}
-            <span className="font-mono text-xs">{restartKeys.join(", ")}</span> when it starts.
-            It applies what it can right away and will tell you exactly what is left to restart
-            for.
-          </AlertDescription>
-        </Alert>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Shared bits
-// ---------------------------------------------------------------------------
-
 function FieldRow({
   field,
   value,
@@ -691,6 +704,452 @@ function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen items-center justify-center p-6">
       <div className="w-full max-w-2xl">{children}</div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The question screens
+// ---------------------------------------------------------------------------
+
+/**
+ * One question, one field, nothing else on screen.
+ *
+ * Deliberately sparse. These three screens are where an operator decides
+ * whether this product is worth their afternoon, and every additional control
+ * is something to read before answering.
+ */
+function QuestionStep({
+  title,
+  hint,
+  placeholder,
+  value,
+  testId,
+  multiline,
+  onChange,
+  onEnter,
+  examples,
+  onExample,
+  signals,
+}: {
+  title: string;
+  hint: string;
+  placeholder: string;
+  value: string;
+  testId: string;
+  multiline?: boolean;
+  onChange: (v: string) => void;
+  onEnter?: () => void;
+  examples?: readonly string[];
+  onExample?: (example: string) => void;
+  /** What we heard, echoed back under the field. */
+  signals?: string[];
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="font-medium" data-testid="setup-question">
+          {title}
+        </h2>
+        <p className="text-sm text-muted-foreground">{hint}</p>
+      </div>
+
+      {multiline ? (
+        <Textarea
+          autoFocus
+          rows={3}
+          value={value}
+          placeholder={placeholder}
+          data-testid={`setup-field-${testId}`}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      ) : (
+        <Input
+          autoFocus
+          value={value}
+          placeholder={placeholder}
+          data-testid={`setup-field-${testId}`}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onEnter?.();
+          }}
+        />
+      )}
+
+      {/* Proof they were heard, straight after the one question they put
+          effort into. Silent when nothing was recognised — a wrong chip is
+          worse than no chip. */}
+      {signals && signals.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5" data-testid="setup-signals">
+          <span className="text-xs text-muted-foreground">Sounds like</span>
+          {signals.map((signal) => (
+            <Badge key={signal} variant="secondary">
+              {signal}
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {/* Beside the field, not instead of it: they append rather than replace,
+          so the operator's own words always survive. */}
+      {examples && onExample && (
+        <div className="flex flex-wrap gap-1.5">
+          {examples.map((example) => (
+            <button
+              key={example}
+              type="button"
+              onClick={() => onExample(example)}
+              data-testid={`setup-example-${example.replace(/\s+/g, "-")}`}
+              className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              + {example}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The address that will be able to sign in.
+ *
+ * Asked here rather than on screen one because by now it has an obvious
+ * purpose — it is how they get back to the company they are about to build,
+ * not a field on a form. It is also the fix for a real dead end: no shipped
+ * template invites anybody, so without this an operator who keeps email
+ * sign-in finishes setup and can then sign in as nobody.
+ */
+function AccountStep({
+  value,
+  onChange,
+  onEnter,
+  required,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onEnter: () => void;
+  required: boolean;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="font-medium" data-testid="setup-question">
+          What&apos;s your email?
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          {required
+            ? "This is how you sign back in, and the only address that can administer the company."
+            : "Optional on this host — you chose no sign-in, so anyone who can reach it is the owner."}
+        </p>
+      </div>
+      <Label htmlFor="setup-email" className="sr-only">
+        Your email
+      </Label>
+      <Input
+        id="setup-email"
+        autoFocus
+        type="email"
+        value={value}
+        placeholder="you@example.com"
+        data-testid="setup-field-email"
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onEnter();
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * The credential, framed as what it buys rather than as what it is.
+ *
+ * Fifth, not first. By now the operator has described their business and can
+ * see what the key is *for*; an API-key field on screen one is a wall in front
+ * of a product nobody has seen yet. Skipping is a first-class answer, and the
+ * copy says exactly what it costs.
+ */
+function PowerStep({
+  status,
+  value,
+  onChange,
+  onEnter,
+}: {
+  status: SetupStatus;
+  value: string;
+  onChange: (v: string) => void;
+  onEnter: () => void;
+}) {
+  const field = status.fields.find((f) => f.key === "tinyhumans_api_key");
+  const locked = field !== undefined && !field.editable;
+
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="font-medium" data-testid="setup-question">
+          What powers your team
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Your teammates think with a hosted model. With a key we design the team
+          around what you just told us; without one you get a solid standard team
+          for your industry, and you can add a key later.
+        </p>
+      </div>
+
+      {locked && <LayerLock />}
+
+      <Label htmlFor="setup-key" className="sr-only">
+        TinyHumans API key
+      </Label>
+      <Input
+        id="setup-key"
+        autoFocus
+        type="password"
+        value={value}
+        disabled={locked}
+        placeholder="th-…"
+        data-testid="setup-field-key"
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onEnter();
+        }}
+      />
+      <p className="text-xs text-muted-foreground">
+        Get one at tinyhumans.ai. Leave it blank to carry on without.
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Review, and the team as reviewed
+// ---------------------------------------------------------------------------
+
+/**
+ * The team, before it exists.
+ *
+ * The screen that earns the ownership. People value what they had a hand in
+ * shaping, and this is the honest place to catch a wrong guess — while it is
+ * still four rows in a browser rather than six records on a host.
+ *
+ * It also says where the team came from, in a sentence. An operator shown a
+ * curated roster with no indication assumes a model read their answers and
+ * produced it, and judges the product on a team it never designed.
+ */
+function ReviewStep({
+  designing,
+  designError,
+  roster,
+  onRoster,
+  onRetry,
+  changed,
+  restartKeys,
+  status,
+  email,
+  built,
+}: {
+  designing: boolean;
+  designError: string | null;
+  roster: SetupRoster | null;
+  onRoster: (roster: SetupRoster) => void;
+  onRetry: () => void;
+  changed: Record<string, string | null>;
+  restartKeys: string[];
+  status: SetupStatus;
+  email: string;
+  /** Non-null once the apply is building, so the button reads as progress. */
+  built: number | null;
+}) {
+  if (designing) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-12" data-testid="setup-designing">
+        <Loader2 className="size-6 animate-spin text-primary" />
+        <p className="text-sm text-muted-foreground">Designing your team…</p>
+      </div>
+    );
+  }
+
+  if (designError || !roster) {
+    return (
+      <Alert variant="destructive" data-testid="setup-design-error">
+        <AlertTriangle />
+        <AlertTitle>We couldn&apos;t design a team</AlertTitle>
+        <AlertDescription className="space-y-2">
+          <p>{designError ?? "The host returned nothing to review."}</p>
+          <Button size="sm" variant="outline" onClick={onRetry}>
+            Try again
+          </Button>
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  const drop = (index: number) =>
+    onRoster({ ...roster, agents: roster.agents.filter((_, i) => i !== index) });
+
+  const rename = (index: number, role: string) =>
+    onRoster({
+      ...roster,
+      agents: roster.agents.map((a, i) => (i === index ? { ...a, role } : a)),
+    });
+
+  return (
+    <div className="space-y-4" data-testid="setup-review">
+      <div className="space-y-1">
+        <h2 className="font-medium">Your team</h2>
+        <p className="text-sm text-muted-foreground">
+          {roster.source === "model"
+            ? "Built from what you told us. Rename or drop anyone — you can add more later."
+            : "A solid standard team for your industry — we couldn't reach a model to tailor it. Rename or drop anyone, and add a key later to redesign."}
+        </p>
+      </div>
+
+      <ul className="space-y-2">
+        {roster.agents.map((agent, i) => (
+          <li
+            key={`${agent.role}-${i}`}
+            className="flex items-start gap-3 rounded-lg border p-3"
+            data-testid="setup-review-agent"
+          >
+            <div className="min-w-0 flex-1 space-y-1">
+              <Input
+                value={agent.role}
+                aria-label={`Role for ${agent.role}`}
+                data-testid="setup-review-role"
+                onChange={(e) => rename(i, e.target.value)}
+                className="h-8"
+              />
+              <p className="truncate text-xs text-muted-foreground">{agent.description}</p>
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => drop(i)}
+              aria-label={`Remove ${agent.role}`}
+              data-testid="setup-review-remove"
+            >
+              Remove
+            </Button>
+          </li>
+        ))}
+      </ul>
+
+      {roster.agents.length === 0 && (
+        <Alert>
+          <AlertTriangle />
+          <AlertTitle>That&apos;s everyone gone</AlertTitle>
+          <AlertDescription>
+            A company needs at least one teammate. Add one back, or start again.
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {/* Stated, not asked. Nobody five screens in can answer a governance
+          question; they can recognise a sentence and change it in Advanced. */}
+      <div className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+        <p>
+          Anything that leaves the company — sending, publishing, spending — waits
+          for you until you say otherwise.
+        </p>
+        {email.trim() && (
+          <p className="mt-1">
+            You&apos;ll sign in as <span className="font-medium text-foreground">{email.trim()}</span>.
+          </p>
+        )}
+      </div>
+
+      {built !== null && (
+        <p className="text-sm text-muted-foreground" data-testid="setup-building">
+          Building {built} {built === 1 ? "teammate" : "teammates"}…
+        </p>
+      )}
+
+      {(Object.keys(changed).length > 0 || restartKeys.length > 0) && (
+        <details className="rounded-lg border p-3">
+          <summary className="cursor-pointer text-sm font-medium">
+            Settings this will write ({Object.keys(changed).length})
+          </summary>
+          <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+            {Object.keys(changed).map((key) => (
+              <li key={key}>
+                <code className="font-mono">{key}</code>
+                {restartKeys.includes(key) && " — takes effect after a restart"}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {status.companies.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          This host already serves a company, so no new one will be created.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Everything that used to be a step.
+ *
+ * A disclosure rather than four screens: sign-in mode, brain, host and tools all
+ * have defaults that work on a laptop, and a knob with a working default is not
+ * a decision worth putting in front of someone who has not seen the product yet.
+ * Nothing is hidden — it is one click away from every screen, and the fields
+ * keep their layer locks, so an env-owned value still refuses to pretend.
+ */
+function AdvancedPanel({
+  open,
+  onToggle,
+  status,
+  values,
+  set,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  status: SetupStatus;
+  values: Record<string, string>;
+  set: (key: string, value: string) => void;
+}) {
+  return (
+    <div className="rounded-lg border">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        data-testid="setup-advanced-toggle"
+        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium"
+      >
+        Advanced settings
+        <span className="text-xs font-normal text-muted-foreground">
+          {open ? "Hide" : "Sign-in, brain, host, tools"}
+        </span>
+      </button>
+
+      {open && (
+        <div className="space-y-6 border-t p-3" data-testid="setup-advanced">
+          <SignInStep
+            status={status}
+            value={values.auth_mode ?? ""}
+            onChange={(v) => set("auth_mode", v)}
+          />
+          {ADVANCED_GROUPS.filter((group) => group.id !== "signin").map((group) => (
+            <div key={group.id} className="space-y-3">
+              <h3 className="text-sm font-medium">{group.label}</h3>
+              {group.id === "tools" && <ToolsStep status={status} />}
+              {fieldsFor(status, group.fields).map((f) => (
+                <FieldRow
+                  key={f.key}
+                  field={f}
+                  value={values[f.key] ?? ""}
+                  onChange={(v) => set(f.key, v)}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

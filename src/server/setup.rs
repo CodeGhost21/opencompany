@@ -732,7 +732,7 @@ async fn apply_inner(
                 &agents,
                 designed.admin_email.as_deref(),
             );
-            let id = crate::desktop::seed_generated_company(state, manifest).await?;
+            let id = crate::desktop::seed_generated_company(state, manifest, Some(answers)).await?;
             Some(id.as_ref().to_string())
         }
         (None, Some(template), true) => {
