@@ -50,6 +50,11 @@ pub mod acp_run_turn;
 pub mod audit;
 pub mod brain;
 pub mod build;
+/// Issue #926: end-to-end proof that a turn which exhausts its tool-iteration
+/// budget pauses **visibly** — the flag is read, the operator gets a second
+/// bubble saying so, and the notice never reaches memory. Test-only.
+#[cfg(test)]
+mod cap_turn_test;
 pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
