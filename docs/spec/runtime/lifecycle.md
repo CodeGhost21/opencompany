@@ -175,6 +175,12 @@ instead of sitting out the whole drain bound. Signal to exit is therefore at
 most `OPENCOMPANY_SHUTDOWN_GRACE_SECONDS` + 2s — the total the pod's
 `terminationGracePeriodSeconds` has to stay above.
 
+(The original spec included an explicit "checkpoint stores" step. Stores
+write every cycle — nothing is buffered beyond the current turn — so an
+explicit checkpoint is redundant; the work the drain waited for is already
+persisted. This note replaces the former step without changing the outcome.)
+
+
 Handling the signal at all is the load-bearing part: without a handler the
 default disposition applies and the process dies on the first signal, which is
 what a grace period on the pod spec is a window *for*. The tenant pod therefore
