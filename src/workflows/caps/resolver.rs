@@ -524,6 +524,82 @@ to = "sub"
         assert!(err.to_string().contains("ghost"), "{err}");
     }
 
+    /// A global workflow the company disabled via `[globals].disable` must
+    /// fail resolution as a `sub_workflow` child, exactly like an unknown id —
+    /// the same contract `crate::globals::test`'s
+    /// `a_disabled_global_workflow_neither_lists_nor_loads` pins at the
+    /// `load_workflow_with_globals` layer this resolver calls into.
+    #[tokio::test]
+    async fn a_company_disabled_global_child_fails_resolution() {
+        let dropped = crate::globals::workflows()[0].id.clone();
+        let store = store_with_globals_disable(Vec::new(), vec![format!("workflow:{dropped}")]);
+        let resolver = StoreWorkflowResolver::new(
+            None,
+            store,
+            CompanyId::new("acme"),
+            "root".to_string(),
+            None,
+        );
+
+        let err = resolver.resolve(&dropped).await.unwrap_err();
+        assert!(
+            err.to_string().contains(&dropped),
+            "the error names the disabled child: {err}"
+        );
+        assert!(
+            err.to_string().contains("not a saved workflow"),
+            "a disabled global reads the same as an unknown id, not a cycle or a parse error: {err}"
+        );
+    }
+
+    /// A parent whose only `sub_workflow` child is a company-disabled global
+    /// must fail the same way — resolving that child never reaches the cycle
+    /// scan, so a disabled global cannot be smuggled in by being (wrongly)
+    /// excluded from the scan rather than from the union it is loaded from.
+    #[tokio::test]
+    async fn a_disabled_global_referenced_by_a_parent_fails_the_same_way() {
+        let dropped = crate::globals::workflows()[0].id.clone();
+        let dir = tempfile::tempdir().unwrap();
+        write_wf(dir.path(), "parent", &parent_of("parent", &dropped));
+        let entries = vec![format!("workflow:{dropped}")];
+        let manifest: CompanyManifest = toml::from_str(&format!(
+            "[company]\nname = \"Acme\"\n\n[globals]\ndisable = [\"{}\"]\n",
+            entries[0]
+        ))
+        .expect("valid manifest");
+        let store: Arc<dyn CompanyStore> = Arc::new(MemStore(std::sync::Mutex::new(Some(
+            CompanyRecord {
+                id: CompanyId::new("acme"),
+                manifest,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            },
+        ))));
+        let resolver = StoreWorkflowResolver::new(
+            Some(dir.path().to_path_buf()),
+            store,
+            CompanyId::new("acme"),
+            "parent".to_string(),
+            None,
+        );
+
+        let err = resolver.resolve(&dropped).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not a saved workflow"),
+            "{err}"
+        );
+    }
+
     #[tokio::test]
     async fn traversal_id_is_refused() {
         let dir = tempfile::tempdir().unwrap();
