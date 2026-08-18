@@ -375,6 +375,23 @@ describe("open turns read back from the run store", () => {
     expect(open.main.queued).toBe(false);
     expect(open.design.queued).toBe(true);
   });
+
+  it("names a thread by its running turn when one is queued behind it", () => {
+    // The per-company serial lock lets one thread hold a running turn and a
+    // queued one at once. The running row is what the operator is waiting on,
+    // so it must name the indicator whichever order the store lists them in.
+    const runningFirst = openTurnsFromRuns([
+      { id: "turn-1", chatId: "main", status: "running" },
+      { id: "turn-2", chatId: "main", status: "pending" },
+    ]);
+    const pendingFirst = openTurnsFromRuns([
+      { id: "turn-2", chatId: "main", status: "pending" },
+      { id: "turn-1", chatId: "main", status: "running" },
+    ]);
+
+    expect(runningFirst).toEqual({ main: { turnId: "turn-1", queued: false } });
+    expect(pendingFirst).toEqual({ main: { turnId: "turn-1", queued: false } });
+  });
 });
 
 /**
