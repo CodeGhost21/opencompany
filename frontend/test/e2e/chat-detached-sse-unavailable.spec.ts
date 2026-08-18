@@ -130,6 +130,7 @@ test("with /events unreachable, a detached turn's reply still lands and the work
   // `[events] connected` from `onopen`; if that ever appears here the route
   // above stopped matching and everything above was proved by the stream, which
   // is the one delivery path this spec exists to do without.
+  expect(eventLog, "the console listener must have logged something").not.toEqual([]);
   expect(
     eventLog.filter((line) => line.includes("connected")),
     `the stream must never have opened, saw: ${eventLog.join(" | ")}`,
