@@ -17,6 +17,16 @@ use crate::{AppConfig, AppState};
 
 /// The workflow summaries a company itself has: the global baseline is listed
 /// in every company, and these tests are about the company's own graphs.
+///
+/// This is an **id heuristic**, not provenance: `WorkflowSummary` carries no
+/// `global` flag over GraphQL, so a row is classified as "the baseline's" by
+/// whether its id matches one of `crate::globals::workflows()`. A company
+/// definition of the *same* id supersedes the global one (see
+/// `crate::company::list_workflows_with_globals`) and would be wrongly
+/// excluded here — none of the fixtures below give a company workflow an id
+/// that collides with a global, so that gap does not fire in this suite, but
+/// see `graphql_lists_a_company_override_of_a_global_id_by_its_own_content`
+/// for the same-id case asserted directly, without this helper.
 pub(crate) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value> {
     value
         .as_array()
