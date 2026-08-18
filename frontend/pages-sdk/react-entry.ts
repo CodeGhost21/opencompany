@@ -34,6 +34,8 @@ export const {
   createRef,
   forwardRef,
   isValidElement,
+  jsx,
+  jsxs,
   lazy,
   memo,
   startTransition,
