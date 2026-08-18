@@ -800,8 +800,11 @@ async fn graph_with_version(
 struct UpdateWorkflowBody {
     #[serde(flatten)]
     graph: CreateWorkflowBody,
-    /// The token from the `GET`/`PUT` this edit was based on. Omit for an
-    /// unconditional write (the `curl` path); the console always sends it.
+    /// The token from the `GET`/`PUT` this edit was based on. **Required** (issue
+    /// #1013): a missing token is a `400`, not an unconditional write, so a stale
+    /// editor can't silently clobber a concurrent save. Kept `Option` +
+    /// `serde(default)` so an omitted field is a clean handler-level `400` with a
+    /// recovery message, rather than an opaque serde `422`.
     #[serde(default)]
     expected_version: Option<String>,
 }
@@ -819,8 +822,17 @@ struct UpdateWorkflowBody {
 /// journalled run in the history — a rename would silently orphan all three. A
 /// rename is a create plus a delete, and the operator should say so.
 ///
-/// Statuses: `400` (bad graph, or `id` ≠ `wid`), `404` (unknown id), `409`
-/// (source-defined, body-less, name taken, or a stale `expectedVersion`).
+/// `expectedVersion` is **required** (issue #1013): omitting it used to mean an
+/// unconditional write, so a console holding a stale graph — or one that read
+/// `version` as `undefined` and sent nothing — silently clobbered a concurrent
+/// save. A missing token is now a `400`, matching the agent `update_workflow`
+/// tool, which has always demanded it. A caller re-reads the workflow and echoes
+/// back its `version`; the conditional write then refuses with a `409` if the
+/// graph moved in between.
+///
+/// Statuses: `400` (bad graph, `id` ≠ `wid`, or a missing `expectedVersion`),
+/// `404` (unknown id), `409` (source-defined, body-less, name taken, or a stale
+/// `expectedVersion`).
 async fn update_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
@@ -840,7 +852,18 @@ async fn update_workflow(
         ))));
     }
 
-    let expected = body.expected_version.clone();
+    // `expectedVersion` is required (issue #1013). An absent token used to mean
+    // an unconditional write; that let a stale editor overwrite a concurrent save
+    // without ever seeing a 409. Refuse the write with a 400 instead, mirroring
+    // the agent `update_workflow` tool, and tell the caller how to recover.
+    let Some(expected) = body.expected_version.clone() else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "`expectedVersion` is required: re-read this workflow and send back the `version` it \
+             returns. A `PUT` replaces the whole graph, so saving without the version you read \
+             from could silently overwrite a change made since."
+                .to_string(),
+        )));
+    };
     let draft = RawWorkflow::try_from(body.graph)?;
     reject_undeliverable_channel_destinations(&company, &draft)?;
     let file = update_company_workflow(
@@ -850,7 +873,7 @@ async fn update_workflow(
         company.runtime.workflow_revisions(),
         Some(company.runtime.events()),
         draft,
-        expected.as_deref(),
+        Some(expected.as_str()),
     )
     .await
     .map_err(ApiError)?;
@@ -3931,16 +3954,22 @@ mod tests {
             let home_dir = home();
             let state = desk_state(home_dir.path()).await;
 
-            assert_eq!(
-                post_create(state.clone(), create_body()).await.status(),
-                StatusCode::OK
-            );
+            let created = post_create(state.clone(), create_body()).await;
+            assert_eq!(created.status(), StatusCode::OK);
+            // Carry the created graph's token (required since #1013) so the 400
+            // comes from the destination guard, not the missing-token guard.
+            let version = json_body(created).await["version"]
+                .as_str()
+                .expect("create returns a version")
+                .to_string();
 
+            let mut body = body_with_destination("channel", Some("operator"));
+            body["expectedVersion"] = serde_json::json!(version);
             let response = router(state)
                 .oneshot(request(
                     "PUT",
                     "/api/v1/company/workflows/greeter",
-                    Some(body_with_destination("channel", Some("operator"))),
+                    Some(body),
                 ))
                 .await
                 .unwrap();
@@ -5892,15 +5921,19 @@ mod tests {
             assert_eq!(graph["description"], "Say hi, every morning.");
         }
 
-        /// Omitting the token is an unconditional write — the `curl` contract.
+        /// **The silent-clobber guard, at the front door (issue #1013).** Omitting
+        /// the token used to be an unconditional write; a stale editor could then
+        /// overwrite a concurrent save without ever seeing a `409`. A tokenless
+        /// `PUT` is now a `400` that tells the operator to re-read and resend the
+        /// `version`.
         #[tokio::test]
-        async fn an_edit_without_a_token_is_unconditional() {
+        async fn an_edit_without_a_token_is_rejected() {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
             create_greeter(&state).await;
 
-            let response = router(state)
+            let response = router(state.clone())
                 .oneshot(request(
                     "PUT",
                     "/api/v1/company/workflows/greeter",
@@ -5908,7 +5941,21 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(
+                message.contains("version") && message.contains("read"),
+                "the 400 must tell the operator to re-read and resend the version: {body}"
+            );
+
+            // The refusal changed nothing — the original description is intact.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph = json_body(response).await;
+            assert_eq!(graph["description"], "Say hi.");
         }
 
         /// A `PUT` that would rename the id is a 400, not a silent create — the
@@ -5949,7 +5996,9 @@ mod tests {
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
 
-            let mut body = edited_body(None);
+            // A token is required (issue #1013), so send one; the unknown id is
+            // resolved before the token is ever compared, so this stays a 404.
+            let mut body = edited_body(Some("deadbeef"));
             body["id"] = serde_json::json!("ghost");
             let response = router(state)
                 .oneshot(request(
@@ -5969,14 +6018,16 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
-            create_greeter(&state).await;
+            let version = create_greeter(&state).await;
 
-            // No trigger node at all.
+            // No trigger node at all. Carries a valid token (required since #1013)
+            // so the 400 comes from structural validation, not the token guard.
             let body = serde_json::json!({
                 "id": "greeter",
                 "name": "Greeter",
                 "nodes": [ { "id": "done", "kind": "output", "name": "Report" } ],
-                "edges": []
+                "edges": [],
+                "expectedVersion": version
             });
             let response = router(state)
                 .oneshot(request(
@@ -6088,12 +6139,14 @@ mod tests {
             let (state, _store, _id) = hosted_state(&home).await;
             let stale = create_greeter(&state).await;
 
-            // Someone edits after the console loaded the graph.
+            // Someone edits after the console loaded the graph. This uses the
+            // then-current token (`stale`); the edit moves the version, so the
+            // delete below carries a now-stale one.
             let edited = router(state.clone())
                 .oneshot(request(
                     "PUT",
                     "/api/v1/company/workflows/greeter",
-                    Some(edited_body(None)),
+                    Some(edited_body(Some(&stale))),
                 ))
                 .await
                 .unwrap();
@@ -6137,13 +6190,13 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
-            create_greeter(&state).await;
+            let version = create_greeter(&state).await;
 
             let response = router(state.clone())
                 .oneshot(request(
                     "PUT",
                     "/api/v1/companies/acme/workflows/greeter",
-                    Some(edited_body(None)),
+                    Some(edited_body(Some(&version))),
                 ))
                 .await
                 .unwrap();
