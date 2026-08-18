@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::workspace_scaffold::{
-    PAGE_COMPILED_MIME, PAGE_COMPILED_NAME, PAGE_MANIFEST_NAME, PAGE_SOURCE_NAME, PAGES_ROOT,
+    PAGE_COMPILED_MIME, PAGE_COMPILED_NAME, PAGE_MANIFEST_NAME, PAGES_ROOT,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
