@@ -64,8 +64,8 @@ use tinyagents::harness::model::{ModelRequest, ModelResponse};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::company::{
-    WORKFLOW_DESTINATION_KINDS, WorkflowGraphSpec, courtesy_validate_draft, list_workflows_union,
-    raw_workflow_from_spec,
+    WORKFLOW_DESTINATION_KINDS, WorkflowGraphSpec, courtesy_validate_draft,
+    list_workflows_with_globals, raw_workflow_from_spec,
 };
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;
@@ -429,18 +429,37 @@ pub async fn run_workflow_build_pass(
     };
     record_usage(&runtime, &builder, &agent, &run_id, &usage).await;
 
-    // The model's two answers: a graph, or "this is not automatable".
+    // The model's answers: a graph, a reasoned "this is not automatable", or
+    // — split out by #873 — a draft that decided nothing at all.
     let spec = match draft.into_outcome() {
         BuildOutcome::NotAutomatable(reason) => {
-            settle_to_todo(
+            // Issue #873: a verdict, not a fault. `settle_not_automatable`
+            // settles the attempt Succeeded and converts the card to a `once`
+            // deliverable so the next dispatch reaches its assignee instead of
+            // re-entering this pass to draw the same conclusion again.
+            settle_not_automatable(
                 &runtime,
                 &task_id,
                 token,
                 &run_id,
-                &format!("this is better done once than built into a workflow: {reason}"),
+                // The operator-facing half of #873: the note has to say what
+                // happened to the card, not only what the builder concluded.
+                // Before this, the card read as a verdict while the run row next
+                // to it read as a failure, and nothing said the card had been
+                // converted or where it goes next.
+                &format!(
+                    "this is better done once than built into a workflow: {reason} — this card is \
+                     now a one-off for its assignee to do by hand, not a workflow to build"
+                ),
                 usage,
             )
             .await;
+            return;
+        }
+        // Parsed, but decided nothing — a fault, so it keeps the Failed settle
+        // and stays builder-routed for a retry (issue #873).
+        BuildOutcome::NoAnswer(reason) => {
+            settle_to_todo(&runtime, &task_id, token, &run_id, &reason, usage).await;
             return;
         }
         BuildOutcome::Graph { summary, mut spec } => {
@@ -641,9 +660,17 @@ async fn settle_to_review(
     finish_run(runtime, run_id, RunStatus::Succeeded, None, usage).await;
 }
 
-/// Not-automatable, or the pass failed: the card returns to To-do with the reason
-/// and **no** proposal (decision D2c), and the attempt settles Failed. A card
-/// moved out from under the pass cancels the attempt instead.
+/// The pass **failed**: the card returns to To-do with the reason and **no**
+/// proposal (decision D2c), and the attempt settles Failed. A card moved out
+/// from under the pass cancels the attempt instead.
+///
+/// Issue #873: this is now the fault path only. A build that could not be
+/// *attempted* — an unreadable company state, a model timeout, a model error —
+/// belongs here, and its card keeps `deliverable: workflow` on purpose, because
+/// retrying the build is the right next move for a fault.
+///
+/// A build that ran and concluded "don't automate this" is not a fault and no
+/// longer comes through this door — see [`settle_not_automatable`].
 async fn settle_to_todo(
     runtime: &Arc<CompanyRuntime>,
     task_id: &str,
@@ -683,6 +710,77 @@ async fn settle_to_todo(
         );
     }
     finish_run(runtime, run_id, RunStatus::Failed, Some(&reason), usage).await;
+}
+
+/// The builder ran and decided the work should be **done once** rather than
+/// automated (issue #873). A verdict, not a fault, and settled as one.
+///
+/// Three things separate this from [`settle_to_todo`], and all three are the
+/// bug: the same door served both, so a correct refusal was filed as a failure
+/// and then retried forever.
+///
+/// 1. **The attempt settles `Succeeded`.** The builder was asked a question and
+///    answered it. Filing that as `Failed` made an honest "don't automate this"
+///    indistinguishable from a model timeout — to the console, to the attempt
+///    history, and to anything counting failures.
+/// 2. **The card's deliverable flips to `once`.** This is what breaks the loop.
+///    `CompanyRuntime::dispatch_task` routes a `workflow`-deliverable card to
+///    this very pass instead of to its assignee, so returning the card to To-do
+///    still carrying `workflow` guaranteed the next dispatch re-entered the
+///    builder, drew the same verdict, and failed the same way. As `once`, the
+///    next dispatch reaches the assignee named on the card — the person who can
+///    simply do the work, which is what the verdict asked for.
+/// 3. **No `error` on the run row.** The reason goes on the card note, where the
+///    issue reports it already reads sensibly. Putting it in `error` would keep
+///    the operator-facing half of this bug alive: a surface rendering `error` as
+///    a failure would still show red for a reasoned decision.
+///
+/// The card still lands in To-do rather than somewhere new. That column is only
+/// a trap while the deliverable says `workflow`; once it says `once`, To-do is
+/// the ordinary place for work waiting on a person.
+async fn settle_not_automatable(
+    runtime: &Arc<CompanyRuntime>,
+    task_id: &str,
+    token: u64,
+    run_id: &str,
+    reason: &str,
+    usage: TokenUsage,
+) {
+    let Some(mut card) = claim_settle(runtime, task_id, token).await else {
+        finish_run(
+            runtime,
+            run_id,
+            RunStatus::Cancelled,
+            Some("the card moved while its workflow was being built"),
+            usage,
+        )
+        .await;
+        return;
+    };
+    let reason = cap(reason, MAX_REASON_CHARS);
+    card.note = Some(append_result(
+        card.note.as_deref(),
+        SYSTEM_ATTRIBUTION,
+        &reason,
+    ));
+    // No proposal was made, and any earlier one must not read as current.
+    card.workflow_proposal = None;
+    // The loop-breaker. Ordered after `claim_settle`, which requires the card to
+    // still be a `workflow` card — so the guard sees the deliverable this pass
+    // was started for, and only the write below changes it.
+    card.deliverable = TaskDeliverable::Once;
+    card.column = COLUMN_TODO.to_string();
+    card.updated_at_millis = now_millis();
+    if let Err(err) = runtime.tasks().upsert(runtime.id(), &card).await {
+        tracing::warn!(
+            company = %runtime.id(),
+            task = %task_id,
+            error = %err,
+            "[builder] decided this is better done once but could not convert the card; it stays \
+             In Progress until the next boot"
+        );
+    }
+    finish_run(runtime, run_id, RunStatus::Succeeded, None, usage).await;
 }
 
 /// Settles the attempt row. Best-effort: the work (or its failure) has already
@@ -753,6 +851,10 @@ struct RosterEntry {
     role: String,
     name: Option<String>,
     description: Option<String>,
+    /// Whether this teammate came from the global baseline rather than the
+    /// company's own roster. Read only when a label matches more than one
+    /// teammate — see [`resolve_agent_ids`].
+    global: bool,
 }
 
 /// The card-independent half of the evidence pack: everything about the company
@@ -792,16 +894,24 @@ async fn gather_company_evidence(runtime: &Arc<CompanyRuntime>) -> crate::Result
             // A manifest `[[agent]]` has no display name; its role is its label.
             name: None,
             description: a.description.clone(),
+            global: a.global,
         })
         .chain(record.overlay_agents.iter().map(|a| RosterEntry {
             id: a.id.clone(),
             role: a.role.clone(),
             name: Some(a.name.clone()),
             description: a.description.clone(),
+            // An operator added this teammate to *this* company; nothing about
+            // it comes from the baseline.
+            global: false,
         }))
         .collect();
 
-    let workflows = list_workflows_union(runtime.source_dir(), &record.overlay_workflows);
+    let workflows = list_workflows_with_globals(
+        runtime.source_dir(),
+        &record.overlay_workflows,
+        &record.manifest.globals.disable,
+    );
     let existing_names: Vec<String> = workflows.iter().map(|w| w.name.clone()).collect();
     let existing_ids: HashSet<String> = workflows.into_iter().map(|w| w.id).collect();
 
@@ -929,7 +1039,18 @@ enum BuildOutcome {
         spec: WorkflowGraphSpec,
     },
     /// The plan is not worth building into a reusable workflow; the string is why.
+    ///
+    /// A **decision** — the builder was asked and answered. Issue #873 settles
+    /// this as a succeeded attempt and converts the card to a one-off.
     NotAutomatable(String),
+    /// The draft parsed but decided nothing: no graph, and no reason either.
+    ///
+    /// Split out from [`NotAutomatable`](Self::NotAutomatable) by issue #873.
+    /// The two used to share a variant, which was harmless while both settled
+    /// Failed — but a verdict now converts the card and files a success, and a
+    /// model that returned an empty object has concluded nothing that would
+    /// justify either. This is a fault, and settles like one.
+    NoAnswer(String),
 }
 
 impl BuildDraft {
@@ -944,13 +1065,22 @@ impl BuildDraft {
                     spec,
                 }
             }
+            // No usable graph. Whether that is a verdict or a non-answer turns
+            // on whether the model actually decided anything (issue #873).
             _ => {
-                let reason = if self.reason.trim().is_empty() {
-                    "the model did not return a workflow graph".to_string()
-                } else {
-                    self.reason
-                };
-                BuildOutcome::NotAutomatable(reason)
+                if !self.reason.trim().is_empty() {
+                    // It gave a reason — a decision, whatever `automatable` said.
+                    return BuildOutcome::NotAutomatable(self.reason);
+                }
+                if self.automatable == Some(false) {
+                    // An explicit "no" with no prose is still an explicit no.
+                    return BuildOutcome::NotAutomatable(
+                        "the builder declined to automate this but gave no reason".to_string(),
+                    );
+                }
+                // Neither a graph, nor a reason, nor a refusal: nothing was
+                // decided, so this must not convert the card or read as success.
+                BuildOutcome::NoAnswer("the model did not return a workflow graph".to_string())
             }
         }
     }
@@ -1553,6 +1683,27 @@ fn resolve_agent_ids(
                 hits.push(entry.id.as_str());
             }
         }
+        // The baseline ships a `writer` and a `researcher`, so a company with
+        // its own writer now has two teammates answering to "the writer". The
+        // company's own wins, the same precedence every other globals merge
+        // point applies — an ambiguity error here would make a vertical's own
+        // roster unaddressable by role in a sentence.
+        if hits.len() > 1 {
+            let own: Vec<&str> = hits
+                .iter()
+                .copied()
+                .filter(|id| {
+                    roster
+                        .iter()
+                        .find(|entry| entry.id == *id)
+                        .is_some_and(|entry| !entry.global)
+                })
+                .collect();
+            if own.len() == 1 {
+                hits = own;
+            }
+        }
+
         match hits.as_slice() {
             [only] => {
                 let resolved = (*only).to_string();

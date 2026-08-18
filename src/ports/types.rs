@@ -2012,7 +2012,28 @@ pub struct ReplyTo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundMessage {
     /// The channel to emit on.
+    ///
+    /// A **destination**, never an author. Issue #885: all three
+    /// [`AgentReply`](CompanyEvent::AgentReply) writers used to copy this into
+    /// `agent_id`, whose contract is "the agent that produced the reply" — so
+    /// every bubble emitted on the operator channel was journaled as though the
+    /// operator had written it, permanently. Use [`agent`](Self::agent) for who
+    /// spoke; this only says where it goes.
     pub channel: String,
+    /// The roster teammate that produced this message (issue #885).
+    ///
+    /// `None` for a message no agent authored — a system notice, a scheduler
+    /// tick, a channel-level ack — and for every producer that does not know
+    /// its responder. A writer journaling an `AgentReply` falls back to
+    /// [`channel`](Self::channel) when this is absent, which is exactly the
+    /// pre-#885 behaviour, so nothing regresses on a path that has not been
+    /// taught to fill it in.
+    ///
+    /// Additive on the wire: omitted when absent, so the POST `/chat` body and
+    /// every stored record round-trip byte-identically for a producer that
+    /// sets nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// The message text.
     pub text: String,
     /// The visible processing steps behind this bubble — the agent's tool calls,
@@ -3580,6 +3601,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
@@ -3595,6 +3617,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "done".to_string(),
             steps: vec![TurnStep {
                 kind: TurnStepKind::Note,
@@ -3620,6 +3643,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
@@ -3638,6 +3662,7 @@ mod test {
             message_id: None,
             task_id: Some("t-42".to_string()),
             channel: "operator".to_string(),
+            agent: None,
             text: "opened one".to_string(),
             steps: Vec::new(),
             reply_to: None,

@@ -285,6 +285,15 @@ feature-gated off.
 - **Graceful 404:** until an endpoint exists it should 404; the console already
   treats that as "not wired yet" and shows the sample/notice — so partial
   rollout is safe.
+- **Toast lifetime:** the one `<Toaster>` is mounted at the app root, outside the
+  routed tree, so a toast outlives the view that raised it and nothing about
+  changing view clears one. `sonner`'s auto-dismiss is a timer it *pauses* — on
+  hover, on a pointer interaction, on a hidden tab — and two of those latch with
+  no way back (issue #933). `src/lib/toast-lifetime.ts` is the ceiling that makes
+  a stuck toast impossible: it accumulates each toast's *visible* time and
+  dismisses one whose duration plus a grace period is spent. Hovering to read, a
+  backgrounded tab, and an explicit `duration: Infinity` are all still honoured,
+  so callers keep raising plain `toast.*` calls and need not think about it.
 
 ## Implementation order (delivered)
 

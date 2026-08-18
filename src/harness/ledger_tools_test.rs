@@ -15,7 +15,7 @@ fn ctx(home: &tempfile::TempDir) -> Ledgers {
 }
 
 fn tools(ctx: &Ledgers) -> Vec<Box<dyn Tool>> {
-    ledger_tools(ctx.clone(), "ceo".to_string())
+    ledger_tools(ctx.clone(), "ceo".to_string(), None, true)
 }
 
 fn tool<'a>(tools: &'a [Box<dyn Tool>], name: &str) -> &'a dyn Tool {
@@ -308,4 +308,108 @@ fn every_schema_requires_the_ledger_argument() {
             .collect();
         assert!(required.contains(&"ledger"), "`{name}`: {schema}");
     }
+}
+
+// -- per-agent ledger grants (`[[agent]].ledgers`) ---------------------------
+
+/// An omitted `ledgers` grant is unrestricted: `list_ledgers` names every
+/// ledger, matching the tool surface before this field existed.
+#[tokio::test]
+async fn an_unscoped_agent_lists_every_ledger() {
+    let home = tempfile::tempdir().unwrap();
+    let ctx = ctx(&home);
+    let tools = ledger_tools(ctx, "ceo".to_string(), None, true);
+    let result = tool(&tools, LIST_LEDGERS_TOOL)
+        .execute(json!({}))
+        .await
+        .unwrap();
+    let text = format!("{result:?}");
+    for slug in ["tasks", "goals", "decisions"] {
+        assert!(text.contains(slug), "`{slug}` missing: {text}");
+    }
+}
+
+/// A declared `ledgers` grant confines `list_ledgers` to exactly what it
+/// names — a ledger left off the list does not appear.
+#[tokio::test]
+async fn a_scoped_agent_lists_only_its_declared_ledgers() {
+    let home = tempfile::tempdir().unwrap();
+    let ctx = ctx(&home);
+    let grants = vec![crate::company::LedgerGrant {
+        name: "tasks".to_string(),
+        access: crate::company::LedgerAccess::Record,
+    }];
+    let tools = ledger_tools(ctx, "ceo".to_string(), Some(grants), true);
+    let result = tool(&tools, LIST_LEDGERS_TOOL)
+        .execute(json!({}))
+        .await
+        .unwrap();
+    let text = format!("{result:?}");
+    assert!(text.contains("tasks"), "{text}");
+    assert!(!text.contains("goals"), "{text}");
+    assert!(!text.contains("decisions"), "{text}");
+}
+
+/// `read_ledger` on a slug this agent's grant does not name is refused —
+/// visibility, not merely write access, is what the grant governs.
+#[tokio::test]
+async fn reading_an_undeclared_ledger_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let ctx = ctx(&home);
+    let grants = vec![crate::company::LedgerGrant {
+        name: "tasks".to_string(),
+        access: crate::company::LedgerAccess::Record,
+    }];
+    let tools = ledger_tools(ctx, "ceo".to_string(), Some(grants), true);
+    let result = tool(&tools, READ_LEDGER_TOOL)
+        .execute(json!({ "ledger": "goals" }))
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    let text = format!("{result:?}");
+    assert!(text.contains("goals"), "{text}");
+}
+
+/// A `read`-only grant answers `read_ledger` but refuses `record_entry`.
+#[tokio::test]
+async fn a_read_only_grant_refuses_record_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let ctx = ctx(&home);
+    let grants = vec![crate::company::LedgerGrant {
+        name: "goals".to_string(),
+        access: crate::company::LedgerAccess::Read,
+    }];
+    let tools = ledger_tools(ctx, "ceo".to_string(), Some(grants), true);
+
+    let read = tool(&tools, READ_LEDGER_TOOL)
+        .execute(json!({ "ledger": "goals" }))
+        .await
+        .unwrap();
+    assert!(!read.is_error, "{read:?}");
+
+    let record = tool(&tools, RECORD_ENTRY_TOOL)
+        .execute(json!({
+            "ledger": "goals",
+            "id": "grow-mrr",
+            "fields": { "goal": "grow MRR", "status": "open" }
+        }))
+        .await
+        .unwrap();
+    assert!(record.is_error);
+    assert!(format!("{record:?}").contains("record"));
+}
+
+/// `can_declare_ledgers = false` refuses `define_ledger` outright, whatever
+/// the manifest's other ledger grants say.
+#[tokio::test]
+async fn can_declare_ledgers_false_refuses_define_ledger() {
+    let home = tempfile::tempdir().unwrap();
+    let ctx = ctx(&home);
+    let tools = ledger_tools(ctx, "ceo".to_string(), None, false);
+    let result = tool(&tools, DEFINE_LEDGER_TOOL)
+        .execute(risks())
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    assert!(format!("{result:?}").contains("can_declare_ledgers"));
 }

@@ -85,8 +85,8 @@ use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
     WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, delete_company_workflow,
-    list_workflows_union, load_workflow_union, rollback_company_workflow, seed_file_exists,
-    set_company_workflow_enabled, update_company_workflow, workflow_version,
+    list_workflows_with_globals, load_workflow_with_globals, rollback_company_workflow,
+    seed_file_exists, set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -417,8 +417,13 @@ fn overlay_toml<'a>(overlays: &'a [OverlayWorkflow], wid: &str) -> Option<&'a st
         .map(|w| w.toml.as_str())
 }
 
-async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflow>, ApiError> {
-    Ok(workflow_state(company).await?.0)
+/// This company's overlay graph bodies and its `[globals].disable`, read
+/// together — the pair every union read needs.
+async fn overlay_workflows_and_globals(
+    company: &ScopedCompany,
+) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ApiError> {
+    let (overlays, _, globals_disable) = workflow_state(company).await?;
+    Ok((overlays, globals_disable))
 }
 
 /// The company's runtime-authored graph bodies **and** the ids the operator has
@@ -430,15 +435,24 @@ async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflo
 /// an operator has just toggled it.
 async fn workflow_state(
     company: &ScopedCompany,
-) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ApiError> {
+) -> Result<(Vec<OverlayWorkflow>, Vec<String>, Vec<String>), ApiError> {
     let record: Option<CompanyRecord> = company
         .runtime
         .store()
         .load(company.id())
         .await
         .map_err(ApiError)?;
+    // The company's `[globals].disable` rides along for the same reason the
+    // other two do: a route that resolved a global graph without it would serve
+    // one this company opted out of.
     Ok(record
-        .map(|r| (r.overlay_workflows, r.disabled_workflows))
+        .map(|r| {
+            (
+                r.overlay_workflows,
+                r.disabled_workflows,
+                r.manifest.globals.disable,
+            )
+        })
         .unwrap_or_default())
 }
 
@@ -453,9 +467,9 @@ async fn workflow_state(
 /// does this return `200 []`, so the console renders "no workflows yet" rather
 /// than a failure.
 async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSummary>>, ApiError> {
-    let (overlays, disabled) = workflow_state(&company).await?;
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
     let source_dir = company.runtime.source_dir();
-    let files = list_workflows_union(source_dir, &overlays);
+    let files = list_workflows_with_globals(source_dir, &overlays, &globals_disable);
     let mut seen: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
     let mut summaries: Vec<WorkflowSummary> = files
         .into_iter()
@@ -512,8 +526,8 @@ async fn get_workflow(
         ))));
     }
     let source_dir = company.runtime.source_dir();
-    let (overlays, disabled) = workflow_state(&company).await?;
-    let file = load_workflow_union(source_dir, &overlays, &wid)
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
+    let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
     // Issue #259: the version token rides out with the graph, so the console
@@ -714,7 +728,7 @@ async fn graph_with_version(
     file: WorkflowFile,
 ) -> Result<WorkflowGraph, ApiError> {
     let source_dir = company.runtime.source_dir();
-    let (overlays, disabled) = workflow_state(company).await?;
+    let (overlays, disabled, _) = workflow_state(company).await?;
     let editable = is_editable(source_dir, &overlays, &file.id);
     let version = editable
         .then(|| overlay_toml(&overlays, &file.id).map(workflow_version))
@@ -894,9 +908,9 @@ async fn set_workflow_enabled(
     // Answer with the graph, re-read, rather than a bare 204: the console
     // renders the row from this shape, and reading it back means the `enabled`
     // it shows is what the store holds rather than what the request asked for.
-    let (overlays, disabled) = workflow_state(&company).await?;
+    let (overlays, disabled, globals_disable) = workflow_state(&company).await?;
     let source_dir = company.runtime.source_dir();
-    let file = load_workflow_union(source_dir, &overlays, &wid)
+    let file = load_workflow_with_globals(source_dir, &overlays, &globals_disable, &wid)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
     let editable = is_editable(source_dir, &overlays, &wid);
@@ -1296,14 +1310,19 @@ async fn run_workflow(
 
     // Load the saved graph from the seed ∪ overlay union, so a graph created on
     // a hosted tenant (no source directory) runs the same as a committed one.
-    let overlays = overlay_workflows(&company)
+    let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
         .await
         .map_err(IntoResponse::into_response)?;
-    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
-        })?;
+    let file = load_workflow_with_globals(
+        company.runtime.source_dir(),
+        &overlays,
+        &globals_disable,
+        &wid,
+    )
+    .map_err(|e| ApiError(e).into_response())?
+    .ok_or_else(|| {
+        ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+    })?;
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let detach = body.detach;
@@ -1893,7 +1912,7 @@ async fn fix_from_run(
 
     // Load the saved graph for `wid` (seed ∪ overlay) and convert it to the spec
     // the copilot corrects and pins its identity to.
-    let overlays = overlay_workflows(&company)
+    let (overlays, globals_disable) = overlay_workflows_and_globals(&company)
         .await
         .map_err(IntoResponse::into_response)?;
     // A source-defined workflow (seed-backed, or seed-shadowed) can never take
@@ -1909,11 +1928,16 @@ async fn fix_from_run(
         )))
         .into_response());
     }
-    let file = load_workflow_union(company.runtime.source_dir(), &overlays, &wid)
-        .map_err(|e| ApiError(e).into_response())?
-        .ok_or_else(|| {
-            ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
-        })?;
+    let file = load_workflow_with_globals(
+        company.runtime.source_dir(),
+        &overlays,
+        &globals_disable,
+        &wid,
+    )
+    .map_err(|e| ApiError(e).into_response())?
+    .ok_or_else(|| {
+        ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))).into_response()
+    })?;
     // `workflow_spec_from_graph` below has no `on_error`/`retry` field on
     // `WorkflowNodeSpec` (the builder never authors them — see its own doc
     // comment), so a node that had either set loses it silently once the
@@ -2527,6 +2551,33 @@ fn relabel_blocked(nodes: &mut [WorkflowRunNode], blocked: &[crate::ports::Workf
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The globals-unaware readers: these tests assert the company's own two
+    // sources, so they call the form that resolves no baseline.
+    use crate::company::{list_workflows_union, load_workflow_union};
+
+    /// The listed rows this company itself has, with the global baseline
+    /// filtered out. Every company lists the baseline graphs; these tests are
+    /// about what this one created, deleted, or declared.
+    ///
+    /// This is an **id heuristic**, not provenance: `WorkflowSummary` carries
+    /// no `global` flag, so a row is classified as "the baseline's" purely by
+    /// id membership in `crate::globals::workflows()`. A company definition of
+    /// the *same* id supersedes the global one and would be wrongly excluded
+    /// here — none of the fixtures below give a company workflow a colliding
+    /// id, so the gap does not fire in this suite; see
+    /// `write_test::workflow_create_of_an_id_matching_a_global_wins_by_content`
+    /// for that case asserted directly, without this helper.
+    fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
+        listed
+            .as_array()
+            .expect("array response")
+            .iter()
+            .filter(|row| {
+                let id = row["id"].as_str().unwrap_or_default();
+                !crate::globals::workflows().iter().any(|w| w.id == id)
+            })
+            .collect()
+    }
 
     const DEMO: &str = r#"
         id = "demo"
@@ -2674,6 +2725,7 @@ mod tests {
         use crate::company::{WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef};
 
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,
@@ -2864,6 +2916,7 @@ mod tests {
         use crate::company::{WorkflowNodeDef, WorkflowNodeKind};
 
         let file = WorkflowFile {
+            global: false,
             id: "wf".into(),
             name: "WF".into(),
             description: None,
@@ -3316,6 +3369,7 @@ mod tests {
     // HTTP-level: a hosted tenant has no source directory to scan, so these
     // exercise the manifest-enabled union path end to end via the router.
     mod hosted_mode {
+        use super::own_rows;
         use axum::body::{Body, to_bytes};
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
@@ -3411,7 +3465,7 @@ mod tests {
             // Regression for #70: the REST list used to scan the filesystem
             // only, so a hosted tenant with no source dir always got `[]`
             // here even though its manifest declared an enabled workflow.
-            let items = body.as_array().expect("array response");
+            let items = own_rows(&body);
             assert_eq!(items.len(), 1, "body: {body}");
             assert_eq!(items[0]["id"], "demo");
             // No file to load a real name from, so the id is the fallback
@@ -3546,7 +3600,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let listed = json_body(response).await;
-            let items = listed.as_array().expect("array");
+            let items = own_rows(&listed);
             assert_eq!(items.len(), 1, "body: {listed}");
             assert_eq!(items[0]["id"], "greeter");
             assert_eq!(items[0]["name"], "Greeter");
@@ -4178,6 +4232,128 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
 
+        /// A **global-only** workflow — no seed file, no overlay body, just the
+        /// baseline every company gets — must still be toggleable: it has a
+        /// schedule to pause exactly like a company-authored one, and
+        /// `disabled_workflows` (what this route writes) is a separate
+        /// mechanism from `[globals].disable` (what drops the global outright).
+        /// Before this, `set_company_workflow_enabled`'s "does this company
+        /// have a body for `wid`" check only looked at seed files and overlays,
+        /// so a global-only id read as a bodiless manifest-`enabled` id and the
+        /// route answered 409 for a graph that plainly exists and runs.
+        #[tokio::test]
+        async fn the_enabled_route_toggles_a_global_only_workflow() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            let global_id = crate::globals::workflows()[0].id.clone();
+
+            let paused = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
+                    Some(serde_json::json!({ "enabled": false })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(paused.status(), StatusCode::OK);
+            assert_eq!(json_body(paused).await["enabled"], serde_json::json!(false));
+
+            let list = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let body = json_body(list).await;
+            let row = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["id"] == global_id.as_str())
+                .expect("still listed");
+            assert_eq!(row["enabled"], serde_json::json!(false));
+
+            // Back on, and still resolvable through `GET …/workflows/{wid}`
+            // throughout — pausing a global must not make it unreadable.
+            let armed = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
+                    Some(serde_json::json!({ "enabled": true })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(armed.status(), StatusCode::OK);
+            assert_eq!(json_body(armed).await["enabled"], serde_json::json!(true));
+
+            let read = router(state)
+                .oneshot(request(
+                    "GET",
+                    &format!("/api/v1/company/workflows/{global_id}"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(read.status(), StatusCode::OK);
+        }
+
+        /// A workflow this company has explicitly dropped via
+        /// `[globals].disable` no longer exists as far as this company is
+        /// concerned, so toggling it is the same 404 an unknown id gets — the
+        /// global-only arm above must not treat a disabled global as having a
+        /// body.
+        #[tokio::test]
+        async fn toggling_a_company_disabled_global_is_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            let global_id = crate::globals::workflows()[0].id.clone();
+            let manifest: CompanyManifest = toml::from_str(&format!(
+                "[company]\nname = \"Acme\"\n\n[globals]\ndisable = [\"workflow:{global_id}\"]\n"
+            ))
+            .unwrap();
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+            // Not `state_over`: it always builds with `empty_manifest()`, which
+            // would overwrite this test's `[globals].disable` and silently pass
+            // for the wrong reason.
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id, std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
+                    Some(serde_json::json!({ "enabled": false })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
         /// Restart survival: a workflow created through the API is still listed
         /// by a completely fresh `AppState` rebuilt over the same store — proving
         /// the body is durable, not process-local.
@@ -4205,7 +4381,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let listed = json_body(response).await;
-            let items = listed.as_array().expect("array");
+            let items = own_rows(&listed);
             assert_eq!(items.len(), 1, "body: {listed}");
             assert_eq!(items[0]["id"], "greeter");
             assert_eq!(items[0]["name"], "Greeter");
@@ -5076,7 +5252,7 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
+            assert_eq!(own_rows(&items).len(), 1, "{items}");
         }
 
         // ── Issue #274: revision history + rollback at the HTTP boundary ────
@@ -5345,8 +5521,9 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
-            assert_eq!(items[0]["id"], "greeter");
+            let own = own_rows(&items);
+            assert_eq!(own.len(), 1, "{items}");
+            assert_eq!(own[0]["id"], "greeter");
         }
 
         #[tokio::test]
@@ -5422,7 +5599,7 @@ mod tests {
                 .await
                 .unwrap();
             let items = json_body(response).await;
-            assert_eq!(items.as_array().unwrap().len(), 0, "{items}");
+            assert_eq!(own_rows(&items).len(), 0, "{items}");
 
             // …and from the graph read.
             let response = router(state)
@@ -5439,7 +5616,7 @@ mod tests {
                 .unwrap();
             let items = json_body(response).await;
             assert_eq!(
-                items.as_array().unwrap().len(),
+                own_rows(&items).len(),
                 0,
                 "a deleted workflow must not come back on restart: {items}"
             );

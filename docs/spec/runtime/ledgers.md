@@ -219,6 +219,30 @@ mid-run is reachable by every tool immediately and named in the *prompt* from th
 next build. That is the honest limit: system prompts are assembled once, and
 nothing can retroactively edit one already in flight.
 
+### Per-agent visibility and access: `[[agent]].ledgers`
+
+The five tools above are the whole company's surface, uniform across every
+agent. `[[agent]].ledgers` narrows that per teammate: a list of
+`{ name, access = "read" | "record" }` grants, omitted by default.
+
+An omitted `ledgers` key is **unrestricted** — every ledger, at `record` — the
+tool surface every agent had before this field existed, so adding it to a
+manifest is a no-op for a company that never opts in. A declared list confines
+`list_ledgers`/`read_ledger` to exactly the slugs it names (an undeclared slug
+is invisible, not merely unwritable) and requires `access = "record"` for
+`record_entry`/`close_entry`; a bare `{ name = "tasks" }` defaults to `read`,
+the safer of the two.
+
+This is visibility and read/record — a different axis from
+[`writers`](#agents-create-and-record-only-people-delete), which stays the
+authoritative check on whether a write actually lands. An `access = "record"`
+grant to a built-in ledger whose `writers` excludes that agent is a manifest
+validation error, not a disagreement discovered at call time; a
+company-declared ledger cannot be checked that early, since it may not exist
+yet, so any conflict there is an ordinary tool refusal. `can_declare_ledgers`
+(default `true`) gates `define_ledger` alone. See
+`docs/spec/runtime/agents.md`.
+
 ## Storage
 
 `LedgerStore` (`ports/ledgers.rs`) keeps two things with very different

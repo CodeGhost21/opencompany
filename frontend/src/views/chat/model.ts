@@ -37,6 +37,60 @@ export function deskFromDto(d: DeskDto): Desk {
  */
 export type Transcripts = Record<string, ChatMessage[]>;
 
+/**
+ * How far a channel's persisted history has got, per channel.
+ *
+ * {@link Transcripts} cannot answer this on its own: an absent key and a key
+ * holding `[]` both read as "no messages", and the timeline coerces the two
+ * together the moment it does `transcripts[id] ?? []`. So "nobody has asked the
+ * host yet" is indistinguishable from "the host says this channel is empty",
+ * and the timeline printed the second while the first was true — the reload
+ * flash issue #934 describes.
+ */
+export type HistoryStatus = "loading" | "ready";
+
+export interface HistoryHydration {
+  /**
+   * Whether the desks/roster pass has finished marking every channel it is
+   * going to hydrate.
+   *
+   * Needed because `ChatView` resolves its own desk list independently of the
+   * shell's, and can therefore render a channel before the shell's pass has
+   * reached it. Without this, that window has no entry in `byChannel` and looks
+   * exactly like a channel nothing will ever hydrate.
+   */
+  discovered: boolean;
+  /** Channel id → whether its `chat/history` request has settled. */
+  byChannel: Record<string, HistoryStatus>;
+}
+
+/** Before a company's rehydration pass has begun: everything is still pending. */
+export const HISTORY_UNSTARTED: HistoryHydration = { discovered: false, byChannel: {} };
+
+/**
+ * No rehydration is happening or ever will — for a `ChatView` mounted without a
+ * shell behind it. The distinction from {@link HISTORY_UNSTARTED} is the whole
+ * point: this one resolves every channel to "ready", so a caller that does not
+ * track hydration renders exactly as it did before, rather than spinning on a
+ * pass that is never coming.
+ */
+export const HISTORY_UNTRACKED: HistoryHydration = { discovered: true, byChannel: {} };
+
+/**
+ * Whether we know enough about `channelId` to state that it is empty.
+ *
+ * The three cases, and why the last one is `discovered` rather than `false`: a
+ * channel with a status answers for itself; a channel with none *after* the
+ * pass has run is one nothing will hydrate (a console-only teammate, a host
+ * with no `chat/history`), and holding a spinner on it forever is worse than
+ * the wrong claim this exists to prevent.
+ */
+export function historyReady(hydration: HistoryHydration, channelId: string): boolean {
+  const status = hydration.byChannel[channelId];
+  if (status) return status === "ready";
+  return hydration.discovered;
+}
+
 export type ChannelKind = "channel" | "dm";
 
 export interface Channel {

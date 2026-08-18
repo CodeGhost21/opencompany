@@ -33,6 +33,21 @@ use crate::company::Agent;
 /// about the work in progress, so no exclusion can apply to it.
 pub const UNIVERSAL_DOCUMENT: &str = "METHOD.md";
 
+/// The company's per-workspace working agreement, routed to every role
+/// alongside [`UNIVERSAL_DOCUMENT`].
+///
+/// Distinct from `METHOD.md`: `METHOD.md` is the company's method policy,
+/// authored per company; `AGENTS.md` is the bundle-level agreement every
+/// teammate in the roster shares — which files exist and what they are for,
+/// how work is expected to be handed off, conventions a person and every
+/// agent are both bound by. Also asserts nothing about work in progress, so it
+/// is exempt from class exclusions the same way `METHOD.md` is.
+pub const AGENTS_DOC: &str = "AGENTS.md";
+
+/// Every document routed to every role, whatever its tier, classes, or
+/// explicit `context` list — in the order they are placed in the prompt.
+pub const UNIVERSAL_DOCUMENTS: &[&str] = &[UNIVERSAL_DOCUMENT, AGENTS_DOC];
+
 /// The company's summarized picture: what is established, what is ruled out.
 pub const BRIEF: &str = "BRIEF.md";
 /// The evidence ledger — what already holds true, with its derivation.
@@ -114,40 +129,47 @@ pub fn excluded_documents(classes: &[String]) -> Vec<&'static str> {
 ///
 /// Resolution order:
 ///
-/// 1. the universal document, always;
+/// 1. [`UNIVERSAL_DOCUMENTS`], always;
 /// 2. the agent's explicit `context` list if it declared one, else its tier's
 ///    default row;
 /// 3. minus anything its classes exclude.
 ///
 /// `Some(vec![])` (an explicit `context = []`) and `None` (an omitted key) are
-/// deliberately different: the first means "the universal document and nothing
-/// else", the second means "take the default". `Agent::context` is
-/// `Option<Vec<String>>` precisely so that distinction is representable.
+/// deliberately different: the first means "the universal documents and
+/// nothing else", the second means "take the default". `Agent::context` is
+/// `Option<Vec<ContextEntry>>` precisely so that distinction is representable.
 ///
 /// Returned in routing order with duplicates removed, so a manifest that lists
-/// the universal document explicitly does not get it twice.
+/// a universal document explicitly does not get it twice.
 pub fn routed_documents(agent: &Agent) -> Vec<String> {
     let excluded = excluded_documents(&agent.classes);
 
     let chosen: Vec<String> = match agent.context.as_deref() {
-        Some(explicit) => explicit.to_vec(),
+        Some(explicit) => explicit
+            .iter()
+            .map(|entry| entry.path().to_string())
+            .collect(),
         None => tier_defaults(agent.tier.as_deref())
             .iter()
             .map(|doc| doc.to_string())
             .collect(),
     };
 
-    let mut routed = Vec::with_capacity(chosen.len() + 1);
+    let mut routed = Vec::with_capacity(chosen.len() + UNIVERSAL_DOCUMENTS.len());
     let mut seen = std::collections::HashSet::new();
-    for document in std::iter::once(UNIVERSAL_DOCUMENT.to_string()).chain(chosen) {
+    let universal = UNIVERSAL_DOCUMENTS.iter().map(|doc| doc.to_string());
+    for document in universal.chain(chosen) {
         let document = document.trim().to_string();
         if document.is_empty() {
             continue;
         }
-        // The universal document is exempt from exclusion: it is method, not
-        // assertion, so no class has a reason to withhold it — and a role
-        // excluded from the method could not follow it.
-        if document != UNIVERSAL_DOCUMENT && excluded.contains(&document.as_str()) {
+        // The universal documents are exempt from exclusion: neither asserts
+        // anything about the work in progress, so no class has a reason to
+        // withhold either — and a role excluded from the method or the
+        // working agreement could not follow it.
+        if !UNIVERSAL_DOCUMENTS.contains(&document.as_str())
+            && excluded.contains(&document.as_str())
+        {
             continue;
         }
         if seen.insert(document.clone()) {
@@ -231,6 +253,7 @@ mod tests {
 
     fn agent(tier: Option<&str>) -> Agent {
         Agent {
+            global: false,
             id: "a".into(),
             role: "Role".into(),
             description: None,
@@ -243,6 +266,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         }
     }
 
@@ -268,23 +293,23 @@ mod tests {
     fn the_per_tier_default_table_matches_the_spec() {
         assert_eq!(
             routed_documents(&agent(Some("orchestrator"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS, THREADS]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS, THREADS]
         );
         assert_eq!(
             routed_documents(&agent(Some("reasoning"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS]
         );
         assert_eq!(
             routed_documents(&agent(Some("frontend"))),
-            [UNIVERSAL_DOCUMENT, BRIEF]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
         );
         assert_eq!(
             routed_documents(&agent(Some("compress"))),
-            [UNIVERSAL_DOCUMENT]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC]
         );
         assert_eq!(
             routed_documents(&agent(Some("subconscious"))),
-            [UNIVERSAL_DOCUMENT]
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC]
         );
     }
 
@@ -304,13 +329,13 @@ mod tests {
         explicit.context = Some(Vec::new());
         assert_eq!(
             routed_documents(&explicit),
-            [UNIVERSAL_DOCUMENT],
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC],
             "`context = []` means the universal document and nothing else"
         );
 
         assert_eq!(
             routed_documents(&agent(Some("orchestrator"))),
-            [UNIVERSAL_DOCUMENT, BRIEF, CLAIMS, THREADS],
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF, CLAIMS, THREADS],
             "an omitted key takes the tier default"
         );
     }
@@ -319,7 +344,10 @@ mod tests {
     fn an_explicit_context_overrides_the_tier_default() {
         let mut a = agent(Some("orchestrator"));
         a.context = Some(vec!["GOAL.md".into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, "GOAL.md"]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, "GOAL.md"]
+        );
     }
 
     #[test]
@@ -337,7 +365,7 @@ mod tests {
         let mut a = agent(Some("reasoning"));
         a.classes = vec!["judge".into()];
         a.context = Some(vec![SCRATCH.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC]);
     }
 
     #[test]
@@ -358,7 +386,10 @@ mod tests {
         let mut a = agent(None);
         a.classes = vec!["judge".into()];
         a.context = Some(vec![SCRATCH.into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     #[test]
@@ -371,7 +402,10 @@ mod tests {
             CLAIMS.into(),
             BRIEF.into(),
         ]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     /// The method policy is exempt: it is how the company works, not something
@@ -381,21 +415,27 @@ mod tests {
         let mut a = agent(None);
         a.classes = vec!["judge".into(), "evidence".into(), "directive".into()];
         a.context = Some(Vec::new());
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT]);
+        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, AGENTS_DOC]);
     }
 
     #[test]
     fn a_document_listed_twice_is_routed_once() {
         let mut a = agent(None);
         a.context = Some(vec![UNIVERSAL_DOCUMENT.into(), BRIEF.into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     #[test]
     fn blank_context_entries_are_ignored() {
         let mut a = agent(None);
         a.context = Some(vec!["".into(), "  ".into(), BRIEF.into()]);
-        assert_eq!(routed_documents(&a), [UNIVERSAL_DOCUMENT, BRIEF]);
+        assert_eq!(
+            routed_documents(&a),
+            [UNIVERSAL_DOCUMENT, AGENTS_DOC, BRIEF]
+        );
     }
 
     /// An unknown class imposes no exclusion. Manifest validation refuses one

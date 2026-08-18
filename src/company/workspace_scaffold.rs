@@ -1,6 +1,5 @@
-//! The workspace's system roots — `Agents/` and `Desks/` — and the folders
-//! minted beneath them the first time somebody actually produces something
-//! (issue #551).
+//! The workspace's system roots — `Agents/`, `Desks/`, and `secrets/` — and the
+//! content the runtime owns beneath them.
 //!
 //! Before this module an agent had nowhere in the shared tree that was
 //! recognisably *its own*: everything it produced landed in its private
@@ -31,6 +30,8 @@
 //!   folder per roster member, one level up. It is therefore minted *whole* —
 //!   root and member folder in one call — by [`ensure_desk_folder`], so it
 //!   appears exactly when a desk first has something to put in it.
+//! * `secrets/` is operator-only scaffolding. It is laid down eagerly with a
+//!   `README.md` explaining that agent workspace tools omit the entire subtree.
 //! * A **member folder** was never scaffolding either; it is a container for
 //!   something. `Agents/<agent-id>/` and `Desks/<desk-id>/` are minted on demand
 //!   — by [`ensure_agent_folder`] / [`ensure_desk_folder`], at the moment that
@@ -85,6 +86,7 @@ use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+use crate::ports::{generate_id, now_millis};
 
 /// The reserved root folder holding one subfolder per agent that has produced
 /// something.
@@ -100,6 +102,17 @@ pub const AGENTS_ROOT: &str = "Agents";
 /// Not scaffolded at boot — see [`SYSTEM_ROOTS`] and [`ensure_desk_folder`].
 pub const DESKS_ROOT: &str = "Desks";
 
+/// The operator-only workspace subtree.
+///
+/// Agents never receive this root or anything beneath it through their
+/// workspace list, read, search, or write tools. The operator surfaces still
+/// use the full workspace store, so notes here remain ordinarily browsable and
+/// editable in the console.
+pub const SECRETS_ROOT: &str = "secrets";
+
+/// The note provisioned inside [`SECRETS_ROOT`] on first boot.
+pub const SECRETS_README: &str = "# Workspace secrets\n\nStore private operator notes and secret values in this folder. Everything under `secrets/` is hidden from agent workspace tools, including listing, reading, searching, and writing. Operators can still browse and edit these notes in the Workspace view.\n\nDo not treat this folder as an application credential store: use the Connections and inference settings for credentials that OpenCompany must inject into tools or providers.\n";
+
 /// The system roots the runtime lays down eagerly, on every boot.
 ///
 /// Deliberately *not* derived from the manifest: `Agents/` exists because a
@@ -114,19 +127,35 @@ pub const DESKS_ROOT: &str = "Desks";
 /// apart from content — the re-seed tests, a future console filter — can ask
 /// rather than hard-code the names, and so promoting a root back to eager stays
 /// a one-line change.
-pub const SYSTEM_ROOTS: [&str; 1] = [AGENTS_ROOT];
+pub const SYSTEM_ROOTS: [&str; 2] = [AGENTS_ROOT, SECRETS_ROOT];
+
+/// Whether a logical workspace path belongs to the operator-only subtree.
+///
+/// This is case-insensitive on the root segment so a colliding `Secrets` node
+/// cannot become an accidental agent-visible twin. Descendants are tested by
+/// segments rather than string prefix, so `secrets-old/` remains ordinary
+/// shared workspace content.
+pub fn is_agent_hidden_path(path: &str) -> bool {
+    path.trim()
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .is_some_and(|root| root.eq_ignore_ascii_case(SECRETS_ROOT))
+}
 
 /// Adopt-or-create the eagerly-scaffolded roots ([`SYSTEM_ROOTS`]) for
 /// `company`.
 ///
-/// One `tree()` read, then only the creates that are actually missing. Safe to
+/// Two `tree()` reads (the second resolves the README parent), then only the
+/// creates that are actually missing. Safe to
 /// call on every boot: it depends on nothing but the company id, so an existing
 /// company picks the roots up the next time it starts.
 ///
 /// What it creates is stamped [`WorkspaceOrigin::Seed`] — scaffolding the
-/// runtime lays down, authored by no operator and no agent. Nothing is created
-/// *inside* a root here; see [`ensure_agent_folder`]. `Desks/` is not created
-/// here at all, and an existing one is never even looked at: this walks
+/// runtime lays down, authored by no operator and no agent. `secrets/` receives
+/// one explanatory `README.md`; member folders beneath `Agents/` remain lazy
+/// (see [`ensure_agent_folder`]). `Desks/` is not created here at all, and an
+/// existing one is never even looked at: this walks
 /// [`SYSTEM_ROOTS`] by name, so a legacy company's `Desks/` (from before issue
 /// #645, or hand-made by an operator) is left exactly as it stands, contents
 /// and authorship included.
@@ -163,6 +192,52 @@ pub async fn ensure_workspace_scaffold(
                         company = %company,
                         error = %e,
                         "[workspace] could not create the `{root}` root; will retry on the next boot"
+                    );
+                }
+            }
+        }
+    }
+
+    // `secrets/` is useful before an operator has put anything in it, and the
+    // note explains the boundary at the place they encounter it. Refresh the
+    // tree after claiming roots so a newly-created root has an id to parent the
+    // note beneath. As with the roots, collisions fail closed and retry later.
+    let nodes = store.tree(company).await?;
+    let secret_root = match find(&nodes, None, SECRETS_ROOT) {
+        Found::Folder(id) => Some(id),
+        Found::Collision(why) => {
+            tracing::warn!(
+                company = %company,
+                "[workspace] {why}; not provisioning `{SECRETS_ROOT}/README.md`"
+            );
+            None
+        }
+        Found::Free => None,
+    };
+    if let Some(root_id) = secret_root {
+        match find(&nodes, Some(root_id.as_str()), "README.md") {
+            Found::Folder(_) | Found::Collision(_) => tracing::warn!(
+                company = %company,
+                "[workspace] `{SECRETS_ROOT}/README.md` is not one unambiguous note; leaving it untouched"
+            ),
+            Found::Free => {
+                let readme = WorkspaceNode {
+                    id: generate_id(),
+                    name: "README.md".to_string(),
+                    kind: NodeKind::File,
+                    parent_id: Some(root_id),
+                    updated_at_millis: now_millis(),
+                    created_by: WorkspaceOrigin::Seed,
+                    updated_by: WorkspaceOrigin::Seed,
+                    mime: None,
+                    size: None,
+                    sha256: None,
+                };
+                if let Err(error) = store.create(company, &readme, Some(SECRETS_README)).await {
+                    tracing::warn!(
+                        company = %company,
+                        %error,
+                        "[workspace] could not create `{SECRETS_ROOT}/README.md`; will retry on the next boot"
                     );
                 }
             }
@@ -440,11 +515,13 @@ mod tests {
         paths(&ws.tree(company).await.unwrap())
     }
 
-    /// The scaffold is exactly one empty root — and, crucially, nothing else.
-    /// A folder per roster member is what this feature stopped doing: a member
-    /// folder means "this teammate produced something", so an empty one is a
-    /// claim the tree has no business making. Issue #645 applied the same rule
-    /// to `Desks/` itself, which had no producer at all.
+    fn scaffold_paths() -> Vec<&'static str> {
+        vec!["Agents", "secrets", "secrets/README.md"]
+    }
+
+    /// The scaffold has an empty agent root plus the operator-only secrets
+    /// folder and its explanatory note. It never creates roster member folders
+    /// or the unused `Desks/` root.
     #[tokio::test]
     async fn it_provisions_one_empty_system_root() {
         let (_dir, ws) = store().await;
@@ -457,11 +534,10 @@ mod tests {
         let nodes = ws.tree(&company).await.unwrap();
         assert_eq!(
             paths(&nodes),
-            vec!["Agents"],
+            scaffold_paths(),
             "`Desks/` has no producer, so boot must not lay it down"
         );
-        for node in &nodes {
-            assert_eq!(node.kind, NodeKind::Folder, "{} is not a folder", node.name);
+        for node in nodes.iter().filter(|node| node.kind == NodeKind::Folder) {
             assert_eq!(
                 node.created_by,
                 WorkspaceOrigin::Seed,
@@ -469,6 +545,9 @@ mod tests {
                 node.name
             );
         }
+        let readme = nodes.iter().find(|node| node.name == "README.md").unwrap();
+        let (_, body) = ws.read(&company, &readme.id).await.unwrap().unwrap();
+        assert_eq!(body, SECRETS_README);
     }
 
     /// The scaffold takes no roster and asks for none: a company with no agents
@@ -484,7 +563,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(tree_paths(&ws, &company).await, vec!["Agents"]);
+        assert_eq!(tree_paths(&ws, &company).await, scaffold_paths());
     }
 
     /// The property that lets this run on every boot.
@@ -499,7 +578,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(tree_paths(&ws, &company).await, vec!["Agents"]);
+        assert_eq!(tree_paths(&ws, &company).await, scaffold_paths());
     }
 
     /// An operator-made `Agents/` folder is adopted as-is rather than
@@ -533,7 +612,7 @@ mod tests {
             .unwrap();
 
         let nodes = ws.tree(&company).await.unwrap();
-        assert_eq!(paths(&nodes), vec!["Agents"]);
+        assert_eq!(paths(&nodes), scaffold_paths());
         let root = nodes.iter().find(|n| n.name == AGENTS_ROOT).unwrap();
         assert_eq!(root.id, "hand-made", "the operator's folder must be reused");
         assert_eq!(
@@ -577,8 +656,8 @@ mod tests {
         let nodes = ws.tree(&company).await.unwrap();
         assert_eq!(
             paths(&nodes),
-            vec!["Agents"],
-            "the collision must not be worked around by creating anything else"
+            scaffold_paths(),
+            "the collision must not be shadowed; unrelated scaffold still provisions"
         );
         assert_eq!(
             nodes.iter().find(|n| n.name == AGENTS_ROOT).unwrap().kind,
@@ -605,7 +684,11 @@ mod tests {
             2,
             "an ambiguous root must not gain a third candidate"
         );
-        assert_eq!(nodes.len(), 2, "nothing else was created either");
+        assert_eq!(
+            paths(&nodes),
+            vec!["Agents", "Agents", "secrets", "secrets/README.md"],
+            "only the unrelated secrets scaffold may be created beside the collision"
+        );
     }
 
     /// The tree is company-scoped: scaffolding one company leaves another's
@@ -644,7 +727,7 @@ mod tests {
         assert_eq!(first, second, "a second call minted a rival folder");
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "Agents/ceo"]
+            vec!["Agents", "Agents/ceo", "secrets", "secrets/README.md"]
         );
         let nodes = ws.tree(&company).await.unwrap();
         let ceo = nodes.iter().find(|n| n.name == "ceo").unwrap();
@@ -668,7 +751,7 @@ mod tests {
 
         assert_eq!(
             tree_paths(&ws, &company).await,
-            vec!["Agents", "Agents/cmo"]
+            vec!["Agents", "Agents/cmo", "secrets", "secrets/README.md"]
         );
     }
 
@@ -892,7 +975,7 @@ mod tests {
         let nodes = ws.tree(&company).await.unwrap();
         assert_eq!(
             paths(&nodes),
-            vec!["Agents", "Desks"],
+            vec!["Agents", "Desks", "secrets", "secrets/README.md"],
             "dropping `Desks/` from the scaffold must not delete an existing one"
         );
         let desks = nodes.iter().find(|n| n.name == DESKS_ROOT).unwrap();

@@ -248,6 +248,37 @@ pub fn folder_claim_ambiguous_refusal(name: &str, count: usize) -> String {
     format!("{count} nodes under this folder are named `{name}`, so the path is ambiguous")
 }
 
+/// Whether a **file** already occupies `(parent, name)` (issue #894).
+///
+/// The sibling-uniqueness predicate every backend's [`WorkspaceStore::create`]
+/// applies, shared so the three cannot drift on what "taken" means.
+///
+/// # Files only, and that is the rule rather than an omission
+///
+/// A folder is not consulted and does not block, so a folder and a file may
+/// still share a name in one parent exactly as they always could. Folder-vs-
+/// folder claims are [`adopt_or_create_folder`]'s job (issue #759), which
+/// adopts rather than refuses. Widening this to every kind would be a **new
+/// tree rule** rather than the race fix issue #894 asks for, and it would break
+/// MongoDB, whose guard is a partial index over file documents alone.
+///
+/// [`adopt_or_create_folder`]: WorkspaceStore::adopt_or_create_folder
+pub fn file_name_taken<'a>(
+    nodes: impl Iterator<Item = &'a WorkspaceNode>,
+    parent: Option<&str>,
+    name: &str,
+) -> bool {
+    nodes.into_iter().any(|node| {
+        node.kind == NodeKind::File && node.parent_id.as_deref() == parent && node.name == name
+    })
+}
+
+/// The refusal every backend gives when a file already carries the name a
+/// [`create`](WorkspaceStore::create) asked for.
+pub fn duplicate_file_refusal(name: &str) -> String {
+    format!("workspace already contains a note named `{name}` in that folder")
+}
+
 /// One node in the workspace tree. `id` is a stable ULID; `parent_id` is `None`
 /// at the workspace root.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -460,6 +491,28 @@ pub trait WorkspaceStore: Send + Sync {
     /// Creates a node (folder or file). The node's `id` must be fresh; the
     /// `parent_id`, when set, must name an existing folder. `content` seeds a
     /// file body.
+    ///
+    /// # A file's name must be free among its siblings (issue #894)
+    ///
+    /// Creating a **file** whose `(parent_id, name)` a file already occupies is
+    /// an [`OpenCompanyError::Conflict`](crate::error::OpenCompanyError). The
+    /// predicate is [`file_name_taken`] and the refusal is
+    /// [`duplicate_file_refusal`], shared so the backends cannot disagree about
+    /// either.
+    ///
+    /// **This is a store guarantee, not a caller convention, and the difference
+    /// is the whole of issue #894.** `workspace_create` checks the path index
+    /// and then calls this — check-then-act, which two concurrent callers both
+    /// pass. Only the store can decide the loser: fs under the index lock,
+    /// SQLite inside an `IMMEDIATE` transaction, MongoDB against a partial
+    /// unique index. A caller-side check is a narrowing of the window, never a
+    /// closing of it, so nothing above this line may be trusted to enforce it.
+    ///
+    /// Folders are deliberately exempt — see [`file_name_taken`]. A tree that
+    /// *already* holds duplicates keeps them: this refuses new collisions and
+    /// repairs no history, so a store carrying pre-existing duplicates opens
+    /// and serves exactly as before (`read` still answers that path
+    /// `Ambiguous`, `list` still shows both).
     ///
     /// No `author` argument: the node arrives fully formed, so the caller sets
     /// [`WorkspaceNode::created_by`] and [`WorkspaceNode::updated_by`] on it

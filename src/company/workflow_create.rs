@@ -1468,8 +1468,19 @@ pub(crate) async fn set_company_workflow_enabled(
     // sent a corrupt-graph id down the bodiless branch and told the operator it
     // "was provisioned by name only". That is false for a workflow they created,
     // and it leaves them with no way to pause it and no accurate reason why.
-    let has_body =
-        seed_file_exists(source_dir, wid) || record.overlay_workflows.iter().any(|w| w.id == wid);
+    //
+    // A **global** graph counts too, as long as this company has not dropped it
+    // outright via `[globals].disable` — a global has no seed file and no
+    // overlay body of its own, so without this arm it read exactly like a
+    // bodiless manifest-`enabled` id and could never be paused from here,
+    // despite `disabled_workflows` (the pause flag this function writes) being
+    // a wholly separate mechanism from the globals opt-out.
+    let is_undisabled_global =
+        !crate::globals::disabled(&record.manifest.globals.disable, "workflow", wid)
+            && crate::globals::workflows().iter().any(|w| w.id == wid);
+    let has_body = seed_file_exists(source_dir, wid)
+        || record.overlay_workflows.iter().any(|w| w.id == wid)
+        || is_undisabled_global;
     if !has_body {
         if record.manifest.workflows.enabled.iter().any(|id| id == wid) {
             return Err(OpenCompanyError::Conflict(format!(
@@ -1486,11 +1497,16 @@ pub(crate) async fn set_company_workflow_enabled(
     // host cannot read is exactly the kind an operator most wants to stop, and
     // refusing would leave them nothing to do about it. It just journals under
     // its id.
-    let name = crate::company::load_workflow_union(source_dir, &record.overlay_workflows, wid)
-        .ok()
-        .flatten()
-        .map(|file| file.name)
-        .unwrap_or_else(|| wid.to_string());
+    let name = crate::company::load_workflow_with_globals(
+        source_dir,
+        &record.overlay_workflows,
+        &record.manifest.globals.disable,
+        wid,
+    )
+    .ok()
+    .flatten()
+    .map(|file| file.name)
+    .unwrap_or_else(|| wid.to_string());
 
     if !record.set_workflow_enabled(wid, enabled) {
         return Ok(false);

@@ -45,7 +45,7 @@ backend, and there is no per-channel routing on the host.
 
 | | |
 |---|---|
-| Transcripts | Journaled by the host and rehydrated from `GET {scope}/chat/history` on load. This has been true since #65 — the "per-session memory" this file used to claim was already out of date. |
+| Transcripts | Journaled by the host and rehydrated from `GET {scope}/chat/history` on load. This has been true since #65 — the "per-session memory" this file used to claim was already out of date. The rehydration is *not* instant, and the timeline has to say so: see [Empty, or not answered yet](#empty-or-not-answered-yet). |
 | Channel scoping | Every message carries the desk it was sent to, and the host filters server-side. Two people in two channels are not in the same room, and have not been since #53/#65. |
 | Threads | A reply posts its `parent` — the parent message's own id — and comes back under it. Both halves of the exchange hang off the row the thread opened from. |
 | Reactions | One durable row per person per emoji, so a chip says who reacted and whether one of them was you. `POST {scope}/chat/messages/{seq}/reactions` with an explicit `on`, which makes a retry idempotent. |
@@ -67,6 +67,37 @@ no reactions, which is the truth about it. History journaled under the old
 counter-minted `member-N` teammate ids stays orphaned — there is no honest
 mapping from `member-3` to a person, and inventing one would be worse than the
 loss.
+
+## Empty, or not answered yet
+
+`Transcripts` is `Record<string, ChatMessage[]>`, and the timeline reads it as
+`transcripts[channel.id] ?? []`. That `??` collapses two different facts into
+one: *nobody has asked the host about this channel* and *the host says this
+channel has nothing*. The channel intro then printed the second — "This is the
+start of your direct message with …" — while the first was true, so reloading a
+DM with months of history rendered it as brand new for as long as the fetch took
+(issue #934). Nothing was lost; it just read exactly like it had been.
+
+`HistoryHydration` in `model.ts` is the missing fact, and `historyReady()` is
+the one place that reads it:
+
+| State | May the intro claim "this is the start"? |
+|---|---|
+| `byChannel[id] === "loading"` | No — the request is in flight. |
+| `byChannel[id] === "ready"` | Yes. Settled, including a host that answered with nothing or failed outright. |
+| No entry, `discovered === false` | No. The shell's pass has not reached this channel yet — `ChatView` resolves its own desk list independently, so it can paint a channel a moment before the shell marks it. |
+| No entry, `discovered === true` | Yes. The pass ran and did not claim it, so nothing is coming — a console-only teammate, or a host with no `chat/history`. Holding a spinner forever would be a worse lie than the one this prevents. |
+
+`AppShell` owns the map because it owns the fetches. A channel is marked
+`loading` *before* its request goes out, never after — the gap between "this
+channel exists" and "its history is in flight" is precisely the window the bug
+lived in.
+
+While a channel is pending and has no rows, `MessageTimeline` renders skeleton
+rows in place of the claim. The avatar and title above them still render: those
+state where you are, which is not a claim about history. Rows that arrived
+locally — a message sent before hydration landed — render immediately; only the
+assertion of emptiness waits.
 
 ## Membership
 
@@ -115,7 +146,7 @@ chart's desk level, since no desk can name a parent desk. See
 | `model.ts` | Channels, senders, timeline grouping, formatting. All pure. |
 | `ChannelRail.tsx` | The channel/DM list, with collapsible sections. |
 | `ChatHeader.tsx` | The bar above the timeline. |
-| `MessageTimeline.tsx` | The scroll body: day dividers, channel intro, typing row. |
+| `MessageTimeline.tsx` | The scroll body: day dividers, channel intro, loading skeleton, typing row. |
 | `MessageRow.tsx` | One line — avatar gutter, author, body, reactions, hover action bar. |
 | `MessageComposer.tsx` | The composer dock; also used compact in the thread panel. |
 | `ThreadPanel.tsx` | Replies to one message, with their own composer. |

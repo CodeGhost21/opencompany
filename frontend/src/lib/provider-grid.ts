@@ -159,6 +159,74 @@ export function disconnectRouteFor(
   return null;
 }
 
+/**
+ * How many of a toolkit's accounts an agent can actually act as, and how many
+ * exist but cannot be acted as yet.
+ *
+ * **The one rule for counting accounts** (issue #923). The page had two. The
+ * tile grid printed `accounts.length` — every account, whatever its state —
+ * under a badge gated on {@link GridProvider.connected}, which the host defines
+ * as *at least one account is `ACTIVE`*. Mixing those two reads produced a page
+ * that contradicted itself in both directions at once: a Gmail holding one
+ * `ACTIVE` account and five `INITIATED` ones announced "6 accounts connected",
+ * while a Notion holding three `INITIATED` ones and no `ACTIVE` one announced
+ * "not connected" directly above the three accounts it holds.
+ *
+ * Both facts come from the same per-account `connected` flag the host already
+ * sends, which it sets for `ACTIVE`/`CONNECTED` alone. Nothing new is derived
+ * here; the two numbers are simply counted once, in one place, for every
+ * surface that reports them.
+ */
+export interface AccountTally {
+  /** Accounts an agent can act as — the host's per-account `connected`. */
+  live: number;
+  /**
+   * Accounts the company holds that are not usable: mid-handshake
+   * (`INITIATED`), lapsed (`EXPIRED`), or any other state Composio may add.
+   *
+   * Counted rather than named. The host forwards `status` verbatim and leaves
+   * the vocabulary to the console precisely because it will not guess at values
+   * it has not seen, and a summary line that had to name them would have to
+   * guess too. What the operator needs from a tile is that these accounts
+   * *exist* — the states themselves are listed per account below it.
+   */
+  pending: number;
+}
+
+/** Count a toolkit's accounts by whether an agent can act as them. */
+export function tallyAccounts(accounts: ComposioConnectedAccount[] | undefined): AccountTally {
+  const rows = accounts ?? [];
+  const live = rows.filter((a) => a.connected).length;
+  return { live, pending: rows.length - live };
+}
+
+/**
+ * What a surface says about a toolkit's accounts, or `null` when it holds none
+ * and the caller should fall back to its own wording.
+ *
+ * Shared by the tile grid and the provider detail panel so the two cannot drift
+ * again (issue #923): they described the same accounts differently, and #582
+ * had already had to remove a *second grid* for saying "connected" where the
+ * first said otherwise. A third implementation of "connected" would not have
+ * helped, so there is one.
+ *
+ * "none connected" is deliberate for a toolkit holding only unusable accounts.
+ * "not connected" is what the tile said before, and it is false: an account
+ * mid-handshake is not the absence of an account, and the operator reading it
+ * could see three of them listed below. This states both halves — the accounts
+ * are there, and none of them is usable yet.
+ */
+export function accountSummary(accounts: ComposioConnectedAccount[] | undefined): string | null {
+  const { live, pending } = tallyAccounts(accounts);
+  if (live > 0) {
+    return live === 1 ? "1 account connected" : `${live} accounts connected`;
+  }
+  if (pending > 0) {
+    return pending === 1 ? "1 account, not connected" : `${pending} accounts, none connected`;
+  }
+  return null;
+}
+
 /** The local tile for a Composio slug, when the console has metadata for one. */
 function nativeTileFor(slug: string): ConnectionProvider | undefined {
   return CONNECTION_PROVIDERS.find((p) => toolkitSlug(p.toolkit) === slug);

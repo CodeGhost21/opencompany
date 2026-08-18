@@ -1495,7 +1495,13 @@ impl CompanyRuntime {
                     CompanyEvent::AgentReply {
                         parent,
                         chat_id,
-                        agent_id: response.channel.clone(),
+                        // Issue #885: the author, not the destination. Same
+                        // fallback as the `/chat` path — a producer that names
+                        // no agent keeps the pre-#885 behaviour exactly.
+                        agent_id: response
+                            .agent
+                            .clone()
+                            .unwrap_or_else(|| response.channel.clone()),
                         text: response.text.clone(),
                         steps: response.steps.clone(),
                         task_id: response.task_id.clone(),
@@ -1589,6 +1595,7 @@ impl CompanyRuntime {
                 message_id: None,
                 task_id: None,
                 channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                agent: None,
                 text: format!(
                     "Recorded. The agent picks this back up once the remaining {outstanding} \
                      sign-off{} on this step {} decided.",
@@ -1716,6 +1723,7 @@ impl CompanyRuntime {
                             message_id: None,
                             task_id: None,
                             channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                            agent: None,
                             text: text.clone(),
                             steps: Vec::new(),
                             reply_to: None,
@@ -1807,6 +1815,7 @@ impl CompanyRuntime {
                         message_id: None,
                         task_id: None,
                         channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                        agent: None,
                         text: text.to_string(),
                         steps: Vec::new(),
                         reply_to: None,

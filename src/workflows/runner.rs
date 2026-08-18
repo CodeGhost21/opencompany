@@ -1452,6 +1452,7 @@ description = "Runs Acme."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
             search: None,
@@ -2005,6 +2006,7 @@ to = "done"
 
         let dir = tempfile::tempdir().unwrap();
         let file = WorkflowFile {
+            global: false,
             id: "bad".to_string(),
             name: "Bad".to_string(),
             description: None,

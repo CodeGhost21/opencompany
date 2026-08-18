@@ -25,6 +25,7 @@ pub mod composio_toolkits;
 pub mod connections_read;
 pub mod domain;
 pub mod finances;
+pub mod hosting;
 pub mod imap;
 pub mod inbox;
 pub mod inference;
@@ -171,6 +172,7 @@ pub fn router() -> Router<AppState> {
         .merge(connections_read::router())
         .merge(channels::router())
         .merge(billing::router())
+        .merge(hosting::router())
         .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())

@@ -105,7 +105,11 @@ tinyagents = { path = "vendor/openhuman/vendor/tinyagents", optional = true, fea
 # domain. The feature carries no extra deps (`skills = []` upstream) — it only
 # recompiles the skills domain modules. TinyAgents is consumed from OpenHuman's
 # own pin so both crates always share one trait identity and cannot drift.
-openhuman_core = { package = "openhuman", path = "vendor/openhuman", optional = true, default-features = false, features = ["skills", "mcp"] }
+# `hosting` adds the `hosting_*` tools and the `tinyhosts` unified hosting API
+# behind them (`openhuman::hosting`), which is what lets a company put its
+# workspace on a real hosting provider. Taken without OpenHuman's TinyBus
+# module: `tinyhosts` is linked as a library, so nothing here loads a cdylib.
+openhuman_core = { package = "openhuman", path = "vendor/openhuman", optional = true, default-features = false, features = ["skills", "mcp", "hosting"] }
 # The openhuman `Provider`/`Memory` traits return `anyhow::Result` and log via
 # the `log` facade; both only link under the `openhuman` feature.
 anyhow = { version = "1", optional = true }

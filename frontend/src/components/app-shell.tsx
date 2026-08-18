@@ -72,7 +72,10 @@ import {
   channelIdForThread,
   deskFromDto,
   dmChannelId,
+  HISTORY_UNSTARTED,
   type DecidedApproval,
+  type HistoryHydration,
+  type HistoryStatus,
   type Transcripts,
 } from "@/views/chat/model";
 import { Conversation } from "@/views/Conversation";
@@ -304,6 +307,11 @@ export function AppShell({
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
   const [transcripts, setTranscripts] = useState<Transcripts>({});
+  // How far each channel's history rehydration has got. Kept beside
+  // `transcripts` rather than inside it because an empty transcript is a
+  // legitimate final answer, and the timeline has to tell that apart from not
+  // having asked yet before it prints "this is the start of…" (issue #934).
+  const [hydration, setHydration] = useState<HistoryHydration>(HISTORY_UNSTARTED);
   // Host thread id → chat channel id, for every channel this company has.
   // Resolved by the desks/roster effect below, which already works the pairing
   // out to hydrate each channel and used to throw it away — leaving the shell
@@ -501,6 +509,10 @@ export function AppShell({
     // channels that no longer exist, and start the unread floor again so the
     // incoming company's rehydrated history isn't counted as news.
     setChatChannelByThread({});
+    // Another company's channels are another namespace here too, and a status
+    // carried over would let the incoming company's channels claim to be
+    // settled before anything has asked about them.
+    setHydration(HISTORY_UNSTARTED);
     setFirstDeskChannelId(null);
     setLastViewedChannel({});
     setUnreadSince(Date.now());
@@ -556,20 +568,35 @@ export function AppShell({
     // untouched), but not for a DM: the channel id is the console-local
     // `dmChannelId`, while the thread id `getChatHistory`/`chat` read is the
     // roster agent id (see `ChatView`'s `send`) — so this takes both.
+    const markHistory = (channelId: string, status: HistoryStatus) =>
+      setHydration((h) => ({ ...h, byChannel: { ...h.byChannel, [channelId]: status } }));
+
     const hydrateChannel = (channelId: string, threadId: string) => {
+      // Marked before the request, not after: the gap between "this channel
+      // exists" and "its history is in flight" is precisely the window the
+      // timeline used to fill with the empty-channel copy.
+      markHistory(channelId, "loading");
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
-          if (cancelled || entries.length === 0) return;
+          if (cancelled) return;
+          if (entries.length === 0) {
+            // An empty answer is still an answer, and the only thing that ever
+            // makes the "start of your direct message" copy true.
+            markHistory(channelId, "ready");
+            return;
+          }
           const hydrated = fromHistory(entries);
           setTranscripts((t) => {
             const known = new Set((t[channelId] ?? []).map((m) => m.id));
             const fresh = hydrated.filter((m) => !known.has(m.id));
             return fresh.length === 0 ? t : { ...t, [channelId]: [...fresh, ...(t[channelId] ?? [])] };
           });
+          markHistory(channelId, "ready");
         })
         .catch(() => {
           /* host without `/chat/history`, or offline — channel stays empty */
+          if (!cancelled) markHistory(channelId, "ready");
         });
     };
 
@@ -606,6 +633,9 @@ export function AppShell({
         setFirstDeskChannelId(chatDesks[0]?.id ?? null);
         chatDesks.forEach((d) => hydrateChannel(d.id, d.id));
         roster.forEach((m) => hydrateChannel(dmChannelId(m), m.id));
+        // Every channel this pass will hydrate now has a status, so a channel
+        // with none is one nothing is coming for.
+        setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
         // Host without `/desks`, or offline — keep the static default
@@ -616,6 +646,7 @@ export function AppShell({
         setChatChannelByThread(channelMap(fallbackDesks, []));
         setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
         fallbackDesks.forEach((d) => hydrateChannel(d.id, d.id));
+        if (!cancelled) setHydration((h) => ({ ...h, discovered: true }));
       });
 
     return () => {
@@ -1218,6 +1249,7 @@ export function AppShell({
               onReply={() => void feed.refresh()}
               transcripts={transcripts}
               setTranscripts={setTranscripts}
+              hydration={hydration}
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
               liveStepsByThread={liveStepsByThread}
