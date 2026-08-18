@@ -50,6 +50,17 @@ pub mod acp_run_turn;
 pub mod audit;
 pub mod brain;
 pub mod build;
+/// Issue #989 (Part 2a of #926): end-to-end proof that a **chat** turn which
+/// pauses at its tool-iteration cap runs the same #244 unpublished-work scan
+/// and nudge the task-dispatch path (`run_task`) already gets — and that a
+/// capped turn which wrote nothing is not nudged on top of it. Test-only.
+#[cfg(test)]
+mod cap_publish_test;
+/// Issue #926: end-to-end proof that a turn which exhausts its tool-iteration
+/// budget pauses **visibly** — the flag is read, the operator gets a second
+/// bubble saying so, and the notice never reaches memory. Test-only.
+#[cfg(test)]
+mod cap_turn_test;
 pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
@@ -561,6 +572,80 @@ pub struct HarnessDeps {
     pub checkouts: repo::CheckoutLedger,
 }
 
+/// A minimal [`HarnessDeps`] for tests that only care about **workflow-tool
+/// wiring**: which namespaces a `tool_call` can reach, and why the others cannot.
+///
+/// Only the inputs [`workflow_tool_wiring`](crate::workflows::caps) actually
+/// reads are parameters — the meter and plan (which resolve the capability
+/// filter per company and spend) and the static filter itself. `search` is
+/// pinned to `None`, because a deployment with no managed search backend is the
+/// shape issue #874 is about. Everything else is the cheapest inert default, so
+/// a test asserting on wiring does not have to name thirty fields that cannot
+/// affect the answer.
+///
+/// Shared rather than copied: the same fixture backs the runtime-level wiring
+/// tests and the `tool-slugs` route test, so both ask about one deployment shape.
+#[cfg(test)]
+pub(crate) fn workflow_wiring_deps(
+    runtime: &crate::CompanyRuntime,
+    meter: Option<Arc<dyn UsageMeter>>,
+    capabilities: toolbelt::CapabilityFilter,
+    plan: Option<capability_budget::CapabilityPlan>,
+) -> HarnessDeps {
+    HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
+        provider: Arc::new(provider::MockProvider::default()),
+        provider_slug: "mock".to_string(),
+        context: runtime.context.clone(),
+        store: runtime.store.clone(),
+        meter,
+        workspace_root: std::env::temp_dir(),
+        workspace_git_enabled: false,
+        audit_root: std::env::temp_dir(),
+        model_override: None,
+        tasks: None,
+        artifacts: None,
+        skills: None,
+        skills_source_dir: None,
+        skills_registry: Arc::from([]),
+        mcp_servers: Vec::new(),
+        default_mcp_servers: Vec::new(),
+        facts: None,
+        events: None,
+        delegations: orchestrator::DelegationQueue::default(),
+        workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+        mcp_failures: mcp_probe::McpFailureQueue::default(),
+        pending_publishes: publish::PendingPublishQueue::default(),
+        workflow_refs: workflow_refs::WorkflowRefQueue::default(),
+        run_outputs: orchestrator::RunOutputCache::default(),
+        run_output_store: None,
+        workflow_revisions: None,
+        approval_requests: policy::ApprovalRequestQueue::default(),
+        secrets: None,
+        web_allowed_domains: Vec::new(),
+        capabilities,
+        workflow_source_dir: None,
+        plan,
+        media: None,
+        composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
+        hosting: None,
+        // The staging shape in issue #874: `searchCredentialConfigured: false`.
+        search: None,
+        steer: crate::company::steer::InflightRegistry::default(),
+        run_supervisor: crate::runtime::RunSupervisor::default(),
+        delivery: None,
+        workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: repo::CheckoutLedger::default(),
+    }
+}
+
 /// One live openhuman agent, keyed by its manifest id.
 pub struct CompanyAgent {
     /// The manifest agent id.
@@ -634,6 +719,25 @@ pub struct TurnOutcome {
     /// The scrubbed, folded processing steps (empty for a memory-served or
     /// tool-less turn — the zero-steps tell).
     pub steps: Vec<TurnStep>,
+    /// Whether this turn **paused at its tool-iteration cap** rather than
+    /// finishing what it set out to do (issue #926).
+    ///
+    /// A capped turn is not an error and never has been: openhuman stops the
+    /// tool loop, makes one extra tools-disabled call asking the model for a
+    /// resumable "Done so far / Next steps" checkpoint, and returns that as an
+    /// ordinary `Ok(reply)`. So the reply reads like a finished answer, and
+    /// nothing in the text, the steps or the error channel distinguishes "I
+    /// answered you" from "I ran out of steps mid-task" — which is exactly what
+    /// the operator could not tell.
+    ///
+    /// Read from openhuman's public
+    /// [`Agent::last_turn_hit_cap`](oh::agent::Agent::last_turn_hit_cap) while
+    /// the agent lock is still held, the same under-lock idiom
+    /// [`read_turn_usage`] uses. `false` on every path that returns an outcome
+    /// **without** running a model turn (the two pre-turn budget refusals, the
+    /// ACP fold) — a refusal is not a pause, and labelling one as a cap hit
+    /// would tell the operator to reply "continue" to a turn that never ran.
+    pub hit_iteration_cap: bool,
 }
 
 impl CompanyAgent {
@@ -795,12 +899,45 @@ impl CompanyAgent {
         // still runs this cleanup before propagating, so the collector never
         // leaks.
         agent.set_on_progress(None);
+        // Issue #926: read the cap flag while the lock is still held, the same
+        // under-lock idiom `read_turn_usage` uses above. Not draining, so the
+        // retry path's second attempt simply overwrites the first's value —
+        // which is right: the outcome describes the attempt that produced the
+        // reply being returned.
+        let hit_iteration_cap = agent.last_turn_hit_cap();
         drop(agent);
         let events = collector.await.unwrap_or_default();
+        // The cap openhuman was actually enforcing, for the trace only. Taken
+        // from the last `IterationStarted` rather than from config, so the log
+        // reports the number the turn ran under instead of the one this crate
+        // believes it configured. Deliberately NOT plumbed into the operator
+        // notice: one notice can cover a responder turn, a desk turn and a
+        // relay turn, and naming one of their caps would be a number the
+        // operator cannot map back to anything.
+        let iteration_cap = events.iter().rev().find_map(|event| match event {
+            oh::agent::progress::AgentProgress::IterationStarted { max_iterations, .. } => {
+                Some(*max_iterations)
+            }
+            _ => None,
+        });
+        if hit_iteration_cap {
+            tracing::info!(
+                agent = %self.agent_id,
+                iteration_cap,
+                "[turn] paused at the tool-iteration cap; the reply is a resumable checkpoint, not a finished answer"
+            );
+        }
         let steps = steps::fold_steps(events);
 
         let reply = reply?;
-        Ok((TurnOutcome { reply, steps }, usages))
+        Ok((
+            TurnOutcome {
+                reply,
+                steps,
+                hit_iteration_cap,
+            },
+            usages,
+        ))
     }
 
     /// Classify one `agent.turn` result for the retry wrapper.
@@ -1938,6 +2075,9 @@ impl HarnessPool {
                             return Some(TurnOutcome {
                                 reply: TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
                                 steps: Vec::new(),
+                                // No model call ran, so no cap was reached
+                                // (issue #926). A refusal is not a pause.
+                                hit_iteration_cap: false,
                             });
                         }
                     }
@@ -2181,6 +2321,9 @@ impl HarnessPool {
                                 return Ok(TurnOutcome {
                                     reply: agent_budget_exhausted_notice(agent_id, cap),
                                     steps: Vec::new(),
+                                    // No model call ran, so no cap was reached
+                                    // (issue #926). A refusal is not a pause.
+                                    hit_iteration_cap: false,
                                 });
                             }
                         }

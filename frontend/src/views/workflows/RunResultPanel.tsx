@@ -8,6 +8,7 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import type {
   WorkflowGraph,
   WorkflowRunNode,
@@ -15,11 +16,39 @@ import type {
 } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ApprovalRow } from "@/views/chat/ApprovalRow";
+import type { DecidedApproval } from "@/views/chat/model";
 
 import { DeliveryRows } from "./RunHistoryPanel";
 // Issue #596: the per-node parse is now shared with the durable run inspector
 // and the pre-publish approvals card, so it lives in `run-output.ts`.
 import { type NodeResult, parseRunNodes } from "./run-output";
+// Issue #1002: which of the company's parked cards this run is held on.
+import { blockingApprovals, runApprovals, type RunApproval } from "./run-approvals";
+
+/** Stable empty defaults, so an omitted prop cannot churn the card's props. */
+const EMPTY_APPROVALS: ApprovalSummary[] = [];
+const EMPTY_NAMES = new Map<string, string>();
+const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+const EMPTY_DECIDED: Record<string, DecidedApproval> = {};
+const EMPTY_FAILED: Record<string, string> = {};
+const EMPTY_VERDICTS: Record<string, Verdict> = {};
+
+/**
+ * The in-flight verdict for one approval, as its own map.
+ *
+ * Narrowed per row for the reason #373 established one surface over: a decision
+ * in flight on one of a run's cards must not freeze the buttons on the others.
+ * Falls back to a shared empty map so an idle row's props do not churn on every
+ * render of the drawer.
+ */
+function decidingFor(
+  id: string,
+  deciding: ReadonlyMap<string, Verdict>,
+): ReadonlyMap<string, Verdict> {
+  const verdict = deciding.get(id);
+  return verdict ? new Map([[id, verdict]]) : EMPTY_DECIDING;
+}
 
 /** The run-output drawer: one readable card per executed node (the producing
  * agent and its reply, markdown-rendered) plus the branch each condition node
@@ -31,6 +60,13 @@ export function RunResultPanel({
   graph,
   request,
   onClose,
+  approvals = EMPTY_APPROVALS,
+  now,
+  askerNames = EMPTY_NAMES,
+  deciding = EMPTY_DECIDING,
+  decided = EMPTY_DECIDED,
+  failed = EMPTY_FAILED,
+  onDecide,
 }: {
   result: WorkflowRunResult;
   graph: WorkflowGraph | null;
@@ -38,6 +74,46 @@ export function RunResultPanel({
    * nothing, in which case the line is omitted rather than showing a bare dash. */
   request: string;
   onClose: () => void;
+  /**
+   * The company's parked approvals — the **whole** queue (issue #1002), the
+   * same array the Approvals page and the sidebar badge read.
+   *
+   * Handed in whole and narrowed here, deliberately. Nothing upstream filters
+   * it, so this surface cannot make the page show less or the badge disagree
+   * with it: it is a second *reader* of one queue, not a second queue.
+   *
+   * And it is a **live** array — the feed refreshes it on every
+   * `approval_resolved` frame — which is what stops the drawer calling a step
+   * blocked after somebody else cleared it. Optional, so a caller that does not
+   * wire it gets exactly the pre-#1002 drawer.
+   */
+  approvals?: ApprovalSummary[];
+  /** The feed's clock, for the "waiting N minutes" line. Defaults to now. */
+  now?: number;
+  /** Agent id → display name, for the "Asked by" line. */
+  askerNames?: Map<string, string>;
+  /** The verdict an approval is waiting on, keyed by id; empty when idle. */
+  deciding?: ReadonlyMap<string, Verdict>;
+  /**
+   * Verdicts already witnessed, with the last-seen summary — from this drawer,
+   * the Approvals page, or another console over the stream.
+   *
+   * The host drops a resolved approval from the queue at once, so this is what
+   * lets a decided row settle in place rather than blinking out of the panel.
+   */
+  decided?: Record<string, DecidedApproval>;
+  /** Decisions that did not land, keyed by approval id — the message to show. */
+  failed?: Record<string, string>;
+  /**
+   * Record one decision, on one approval, by its own id.
+   *
+   * One ordinary per-id resolve per approval — the same call the Approvals page
+   * makes, through the same client. There is no batch decision on the wire and
+   * none is invented here: each park stays a separate single-use decision, so a
+   * racing operator on the other surface gets a real approval or a `NotParked`
+   * no-op receipt, never a double execution.
+   */
+  onDecide?: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
 }) {
   const nodeResults = useMemo(
     () => parseRunNodes(result.output, graph),
@@ -58,6 +134,18 @@ export function RunResultPanel({
   // cannot disagree about whether this run stopped for a person.
   const blockedNodes = result.blockedNodes ?? [];
   const parkedCount = result.approvals?.length ?? 0;
+  // Issue #1002. Derived from the LIVE queue, never from `result.approvals` —
+  // that is a receipt of what this run opened (#880) and nothing ever comes back
+  // to flip a row on it, so a panel grounded there would go on calling a step
+  // blocked long after the card was cleared. The receipt is used for the one
+  // thing it *is* authoritative about: which node parked which card.
+  const runRows = useMemo(
+    () => runApprovals(approvals, decided, result.runId, result.approvals),
+    [approvals, decided, result.runId, result.approvals],
+  );
+  const stillWaiting = useMemo(() => blockingApprovals(runRows), [runRows]);
+  /** Whether the drawer is actually offering the decision, not just naming it. */
+  const canDecideHere = runRows.length > 0 && !!onDecide;
 
   return (
     <div className="border-t bg-card/60" data-testid="workflow-run-result">
@@ -145,7 +233,16 @@ export function RunResultPanel({
             {blockedNodes.length === 1 ? "it" : "they"} produced nothing and the
             steps after {blockedNodes.length === 1 ? "it" : "them"} did not run.{" "}
             {parkedCount > 0
-              ? `This run parked ${parkedCount} approval${parkedCount === 1 ? "" : "s"}; decide ${parkedCount === 1 ? "it" : "them"} in Approvals, then run the workflow again — approving does not continue this run.`
+              ? `This run parked ${parkedCount} approval${parkedCount === 1 ? "" : "s"}; decide ${parkedCount === 1 ? "it" : "them"} ${
+                  // Issue #1002: the cards are on this screen now, so say so —
+                  // and keep naming Approvals, because that page is still the
+                  // queue and still holds every one of them. Only claimed when
+                  // the section is actually rendering: a run whose cards this
+                  // console cannot join (an old host that sends back no run id)
+                  // still gets the original sentence rather than a pointer to
+                  // something that is not there.
+                  canDecideHere ? "below or in Approvals" : "in Approvals"
+                }, then run the workflow again — approving does not continue this run.`
               : "Nothing here can be approved; change the policy and run the workflow again."}
           </p>
         )}
@@ -153,6 +250,24 @@ export function RunResultPanel({
           <p className="mb-2 text-xs text-muted-foreground">
             Waiting on: {result.pendingApprovals.join(", ")}
           </p>
+        )}
+
+        {/* Issue #1002: the half the drawer never had — the cards this run is
+            held on, decidable here, scoped to the run on screen. The Approvals
+            page still lists every one of these and stays the queue; this is a
+            second reader of it, narrowed, so an operator does not have to leave
+            the run they are looking at to unblock it. */}
+        {canDecideHere && onDecide && (
+          <RunApprovalsSection
+            rows={runRows}
+            stillWaiting={stillWaiting.length}
+            graph={graph}
+            now={now ?? Date.now()}
+            askerNames={askerNames}
+            deciding={deciding}
+            failed={failed}
+            onDecide={onDecide}
+          />
         )}
 
         {deliveries.length > 0 && <DeliveryRows deliveries={deliveries} />}
@@ -189,6 +304,108 @@ export function RunResultPanel({
             {JSON.stringify(result.output, null, 2)}
           </pre>
         </details>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The cards this run is held on, decidable in place (issue #1002).
+ *
+ * ## One row per approval, per-node, one decision each
+ *
+ * Each row renders the **shipped** approval card — the same
+ * `@/components/approval-card` pieces the Approvals page and the inline chat
+ * card are built from, through `ApprovalRow` — over a single-item list. A
+ * single-item card is exactly what that component rendered before #842
+ * consolidated batches: headline, payload, asker, waiting time and the
+ * grant-scope control, with one Approve and one Decline. Sharing the card
+ * rather than restating it is what keeps two surfaces from offering different
+ * things for one approval, and it means role redaction (#618) reaches here for
+ * free — a member sees "not shown to you" here for the same reason they see it
+ * on the page.
+ *
+ * **No batch gesture, deliberately.** There is no "approve all for this run"
+ * here: a run holds until *every* parked gate is decided only after #994, and
+ * until then run-shaped wording ("the run continues once the remaining N are
+ * decided") would be a claim today's behaviour does not honour. Per-node
+ * resolve is true now and ships now; the grouping folds in with #994's `batch`
+ * field.
+ *
+ * ## What it does not do
+ *
+ * It resolves. It does not re-implement resolving: `onDecide` is the shell's
+ * one handler, calling the one `resolveApproval` the page calls, per id. No
+ * optimistic local state either — a row reads decided only once a verdict has
+ * actually been witnessed, so a stale entry can never be offered for a second
+ * decision from here.
+ */
+function RunApprovalsSection({
+  rows,
+  stillWaiting,
+  graph,
+  now,
+  askerNames,
+  deciding,
+  failed,
+  onDecide,
+}: {
+  rows: RunApproval[];
+  /** How many of them nobody has decided yet. */
+  stillWaiting: number;
+  graph: WorkflowGraph | null;
+  now: number;
+  askerNames: Map<string, string>;
+  deciding: ReadonlyMap<string, Verdict>;
+  failed: Record<string, string>;
+  onDecide: (approval: ApprovalSummary, verdict: Verdict, scope: GrantScope) => void;
+}) {
+  const nameById = useMemo(
+    () => new Map(graph?.nodes.map((n) => [n.id, n.name]) ?? []),
+    [graph],
+  );
+
+  return (
+    <div
+      className="mb-3 rounded-lg border bg-background/40 p-2"
+      data-testid="workflow-run-approvals"
+      data-still-waiting={stillWaiting}
+    >
+      <p className="text-xs font-medium">
+        {stillWaiting > 0
+          ? `Waiting on you — ${stillWaiting} of ${rows.length} still to decide`
+          : // Every card answered. It must NOT say the run is continuing: an
+            // agent node is not re-enterable, so approving never resumes this
+            // run — the same thing the blocked sentence above says, said again
+            // at the moment the operator has just finished deciding.
+            `All ${rows.length} decided — run the workflow again to continue`}
+      </p>
+      <div className="mt-1 space-y-1">
+        {rows.map((row) => {
+          const node = row.nodeId
+            ? (nameById.get(row.nodeId) ?? row.nodeId)
+            : null;
+          return (
+            <div key={row.approval.id} data-testid="workflow-run-approval">
+              {node && (
+                <p className="px-4 text-3xs uppercase tracking-wide text-muted-foreground">
+                  {node}
+                </p>
+              )}
+              <ApprovalRow
+                approvals={[row.approval]}
+                now={now}
+                askerNames={askerNames}
+                // Narrowed to this row's own approval: a decision in flight on
+                // another card of the same run is not this card's business.
+                deciding={decidingFor(row.approval.id, deciding)}
+                decided={row.verdict ? { [row.approval.id]: row.verdict } : EMPTY_VERDICTS}
+                failed={failed}
+                onDecide={onDecide}
+              />
+            </div>
+          );
+        })}
       </div>
     </div>
   );

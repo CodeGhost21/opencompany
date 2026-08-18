@@ -169,6 +169,26 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             },
             "tool_access.changed",
         ),
+        // Issue #983. Written for completeness on the same terms as
+        // `ReactionToggled` above, not for a live path: these bracket a chat
+        // turn and are appended beside it rather than driving a cycle, so a
+        // brain never sees one here. The turn id is the whole payload — the
+        // message text rides the `OperatorMessage` this brackets, and the
+        // failure reason is tenant-scoped, so neither is copied here.
+        CompanyEvent::TurnStarted {
+            turn_id, chat_id, ..
+        } => (
+            Role::System,
+            "operator".to_string(),
+            format!("[{chat_id}] turn {turn_id} accepted"),
+            "turn.started",
+        ),
+        CompanyEvent::TurnFailed { turn_id, .. } => (
+            Role::System,
+            "operator".to_string(),
+            format!("Turn {turn_id} did not finish"),
+            "turn.failed",
+        ),
         CompanyEvent::TaskDispatched { task_id, .. } => (
             Role::System,
             "board".to_string(),

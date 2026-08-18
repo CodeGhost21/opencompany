@@ -14,7 +14,7 @@ describe("destinationTargetProblem — unwired channel", () => {
   it("rejects a channel that is not in the wired set, naming what is", () => {
     const problem = destinationTargetProblem("channel", "ghost", wired);
     expect(problem).toBe(
-      "`ghost` is not a wired channel — this deployment has: operator, email.",
+      "`ghost` is not a workflow delivery channel — this runtime has: operator, email.",
     );
   });
 
