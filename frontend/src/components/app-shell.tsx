@@ -102,6 +102,9 @@ const WorkspaceView = lazy(() =>
 const FinancesView = lazy(() =>
   import("@/views/FinancesView").then((m) => ({ default: m.FinancesView })),
 );
+// Hosts a sandboxed iframe and the postMessage bridge — load on demand, same
+// as the other heavier, less-visited surfaces.
+const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
 
 export type View =
   | "overview"
