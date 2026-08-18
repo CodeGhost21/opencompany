@@ -5283,10 +5283,12 @@ description = "Sets direction."
             before.contains(&"read_workspace_state".to_string()),
             "got {before:?}"
         );
-        assert!(
-            before.contains(&"memory_store".to_string()),
-            "intrinsic memory tool must be present: {before:?}"
-        );
+        // `memory_store`/`memory_recall` are currently withheld altogether
+        // (see `harness::build::memory_tools`'s doc comment) — openhuman
+        // removed the constructor seam that let either tool act on a
+        // company's own `ContextStore` rather than one shared,
+        // unconfigured store. `file_read` is this test's example of an
+        // intrinsic, ungated tool instead.
         assert!(
             before.contains(&"file_read".to_string()),
             "ungated files namespace must be present: {before:?}"
@@ -5331,10 +5333,6 @@ description = "Sets direction."
         assert!(
             !after.contains(&"read_workspace_state".to_string()),
             "the whole shell namespace drops: {after:?}"
-        );
-        assert!(
-            after.contains(&"memory_store".to_string()),
-            "intrinsic memory tool survives gating: {after:?}"
         );
         assert!(
             after.contains(&"file_read".to_string()),
