@@ -20,6 +20,7 @@ import {
   type ApprovalSummary,
   type CapabilityStatusDto,
   type ChatHistoryMessageDto,
+  type ChatPostResult,
   type ChatResponse,
   type CompanyStatus,
   type ConnectionStart,
@@ -429,14 +430,34 @@ export class OpenCompanyClient {
      * field follows everywhere (see `CreateTask.deliverable`).
      */
     deliverable?: TaskDeliverable,
-  ): Promise<ChatResponse> {
-    const body: { text: string; chat?: string; parent?: string; deliverable?: TaskDeliverable } = {
+    /**
+     * Ask for the turn's id instead of its answer (issue #983): the host
+     * journals the message, mints a durable turn row and answers `202` without
+     * holding the request open for a turn whose duration is unbounded.
+     *
+     * Sending this does **not** mean a detached answer came back. A host that
+     * predates the field ignores it and answers the full synchronous `200`, so
+     * the caller must branch on the returned shape via `isDetachedChat` — which
+     * is exactly why this returns a union rather than the detached type.
+     */
+    detach?: boolean,
+  ): Promise<ChatPostResult> {
+    const body: {
+      text: string;
+      chat?: string;
+      parent?: string;
+      deliverable?: TaskDeliverable;
+      detach?: boolean;
+    } = {
       text,
     };
     if (chat) body.chat = chat;
     if (parent) body.parent = parent;
     if (deliverable === "workflow") body.deliverable = deliverable;
-    return this.request<ChatResponse>("POST", `${this.scope(company)}/chat`, body);
+    // Sent only when asked for, so an ordinary post keeps the exact body shape
+    // it had before #983 — the same omitted-field rule `deliverable` follows.
+    if (detach) body.detach = detach;
+    return this.request<ChatPostResult>("POST", `${this.scope(company)}/chat`, body);
   }
 
   /**
