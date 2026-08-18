@@ -398,6 +398,7 @@ pub fn relay_reply(
         message_id: None,
         task_id: None,
         channel: orchestrator.to_string(),
+        agent: None,
         text: relay_text(card, responder, orchestrator),
         reply_to: Some(ReplyTo {
             chat_id: origin_chat_id,

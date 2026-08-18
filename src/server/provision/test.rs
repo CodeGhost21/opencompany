@@ -1122,6 +1122,7 @@ impl Brain for EffectBrain {
                     message_id: None,
                     task_id: None,
                     channel: "operator".into(),
+                    agent: None,
                     text: format!("handled: {text}"),
                     steps: Vec::new(),
                     reply_to: None,

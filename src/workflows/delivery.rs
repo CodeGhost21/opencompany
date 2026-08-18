@@ -1338,6 +1338,7 @@ async fn post_to_channel(
             message_id: None,
             task_id: None,
             channel: channel_id.to_string(),
+            agent: None,
             text: format!("{subject}\n\n{text}"),
             steps: Vec::new(),
             reply_to: None,
