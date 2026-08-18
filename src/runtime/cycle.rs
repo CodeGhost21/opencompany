@@ -1943,6 +1943,12 @@ fn cycle_task_id(
             // either as a stimulus would make a turn re-trigger itself.
             | CompanyEvent::TurnStarted { .. }
             | CompanyEvent::TurnFailed { .. }
+            // Issue #1015: an attempt row announcing its own move. The same
+            // argument as `TaskCardChanged` directly above, and it matters more
+            // here — the store appends it *after* the status write, and the
+            // write is made by this very cycle, so treating it as a stimulus
+            // would let a run re-trigger itself on every transition it makes.
+            | CompanyEvent::RunStatusChanged { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -2122,6 +2128,12 @@ fn cycle_conversation(
             // either as a stimulus would make a turn re-trigger itself.
             | CompanyEvent::TurnStarted { .. }
             | CompanyEvent::TurnFailed { .. }
+            // Issue #1015: an attempt row announcing its own move. The same
+            // argument as `TaskCardChanged` directly above, and it matters more
+            // here — the store appends it *after* the status write, and the
+            // write is made by this very cycle, so treating it as a stimulus
+            // would let a run re-trigger itself on every transition it makes.
+            | CompanyEvent::RunStatusChanged { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -2449,6 +2461,7 @@ impl<'a> CycleHostImpl<'a> {
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2545,6 +2558,7 @@ impl<'a> CycleHostImpl<'a> {
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2585,7 +2599,11 @@ fn first_line(text: &str, max: usize) -> String {
 /// assignee is the addressed desk's lead — so a hand-off recorded against a desk
 /// id surfaces when the operator addresses that desk by id or name, and a card
 /// assigned to a person surfaces when that person is addressed.
-fn assignment_matches(record: &CompanyRecord, target: &str, assignee: &str) -> bool {
+///
+/// `pub(crate)` since issue #982 for a second caller — `chat_handler_card`'s
+/// adoption predicate, which has to ask the same question about the card the
+/// REST handler just wrote. One comparator, so the two cannot drift.
+pub(crate) fn assignment_matches(record: &CompanyRecord, target: &str, assignee: &str) -> bool {
     if assignee.eq_ignore_ascii_case(target) {
         return true;
     }
@@ -2832,6 +2850,7 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -3253,6 +3272,7 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -3314,6 +3334,7 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -6458,6 +6479,7 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -6532,6 +6554,7 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,

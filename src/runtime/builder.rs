@@ -1194,7 +1194,15 @@ impl RuntimeBuilder {
                 ledgers: ledgers_for_guard.clone(),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
-                runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
+                // Issue #1015: every attempt status change journals a frame, so
+                // the task screen can be pushed rather than polled. Wrapped here
+                // rather than at the cycle's call sites because
+                // `reap_orphaned_runs` settles crash-killed runs through
+                // `finish_run` directly — see `runtime::run_events`.
+                runs: Arc::new(crate::runtime::run_events::EventingRunStore::new(
+                    self.runs.unwrap_or_else(|| fs_ops.clone()),
+                    events.clone(),
+                )),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 workflow_run_outputs: self
@@ -2492,10 +2500,18 @@ impl RuntimeBuilder {
                                     // response surface, not a workflow delivery
                                     // destination: its buffer has no durable
                                     // reader. Desk and provider adapters are the
-                                    // accepted workflow write paths.
+                                    // accepted workflow write paths. The rule
+                                    // itself lives next to the operator-channel
+                                    // constant (issue #981) so this set, the
+                                    // set the console's picker offers and the
+                                    // set delivery accepts cannot disagree.
                                     channels: channels
                                         .iter()
-                                        .filter(|channel| channel.channel_id() != OPERATOR_CHANNEL)
+                                        .filter(|channel| {
+                                            crate::runtime::channel::is_deliverable_channel(
+                                                channel.channel_id(),
+                                            )
+                                        })
                                         .cloned()
                                         .collect(),
                                     // Issue #227: the same gate and journal the
@@ -4268,6 +4284,7 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -4733,6 +4750,7 @@ mod test {
             mode: mode.to_string(),
             always_approve: always.iter().map(|s| s.to_string()).collect(),
             auto_approve_under_usd: under,
+            approval_ttl_hours: None,
         }
     }
 
@@ -5173,12 +5191,12 @@ mod test {
         assert_eq!(runtime.channels.len(), 2);
         assert!(runtime.channels.iter().any(|c| c.channel_id() == "email"));
 
-        // The #813 accessor the console's channel picker reads names BOTH: the
-        // always-wired `operator` and the openhuman-backed provider channel, so
-        // a workflow author can target either.
-        let wired = runtime.wired_channel_ids();
-        assert!(wired.contains(&"operator".to_string()));
-        assert!(wired.contains(&"email".to_string()));
+        // The accessor the console's channel picker reads (#813) names the
+        // openhuman-backed provider channel and NOT `operator`: delivery
+        // refuses the operator adapter by name, so offering it as a
+        // destination would offer the one target guaranteed to fail (#981).
+        let deliverable = runtime.deliverable_channel_ids();
+        assert_eq!(deliverable, vec!["email".to_string()], "{deliverable:?}");
 
         // A granted call routes through the OpenHuman transport.
         let result = runtime
@@ -5209,9 +5227,17 @@ mod test {
         // No openhuman channel is added when the daemon is unreachable.
         assert_eq!(runtime.channels.len(), 1);
         assert_eq!(runtime.channels[0].channel_id(), "operator");
-        // The #813 accessor the console's channel picker reads: `operator` is
-        // always wired, so a workflow always has at least one real target.
-        assert_eq!(runtime.wired_channel_ids(), vec!["operator".to_string()]);
+        // The accessor the console's channel picker reads (#813): `operator` is
+        // the only wired adapter here, and it is not a delivery target — so a
+        // workflow on this runtime has NOWHERE to deliver, and the honest
+        // answer is an empty picker (#981). It previously answered
+        // `["operator"]`, which is what put the guaranteed-to-fail target in
+        // front of authors.
+        assert!(
+            runtime.deliverable_channel_ids().is_empty(),
+            "an operator-only runtime has no workflow delivery channel: {:?}",
+            runtime.deliverable_channel_ids()
+        );
 
         // Tools degrade to the grant-enforcing built-in: ungranted rejected,
         // granted returns a well-formed not-implemented result — and the RPC
@@ -5302,6 +5328,108 @@ mod test {
             .collect();
         assert!(ids.contains(&"engineering"));
         assert!(ids.contains(&"research"));
+
+        // Both desks are real delivery targets — they write to the company's
+        // durable event log — and `operator` is not one of them (#981).
+        let deliverable = runtime.deliverable_channel_ids();
+        assert!(
+            deliverable.contains(&"engineering".to_string()),
+            "{deliverable:?}"
+        );
+        assert!(
+            deliverable.contains(&"research".to_string()),
+            "{deliverable:?}"
+        );
+        assert!(
+            !deliverable.contains(&"operator".to_string()),
+            "{deliverable:?}"
+        );
+    }
+
+    /// **The invariant that would have caught #981.** The picker's set and the
+    /// delivery layer's set are produced by the same `build()`, from the same
+    /// adapters, and must be the same list.
+    ///
+    /// They were not. `WorkflowDeliveryDeps.channels` dropped `operator` with an
+    /// inline filter while the accessor the console reads returned every adapter
+    /// — so an author was offered a destination the runner refuses by name, and
+    /// nothing in the build asserted the two agreed. Pinning them together is
+    /// what makes a future divergence a test failure rather than a run that
+    /// reports `channel-not-wired` for a target the console suggested.
+    ///
+    /// Needs the harness arm, because that is the only site that wires
+    /// `WorkflowDeliveryDeps` at all.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn the_picker_set_equals_the_delivery_deps_the_same_build_wired() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = tmp_home("oc-981-invariant-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("invariant-co");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Invariant Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[group_chat]]
+            id = "engineering"
+            name = "Engineering"
+            members = ["eng1"]
+            "#,
+        );
+
+        let stub = spawn_stub("ack").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    credential: crate::company::Credential::from_value("k"),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let delivery = runtime
+            .workflow_harness_deps
+            .as_ref()
+            .expect("the harness arm wires workflow deps")
+            .delivery
+            .as_ref()
+            .expect("the harness arm wires delivery deps");
+        let deps_channels: Vec<String> = delivery
+            .channels
+            .iter()
+            .map(|channel| channel.channel_id().to_string())
+            .collect();
+
+        assert_eq!(
+            runtime.deliverable_channel_ids(),
+            deps_channels,
+            "the destination picker offers a set the delivery layer does not accept"
+        );
+        // Not vacuous in either direction: the runtime really did wire the
+        // operator adapter, and the desk really is deliverable.
+        assert!(
+            runtime
+                .channels
+                .iter()
+                .any(|channel| channel.channel_id() == OPERATOR_CHANNEL),
+            "the operator adapter must be wired, or the exclusion proves nothing"
+        );
+        assert_eq!(deps_channels, vec!["engineering".to_string()]);
     }
 
     /// A desk added to `company.toml` since the last boot is wired on this one.

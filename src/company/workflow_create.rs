@@ -879,12 +879,7 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
         // confers it — while every other namespace uses the ordinary grant-glob
         // intersection, exactly the split `WorkflowToolInvoker::invoke` enforces.
         let grants = &record.manifest.tools.allow;
-        let granted = if namespace == "search" {
-            crate::company::grants_search_explicit(grants)
-        } else {
-            crate::harness::build::grants_cover(grants, namespace)
-        };
-        if !granted {
+        if !crate::workflows::caps::grants_workflow_namespace(grants, namespace) {
             return Err(OpenCompanyError::InvalidRequest(format!(
                 "node `{}` calls tool `{slug}` (namespace `{namespace}`), which this company's \
                  `[tools].allow` does not grant — grant it in `[tools].allow`.",
@@ -942,47 +937,44 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
     Ok(())
 }
 
-/// The granted `tool_call` slugs this company may author and pass create-time
-/// validation (issue #753). Deployment wiring is intentionally not checked:
-/// author-now-wire-later remains legal, while prompt grounding uses the
-/// effective sibling below.
+/// Whether `[tools].allow` grants the namespace `info` belongs to — a catalogue
+/// -shaped wrapper over
+/// [`grants_workflow_namespace`](crate::workflows::caps::grants_workflow_namespace),
+/// which is the rule itself and is shared with
+/// [`validate_tool_call_node`] and the run-time
+/// [`refusal_for`](crate::workflows::caps).
 ///
-/// It is the exact companion of [`validate_tool_call_node`]'s grant half: a slug
-/// survives here iff that gate would accept it — its namespace covered by
-/// `[tools].allow`, with the priced `search` family requiring an **explicit**
-/// `search` grant (a `*` wildcard never confers it). So the tools the copilot
-/// shows the model are precisely the ones a proposed `tool_call` node will clear
-/// at courtesy validation, and the two cannot drift: both read
-/// [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) (itself pinned to
-/// `namespace_of`) and both apply the same grant rule.
-///
-/// Gated with the copilot it serves — the only caller is
-/// `crate::harness::workflow_build`, and the grant helpers live behind the
-/// `openhuman` feature, so in the default build this would be dead code over
-/// symbols that are not compiled.
+/// Exists only so the two grounding lists can filter
+/// [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) rows directly. Because the
+/// catalogue is itself pinned to `namespace_of`, a slug passes here iff
+/// validation would accept it — so what a caller is shown and what a proposed
+/// `tool_call` node clears at courtesy validation cannot drift.
 #[cfg(feature = "openhuman")]
-pub(crate) fn workflow_callable_tool_slugs(record: &CompanyRecord) -> Vec<String> {
-    let grants = &record.manifest.tools.allow;
-    // Reads the rich [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) since #813
-    // (the same grant rule, just the catalogue as the source), so the slugs the
-    // copilot grounds on and the ones it can validate come from one table.
-    crate::workflows::caps::WORKFLOW_TOOL_CATALOG
-        .iter()
-        .filter(|info| {
-            if info.namespace == "search" {
-                crate::company::grants_search_explicit(grants)
-            } else {
-                crate::harness::build::grants_cover(grants, info.namespace)
-            }
-        })
-        .map(|info| info.slug.to_string())
-        .collect()
+fn grants_workflow_tool(
+    grants: &[String],
+    info: &crate::workflows::caps::WorkflowToolInfo,
+) -> bool {
+    crate::workflows::caps::grants_workflow_namespace(grants, info.namespace)
 }
 
-/// The tools the create-time copilot may ground on: catalogue, company grant,
-/// and deployment wiring all agree. Create validation intentionally remains
-/// permissive for a granted-but-unwired tool so an operator may author now and
-/// wire the provider later; this narrower set is prompt grounding only.
+/// The tools a caller may ground a proposal on: catalogue, company grant, and
+/// deployment wiring all agree (issues #753, #874). Both copilot surfaces read
+/// it — the in-process create/fix builder and `GET …/workflows/tool-slugs` — so
+/// neither can offer a tool the run would refuse.
+///
+/// `wired` is `None` when the deployment's wiring is not knowable (no harness
+/// deps): the grant filter then stands alone, which is the widest honest answer
+/// rather than a claim that nothing is wired.
+///
+/// Create validation intentionally remains **permissive** for a
+/// granted-but-unwired tool so an operator may author now and wire the provider
+/// later; this narrower set is grounding only, and
+/// [`workflow_granted_but_unwired_tool_slugs`] names the difference so the gap
+/// is reported rather than silently dropped.
+///
+/// Gated with the copilot it serves — the grant helpers live behind the
+/// `openhuman` feature, so in the default build this would be dead code over
+/// symbols that are not compiled.
 #[cfg(feature = "openhuman")]
 pub(crate) fn workflow_effective_tool_slugs(
     record: &CompanyRecord,
@@ -992,17 +984,26 @@ pub(crate) fn workflow_effective_tool_slugs(
     crate::workflows::caps::WORKFLOW_TOOL_CATALOG
         .iter()
         .filter(|info| {
-            let granted = if info.namespace == "search" {
-                crate::company::grants_search_explicit(grants)
-            } else {
-                crate::harness::build::grants_cover(grants, info.namespace)
-            };
-            granted && wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
+            grants_workflow_tool(grants, info)
+                && wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
         })
         .map(|info| info.slug.to_string())
         .collect()
 }
 
+/// The exact complement of [`workflow_effective_tool_slugs`] within the granted
+/// set: tools this company holds a grant for that cannot run on **this**
+/// deployment.
+///
+/// Reported rather than silently dropped (issue #874) so a reader can tell "this
+/// company is not allowed that tool" — absent from both lists — from "allowed,
+/// but nobody has configured the provider here". A copilot grounded on both
+/// answers "that needs web search, which is not wired here" instead of either
+/// proposing a doomed node or denying the tool exists.
+///
+/// Empty when `wired` is `None`: with the deployment unknowable, "which of these
+/// are unwired" has no honest answer, and every granted slug stays in the
+/// effective list.
 #[cfg(feature = "openhuman")]
 pub(crate) fn workflow_granted_but_unwired_tool_slugs(
     record: &CompanyRecord,
@@ -1012,12 +1013,8 @@ pub(crate) fn workflow_granted_but_unwired_tool_slugs(
     crate::workflows::caps::WORKFLOW_TOOL_CATALOG
         .iter()
         .filter(|info| {
-            let granted = if info.namespace == "search" {
-                crate::company::grants_search_explicit(grants)
-            } else {
-                crate::harness::build::grants_cover(grants, info.namespace)
-            };
-            granted && !wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
+            grants_workflow_tool(grants, info)
+                && !wired.is_none_or(|namespaces| namespaces.contains(info.namespace))
         })
         .map(|info| info.slug.to_string())
         .collect()
@@ -1493,16 +1490,49 @@ pub(crate) async fn set_company_workflow_enabled(
     // host cannot read is exactly the kind an operator most wants to stop, and
     // refusing would leave them nothing to do about it. It just journals under
     // its id.
-    let name = crate::company::load_workflow_with_globals(
+    let file = crate::company::load_workflow_with_globals(
         source_dir,
         &record.overlay_workflows,
         &record.manifest.globals.disable,
         wid,
     )
     .ok()
-    .flatten()
-    .map(|file| file.name)
-    .unwrap_or_else(|| wid.to_string());
+    .flatten();
+    let name = file
+        .as_ref()
+        .map(|file| file.name.clone())
+        .unwrap_or_else(|| wid.to_string());
+
+    // Issue #976: arming is where the promise is made, so it is where the
+    // promise is checked. A stage-less graph with a schedule fires on time, runs
+    // nothing and reports nothing — `campaign` on staging is exactly that, one
+    // resume away from a schedule it cannot keep.
+    //
+    // **Refused here rather than at save, deliberately.** Saving a stub
+    // mid-authoring is legitimate and the module is built for it: `parse_workflow`
+    // was made lenient on purpose (#661) so the console can drop a trigger and
+    // add stages afterwards, and refusing an empty graph at save would also
+    // refuse every existing seed and legacy body on its next edit. Saving
+    // promises nothing; switching a schedule on promises that something happens.
+    // This is also the human gate #276 already forces a scheduled graph through,
+    // and it has the parsed graph in hand for the journal name above — so the
+    // check costs no extra load.
+    //
+    // Only `enabled`, and only when a schedule is what is being armed. Switching
+    // such a workflow OFF stays allowed: an operator must always be able to stop
+    // a thing, which is the same call the unparseable-body case above makes.
+    // A manual (unscheduled) graph is left alone — running a stub by hand is the
+    // author's own business, and the run says so through
+    // [`STAGELESS_WORKFLOW_NOTICE`](crate::company::STAGELESS_WORKFLOW_NOTICE).
+    if enabled
+        && let Some(file) = file.as_ref()
+        && file.trigger_schedule().is_some()
+        && !file.has_runnable_node()
+    {
+        return Err(OpenCompanyError::InvalidRequest(
+            crate::company::STAGELESS_SCHEDULE_REFUSAL.to_string(),
+        ));
+    }
 
     if !record.set_workflow_enabled(wid, enabled) {
         return Ok(false);
@@ -2498,6 +2528,138 @@ to = "done"
                 .await
                 .expect_err("name collides with the overlay body");
         assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+    }
+
+    /// A graph whose only node is its trigger, carrying a schedule — the
+    /// `campaign` shape from staging (issue #976).
+    fn stageless_scheduled_draft(id: &str, name: &str) -> RawWorkflow {
+        let mut draft = valid_draft(id, name);
+        // Keep only the trigger, and put a schedule on it. This is what the
+        // console produces when somebody drops a Start node, sets a cron, and
+        // saves before adding any stage.
+        draft.nodes.retain(|n| n.kind == "trigger");
+        draft.edges.clear();
+        draft.nodes[0].schedule = Some("0 9 * * *".to_string());
+        draft
+    }
+
+    /// Saving one is **allowed**, and that is the deliberate half of the fix.
+    /// Authoring is incremental: the console drops a Start node first and adds
+    /// stages after, `parse_workflow` was made lenient on purpose (#661) to
+    /// support exactly that, and refusing at save would also refuse every
+    /// existing seed and legacy body on its next edit.
+    #[tokio::test]
+    async fn a_stageless_graph_still_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            stageless_scheduled_draft("campaign", "Campaign"),
+        )
+        .await
+        .expect("a stub mid-authoring is legitimate and must save");
+    }
+
+    /// ...but switching its schedule on is refused. Arming is where the promise
+    /// is made, so it is where the promise is checked: resume this and it fires
+    /// on time, runs nothing, and reports nothing.
+    #[tokio::test]
+    async fn arming_a_stageless_schedule_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            stageless_scheduled_draft("campaign", "Campaign"),
+        )
+        .await
+        .expect("saves");
+
+        let err = set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "campaign",
+            true,
+        )
+        .await
+        .expect_err("a schedule that cannot run must not be armed");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("no stage to run"),
+            "the operator is told WHAT is wrong: {rendered}"
+        );
+        assert!(
+            rendered.contains("Add at least one node"),
+            "...and the one thing they can do about it: {rendered}"
+        );
+    }
+
+    /// Switching such a workflow **off** stays allowed. An operator must always
+    /// be able to stop a thing — the same call the unparseable-body case makes
+    /// — and a guard that trapped a workflow in the armed state would be worse
+    /// than the silence it replaced.
+    #[tokio::test]
+    async fn a_stageless_schedule_can_still_be_switched_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            stageless_scheduled_draft("campaign", "Campaign"),
+        )
+        .await
+        .expect("saves");
+
+        set_company_workflow_enabled(&company, Some(dir.path()), &store, None, "campaign", false)
+            .await
+            .expect("pausing must never be refused");
+    }
+
+    /// A graph with a real stage arms normally. Without this the refusal above
+    /// would pass against a build that refused every schedule.
+    #[tokio::test]
+    async fn arming_a_scheduled_graph_with_a_stage_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        let mut draft = valid_draft("greeter", "Greeter");
+        draft.nodes[0].schedule = Some("0 9 * * *".to_string());
+        create_company_workflow(&company, Some(dir.path()), &store, None, draft)
+            .await
+            .expect("saves");
+
+        set_company_workflow_enabled(&company, Some(dir.path()), &store, None, "greeter", true)
+            .await
+            .expect("a graph that can actually run may be armed");
     }
 
     /// A manifest-`enabled` id with no body in either source is shown by the

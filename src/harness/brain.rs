@@ -191,6 +191,35 @@ pub struct HarnessBrain {
     runs: Option<Arc<dyn crate::ports::RunStore>>,
 }
 
+/// The single bubble a workflow-copilot turn returns (issues #416, #966).
+///
+/// Named rather than inlined because its **author** is the load-bearing field
+/// and it was wrong. #885 taught the main operator bubble to carry its
+/// responder and left this branch on `None`, so a genuine copilot reply kept
+/// journaling as `agent_id: "operator"` — the #885 defect still happening, not
+/// history needing a label. A function is what lets that be asserted without
+/// standing up a scripted model endpoint and a whole harness pool.
+///
+/// `CONFINED_AGENT_ID` is deliberately not a roster id (see [`confine`]): it
+/// names no teammate and cannot be addressed. That makes it a **truthful**
+/// author rather than a resolvable one, which is why
+/// `chat_history::is_known_author` has to know it — otherwise this row trades
+/// one wrong answer for a permanent false positive in the attribution audit.
+///
+/// No card, by construction: a confined turn has no `spawn_task` to call, and
+/// the chat handler does not open one from a copilot message either.
+fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
+    OutboundMessage {
+        message_id: None,
+        task_id: None,
+        channel: "operator".to_string(),
+        agent: Some(confine::CONFINED_AGENT_ID.to_string()),
+        text: outcome.reply,
+        reply_to: None,
+        steps: outcome.steps,
+    }
+}
+
 impl HarnessBrain {
     /// Builds a harness brain for `record`, answering unaddressed operator
     /// messages with the company orchestrator (the `tier = "orchestrator"` agent,
@@ -2201,6 +2230,7 @@ impl HarnessBrain {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2242,7 +2272,8 @@ impl HarnessBrain {
     ///
     /// Desks are tried first so a desk whose id happens to match an agent id
     /// keeps routing as a desk; the DM case only ever claims ids that resolve to
-    /// no desk at all. Without step 2 a DM thread would silently reach the
+    /// no desk at all. The console's `dm:<teammate-id>` channel key is resolved
+    /// last, after both (issue #982) — see the comment on that arm. Without step 2 a DM thread would silently reach the
     /// orchestrator instead of the teammate the operator opened — the console
     /// would look like it were addressing an agent while talking to someone
     /// else.
@@ -2286,6 +2317,21 @@ impl HarnessBrain {
         }
         if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
             return agent;
+        }
+        // Issue #982, step 3: the console's DM channel id, `dm:<teammate-id>`.
+        // Tried LAST, and for the same reason the case-folding above is safe —
+        // it can only claim a key that resolves to nothing today, so no existing
+        // thread moves, and a company that really does have a desk or teammate
+        // called `dm:x` keeps it. Without it a `dm:`-keyed thread reached arm 4
+        // and the orchestrator answered a DM addressed to somebody else, which
+        // is the same misroute #884 closed for a bare key.
+        if let Some(key) = crate::runtime::assignee::dm_key(chat) {
+            if let Some(lead) = self.desk_lead(key) {
+                return lead;
+            }
+            if let Some(agent) = self.record().resolve_roster_agent_id(key) {
+                return agent;
+            }
         }
         tracing::warn!(
             company = %self.record().id,
@@ -2643,18 +2689,7 @@ impl HarnessBrain {
                                 &confinement,
                             )
                             .await?;
-                        channel_responses.push(OutboundMessage {
-                            message_id: None,
-                            // No card, by construction: a confined turn has no
-                            // `spawn_task` to call, and the chat handler does
-                            // not open one from a copilot message either.
-                            task_id: None,
-                            channel: "operator".to_string(),
-                            agent: None,
-                            text: outcome.reply,
-                            reply_to: None,
-                            steps: outcome.steps,
-                        });
+                        channel_responses.push(confined_bubble(outcome));
                         continue;
                     }
                     // Route to the addressed desk's lead, else the orchestrator.
@@ -4065,6 +4100,7 @@ members = ["engineer"]
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -5534,15 +5570,18 @@ members = ["engineer"]
     fn responder_for_warns_before_falling_back_to_the_orchestrator() {
         let dir = tempfile::tempdir().unwrap();
         let (brain, _tasks) = brain_with_desk(dir.path());
+        // `dm:engineer` was this fixture until issue #982 made it resolve; the
+        // key here has to be one that names nothing at all, or the test would
+        // pass by asserting the wrong fact and #884's coverage would be gone.
         let logs = logs_from(|| {
             assert_eq!(
-                brain.responder_for(Some("dm:engineer")),
+                brain.responder_for(Some("dm:nobody_by_that_name")),
                 "chief",
                 "the fallback itself is unchanged"
             );
         });
         assert!(
-            logs.contains("dm:engineer"),
+            logs.contains("dm:nobody_by_that_name"),
             "the unresolved key must be named so the fall-through is greppable: {logs}"
         );
         assert!(logs.contains("WARN"), "{logs}");
@@ -5554,6 +5593,30 @@ members = ["engineer"]
             assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
         });
         assert!(quiet.is_empty(), "a resolved key must not warn: {quiet}");
+    }
+
+    /// Issue #982: the console mints a DM channel id as `dm:<teammate-id>`, and
+    /// a sibling route documents that form as a valid channel key — so a thread
+    /// keyed on it has to be answered by the teammate it names, not by the
+    /// orchestrator.
+    ///
+    /// The prefix is stripped **after** the desk and roster attempts, so this
+    /// can only ever claim a key that resolved to nothing: `engineer` and
+    /// `eng_desk` still route exactly as they did, which the test above pins.
+    #[test]
+    fn responder_for_answers_a_console_dm_channel_key_as_the_teammate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        assert_eq!(
+            brain.responder_for(Some("dm:engineer")),
+            "engineer",
+            "a DM channel key addresses the teammate it names"
+        );
+        assert_eq!(
+            brain.responder_for(Some("dm:")),
+            "chief",
+            "a prefix with nothing after it names nobody"
+        );
     }
 
     /// A human- or console-typed teammate key resolves case-insensitively to the
@@ -6578,6 +6641,7 @@ members = ["eng1", "eng2"]
                 mode: "supervised".to_string(),
                 always_approve: Vec::new(),
                 auto_approve_under_usd: None,
+                approval_ttl_hours: None,
             },
             None,
         )
@@ -7405,6 +7469,7 @@ members = ["eng1", "eng2"]
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -8686,5 +8751,35 @@ members = ["eng1", "eng2"]
         // work is not a hand-off.
         let parent = cards.iter().find(|c| c.id == "t-parent").expect("parent");
         assert_eq!(parent.column, "in_review");
+    }
+
+    /// Issue #966: a workflow-copilot reply is authored by the copilot.
+    ///
+    /// This is the assertion the #885 fix was missing on this branch. The bubble
+    /// is emitted on the **operator** channel, and before this the author field
+    /// was left `None` — so the journal writer's `channel` fallback stamped
+    /// `agent_id: "operator"` on a reply an agent had genuinely produced.
+    ///
+    /// Asserts the author is *not* the channel, rather than only that it equals
+    /// the constant: the defect's whole shape is the two being conflated, and a
+    /// test that checked equality alone would still pass if `CONFINED_AGENT_ID`
+    /// were ever redefined to `"operator"`.
+    #[test]
+    fn a_copilot_turn_is_authored_by_the_copilot_not_the_operator_channel() {
+        let bubble = confined_bubble(crate::harness::TurnOutcome {
+            reply: "here is what that node does".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+        });
+        assert_eq!(bubble.channel, "operator", "the destination is unchanged");
+        assert_eq!(
+            bubble.agent.as_deref(),
+            Some(crate::ports::CONFINED_AGENT_ID)
+        );
+        assert_ne!(
+            bubble.agent.as_deref(),
+            Some(bubble.channel.as_str()),
+            "author and destination must not be the same value — that conflation is issue #885"
+        );
     }
 }
