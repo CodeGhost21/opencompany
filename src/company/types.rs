@@ -389,10 +389,15 @@ pub struct CompanyManifest {
 
 /// `[globals]` — this company's relationship to the global baseline.
 ///
-/// The baseline is a floor every company gets whichever vertical it started
-/// from, so the only thing left to configure is what this company does *not*
-/// want. Replacing a global needs no entry here: a company definition of the
-/// same id supersedes the global one on its own.
+/// The roster, workflows and skills are a floor every company gets whichever
+/// vertical it started from, so the only thing left to configure for those is
+/// what this company does *not* want. Replacing a global needs no entry here:
+/// a company definition of the same id supersedes the global one on its own.
+///
+/// The tool belt (`[tools].default_allow`) is the one part of the baseline
+/// that is a *default*, not a floor: it is what a company with no `[tools]`
+/// section of its own starts with, never a minimum re-granted underneath one
+/// — see [`crate::globals`].
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Globals {
     /// Globals this company drops outright, as `<kind>:<id>` keys — e.g.
