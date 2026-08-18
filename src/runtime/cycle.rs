@@ -4577,7 +4577,8 @@ mod test {
             .filter(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND)
             .collect();
         assert_eq!(spend.len(), 1);
-        assert_eq!(spend[0].amount_usd, 0.031);
+        // Negative: an outflow, per the ledger convention (issue #1047).
+        assert_eq!(spend[0].amount_usd, -0.031);
     }
 
     /// Tokens without USD (the managed passthrough bills backend-side) still
