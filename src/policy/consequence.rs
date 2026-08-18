@@ -1139,7 +1139,8 @@ fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
 /// safe-read allowlist, and takes the **maximum** — so `grep x && rm -rf /` is
 /// `Destructive`, not `Read` — then lifts anything with a redirect or `tee` to
 /// `Write`. Anything it does not recognise is `Write`, which is the cautious
-/// direction.
+/// direction. [`shell_argv_read_exception`] then admits three omitted bases
+/// only when their parsed argv proves that their writing forms are absent.
 ///
 /// Reused rather than restated. A second list here would be a second thing to
 /// keep current, and the moment the two disagreed the safer one would not
@@ -1237,10 +1238,184 @@ fn shell_command_is_read(command: &str, declared: Option<&str>) -> bool {
     // by the `Reach` this returns.
     let policy = SecurityPolicy::default();
     let mut class = policy.classify_command(command);
+    if class == CommandClass::Write && shell_argv_read_exception(command) {
+        class = CommandClass::Read;
+    }
     if let Some(declared) = declared.and_then(SecurityPolicy::parse_declared_class) {
         class = class.max(declared);
     }
     matches!(class, CommandClass::Read)
+}
+
+/// Read-only argv forms whose base is deliberately absent from the vendored
+/// name-only allowlist (issue #972).
+///
+/// This is a fallback for `Write`, never a replacement for the vendor's
+/// network/destructive grading. It accepts one parsed simple command only:
+/// shell operators, expansions, comments, malformed quoting and every unknown
+/// base fail closed before any flag-specific rule is considered.
+#[cfg(feature = "openhuman")]
+fn shell_argv_read_exception(command: &str) -> bool {
+    let Some(argv) = parse_simple_shell_argv(command) else {
+        return false;
+    };
+    let Some((base, args)) = argv.split_first() else {
+        return false;
+    };
+
+    match base.as_str() {
+        "sed" => {
+            !shell_argv_has_option(args, 'i', "--in-place")
+                // A file-supplied program is opaque to this classifier and may
+                // contain sed's `w` or `e` commands.
+                && !shell_argv_has_option(args, 'f', "--file")
+        }
+        "sort" => {
+            !shell_argv_has_option(args, 'o', "--output")
+                // GNU sort may execute this program while spilling runs.
+                && !shell_argv_has_long_option(args, "--compress-program")
+        }
+        "awk" => {
+            !shell_argv_has_option(args, 'f', "--file")
+                && !shell_argv_has_option(args, 'E', "--exec")
+                && args.iter().all(|arg| {
+                    let compact: String = arg.chars().filter(|c| !c.is_whitespace()).collect();
+                    !arg.contains('>')
+                        && !arg.contains('|')
+                        && !compact.contains("system(")
+                        && !arg.contains("@load")
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Parse exactly one shell simple-command argv.
+///
+/// This intentionally supports less syntax than a shell. Quoting and escaped
+/// characters are enough for ordinary sed/awk programs; syntax that could add
+/// commands or derive flags at execution time is ambiguous here and rejected.
+#[cfg(feature = "openhuman")]
+fn parse_simple_shell_argv(command: &str) -> Option<Vec<String>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    // Command substitution is refused even when quoting makes it literal. The
+    // existing shell execution guard uses the same deliberately lexical rule.
+    if command.contains("$(") || command.contains('`') || command.contains('\0') {
+        return None;
+    }
+
+    let mut argv = Vec::new();
+    let mut word = String::new();
+    let mut word_started = false;
+    let mut quote = Quote::None;
+    let mut chars = command.chars();
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Quote::None => match ch {
+                '\'' => {
+                    quote = Quote::Single;
+                    word_started = true;
+                }
+                '"' => {
+                    quote = Quote::Double;
+                    word_started = true;
+                }
+                '\\' => {
+                    let escaped = chars.next()?;
+                    if escaped == '\n' || escaped == '\r' {
+                        return None;
+                    }
+                    word.push(escaped);
+                    word_started = true;
+                }
+                c if c.is_whitespace() => {
+                    if word_started {
+                        argv.push(std::mem::take(&mut word));
+                        word_started = false;
+                    }
+                }
+                // These either join commands, redirect I/O, start a subshell,
+                // or make argv depend on runtime expansion/comment parsing.
+                ';' | '|' | '&' | '<' | '>' | '(' | ')' | '$' | '#' => return None,
+                _ => {
+                    word.push(ch);
+                    word_started = true;
+                }
+            },
+            Quote::Single => {
+                if ch == '\'' {
+                    quote = Quote::None;
+                } else {
+                    word.push(ch);
+                }
+            }
+            Quote::Double => match ch {
+                '"' => quote = Quote::None,
+                '\\' => {
+                    let escaped = chars.next()?;
+                    if escaped == '\n' || escaped == '\r' {
+                        return None;
+                    }
+                    word.push(escaped);
+                }
+                // Double-quoted parameters still make the final argv unknown.
+                '$' => return None,
+                _ => word.push(ch),
+            },
+        }
+    }
+
+    if quote != Quote::None {
+        return None;
+    }
+    if word_started {
+        argv.push(word);
+    }
+    (!argv.is_empty()).then_some(argv)
+}
+
+#[cfg(feature = "openhuman")]
+fn shell_argv_has_option(args: &[String], short: char, long: &str) -> bool {
+    let mut options = true;
+    for arg in args {
+        if options && arg == "--" {
+            options = false;
+            continue;
+        }
+        if !options {
+            continue;
+        }
+        if let Some(name) = arg
+            .strip_prefix("--")
+            .map(|_| arg.split_once('=').map_or(arg.as_str(), |(name, _)| name))
+        {
+            let name = name.strip_prefix("--").unwrap_or(name);
+            let long = long.strip_prefix("--").unwrap_or(long);
+            if !name.is_empty() && long.starts_with(name) {
+                return true;
+            }
+            continue;
+        }
+        if arg
+            .strip_prefix('-')
+            .is_some_and(|flags| !flags.is_empty() && flags.contains(short))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(feature = "openhuman")]
+fn shell_argv_has_long_option(args: &[String], long: &str) -> bool {
+    shell_argv_has_option(args, '\0', long)
 }
 
 /// Without the harness feature the classifier is not linked in, so nothing here
@@ -2709,6 +2884,78 @@ mod tests {
             assert!(
                 !c.reach.parks_under_supervision(),
                 "`{command}` must not park under any acting tier"
+            );
+        }
+    }
+
+    /// Bases omitted from the vendor's name-only allowlist may run unattended
+    /// only when their actual argv excludes every writing form we admit around.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn argv_sensitive_workspace_reads_run_without_admitting_writes() {
+        for command in [
+            "sed -n '860,915p' src/policy/consequence.rs",
+            "sed 's/old/new/g' notes.txt",
+            "sort names.txt",
+            "sort -r names.txt",
+            "awk '{ print $1 }' data.txt",
+            "awk -F, '{ print $2 }' data.csv",
+        ] {
+            assert_eq!(
+                shell(command).reach,
+                Reach::Nothing,
+                "`{command}` has a provably read-only argv"
+            );
+        }
+
+        for command in [
+            "sed -i 's/old/new/g' notes.txt",
+            "sed -ni.bak 's/old/new/g' notes.txt",
+            "sed --in-place=.bak 's/old/new/g' notes.txt",
+            "sed -f transform.sed notes.txt",
+            "sort -o sorted.txt names.txt",
+            "sort -ruooutput.txt names.txt",
+            "sort --output=sorted.txt names.txt",
+            "sort --compress-program=gzip names.txt",
+            "awk '{ print $1 > \"out.txt\" }' data.txt",
+            "awk '{ print $1 }' data.txt > out.txt",
+            "awk '{ print $1 | \"tee out.txt\" }' data.txt",
+            "awk 'BEGIN { system(\"touch out.txt\") }' data.txt",
+            "awk -f report.awk data.txt",
+        ] {
+            assert_eq!(
+                shell(command).reach,
+                Reach::Consequence,
+                "`{command}` can write or execute and must park"
+            );
+        }
+    }
+
+    /// The argv exceptions remain behind #876's lexical containment boundary.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn argv_sensitive_reads_still_refuse_escapes_and_ambiguous_shell_syntax() {
+        for command in [
+            "sed -n '1p' /etc/passwd",
+            "sort /etc/passwd",
+            "awk '{ print $1 }' /etc/passwd",
+            "sed -n '1p' ~/.ssh/config",
+            "sort ~/secrets.txt",
+            "awk '{ print $1 }' ~/.secrets",
+            "sed -n '1p' ../secret.txt",
+            "sort data/../../secret.txt",
+            "awk '{ print $1 }' ../secret.txt",
+            "sed -n \"$(cat program.sed)\" notes.txt",
+            "sort \"$(cat filenames.txt)\"",
+            "awk \"$(cat program.awk)\" data.txt",
+            "sed -n '1p notes.txt",
+            "sort $SORT_FLAGS names.txt",
+            "awk '{ print $1 }' data.txt; rm data.txt",
+        ] {
+            assert_eq!(
+                shell(command).reach,
+                Reach::Consequence,
+                "`{command}` is outside the lexical boundary or has ambiguous argv"
             );
         }
     }

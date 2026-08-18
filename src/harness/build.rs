@@ -4,20 +4,22 @@
 //! [`Agent`], injecting the harness's provider, the [`OcMemory`] adapter, the
 //! [`ApprovalPolicy`] tool policy, and a workspace directory.
 //!
-//! * **Tools**: every agent gets the intrinsic [`memory_tools`] (`memory_store`
-//!   + `memory_recall`) over its own company memory. **File tools** (read,
-//!     write, edit, list, grep, glob) are granted per-agent when the effective
-//!     `tools ∩ agent.tools` grants cover the `files`/`docs` namespace, and are
-//!     sandboxed to the agent's own workspace via a `workspace_only`
-//!     [`SecurityPolicy`] ([`file_tools`]). **Exec-grade tools** (Cell A) now
-//!     slot in beside them via [`toolbelt`](crate::harness::toolbelt): `shell`
-//!     (shell + `read_workspace_state`) and `code` (`apply_patch`,
-//!     `git_operations`, `csv_export`) behind a strict [`toolbelt::exec_security`]
-//!     policy + native runtime + per-workspace audit; `web` (`web_fetch`,
-//!     `http_request`, `curl`, `image_info`) behind the same policy plus a
-//!     per-company SSRF domain allowlist. The `subagent` namespace is reserved
-//!     but empty in v1. Still deferred: browser automation (needs a backend)
-//!     and Node/NPM exec (need a managed bootstrap).
+//! * **Tools**: [`memory_tools`] (`memory_store` + `memory_recall`) is called
+//!   but currently returns nothing — see its doc comment for why openhuman's
+//!   API no longer gives embedders a way to point either tool at a company's
+//!   own memory. **File tools** (read, write, edit, list, grep, glob) are
+//!   granted per-agent when the effective `tools ∩ agent.tools` grants cover
+//!   the `files`/`docs` namespace, and are sandboxed to the agent's own
+//!   workspace via a `workspace_only` [`SecurityPolicy`] ([`file_tools`]).
+//!   **Exec-grade tools** (Cell A) now slot in beside them via
+//!   [`toolbelt`](crate::harness::toolbelt): `shell` (shell +
+//!   `read_workspace_state`) and `code` (`apply_patch`, `git_operations`,
+//!   `csv_export`) behind a strict [`toolbelt::exec_security`] policy + native
+//!   runtime + per-workspace audit; `web` (`web_fetch`, `http_request`,
+//!   `curl`, `image_info`) behind the same policy plus a per-company SSRF
+//!   domain allowlist. The `subagent` namespace is reserved but empty in v1.
+//!   Still deferred: browser automation (needs a backend) and Node/NPM exec
+//!   (need a managed bootstrap).
 //! * **Metered web search** (issue #238, [`search`](crate::harness::search)):
 //!   `web_search` over the managed backend, the discovery half the `web` tools
 //!   never had — they read a *known* URL and cannot find one. Two hard gates
@@ -89,8 +91,7 @@ use openhuman_core::openhuman as oh;
 
 use oh::agent::prompts::SystemPromptBuilder;
 use oh::agent::{Agent, AgentBuilder};
-use oh::memory::tools::{MemoryRecallTool, MemoryStoreTool};
-use oh::memory::traits::Memory;
+use oh::memory::Memory;
 use oh::security::SecurityPolicy;
 #[cfg(feature = "mcp")]
 use oh::tools::McpListToolsTool;
@@ -245,12 +246,11 @@ pub fn build_agent(
         }
     };
 
-    // Intrinsic memory tools: every agent can deliberately store and recall over
-    // its own company memory, complementing the automatic retrieve→inject→store
-    // loop. They are tenant-isolated (an agent's memory is its company's
-    // `ContextStore`) and granted to every agent — unlike the external tools
-    // below, which are scoped by the manifest `[tools]` allow-list.
-    let mut tools: Vec<Box<dyn Tool>> = memory_tools(memory.clone());
+    // Intrinsic memory tools are withheld for now — see `memory_tools`'s doc
+    // comment for why. `tools` still starts from that call so the moment
+    // openhuman gives embedders a way back in, wiring them is a one-line
+    // change here again rather than a rediscovery.
+    let mut tools: Vec<Box<dyn Tool>> = memory_tools(&memory);
     #[cfg(feature = "mcp")]
     {
         // These config-free tools read OpenHuman's live process registry, so
@@ -1087,19 +1087,40 @@ pub fn build_agent(
         .map_err(|e| OpenCompanyError::Harness(format!("build agent '{}': {e}", manifest_agent.id)))
 }
 
-/// The always-on memory tools every embedded agent receives: `memory_store` and
-/// `memory_recall` over the agent's own [`OcMemory`]. Backed by the same
-/// `ContextStore` the automatic loop and `OPENCOMPANY_MEMORY` overlay use, so
-/// deliberate and automatic memory share one store.
+/// The intrinsic `memory_store` / `memory_recall` tools — **withheld today**,
+/// pending a way to point them at a company's own [`OcMemory`] again.
 ///
-/// `MemoryForgetTool` is deliberately excluded — [`OcMemory`]'s append-only
-/// `ContextStore` cannot delete, so a forget tool would silently no-op.
-fn memory_tools(memory: Arc<dyn Memory>) -> Vec<Box<dyn Tool>> {
-    let security = Arc::new(SecurityPolicy::default());
-    vec![
-        Box::new(MemoryStoreTool::new(memory.clone(), security)),
-        Box::new(MemoryRecallTool::new(memory)),
-    ]
+/// Through openhuman's earlier API, `MemoryStoreTool::new` /
+/// `MemoryRecallTool::new` took the `Arc<dyn Memory>` directly, so each
+/// company's own `ContextStore` was exactly what the two tools read and wrote.
+/// The version this crate now vendors changed both constructors to
+/// `fn new(security: Arc<SecurityPolicy>)` / `fn new()` — no memory parameter
+/// — and moved resolution *inside* `execute()` to
+/// `active_memory_guard()`, which reaches an ambient `CoreContext`
+/// this crate's session/turn machinery never scopes (`rg CoreContext::scope`
+/// under `agent/harness/session` finds nothing), or — with no context bound —
+/// falls back to **one process-global workspace** resolved from
+/// `Config::load_or_init()`. Either path is disconnected from `.memory(memory)`
+/// on the session builder: `Tool::execute(&self, args)` takes no session or
+/// memory parameter at all, so there is no route left by which a per-company
+/// `Arc<dyn Memory>` could reach these two tools.
+///
+/// Wiring them anyway would mean every company's "deliberate" memory read and
+/// write lands in one shared, unconfigured store instead of that company's own
+/// `ContextStore` — silently wrong at best, a cross-company memory leak at
+/// worst under this crate's multi-tenant-in-one-process model. Withholding the
+/// tools is the safe default until either openhuman restores an injection seam
+/// for embedders that do not run its RPC/`CoreContext` dispatch, or this crate
+/// builds real per-company `CoreContext` scoping over its own per-company
+/// workspace directories (a materially larger change than this vendor bump).
+///
+/// `MemoryForgetTool` was already excluded before this — [`OcMemory`]'s
+/// append-only `ContextStore` cannot delete, so a forget tool would silently
+/// no-op — and stays excluded now for the same reason it would apply again the
+/// day these two return.
+fn memory_tools(memory: &Arc<dyn Memory>) -> Vec<Box<dyn Tool>> {
+    let _ = memory;
+    Vec::new()
 }
 
 /// The namespace separator for a `[tools].allow` grant: only `.`, because a
@@ -1238,12 +1259,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_tools_expose_store_and_recall() {
+    fn memory_tools_are_withheld_until_a_per_company_injection_seam_exists() {
+        // Regression lock for the finding behind `memory_tools`'s doc comment:
+        // openhuman's `MemoryStoreTool`/`MemoryRecallTool` no longer accept an
+        // `Arc<dyn Memory>` at construction, and `Tool::execute(&self, args)`
+        // takes no session/memory parameter either — so there is currently no
+        // route by which a company's own `Arc<dyn OcMemory>` reaches either
+        // tool. Wiring them anyway would point every company's "deliberate"
+        // memory read/write at one shared, unconfigured openhuman-internal
+        // store instead of that company's own `ContextStore`. Should this
+        // start failing because `memory_tools` grew tools again, the fix that
+        // flips it back on must first confirm each company's own `ContextStore`
+        // is genuinely what backs them — see the doc comment on
+        // `memory_tools` for what that requires.
         use crate::ports::ContextStore;
         use crate::ports::types::{ChunkAddr, ChunkHit, ChunkMeta, CompanyId, ContextChunk};
 
-        // The memory handle is never exercised here — we only assert the tool
-        // surface — so a no-op context suffices.
+        // The memory handle is never exercised — the tools are withheld
+        // unconditionally — so a no-op context suffices.
         struct NoopContext;
         #[async_trait::async_trait]
         impl ContextStore for NoopContext {
@@ -1276,10 +1309,12 @@ mod tests {
             "ceo",
             Arc::new(NoopContext),
         ));
-        let tools = memory_tools(memory);
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        assert!(names.contains(&"memory_store"), "got {names:?}");
-        assert!(names.contains(&"memory_recall"), "got {names:?}");
+        let tools = memory_tools(&memory);
+        assert!(
+            tools.is_empty(),
+            "expected no intrinsic memory tools while withheld, got {:?}",
+            tools.iter().map(|t| t.name()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2435,8 +2470,6 @@ mod tests {
             "http_request",
             "image_info",
             "list",
-            "memory_recall",
-            "memory_store",
             "read_workspace_state",
             "shell",
             "web_fetch",

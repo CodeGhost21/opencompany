@@ -51,6 +51,20 @@ pub fn generate_id() -> String {
     format!("{millis:012x}-{counter:012x}")
 }
 
+/// The agent id a confined turn runs under (issue #416).
+///
+/// Deliberately **not** a roster id: it names no teammate, carries no manifest
+/// grants, and cannot be addressed.
+///
+/// Lives here rather than in `harness::confine` (issue #966) because the whole
+/// harness is `#[cfg(feature = "openhuman")]`, and the chat-history attribution
+/// audit — which compiles in the default build — has to recognise it as a
+/// *known author*. `confine` re-exports it, so every existing
+/// `confine::CONFINED_AGENT_ID` reference is unchanged. Copying the literal into
+/// the audit instead would create exactly the silent twin the console's
+/// `mapComposioCategory` carries a warning about.
+pub const CONFINED_AGENT_ID: &str = "workflow-copilot";
+
 /// The stem [`agent_slug`] falls back to when a display name yields nothing a
 /// roster id may legally be.
 pub const AGENT_SLUG_FALLBACK: &str = "teammate";

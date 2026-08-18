@@ -2055,15 +2055,23 @@ impl crate::ports::runs::RunStore for MongoStore {
         // usage sequences use, keyed per card — so concurrent creates cannot
         // collide even across processes. `next_seq` is 0-based; attempts are
         // 1-based (`Attempt 1` is the first).
-        let attempt = self
-            .next_seq(company, &format!("run:{}", spec.task_id))
-            .await?
-            .saturating_add(1);
+        // A card-less run (issue #983) is always attempt 1 — see the fs
+        // backend's `create_run` for why the ordinal is not shared across them,
+        // and note that a shared counter here would be worse still: it is
+        // durable, so every chat turn a company ever ran would keep counting up.
+        let attempt = match &spec.task_id {
+            Some(task_id) => self
+                .next_seq(company, &format!("run:{task_id}"))
+                .await?
+                .saturating_add(1),
+            None => 1,
+        };
         let run = RunRecord {
             id: spec.id,
             company: company.clone(),
             task_id: spec.task_id,
             agent_id: spec.agent_id,
+            chat_id: spec.chat_id,
             attempt: attempt as u32,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2092,7 +2100,7 @@ impl crate::ports::runs::RunStore for MongoStore {
             .insert_one(doc! {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
-                "task_id": &run.task_id,
+                "task_id": run.task_id.as_deref(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
                 "created_ms": run.created_at_millis as i64,
@@ -2128,7 +2136,7 @@ impl crate::ports::runs::RunStore for MongoStore {
             .update_one(
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
-                    "task_id": &run.task_id,
+                    "task_id": run.task_id.as_deref(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
                     "created_ms": run.created_at_millis as i64,
@@ -3108,7 +3116,20 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         self.collection("workspace_nodes")
             .insert_one(document)
             .await
-            .map_err(mongo_err)?;
+            // Issue #894: the index refusing a second file at one path is a
+            // *contract* outcome, not a storage fault. It reached callers as
+            // `Store("mongodb error: E11000 …")` — a 500 carrying a driver
+            // string — where fs and SQLite both answer `Conflict`. The users
+            // -email index has been mapped this way since it was added.
+            .map_err(|e| {
+                if is_duplicate_key(&e) {
+                    OpenCompanyError::Conflict(crate::ports::workspace::duplicate_file_refusal(
+                        &node.name,
+                    ))
+                } else {
+                    mongo_err(e)
+                }
+            })?;
         Ok(())
     }
 
@@ -3254,7 +3275,16 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         self.collection("workspace_nodes")
             .insert_one(document)
             .await
-            .map_err(mongo_err)?;
+            // Issue #894, as in `create`.
+            .map_err(|e| {
+                if is_duplicate_key(&e) {
+                    OpenCompanyError::Conflict(crate::ports::workspace::duplicate_file_refusal(
+                        &node.name,
+                    ))
+                } else {
+                    mongo_err(e)
+                }
+            })?;
         // The stamped node, so the digest a caller records can only have come
         // from the store (issue #668).
         Ok(node)
@@ -4474,6 +4504,13 @@ mod test {
     async fn conformance_workspace_store() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_sibling_names() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_sibling_names(s.clone()).await;
         drop_db(&s).await;
     }
 

@@ -12,7 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
-use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq, StoredEvent, TurnStep};
+use crate::ports::types::{
+    Actor, ActorKind, CompanyEvent, CompanyRecord, EventSeq, StoredEvent, TurnStep,
+};
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
 /// The console's default/orchestrator thread id
@@ -453,6 +455,120 @@ impl MessageView {
             },
         }
     }
+}
+
+/// The blast radius of issue #885, for one company.
+///
+/// Reported rather than repaired. See [`channel_attributed_replies`] for why a
+/// repair is not available.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AttributionAudit {
+    /// Every `AgentReply` inspected.
+    pub replies: usize,
+    /// Those whose stored `agent_id` names no roster teammate.
+    pub affected: usize,
+    /// The distinct bad `agent_id` values, with a count each — so an operator
+    /// can see at a glance whether they are all `operator` (the #885 shape) or
+    /// whether something else is also writing a non-agent into the field.
+    pub by_agent_id: std::collections::BTreeMap<String, usize>,
+}
+
+impl AttributionAudit {
+    /// Folds one page of journal events in.
+    ///
+    /// Split out from the paging so the rule itself is testable without a
+    /// `CompanyRuntime` — the classification is the part that can be silently
+    /// wrong, and a store fixture would only obscure it.
+    pub fn fold(&mut self, page: &[StoredEvent], is_roster_agent: impl Fn(&str) -> bool) {
+        for stored in page {
+            let CompanyEvent::AgentReply { agent_id, .. } = &stored.event else {
+                continue;
+            };
+            self.replies += 1;
+            if !is_roster_agent(agent_id) {
+                self.affected += 1;
+                *self.by_agent_id.entry(agent_id.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+}
+
+/// Counts desk replies whose author was overwritten with a destination (#885).
+///
+/// # The rule
+///
+/// [`CompanyEvent::AgentReply`]'s `agent_id` is documented as *"the agent that
+/// produced the reply"*, so a value naming no roster teammate is by definition
+/// not an author. That is the whole test, and it is deliberately not `== "operator"`:
+/// the same defect on any other channel — a Telegram chat id, a desk slug —
+/// produces a different wrong string and has to be counted too.
+///
+/// # Why this only counts, and never repairs
+///
+/// **The true author is not recoverable from what is on disk.** `agent_id` was
+/// the only field that carried it and it was overwritten in place. Nothing else
+/// on the event, and nothing beside it, records who spoke:
+///
+/// * `steps` — [`TurnStep`] has no agent field;
+/// * `task_id` — `None` on exactly these rows (it is set on the dispatch path,
+///   which is the one writer that was already correct);
+/// * `parent` — names the question, never the answerer;
+/// * `chat_id` — the desk, which yields *today's* desk lead. Desk membership is
+///   mutable (manifest members unioned with operator-added overlay members), so
+///   that is a re-derivation against current state, not a recovery — and it is
+///   silently wrong for any desk whose lead has changed since.
+/// * the metering store — bucketed per calendar **day** with per-agent
+///   aggregates, so it cannot name the author of one message.
+///
+/// So a backfill would synthesise an author rather than restore one, and a
+/// confident wrong name in a transcript is worse than an admitted gap. These
+/// rows are ambiguous, permanently, and this reports how many there are.
+///
+/// # One deliberate false positive
+///
+/// `CompanyRuntime::announce_continuation_failure` journals a **system** notice
+/// as `agent_id: "operator"` on purpose — it is the runtime telling the operator
+/// a continuation failed, not an agent speaking. It is indistinguishable from a
+/// #885 row on disk, so it is counted here. The count is therefore an upper
+/// bound; in practice that notice is rare enough not to move it.
+/// Whether a stored `agent_id` names an author we can actually resolve.
+///
+/// The roster, **plus the confined copilot** (issue #966). `CONFINED_AGENT_ID`
+/// is deliberately not a roster id — it names no teammate, carries no manifest
+/// grants and cannot be addressed — but a copilot turn genuinely authored its
+/// reply, so the id is a truthful author rather than a destination that leaked
+/// into the field. Counting it would swap one wrong answer for a permanent
+/// false positive, and would make the audit's number drift upward on a company
+/// doing nothing wrong.
+///
+/// This is the single predicate the audit and any presentation of its result
+/// must share; two copies would let the count and the rendering disagree about
+/// which rows are unknown.
+pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
+    agent_id == crate::ports::CONFINED_AGENT_ID
+        || record.resolve_roster_agent_id(agent_id).is_some()
+}
+
+pub async fn channel_attributed_replies(
+    runtime: &CompanyRuntime,
+    record: &CompanyRecord,
+) -> Result<AttributionAudit, OpenCompanyError> {
+    const PAGE: usize = 512;
+    let mut audit = AttributionAudit::default();
+    let mut cursor = EventSeq::new(0);
+    loop {
+        let page = runtime
+            .events()
+            .read_from(runtime.id(), cursor, PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        let last = page[page.len() - 1].seq;
+        audit.fold(&page, |agent_id| is_known_author(agent_id, record));
+        cursor = EventSeq::new(last.value() + 1);
+    }
+    Ok(audit)
 }
 
 /// Loads roster display labels for a company: user id → label.
@@ -1082,5 +1198,177 @@ mod test {
         );
         assert!(!view.text.contains("the run's prose"), "{}", view.text);
         assert_eq!(view.text, "finished → Paused");
+    }
+
+    /// Issue #885: the audit's classification rule.
+    ///
+    /// The rule is "an `agent_id` naming no roster teammate", not
+    /// `== "operator"`, so these pin both the shape actually observed and the
+    /// generalisation — the same writer bug on another channel produces a
+    /// different wrong string and still has to be counted.
+    mod attribution_audit {
+        use super::*;
+
+        fn reply(seq: u64, agent_id: &str) -> StoredEvent {
+            at(
+                seq,
+                CompanyEvent::AgentReply {
+                    chat_id: "engineering".to_string(),
+                    agent_id: agent_id.to_string(),
+                    text: "…".to_string(),
+                    steps: Vec::new(),
+                    task_id: None,
+                    parent: None,
+                },
+            )
+        }
+
+        /// The roster for these: two real teammates and nothing else.
+        ///
+        /// Deliberately *excludes* the confined copilot, because that is the
+        /// point of `is_known_author` — the copilot is a real author that no
+        /// roster will ever resolve.
+        fn on_roster(agent_id: &str) -> bool {
+            matches!(agent_id, "engineer" | "product_manager")
+        }
+
+        /// A record whose roster is exactly `on_roster`'s two teammates.
+        ///
+        /// Built so the tests below call the **real** `is_known_author` rather
+        /// than a local restatement of it. The first version of these tests
+        /// re-implemented the predicate in the test module, which meant
+        /// reverting the production function changed nothing and the tests
+        /// passed either way — proving only that the test agreed with itself.
+        fn record() -> CompanyRecord {
+            let src = "[company]\nname = \"Acme\"\n\n[policy]\nmode = \"full\"\n\
+                       \n[[agent]]\nid = \"engineer\"\nrole = \"Worker\"\ntier = \"orchestrator\"\n\
+                       \n[[agent]]\nid = \"product_manager\"\nrole = \"Worker\"\ntier = \"orchestrator\"\n";
+            let manifest: crate::company::CompanyManifest =
+                toml::from_str(src).expect("manifest parses");
+            CompanyRecord {
+                id: crate::ports::types::CompanyId::new("acme"),
+                manifest,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            }
+        }
+
+        /// Issue #966. A copilot turn genuinely authored its reply, so the id it
+        /// stores is a truthful author — not a destination that leaked into the
+        /// field. Counting it would swap one wrong answer for a permanent false
+        /// positive that climbs on a company doing nothing wrong.
+        #[test]
+        fn the_confined_copilot_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, crate::ports::CONFINED_AGENT_ID),
+                    reply(2, "engineer"),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
+        /// …and it is still not on the roster, which is what makes the widening
+        /// necessary rather than incidental. If `resolve_roster_agent_id` ever
+        /// started answering for it, this says so before the extra arm quietly
+        /// becomes dead code.
+        #[test]
+        fn the_confined_copilot_is_not_reachable_through_the_roster_alone() {
+            let record = record();
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::ports::CONFINED_AGENT_ID)
+                    .is_none(),
+                "the confined id resolved on the roster; `is_known_author`'s extra arm is now \
+                 unnecessary and this test should be deleted deliberately, not left passing"
+            );
+            assert!(is_known_author(crate::ports::CONFINED_AGENT_ID, &record));
+            assert!(is_known_author("engineer", &record));
+            assert!(!is_known_author("operator", &record));
+        }
+
+        #[test]
+        fn a_reply_authored_by_a_real_teammate_is_not_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, "engineer"), reply(2, "product_manager")],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+            assert!(audit.by_agent_id.is_empty());
+        }
+
+        /// The observed #885 shape: the operator channel copied into the author.
+        #[test]
+        fn a_reply_authored_by_the_operator_channel_is_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, "operator"),
+                    reply(2, "engineer"),
+                    reply(3, "operator"),
+                ],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 3);
+            assert_eq!(audit.affected, 2);
+            assert_eq!(audit.by_agent_id.get("operator"), Some(&2));
+        }
+
+        /// The generalisation. A Telegram chat id or a desk slug in the author
+        /// field is the same defect, and a rule keyed on the literal
+        /// `"operator"` would report a clean company.
+        #[test]
+        fn any_non_roster_author_is_counted_not_just_the_operator_channel() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[reply(1, "operator"), reply(2, "-100123456789")],
+                on_roster,
+            );
+            assert_eq!(audit.affected, 2);
+            assert_eq!(audit.by_agent_id.get("-100123456789"), Some(&1));
+        }
+
+        /// Only replies. An operator's own message is not an `AgentReply` and
+        /// has no `agent_id` to be wrong, so counting it would inflate the
+        /// blast radius of a data-integrity bug — the one number that has to be
+        /// trustworthy here.
+        #[test]
+        fn a_non_reply_event_is_neither_scanned_nor_counted() {
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    at(
+                        1,
+                        CompanyEvent::OperatorMessage {
+                            text: "hello".to_string(),
+                            by: None,
+                            chat: None,
+                            parent: None,
+                            deliverable: None,
+                        },
+                    ),
+                    reply(2, "operator"),
+                ],
+                on_roster,
+            );
+            assert_eq!(audit.replies, 1);
+            assert_eq!(audit.affected, 1);
+        }
     }
 }

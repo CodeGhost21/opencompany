@@ -78,8 +78,8 @@ use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
 use self::tools::WorkflowToolInvoker;
 pub(crate) use self::tools::{
-    WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, wired_workflow_namespaces, workflow_tool_info,
-    workflow_tool_wiring,
+    MissingReason, WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, WorkflowToolInfo,
+    WorkflowToolWiring, grants_workflow_namespace, workflow_tool_info, workflow_tool_wiring,
 };
 /// Issue #849: the ceiling on what one agent node's turn carries from upstream.
 /// Re-exported so the end-to-end fan-in proof
@@ -391,6 +391,13 @@ pub async fn build_capabilities(
         // already-settled ticket for a downstream `gate`; real overlap belongs
         // in the later concurrency adoption phase.
         tasks: None,
+        // New in a later tinyflows 0.8.x: `approval` nodes can push a request
+        // at a host-registered `ApprovalProvider`. `None` here leaves the
+        // fallback behaviour intact — an `approval` node still pauses the run
+        // for the host to settle through `engine::resume`; wiring a provider
+        // that proactively notifies a reviewer is a separate policy decision
+        // this repo has not made.
+        approvals: None,
     })
 }
 
@@ -994,6 +1001,13 @@ impl HarnessAgentRunner {
                     &self.company,
                     request.effect,
                     crate::runtime::journal::TaskLink::Unlinked,
+                    None,
+                    // Issue #978: no run turn key, deliberately. These cards are
+                    // tool-call-shaped — `ApprovalPolicy::effect_for` stamps an
+                    // `agent` on them — so approving mints a grant and
+                    // re-dispatches the agent; it never re-dispatches the run.
+                    // Batching them under the run would owe a continuation
+                    // nothing performs.
                     None,
                 )
                 .await

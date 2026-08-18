@@ -203,14 +203,7 @@ mod tests {
         let company = CompanyId::new("acme");
         let runs: Arc<dyn RunStore> = Arc::new(FsOps::new(home.to_path_buf()));
         let run = runs
-            .create_run(
-                &company,
-                NewRun {
-                    id: "run-1".to_string(),
-                    task_id: "t-1".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
+            .create_run(&company, NewRun::for_task("run-1", "t-1", "ceo"))
             .await
             .expect("mint");
         let sink = RunTraceSink::new(company.clone(), run.id, Arc::clone(&runs));
@@ -305,6 +298,7 @@ mod tests {
                     id: spec.id,
                     company: company.clone(),
                     task_id: spec.task_id,
+                    chat_id: spec.chat_id,
                     agent_id: spec.agent_id,
                     attempt: 1,
                     status: RunStatus::Pending,

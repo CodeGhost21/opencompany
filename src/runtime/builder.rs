@@ -661,15 +661,27 @@ impl RuntimeBuilder {
             .with_inbox(handles.inbox.clone())
     }
 
-    /// Overlays just the memory + context ports from a selected memory engine
+    /// Overlays the memory ports from a selected memory engine
     /// (`OPENCOMPANY_MEMORY`, see [`crate::store::select`]).
     ///
     /// Applied *after* [`with_stores`](Self::with_stores) (or over the fs
-    /// defaults), so a dedicated memory engine such as TinyCortex backs recall
-    /// while the base backend keeps every other durable port.
+    /// defaults), so a dedicated memory engine backs recall while the base
+    /// backend keeps every other durable port.
+    ///
+    /// Memory and context always come from the overlay. `FactStore` comes from
+    /// it only when the engine serves facts as well — the embedded engine
+    /// implements memory + context alone and leaves facts on the base backend,
+    /// while an engine bound through the `MemoryProvider` contract covers all
+    /// three ports. Taking whichever the overlay offers is what keeps one
+    /// company's memory on one engine instead of split across two (issue #914).
     pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
-        self.with_memory(overlay.memory.clone())
-            .with_context(overlay.context.clone())
+        let builder = self
+            .with_memory(overlay.memory.clone())
+            .with_context(overlay.context.clone());
+        match &overlay.facts {
+            Some(facts) => builder.with_facts(facts.clone()),
+            None => builder,
+        }
     }
 
     /// Swaps just the runtime journal's durable sink (default: the company
@@ -1182,7 +1194,15 @@ impl RuntimeBuilder {
                 ledgers: ledgers_for_guard.clone(),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
-                runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
+                // Issue #1015: every attempt status change journals a frame, so
+                // the task screen can be pushed rather than polled. Wrapped here
+                // rather than at the cycle's call sites because
+                // `reap_orphaned_runs` settles crash-killed runs through
+                // `finish_run` directly — see `runtime::run_events`.
+                runs: Arc::new(crate::runtime::run_events::EventingRunStore::new(
+                    self.runs.unwrap_or_else(|| fs_ops.clone()),
+                    events.clone(),
+                )),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 workflow_run_outputs: self
@@ -1521,10 +1541,18 @@ impl RuntimeBuilder {
             match crate::ports::runs::reap_orphaned_runs(ops.runs.as_ref(), &id).await {
                 Ok(reaped) => {
                     for run in reaped {
+                        // Issue #983: a reaped chat turn names no card, so the
+                        // row settle above was the whole of its cleanup. The
+                        // transcript half — folding its unterminated
+                        // `TurnStarted` into a `TurnFailed` — is the journal
+                        // sweep further down, not this one.
+                        let Some(task_id) = run.task_id.as_deref() else {
+                            continue;
+                        };
                         match crate::runtime::advance::advance_settled_card(
                             ops.tasks.as_ref(),
                             &id,
-                            &run.task_id,
+                            task_id,
                             crate::ports::runs::RunStatus::Failed,
                             crate::ports::runs::ORPHAN_ERROR,
                         )
@@ -1533,7 +1561,7 @@ impl RuntimeBuilder {
                             Ok(Some(column)) => tracing::info!(
                                 company = %id,
                                 run = %run.id,
-                                task = %run.task_id,
+                                task = %task_id,
                                 column,
                                 "returned a card stranded by a previous host process"
                             ),
@@ -1544,7 +1572,7 @@ impl RuntimeBuilder {
                             Err(err) => tracing::warn!(
                                 company = %id,
                                 run = %run.id,
-                                task = %run.task_id,
+                                task = %task_id,
                                 error = %err,
                                 "reaped an orphaned run but could not return its card"
                             ),
@@ -1609,6 +1637,28 @@ impl RuntimeBuilder {
         // logged inside the sweep and never stops a company booting.
         if handover.is_none() {
             crate::runtime::sweep_interrupted_runs(&events, &id).await;
+
+            // Issue #983, the chat-turn equivalent, resting on the same three
+            // invariants: a turn journals a `TurnStarted` before it takes the
+            // serial lock, every turn is driven in this process, and one process
+            // owns this journal. So a start with no terminal at boot is a turn
+            // that died with the last host — and without this the operator's
+            // question sits in the transcript with no answer after it and no
+            // explanation, which is indistinguishable from a message that never
+            // warranted a reply.
+            //
+            // The row half of the same turn is reclaimed by
+            // `reap_orphaned_runs` above; this is the transcript half. Both are
+            // needed: the row makes a status query honest, the event makes the
+            // conversation honest, and neither can be derived from the other.
+            //
+            // Gated on the handover for exactly the reason the sweeps above are,
+            // and here the mis-fire is the worst of the three: a chat turn
+            // survives a live runtime swap — the drain covers its *cycle*, but
+            // the spawned task journals the replies and settles the row after
+            // that cycle returns — so sweeping mid-life would tell the operator
+            // their turn failed and then answer it.
+            crate::runtime::sweep_interrupted_turns(&events, &id).await;
 
             // Issue #390, the cycle-level equivalent, resting on the same three
             // invariants: a cycle journals a start before it takes the serial
@@ -1694,6 +1744,27 @@ impl RuntimeBuilder {
                 let continuations = crate::runtime::continuation::ContinuationQueue::default();
                 continuations.rearm(journal.parked_turns());
                 continuations
+            }
+        };
+
+        // Issue #978: the run-scoped half of the same fact, on exactly the same
+        // terms. A boot rebuilds it from the gates the replay left parked — the
+        // journal keeps their whole effect while they are parked, which is what
+        // makes a rehydrated batch re-dispatchable — and a rebuild inherits the
+        // live one, because that one also knows the verdicts taken since the
+        // replay and a fresh copy would re-ask about them.
+        let workflow_gates = match handover.as_ref() {
+            Some(h) => h.workflow_gates.clone(),
+            None => {
+                let gates = crate::runtime::workflow_gates::WorkflowGateQueue::default();
+                let parked = journal.pending();
+                gates.rearm(parked.iter().filter_map(|entry| {
+                    entry
+                        .batch
+                        .clone()
+                        .map(|turn| (turn, entry.id.clone(), &entry.effect))
+                }));
+                gates
             }
         };
 
@@ -2429,10 +2500,18 @@ impl RuntimeBuilder {
                                     // response surface, not a workflow delivery
                                     // destination: its buffer has no durable
                                     // reader. Desk and provider adapters are the
-                                    // accepted workflow write paths.
+                                    // accepted workflow write paths. The rule
+                                    // itself lives next to the operator-channel
+                                    // constant (issue #981) so this set, the
+                                    // set the console's picker offers and the
+                                    // set delivery accepts cannot disagree.
                                     channels: channels
                                         .iter()
-                                        .filter(|channel| channel.channel_id() != OPERATOR_CHANNEL)
+                                        .filter(|channel| {
+                                            crate::runtime::channel::is_deliverable_channel(
+                                                channel.channel_id(),
+                                            )
+                                        })
                                         .cloned()
                                         .collect(),
                                     // Issue #227: the same gate and journal the
@@ -2445,6 +2524,13 @@ impl RuntimeBuilder {
                                     parking: Some(crate::workflows::DeliveryParking {
                                         approvals: gate.clone(),
                                         journal: journal.clone(),
+                                        // Issue #978: the SAME two queues the
+                                        // runtime gets below. A gate parked by a
+                                        // run has to arm the counters the
+                                        // resolve path releases, or the run is
+                                        // never continued at all.
+                                        continuations: continuations.clone(),
+                                        gates: workflow_gates.clone(),
                                     }),
                                     // Issue #529: the same journal the runner
                                     // writes its start/per-node trail to, so a
@@ -2702,6 +2788,7 @@ impl RuntimeBuilder {
             runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
         }
         runtime.adopt_continuations(continuations);
+        runtime.adopt_workflow_gates(workflow_gates);
 
         // MCP uses OpenHuman's process-global live connection registry. Keep a
         // runtime-owned config for this OpenCompany home so REST and agents see
@@ -3394,16 +3481,9 @@ mod test {
                 .await
                 .expect("first boot");
             let runs = rt.runs();
-            runs.create_run(
-                &id,
-                NewRun {
-                    id: "run-1".to_string(),
-                    task_id: "t-1".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
-            .await
-            .expect("mint");
+            runs.create_run(&id, NewRun::for_task("run-1", "t-1", "ceo"))
+                .await
+                .expect("mint");
             runs.begin_run(&id, "run-1", EventSeq::new(3))
                 .await
                 .expect("begin");
@@ -3933,11 +4013,7 @@ mod test {
         let home = home_dir.path().to_path_buf();
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
-        let spec = |run: &str, task: &str| NewRun {
-            id: run.to_string(),
-            task_id: task.to_string(),
-            agent_id: "ceo".to_string(),
-        };
+        let spec = |run: &str, task: &str| NewRun::for_task(run, task, "ceo");
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
             .with_id(id.clone())
@@ -3996,6 +4072,187 @@ mod test {
         assert!(runs.list_stale_active(&id).await.unwrap().is_empty());
     }
 
+    /// Issue #983: a chat turn the host died under is reclaimed on **both**
+    /// halves — a `Failed` row carrying the orphan reason, and a `TurnFailed`
+    /// line closing the transcript bracket.
+    ///
+    /// Both are needed and neither is derivable from the other. The row makes
+    /// `GET {scope}/runs` honest; the event makes the *conversation* honest,
+    /// and without it the operator's question sits there with no answer and no
+    /// explanation — which is what a message that never warranted a reply looks
+    /// like too. The turn names no card, which is exactly why the row sweep
+    /// alone leaves nothing an operator would ever find.
+    #[tokio::test]
+    async fn boot_reclaims_a_chat_turn_stranded_by_a_previous_host() {
+        use crate::ports::runs::{NewRun, ORPHAN_ERROR, RunStatus};
+        use crate::ports::types::{CompanyEvent, EventSeq};
+
+        let home_dir = tmp_home("oc-turn-reap-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+
+        let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        first_boot
+            .runs()
+            .create_run(&id, NewRun::for_chat("turn-dead", "general", "general"))
+            .await
+            .unwrap();
+        first_boot
+            .runs()
+            .begin_run(&id, "turn-dead", EventSeq::new(1))
+            .await
+            .unwrap();
+        first_boot
+            .events()
+            .append(
+                &id,
+                CompanyEvent::TurnStarted {
+                    turn_id: "turn-dead".to_string(),
+                    chat_id: "general".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The host dies here: no settle, no reply, no failure line.
+        drop(first_boot);
+
+        let second_boot = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let row = second_boot
+            .runs()
+            .get_run(&id, "turn-dead")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, RunStatus::Failed);
+        assert_eq!(row.error.as_deref(), Some(ORPHAN_ERROR));
+        assert_eq!(row.task_id, None, "a chat turn attempted no card");
+
+        let swept: Vec<String> = second_boot
+            .events()
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::TurnFailed { turn_id, error } if turn_id == "turn-dead" => {
+                    Some(error)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            swept,
+            vec![crate::runtime::TURN_INTERRUPTED_BY_RESTART.to_string()],
+            "the transcript bracket was left open by the boot sweep"
+        );
+    }
+
+    /// **The negative half, and the one that matters most.** A live runtime
+    /// rebuild must sweep *neither* half of a chat turn.
+    ///
+    /// This is the #290 lesson in its sharpest form. A rebuild happens in a
+    /// process that has been serving, so "nothing from this process can be in
+    /// flight" — the whole proof both sweeps rest on — is false. And a chat turn
+    /// is more exposed than a workflow run: `rebuild_company` quiesces and
+    /// drains the *cycle* lock, but the spawned turn task journals its replies
+    /// and settles its row **after** the cycle returns, so a turn is routinely
+    /// live at exactly the moment a rebuild reaches here. Sweeping would fail
+    /// the row out from under it — its own settle is then rejected by the
+    /// transition table — and tell the operator in the transcript that the turn
+    /// failed, moments before its answer arrives.
+    #[tokio::test]
+    async fn a_rebuild_sweeps_no_live_chat_turn() {
+        use crate::ports::runs::{NewRun, RunStatus};
+        use crate::ports::types::{CompanyEvent, EventSeq};
+
+        let home_dir = tmp_home("oc-turn-rebuild-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+
+        let live = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        live.runs()
+            .create_run(&id, NewRun::for_chat("turn-live", "general", "general"))
+            .await
+            .unwrap();
+        live.runs()
+            .begin_run(&id, "turn-live", EventSeq::new(1))
+            .await
+            .unwrap();
+        live.events()
+            .append(
+                &id,
+                CompanyEvent::TurnStarted {
+                    turn_id: "turn-live".to_string(),
+                    chat_id: "general".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The swap, as `rebuild_company` performs it: quiesce, hand over, build.
+        live.quiesce().await;
+        let successor = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_handover(live.handover())
+            .build()
+            .await
+            .unwrap();
+
+        let row = successor
+            .runs()
+            .get_run(&id, "turn-live")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.status,
+            RunStatus::Running,
+            "a rebuild failed a turn that is still working"
+        );
+        assert!(
+            !successor
+                .events()
+                .read_from(&id, EventSeq::new(0), usize::MAX)
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| matches!(&s.event, CompanyEvent::TurnFailed { .. })),
+            "a rebuild told the operator a live turn had failed"
+        );
+
+        // And the turn's own settle still lands, because nothing took the row
+        // to a terminal state behind its back.
+        successor
+            .runs()
+            .finish_run(
+                &id,
+                "turn-live",
+                crate::ports::runs::RunOutcome::new(RunStatus::Succeeded),
+            )
+            .await
+            .expect("the live turn can still settle itself");
+    }
+
     /// Issue #337, the crash-truthfulness half: reaping the *row* is not enough
     /// — the **card** has to leave In Progress too, or the board keeps claiming
     /// work that provably is not being done and nothing will ever re-drive it
@@ -4027,6 +4284,7 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -4051,29 +4309,15 @@ mod test {
             .upsert(&id, &card("card-b", COLUMN_PAUSED))
             .await
             .unwrap();
-        runs.create_run(
-            &id,
-            NewRun {
-                id: "run-a".to_string(),
-                task_id: "card-a".to_string(),
-                agent_id: "ceo".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-a", "card-a", "ceo"))
+            .await
+            .unwrap();
         runs.begin_run(&id, "run-a", crate::ports::types::EventSeq::new(1))
             .await
             .unwrap();
-        runs.create_run(
-            &id,
-            NewRun {
-                id: "run-b".to_string(),
-                task_id: "card-b".to_string(),
-                agent_id: "ceo".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-b", "card-b", "ceo"))
+            .await
+            .unwrap();
         runs.begin_run(&id, "run-b", crate::ports::types::EventSeq::new(2))
             .await
             .unwrap();
@@ -4130,14 +4374,7 @@ mod test {
             RunStatus::Failed
         );
         let next = runs
-            .create_run(
-                &id,
-                NewRun {
-                    id: "run-a2".to_string(),
-                    task_id: "card-a".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
+            .create_run(&id, NewRun::for_task("run-a2", "card-a", "ceo"))
             .await
             .unwrap();
         assert_eq!(
@@ -4513,6 +4750,7 @@ mod test {
             mode: mode.to_string(),
             always_approve: always.iter().map(|s| s.to_string()).collect(),
             auto_approve_under_usd: under,
+            approval_ttl_hours: None,
         }
     }
 
@@ -4953,12 +5191,12 @@ mod test {
         assert_eq!(runtime.channels.len(), 2);
         assert!(runtime.channels.iter().any(|c| c.channel_id() == "email"));
 
-        // The #813 accessor the console's channel picker reads names BOTH: the
-        // always-wired `operator` and the openhuman-backed provider channel, so
-        // a workflow author can target either.
-        let wired = runtime.wired_channel_ids();
-        assert!(wired.contains(&"operator".to_string()));
-        assert!(wired.contains(&"email".to_string()));
+        // The accessor the console's channel picker reads (#813) names the
+        // openhuman-backed provider channel and NOT `operator`: delivery
+        // refuses the operator adapter by name, so offering it as a
+        // destination would offer the one target guaranteed to fail (#981).
+        let deliverable = runtime.deliverable_channel_ids();
+        assert_eq!(deliverable, vec!["email".to_string()], "{deliverable:?}");
 
         // A granted call routes through the OpenHuman transport.
         let result = runtime
@@ -4989,9 +5227,17 @@ mod test {
         // No openhuman channel is added when the daemon is unreachable.
         assert_eq!(runtime.channels.len(), 1);
         assert_eq!(runtime.channels[0].channel_id(), "operator");
-        // The #813 accessor the console's channel picker reads: `operator` is
-        // always wired, so a workflow always has at least one real target.
-        assert_eq!(runtime.wired_channel_ids(), vec!["operator".to_string()]);
+        // The accessor the console's channel picker reads (#813): `operator` is
+        // the only wired adapter here, and it is not a delivery target — so a
+        // workflow on this runtime has NOWHERE to deliver, and the honest
+        // answer is an empty picker (#981). It previously answered
+        // `["operator"]`, which is what put the guaranteed-to-fail target in
+        // front of authors.
+        assert!(
+            runtime.deliverable_channel_ids().is_empty(),
+            "an operator-only runtime has no workflow delivery channel: {:?}",
+            runtime.deliverable_channel_ids()
+        );
 
         // Tools degrade to the grant-enforcing built-in: ungranted rejected,
         // granted returns a well-formed not-implemented result — and the RPC
@@ -5082,6 +5328,108 @@ mod test {
             .collect();
         assert!(ids.contains(&"engineering"));
         assert!(ids.contains(&"research"));
+
+        // Both desks are real delivery targets — they write to the company's
+        // durable event log — and `operator` is not one of them (#981).
+        let deliverable = runtime.deliverable_channel_ids();
+        assert!(
+            deliverable.contains(&"engineering".to_string()),
+            "{deliverable:?}"
+        );
+        assert!(
+            deliverable.contains(&"research".to_string()),
+            "{deliverable:?}"
+        );
+        assert!(
+            !deliverable.contains(&"operator".to_string()),
+            "{deliverable:?}"
+        );
+    }
+
+    /// **The invariant that would have caught #981.** The picker's set and the
+    /// delivery layer's set are produced by the same `build()`, from the same
+    /// adapters, and must be the same list.
+    ///
+    /// They were not. `WorkflowDeliveryDeps.channels` dropped `operator` with an
+    /// inline filter while the accessor the console reads returned every adapter
+    /// — so an author was offered a destination the runner refuses by name, and
+    /// nothing in the build asserted the two agreed. Pinning them together is
+    /// what makes a future divergence a test failure rather than a run that
+    /// reports `channel-not-wired` for a target the console suggested.
+    ///
+    /// Needs the harness arm, because that is the only site that wires
+    /// `WorkflowDeliveryDeps` at all.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn the_picker_set_equals_the_delivery_deps_the_same_build_wired() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = tmp_home("oc-981-invariant-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("invariant-co");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Invariant Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[group_chat]]
+            id = "engineering"
+            name = "Engineering"
+            members = ["eng1"]
+            "#,
+        );
+
+        let stub = spawn_stub("ack").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    credential: crate::company::Credential::from_value("k"),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let delivery = runtime
+            .workflow_harness_deps
+            .as_ref()
+            .expect("the harness arm wires workflow deps")
+            .delivery
+            .as_ref()
+            .expect("the harness arm wires delivery deps");
+        let deps_channels: Vec<String> = delivery
+            .channels
+            .iter()
+            .map(|channel| channel.channel_id().to_string())
+            .collect();
+
+        assert_eq!(
+            runtime.deliverable_channel_ids(),
+            deps_channels,
+            "the destination picker offers a set the delivery layer does not accept"
+        );
+        // Not vacuous in either direction: the runtime really did wire the
+        // operator adapter, and the desk really is deliverable.
+        assert!(
+            runtime
+                .channels
+                .iter()
+                .any(|channel| channel.channel_id() == OPERATOR_CHANNEL),
+            "the operator adapter must be wired, or the exclusion proves nothing"
+        );
+        assert_eq!(deps_channels, vec!["engineering".to_string()]);
     }
 
     /// A desk added to `company.toml` since the last boot is wired on this one.

@@ -124,12 +124,13 @@ pub fn router() -> Router<AppState> {
             "/workflows/draft-from-description",
             post(draft_from_description),
         ))
-        // Issue #783: the wired, granted `tool_call` slugs this company can reach
-        // from a workflow, so the per-workflow copilot can ground a proposal on
-        // real tools instead of guessing (`github_integration` and the like).
-        // Reads the SAME `workflow_callable_tool_slugs` the create-time copilot
-        // grounds on (issue #753), so the two cannot drift. A static prefix
-        // registered here with the others and BEFORE the dynamic
+        // Issue #783: the `tool_call` slugs this company can reach from a
+        // workflow, so the per-workflow copilot can ground a proposal on real
+        // tools instead of guessing (`github_integration` and the like). Reads
+        // the SAME `workflow_effective_tool_slugs` the create-time copilot
+        // grounds on (issues #753, #874), so the two cannot drift — and, since
+        // #874, so neither offers a tool this deployment has not wired. A static
+        // prefix registered here with the others and BEFORE the dynamic
         // `/workflows/{wid}` below — `tool-slugs` is a syntactically valid `wid`.
         .merge(scoped("/workflows/tool-slugs", get(workflow_tool_slugs)))
         // Issue #813: the chat channels actually wired for this running company,
@@ -678,6 +679,54 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
     }
 }
 
+/// Rejects a draft whose `output` node routes its report to a channel this
+/// runtime cannot deliver to (issue #981).
+///
+/// The delivery layer already refuses such a target at run time with a
+/// `ChannelNotWired` row, and that row stays — desks come and go, so a graph
+/// valid at save can be invalid at run, and this is a guard rather than a
+/// guarantee. What it removes is the case the QA pass found: a workflow saved
+/// against `operator`, which delivery refuses **by name** on every runtime and
+/// so can never succeed, discovered only after a scheduled run nobody watched
+/// silently dropped its report.
+///
+/// Both write routes run it, from the same set the destination picker is served
+/// from and with the same sentence the failed delivery would have carried, so
+/// an author who trips it is told what a run would have told them.
+///
+/// Deliberately narrow. A missing target, a `destination` on a non-`output`
+/// node and an unknown `kind` are [`parse_workflow`](crate::company::parse_workflow)'s
+/// to report — it says something more specific about each, and reporting the
+/// wrong problem first is worse than reporting it second. This is also NOT run
+/// at TOML parse time: seed templates are parsed with no runtime in hand, and
+/// checking there would refuse to boot a template on a company whose desks are
+/// not resolved yet.
+fn reject_undeliverable_channel_destinations(
+    company: &ScopedCompany,
+    draft: &RawWorkflow,
+) -> Result<(), ApiError> {
+    let deliverable = company.runtime.deliverable_channel_ids();
+    for node in &draft.nodes {
+        let Some(destination) = &node.destination else {
+            continue;
+        };
+        if destination.kind.trim() != "channel" || node.kind.trim() != "output" {
+            continue;
+        }
+        let target = destination.target.as_deref().map(str::trim).unwrap_or("");
+        if target.is_empty() || deliverable.iter().any(|id| id == target) {
+            continue;
+        }
+        let live: Vec<&str> = deliverable.iter().map(String::as_str).collect();
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "node `{}`: {}",
+            node.id,
+            crate::runtime::undeliverable_channel_message(target, &live)
+        ))));
+    }
+    Ok(())
+}
+
 /// `POST …/workflows` — authors a new workflow graph (issues #69, #112, #168):
 /// the console's form creator, or any direct API caller, posts the graph shape
 /// and it is persisted on the company record.
@@ -697,6 +746,7 @@ async fn create_workflow(
     Json(body): Json<CreateWorkflowBody>,
 ) -> Result<Json<WorkflowGraph>, ApiError> {
     let draft = RawWorkflow::try_from(body)?;
+    reject_undeliverable_channel_destinations(&company, &draft)?;
     let file = create_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -789,6 +839,7 @@ async fn update_workflow(
 
     let expected = body.expected_version.clone();
     let draft = RawWorkflow::try_from(body.graph)?;
+    reject_undeliverable_channel_destinations(&company, &draft)?;
     let file = update_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -2032,22 +2083,61 @@ async fn fix_from_run(
     Err(super::not_wired("the workflow copilot"))
 }
 
-/// The `GET …/workflows/tool-slugs` answer (issue #783): the wired, granted
-/// `tool_call` slugs the per-workflow copilot may ground a proposal on.
+/// The `GET …/workflows/tool-slugs` answer (issues #783, #874): the tools the
+/// per-workflow copilot may ground a proposal on, and — separately — the ones
+/// this company holds a grant for that cannot run on this deployment.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkflowToolSlugsResponse {
-    /// The slugs a proposed `tool_call` node may name — every one of them will
-    /// clear the same grant gate `update_workflow` applies on write.
+    /// The **effective** slugs: granted by `[tools].allow` *and* wired here, so
+    /// a proposed `tool_call` naming one has a chance of running. This is the
+    /// only list a prompt should be grounded on.
     slugs: Vec<String>,
+    /// Granted, but not wired on this deployment (issue #874). Reported rather
+    /// than silently dropped so a reader can tell "this company is not allowed
+    /// that tool" (absent from both lists) from "allowed, nobody has configured
+    /// the provider yet" (here) — and so authoring ahead of wiring, which
+    /// create validation still permits, remains a visible option.
+    ///
+    /// Empty when the wiring is not knowable (no harness deps attached): the
+    /// honest answer to "which of these are unwired" is then "cannot say", and
+    /// `slugs` degrades to the grant-only set rather than emptying out.
+    unwired: Vec<UnwiredWorkflowTool>,
+}
+
+/// One granted-but-unwired tool, with the reason it cannot run here (issue
+/// #874) — the same distinction
+/// [`refusal_for`](crate::workflows::caps) draws at run time, moved forward to
+/// the moment the console asks, instead of arriving as a failed run.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnwiredWorkflowTool {
+    slug: String,
+    /// A stable machine token for a client that wants to branch:
+    /// `searchBackendNotConfigured`, `capabilityTierFiltered`, or the
+    /// cause-less `unwired`. Treat it as open — a new deployment-wiring cause
+    /// adds a token here, so match the ones you handle and fall back to
+    /// [`detail`](Self::detail) rather than assuming the set is closed.
+    reason: &'static str,
+    /// The same sentence in prose, for a client that just wants to show it.
+    detail: &'static str,
 }
 
 /// `GET …/workflows/tool-slugs` (both scope forms) — the per-workflow copilot's
-/// tool grounding (issue #783). Answers the exact slug set
-/// [`workflow_callable_tool_slugs`](crate::company::workflow_callable_tool_slugs)
-/// computes for the create-time copilot (issue #753), so the two grounding
-/// surfaces cannot drift and a slug shown here is one a proposed `tool_call`
-/// clears at courtesy validation.
+/// tool grounding (issue #783), narrowed to the **effective** set by issue #874.
+///
+/// Answers what
+/// [`workflow_effective_tool_slugs`](crate::company::workflow_effective_tool_slugs)
+/// computes — catalogue, company grant and deployment wiring all agreeing — so
+/// this route and the in-process create/fix copilot
+/// (`crate::harness::workflow_build`) ground on one set and cannot drift.
+///
+/// It deliberately does **not** answer the wider *grant-only* set that
+/// create/save validation accepts. That gate stays permissive on purpose so an
+/// operator may author now and wire the provider later, and this route does not
+/// change it. Serving the grant-only set here was issue #874 — a
+/// granted-but-unwired `web_search` was offered to the copilot, which authored a
+/// node that failed at the first run.
 #[cfg(feature = "openhuman")]
 async fn workflow_tool_slugs(
     company: ScopedCompany,
@@ -2064,8 +2154,58 @@ async fn workflow_tool_slugs(
             ))
             .into_response()
         })?;
+    // `None` — no harness deps on this runtime — means the wiring is unknowable,
+    // not that nothing is wired. Both helpers below read it that way: `slugs`
+    // falls back to the grant-only set and `unwired` stays empty, which is the
+    // pre-#874 answer. That keeps a harness-less host honest instead of telling
+    // the copilot every granted tool is broken.
+    let wiring = company.runtime.workflow_tool_wiring(&record).await;
+    let wired = wiring.as_ref().map(|w| &w.wired_namespaces);
+    let unwired = crate::company::workflow_granted_but_unwired_tool_slugs(&record, wired)
+        .into_iter()
+        .map(|slug| {
+            // Every slug here came out of `WORKFLOW_TOOL_CATALOG`, whose entries
+            // are pinned to `namespace_of`, and it is unwired precisely because
+            // its namespace is in `missing` — so both lookups resolve and `None`
+            // is unreachable in practice.
+            //
+            // Matched EXHAUSTIVELY rather than with a catch-all: the whole point
+            // of this field is letting an operator tell one cause from another,
+            // so a third `MissingReason` must break the build here instead of
+            // compiling into "raise your capability tier" — advice that would be
+            // actively wrong for a cause that is not tier filtering. It also
+            // keeps the defensive `None` from being conflated with the tier case.
+            let missing = crate::workflows::caps::workflow_tool_info(&slug)
+                .map(|info| info.namespace)
+                .and_then(|ns| wiring.as_ref().and_then(|w| w.missing.get(ns)).copied());
+            let (reason, detail) = match missing {
+                Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured) => (
+                    "searchBackendNotConfigured",
+                    "granted, but no managed search backend is configured on this deployment; \
+                     ask the platform operator to configure search",
+                ),
+                Some(crate::workflows::caps::MissingReason::CapabilityTierFiltered) => (
+                    "capabilityTierFiltered",
+                    "granted, but the deployment's capability tier filtered it; ask the platform \
+                     operator to raise the capability tier",
+                ),
+                // Unreachable given the pairing above; answered honestly rather
+                // than guessing a cause we do not have.
+                None => (
+                    "unwired",
+                    "granted, but not wired on this deployment; ask the platform operator why",
+                ),
+            };
+            UnwiredWorkflowTool {
+                slug,
+                reason,
+                detail,
+            }
+        })
+        .collect();
     Ok(Json(WorkflowToolSlugsResponse {
-        slugs: crate::company::workflow_callable_tool_slugs(&record),
+        slugs: crate::company::workflow_effective_tool_slugs(&record, wired),
+        unwired,
     }))
 }
 
@@ -2078,26 +2218,36 @@ async fn workflow_tool_slugs(
     company: ScopedCompany,
 ) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
     let _ = &company;
-    Ok(Json(WorkflowToolSlugsResponse { slugs: Vec::new() }))
+    Ok(Json(WorkflowToolSlugsResponse {
+        slugs: Vec::new(),
+        unwired: Vec::new(),
+    }))
 }
 
 /// The `GET …/workflows/wired-channels` answer (issue #813): the chat channel
-/// ids this running company can deliver to, so the output-node destination
-/// editor offers a picker of real targets. `operator` is always present. Not
-/// feature-gated — the wired-channel set exists on every build.
+/// ids this running company can actually deliver to, so the output-node
+/// destination editor offers a picker of real targets. Not feature-gated — the
+/// channel set exists on every build.
+///
+/// **`operator` is not among them** (issue #981). This used to say the opposite
+/// and serve the unfiltered adapter list, which offered authors the one target
+/// workflow delivery refuses by name. An empty list is a truthful answer for a
+/// company with no desks and no provider channels: there is nowhere to deliver.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WiredChannelsResponse {
-    /// The channel ids an `output` node's `channel` destination may target;
-    /// anything else fails at delivery with `ChannelNotWired`.
+    /// The channel ids an `output` node's `channel` destination may target.
+    /// Anything else is rejected when the workflow is saved, and — for a graph
+    /// saved before the desk went away — fails at delivery with
+    /// `ChannelNotWired`.
     channels: Vec<String>,
 }
 
 /// `GET …/workflows/wired-channels` (both scope forms). Reads the running
-/// company's wired channels directly — infallible, no record load needed.
+/// company's deliverable channels directly — infallible, no record load needed.
 async fn workflow_wired_channels(company: ScopedCompany) -> Json<WiredChannelsResponse> {
     Json(WiredChannelsResponse {
-        channels: company.runtime.wired_channel_ids(),
+        channels: company.runtime.deliverable_channel_ids(),
     })
 }
 
@@ -2441,6 +2591,71 @@ async fn list_runs(
             }
             _ => {}
         }
+    }
+
+    // Issue #1009: cross-check the still-`running` rows against the live run set
+    // and settle the ones nobody is running.
+    //
+    // The fold above marks a start with no finish `running: true`, which is only
+    // ever settled by the boot sweep ([`sweep_interrupted_runs`]). Three ways a
+    // finish never lands — a task that panicked, an append that failed, a host
+    // that died — therefore all read as an eternal spinner *until the next host
+    // restart*, with a Stop button that cannot help and a 2s console poll that
+    // never stops. This closes the gap between restarts: any run the fold thinks
+    // is in flight whose id is **absent** from the supervisor's live set has no
+    // task behind it here and now, so it is journaled a synthetic finish (the
+    // same `INTERRUPTED_BY_RESTART` the boot sweep uses) and flipped in the
+    // in-memory row, so this very response is already self-consistent.
+    //
+    // Keyed strictly on `live()` membership. A run the current process is
+    // genuinely running is registered there and is left untouched — the watchdog
+    // (issue #1009, path A) is what guarantees a *panicking* run never reaches
+    // this predicate, because it journals its own finish before its guard drops.
+    //
+    // The one accepted false positive: a run that survived a live
+    // `rebuild_company` swap is registered on the *old* supervisor and so is
+    // absent from the successor's `live()`, so this could settle a run that is
+    // still walking its graph. Accepted because (i) the watchdog keeps panics out
+    // of this path entirely, (ii) that run's real finish lands later in journal
+    // order and wins the read's last-writer-wins display, and (iii) it is the
+    // same class the boot sweep already accepts — which is why that sweep gates
+    // on the handover being absent (see the runtime builder call site). It never
+    // corrupts the journal: a second, truthful finish simply supersedes it.
+    let live_ids: HashSet<String> = company
+        .runtime
+        .run_supervisor()
+        .live()
+        .into_iter()
+        .map(|(run_id, _workflow_id)| run_id)
+        .collect();
+    for entry in runs.iter_mut() {
+        if !entry.running {
+            continue;
+        }
+        let Some(run_id) = entry.run_id.clone() else {
+            continue;
+        };
+        if live_ids.contains(&run_id) {
+            continue;
+        }
+        // Durable half: append the finish so it survives this response, folds
+        // settled on the next `GET …/workflows/runs`, and stops the boot sweep
+        // from having to. Best-effort by construction — a failed append leaves
+        // the row as the in-memory flip below still makes it, and the next read
+        // simply retries.
+        crate::runtime::record_run_finished(
+            company.runtime.events(),
+            company.id(),
+            &entry.workflow_id,
+            entry.scheduled,
+            &run_id,
+            Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART),
+        )
+        .await;
+        // In-memory half: flip the row this response returns, so the console does
+        // not have to wait for the next poll to stop the spinner.
+        entry.running = false;
+        entry.error = Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
     }
 
     // Newest first: a history panel leads with the run that just happened. The
@@ -3540,6 +3755,252 @@ mod tests {
             assert_eq!(graph["edges"][0]["label"], "ok");
         }
 
+        // --- Save-time channel-destination guard (issue #981) ---------------
+
+        /// A hosted tenant WITH a desk, so it has one real delivery channel.
+        /// `hosted_state`'s manifest declares none, which makes its deliverable
+        /// set empty — fine for the nowhere-to-deliver case below, useless for
+        /// telling an accepted target from a refused one.
+        fn desk_manifest() -> CompanyManifest {
+            toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n",
+            )
+            .unwrap()
+        }
+
+        /// `hosted_state` over [`desk_manifest`] — a running company whose
+        /// deliverable set is exactly `["engineering"]`.
+        async fn desk_state(home: &std::path::Path) -> AppState {
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: desk_manifest(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), desk_manifest())
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime.deliverable_channel_ids(),
+                vec!["engineering".to_string()],
+                "the fixture must have exactly one delivery channel, or these tests prove nothing"
+            );
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            state
+        }
+
+        /// [`create_body`] with the output node routing its report to `target`
+        /// on `kind`.
+        fn body_with_destination(kind: &str, target: Option<&str>) -> serde_json::Value {
+            let mut destination = serde_json::json!({ "kind": kind });
+            if let Some(target) = target {
+                destination["target"] = serde_json::Value::String(target.to_string());
+            }
+            let mut body = create_body();
+            body["nodes"][1]["destination"] = destination;
+            body
+        }
+
+        async fn post_create(state: AppState, body: serde_json::Value) -> axum::response::Response {
+            router(state)
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap()
+        }
+
+        /// **The #981 regression.** `operator` was in the picker the console
+        /// showed the author, and delivery refuses it by name on every runtime —
+        /// so the graph saved, ran green, and dropped its report. It is now
+        /// refused at save, naming the channels that would work.
+        #[tokio::test]
+        async fn a_report_routed_to_operator_is_refused_at_save() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response =
+                post_create(state, body_with_destination("channel", Some("operator"))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+            // The live set, so the fix is legible from the refusal alone.
+            assert!(message.contains("engineering"), "{message}");
+            assert!(
+                message.contains("done"),
+                "the refusal must name the node: {message}"
+            );
+        }
+
+        /// A channel nobody wired is refused the same way. The author's typo and
+        /// the author's `operator` are the same mistake — a destination this
+        /// company cannot deliver to — and get one answer.
+        #[tokio::test]
+        async fn a_report_routed_to_an_unwired_channel_is_refused_at_save() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response =
+                post_create(state, body_with_destination("channel", Some("enginering"))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+            assert!(message.contains("engineering"), "{message}");
+        }
+
+        /// The guard refuses what delivery would refuse and nothing more: a real
+        /// desk saves, and reads back with its destination intact.
+        #[tokio::test]
+        async fn a_report_routed_to_a_real_desk_saves() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response = post_create(
+                state.clone(),
+                body_with_destination("channel", Some("engineering")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph = json_body(response).await;
+            assert_eq!(graph["nodes"][1]["destination"]["kind"], "channel");
+            assert_eq!(graph["nodes"][1]["destination"]["target"], "engineering");
+        }
+
+        /// An edit is a save too. The create route was never the only way in —
+        /// `PUT` replaces the graph wholesale, so a destination refused on
+        /// create must not be reachable by saving a clean graph and then
+        /// editing it.
+        #[tokio::test]
+        async fn an_edit_cannot_introduce_an_undeliverable_destination() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            assert_eq!(
+                post_create(state.clone(), create_body()).await.status(),
+                StatusCode::OK
+            );
+
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(body_with_destination("channel", Some("operator"))),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+        }
+
+        /// A company with no desks and no provider channels has nowhere to
+        /// deliver (#963), and says so in its own words rather than trailing off
+        /// after `has: `. The destinations that do NOT depend on a channel still
+        /// save — the guard is about channels, and a company with no desks can
+        /// still mail its owner.
+        #[tokio::test]
+        async fn a_company_with_no_delivery_channel_says_so_and_still_saves_an_owner_report() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = post_create(
+                state.clone(),
+                body_with_destination("channel", Some("engineering")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(message.contains("no durable channels"), "{message}");
+
+            // …and the picker it was offered is empty, not `["operator"]`.
+            let response = router(state.clone())
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/wired-channels",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(json_body(response).await["channels"], serde_json::json!([]));
+
+            let response = post_create(state, body_with_destination("owner", None)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "an `owner` report needs no channel"
+            );
+        }
+
+        /// The guard stays out of everything that is not a channel destination
+        /// on an `output` node: a graph that routes nowhere saves, and a
+        /// `destination` on a non-`output` node is still `parse_workflow`'s
+        /// refusal to report — reporting the wrong problem first would send an
+        /// author looking for a channel that was never their mistake (#947).
+        #[tokio::test]
+        async fn the_guard_leaves_non_channel_graphs_alone() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            // No destination at all: unchanged, saves.
+            assert_eq!(
+                post_create(state.clone(), create_body()).await.status(),
+                StatusCode::OK
+            );
+
+            // A channel destination on the TRIGGER node, on a company with no
+            // delivery channels at all: still rejected for being on the wrong
+            // kind of node, not for the channel.
+            let mut body = create_body();
+            body["id"] = serde_json::Value::String("second".into());
+            body["name"] = serde_json::Value::String("Second".into());
+            body["nodes"][0]["destination"] =
+                serde_json::json!({ "kind": "channel", "target": "engineering" });
+            let response = post_create(state, body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("only `output` nodes route a report"),
+                "the structural problem must be the one reported: {message}"
+            );
+        }
+
         /// A duplicate id is a clean 409, not a 500 — the id-uniqueness check
         /// that replaced the filesystem's `create_new(true)`.
         #[tokio::test]
@@ -3887,11 +4348,17 @@ mod tests {
         }
 
         /// Issue #783: the per-workflow copilot's tool-grounding read answers
-        /// `200 {"slugs":[…]}` on **both** scope forms — which also proves the
-        /// static prefix is wired ahead of the dynamic `/workflows/{wid}` (a
-        /// route-miss, or a `tool-slugs` swallowed as a `wid`, would not be this
-        /// shape). The blank tenant grants no tools, so the list is empty here;
-        /// the point pinned is the contract shape and that the route exists.
+        /// `200 {"slugs":[…],"unwired":[…]}` on **both** scope forms — which also
+        /// proves the static prefix is wired ahead of the dynamic
+        /// `/workflows/{wid}` (a route-miss, or a `tool-slugs` swallowed as a
+        /// `wid`, would not be this shape). The blank tenant grants no tools, so
+        /// both lists are empty here; the point pinned is the contract shape and
+        /// that the route exists.
+        ///
+        /// Issue #874 added `unwired` and it is pinned here as **always present**,
+        /// because the console reads it unconditionally: a body that omitted the
+        /// key on a wired host would read as "nothing is unwired" and silently
+        /// restore the bug this route was narrowed to fix.
         #[tokio::test]
         async fn tool_slugs_answers_a_slug_array_on_both_scope_forms() {
             let home_dir = home();
@@ -3912,7 +4379,112 @@ mod tests {
                     body["slugs"].is_array(),
                     "tool-slugs answers a `slugs` array on {uri}, got: {body}"
                 );
+                assert!(
+                    body["unwired"].is_array(),
+                    "tool-slugs answers an `unwired` array on {uri}, got: {body}"
+                );
             }
+        }
+
+        /// Issue #874, the staging repro through the route itself: a company that
+        /// explicitly grants `search`, on a deployment with no managed search
+        /// backend, must NOT be handed `web_search` to ground a proposal on.
+        ///
+        /// This is the regression that shipped. The route answered the
+        /// **grant-only** set, so `web_search` was advertised, the copilot
+        /// authored a `tool_call` on it, and the run died at the first node with
+        /// `tool_call 'web_search' is not available in company workflows`. What
+        /// pins the fix is the pair of assertions: the slug is gone from `slugs`
+        /// **and** present in `unwired` with a reason — dropping it silently would
+        /// leave an operator unable to tell "not allowed" from "not configured".
+        ///
+        /// A granted-and-wired tool (`shell`) stays offered in the same answer, so
+        /// this cannot pass by narrowing the list to nothing.
+        #[cfg(feature = "openhuman")]
+        #[tokio::test]
+        async fn tool_slugs_omits_a_granted_but_unwired_tool_and_says_why() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let id = CompanyId::new("acme");
+            let mut manifest = empty_manifest();
+            manifest.tools.allow = vec!["search".to_string(), "shell".to_string()];
+
+            let store = FsCompanyStore::new(home.clone());
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+
+            let mut runtime = RuntimeBuilder::new(home.clone(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            // `workflow_wiring_deps` pins `search: None` — the deployment half of
+            // the repro. Everything else is allowed, so `shell` stays wired.
+            runtime.set_workflow_harness_deps(crate::harness::workflow_wiring_deps(
+                &runtime,
+                None,
+                crate::harness::toolbelt::CapabilityFilter::AllowAll,
+                None,
+            ));
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id, std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/tool-slugs", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+
+            let slugs: Vec<&str> = body["slugs"]
+                .as_array()
+                .expect("slugs")
+                .iter()
+                .map(|v| v.as_str().expect("slug"))
+                .collect();
+            assert!(
+                !slugs.contains(&"web_search"),
+                "a granted-but-unwired tool is not offered for grounding: {body}"
+            );
+            assert!(
+                slugs.contains(&"shell"),
+                "a granted AND wired tool is still offered: {body}"
+            );
+
+            let unwired = body["unwired"].as_array().expect("unwired");
+            let entry = unwired
+                .iter()
+                .find(|e| e["slug"] == "web_search")
+                .unwrap_or_else(|| panic!("web_search is reported as unwired: {body}"));
+            assert_eq!(
+                entry["reason"], "searchBackendNotConfigured",
+                "the reason distinguishes an unconfigured provider from a filtered \
+                 capability tier: {body}"
+            );
+            assert!(
+                entry["detail"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("search backend")),
+                "the prose reason is servable as-is: {body}"
+            );
         }
 
         /// A create body whose trigger carries a cron.
@@ -4318,6 +4890,7 @@ mod tests {
                     "writer": { "items": [{ "json": { "text": "the draft" } }] }
                 }),
                 truncated: false,
+                partial: false,
             };
             runtime
                 .workflow_run_outputs()
@@ -4605,27 +5178,35 @@ mod tests {
             );
         }
 
-        /// A run whose host died leaves a start with no finish, and it folds as
-        /// `running: true` with the nodes it did complete. Honest only because
-        /// the boot sweep settles such runs — see `sweep_interrupted_runs`.
+        /// A run the process is genuinely executing — registered on the
+        /// supervisor, so its id is in `live()` — folds as `running: true` with
+        /// the nodes it has completed so far. Since #1009 a start with no finish
+        /// whose id is NOT live is settled on the read instead
+        /// ([`a_run_absent_from_the_live_set_is_settled_by_the_read`]); this pins
+        /// the still-running half of that split, with the guard held across the
+        /// request so the registration stays live for the whole read.
         #[tokio::test]
         async fn run_history_reports_an_unsettled_run_as_running() {
             let home_dir = home();
-            let home = home_dir.path().to_path_buf();
-            let (state, _store, id) = hosted_state(&home).await;
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
 
-            journal_start(&state, &id, "digest", "run-live", false).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", false)
+                .expect("under the default cap");
+            journal_start(&state, &id, "digest", &ctx.run_id, false).await;
             journal_node(
                 &state,
                 &id,
                 "digest",
-                "run-live",
+                &ctx.run_id,
                 "ceo",
                 WorkflowNodeStatus::Ok,
             )
             .await;
 
-            let response = router(state)
+            let response = router(state.clone())
                 .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
                 .await
                 .unwrap();
@@ -5617,6 +6198,119 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        // ── Issue #1009: settle eternal-`running` rows on the read ─────────
+
+        /// Every `WorkflowRunFinished` the company journaled carrying `run_id`.
+        async fn finishes_for(
+            state: &AppState,
+            id: &CompanyId,
+            run_id: &str,
+        ) -> Vec<(Option<String>, bool)> {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .read_from(id, crate::ports::types::EventSeq::new(0), usize::MAX)
+                .await
+                .expect("read")
+                .into_iter()
+                .filter_map(|s| match s.event {
+                    CompanyEvent::WorkflowRunFinished {
+                        run_id: Some(rid),
+                        error,
+                        cancelled,
+                        ..
+                    } if rid == run_id => Some((error, cancelled)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// **The decisive case (issue #1009, path B).** A run whose start was
+        /// journaled but whose finish never landed — and whose id is absent from
+        /// the live run set — is settled by `list_runs` itself, between boots.
+        ///
+        /// Two halves, both asserted: the returned row is `running: false` +
+        /// `INTERRUPTED_BY_RESTART` (so this very response is self-consistent),
+        /// AND a synthetic finish is **durably appended** so the next read folds
+        /// it settled and the boot sweep has nothing left to do. Before the fix
+        /// the row read `running: true` and nothing was appended.
+        #[tokio::test]
+        async fn a_run_absent_from_the_live_set_is_settled_by_the_read() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            // A start with no finish. Nothing is registered on the supervisor,
+            // so this id is absent from `live()`: the process that owned it went
+            // away without journaling a finish.
+            journal_start(&state, &id, "digest", "run-dead", true).await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body.as_array().unwrap().len(), 1);
+            // `running` is skip-serialized when false, so a settled row simply
+            // omits it — assert it is not `true` rather than equal to `false`.
+            assert_ne!(
+                body[0]["running"], true,
+                "an absent run is settled on the read, not left spinning: {body}"
+            );
+            assert_eq!(
+                body[0]["error"],
+                crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART
+            );
+
+            // Durable half: exactly one synthetic finish is now in the journal.
+            let finishes = finishes_for(&state, &id, "run-dead").await;
+            assert_eq!(finishes.len(), 1, "exactly one synthetic finish appended");
+            assert_eq!(
+                finishes[0].0.as_deref(),
+                Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART)
+            );
+            assert!(!finishes[0].1, "a host-restart settle is not a cancel");
+        }
+
+        /// **The mandatory negative (issue #1009, rebuild/clean guard).** A run
+        /// the current process is genuinely running is registered on the
+        /// supervisor, so its id is in `live()` — and `list_runs` must leave it
+        /// alone: the row stays `running: true` and **nothing** is appended.
+        ///
+        /// This is what keeps the cross-check keyed strictly on `live()`
+        /// membership rather than on "has no finish yet", which would stamp
+        /// `INTERRUPTED_BY_RESTART` on a run still walking its graph and then
+        /// contradict its real finish. The guard is held across the read so the
+        /// registration stays live for the whole request.
+        #[tokio::test]
+        async fn a_run_in_the_live_set_is_left_running() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            let runtime = state.registry().get(&id).expect("registered");
+            // Register a live run and HOLD its guard: its id is now in `live()`.
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", true)
+                .expect("under the default cap");
+            journal_start(&state, &id, "digest", &ctx.run_id, true).await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body.as_array().unwrap().len(), 1);
+            assert_eq!(
+                body[0]["running"], true,
+                "a run the process is running must not be settled from under it"
+            );
+
+            assert!(
+                finishes_for(&state, &id, &ctx.run_id).await.is_empty(),
+                "a live run gets no synthetic finish appended"
+            );
         }
     }
 

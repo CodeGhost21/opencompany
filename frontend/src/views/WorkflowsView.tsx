@@ -49,6 +49,7 @@ import {
 import type { CompanyStreamEvent } from "@/hooks/use-events";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
+import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -74,7 +75,12 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
 import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
+// Issue #1002: the run drawer decides a run's parked cards in place, using the
+// same shared approval card the Approvals page and the inline chat card use.
+import { useAskerNames } from "@/components/approval-card";
+import type { DecidedApproval } from "@/views/chat/model";
 import { cn } from "@/lib/utils";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import type { NodeRunState } from "@/lib/workflow-sample";
 // Issue #303: the canvas arithmetic, the run-state folds and the three drawers
 // moved out when this file passed 1800 lines and was about to grow an index and
@@ -91,11 +97,20 @@ import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel"
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
 import { CopilotPanel } from "@/views/workflows/CopilotPanel";
 import { classifyRunError } from "@/views/workflows/run-error";
+import { runFailureFrom, type RunFailure } from "@/views/workflows/run-failure";
+import { RunFailurePanel } from "@/views/workflows/RunFailurePanel";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
+import { approvalsForRun } from "@/views/workflows/run-approvals";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
 const NODE_TYPES = { oc: WorkflowNode };
+
+/** Stable empty defaults, so an omitted approvals prop cannot churn renders. */
+const EMPTY_APPROVALS: ApprovalSummary[] = [];
+const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+const EMPTY_DECIDED: Record<string, DecidedApproval> = {};
+const EMPTY_FAILED: Record<string, string> = {};
 
 /** A stable empty default for `runEvents`, so an omitted prop does not hand the
  * fold a fresh array identity on every render. */
@@ -160,6 +175,12 @@ export function WorkflowsView({
   runEventTick = 0,
   runEvents = EMPTY_RUN_EVENTS,
   listEventTick = 0,
+  approvals = EMPTY_APPROVALS,
+  approvalsNow,
+  decidingApprovals = EMPTY_DECIDING,
+  decidedApprovals = EMPTY_DECIDED,
+  failedApprovals = EMPTY_FAILED,
+  onDecideApproval,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -209,6 +230,38 @@ export function WorkflowsView({
    * the fresh list no longer has.
    */
   listEventTick?: number;
+  /**
+   * The company's parked approvals — the **whole** queue (issue #1002), passed
+   * straight through to the run drawer, which narrows it to the run on screen.
+   *
+   * The same array the Approvals page renders and the sidebar badge counts, and
+   * that is the point: this view is a second *reader* of one queue, so it can
+   * never make the page show less or the badge disagree with it. Live, because
+   * the feed refreshes it on every `approval_resolved` frame — which is what
+   * stops a run drawer calling a step blocked after somebody else cleared it.
+   */
+  approvals?: ApprovalSummary[];
+  /** The feed's clock, for the cards' "waiting N minutes" line. */
+  approvalsNow?: number;
+  /** The verdict an approval is waiting on, keyed by id (issue #1002). */
+  decidingApprovals?: ReadonlyMap<string, Verdict>;
+  /** Verdicts already witnessed, with their last-seen summary (issue #1002). */
+  decidedApprovals?: Record<string, DecidedApproval>;
+  /** Decisions that did not land, keyed by approval id (issue #1002). */
+  failedApprovals?: Record<string, string>;
+  /**
+   * Record one decision on one approval — the shell's handler, which calls the
+   * same per-id `resolveApproval` the Approvals page calls (issue #1002).
+   *
+   * Absent when the caller has not wired the surface, in which case the drawer
+   * renders exactly as it did before #1002: it says the run parked cards and
+   * points at the queue, without offering to decide them.
+   */
+  onDecideApproval?: (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+  ) => void;
 }) {
   const { resolvedTheme } = useTheme();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -221,11 +274,43 @@ export function WorkflowsView({
   const [loadingList, setLoadingList] = useState(true);
   const [loadingGraph, setLoadingGraph] = useState(false);
   const [result, setResult] = useState<WorkflowRunResult | null>(null);
+  // Issue #1007: the run POST that was rejected, held on screen.
+  //
+  // `result` is the drawer for a run that produced something, and it can only
+  // be set from a settled body — which on the failure path never arrives. So a
+  // failed run mounted no surface at all and the console returned to its
+  // resting state behind a four-second toast. This is that outcome's drawer,
+  // and it is state rather than a toast for the same reason `conflict` and
+  // `runRefusal` are: reading it, finding the history row, and fixing the graph
+  // all take longer than a toast lasts.
+  const [runFailure, setRunFailure] = useState<RunFailure | null>(null);
+  // Issue #1007: the dispatch this console is waiting on — when Run was pressed,
+  // and whether it was a test run.
+  //
+  // What acknowledges the click in the history drawer. Between pressing Run and
+  // the host journaling a row there was nothing there at all, which for a run
+  // that takes minutes is most of its life. Rendered as one optimistic row, and
+  // dropped the moment the host's own row for the same run lands — that row
+  // carries the per-node trail this one cannot.
+  const [pendingRun, setPendingRun] = useState<{
+    startedAtMillis: number;
+    dryRun: boolean;
+  } | null>(null);
   // Issue #154: what the operator is asking this run to work on. `ranWith` is
   // pinned when the run is dispatched so the result panel echoes the request the
   // shown output came from, not whatever has been typed since.
   const [request, setRequest] = useState("");
   const [ranWith, setRanWith] = useState("");
+  // Issue #1002: the roster read behind the cards' "Asked by" line, keyed to the
+  // approvals of the run on screen rather than to the whole queue — so a console
+  // with a run drawer closed does not fetch the roster for cards it is not
+  // rendering. `useAskerNames` itself is keyed on the asker id set, so this stays
+  // one read per company rather than one per poll.
+  const runApprovalCards = useMemo(
+    () => approvalsForRun(approvals, result?.runId),
+    [approvals, result?.runId],
+  );
+  const askerNames = useAskerNames(client, company, runApprovalCards);
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   // Issue #259: the same dialog, hydrated from the selected graph. Separate
@@ -333,6 +418,12 @@ export function WorkflowsView({
   // because the `run()` catch reads it synchronously and it must not itself
   // trigger a render. Reset at the top of every `run()`.
   const sawOwnRunStartRef = useRef(false);
+  // Issue #1007: the id that run became, when the live fold got far enough to
+  // tell us. A ref for exactly the reasons above — the `run()` catch reads it
+  // synchronously, and `activeRunId` is not in that callback's closure. It is
+  // what lets a failed POST hand the history fetch a run id to pull forward,
+  // rather than leaving the operator to guess which row was theirs.
+  const ownRunIdRef = useRef<string | null>(null);
   // The run whose cancel came back 404, if any.
   //
   // Deliberately a run id rather than a boolean. A 404 is ambiguous — either
@@ -597,6 +688,7 @@ export function WorkflowsView({
     let live = true;
     setLoadingGraph(true);
     setResult(null);
+    setRunFailure(null);
     setSelectedNodeId(null);
     (async () => {
       try {
@@ -756,6 +848,15 @@ export function WorkflowsView({
     // neither leaks into the new run's triage (issue #528).
     setRunRefusal(null);
     sawOwnRunStartRef.current = false;
+    ownRunIdRef.current = null;
+    // Issue #1007: the LAST run's detail goes with the last run's marks.
+    // `overlayRun` was cleared here from the start and `result` never was, so a
+    // second run that failed left the first run's nodes, output and "Requested:"
+    // line on screen — presented, with nothing to say otherwise, as the new
+    // run's detail. `ranWith` is only pinned on success (below), so the echo was
+    // stale in the same way.
+    setResult(null);
+    setRunFailure(null);
     // Issue #371/#382: clear the previous run's marks and seed the trigger as
     // done immediately, so the canvas responds to the click rather than waiting
     // on the first frame. The `workflow_run_started` frame re-sets the same thing
@@ -773,6 +874,22 @@ export function WorkflowsView({
     // Trimmed once here so the echoed request and the payload the host receives
     // can never disagree.
     const asked = request.trim();
+    // Issue #1007: the browser's own clock, not the host's. It is what the
+    // failure panel measures against and what the optimistic history row counts
+    // from, and both are on screen before the host has said anything at all.
+    const startedAtMillis = Date.now();
+    setPendingRun({ startedAtMillis, dryRun });
+    // Issue #1007: say the click landed. A synchronous run holds its request
+    // open for the whole run, so the only other acknowledgement — the success
+    // toast — arrives minutes later, with a button spinner and an optimistic
+    // canvas in between and nothing that names the workflow. `info`, not
+    // `loading`: a loading toast has no duration, and the console's toast
+    // ceiling (#933) would dismiss it mid-run anyway.
+    toast.info(
+      dryRun
+        ? `Test-running “${graph?.name ?? selectedId}” — nothing will be sent.`
+        : `Running “${graph?.name ?? selectedId}”…`,
+    );
     try {
       // Issue #528: run SYNCHRONOUSLY — no `detach`. The run's full `output` is
       // carried ONLY by this settled 200 body; the journal, SSE, and runs list
@@ -840,11 +957,39 @@ export function WorkflowsView({
           "The run continues on the host — watch the canvas; the outcome lands in History.",
         );
         setRunsTick((n) => n + 1);
+        // Issue #1007: and OPEN the place that sentence points at. Telling
+        // somebody the outcome lands in History while History is shut — it is
+        // closed by default and nothing ever opened it — is the same dead end as
+        // the failure toast: the drawer holds the only durable record of a run
+        // whose response was lost, and it has to be on screen for that to count.
+        setHistoryOpen(true);
+        setAwaitingRunId(ownRunIdRef.current);
       } else {
         toast.error(e instanceof Error ? e.message : "could not run the workflow");
+        // Issue #1007: the toast is now the *notification*, not the record. The
+        // panel is what survives it, built from the structured error rather than
+        // from its message — a code the host gave us reads differently from one
+        // synthesised off a status line, and the panel says which it had.
+        setRunFailure(
+          runFailureFrom(e, {
+            startedAtMillis,
+            atMillis: Date.now(),
+            request: asked,
+            dryRun,
+          }),
+        );
         // A run that failed is journaled too (#228), and is the outcome most
         // worth finding again later — so refresh the history on this path as well.
         setRunsTick((n) => n + 1);
+        // Issue #1007: open the drawer that refresh feeds, so the journaled row
+        // — the per-node trail, which names the step it died on — is on screen
+        // rather than one click away behind a toolbar toggle. And hand the
+        // history fetch the run id when the live fold got far enough to give us
+        // one: it pulls that row forward onto the canvas (#371) for exactly the
+        // console this matters most on, the one whose stream never delivered a
+        // frame to paint from.
+        setHistoryOpen(true);
+        setAwaitingRunId(ownRunIdRef.current);
         // Drop the optimistic frontier so a failed run does not leave a node
         // pulsing "running" forever. The fold owns anything actually reported.
         setOptimistic(null);
@@ -1164,6 +1309,8 @@ export function WorkflowsView({
   useEffect(() => {
     if (!starting || !liveRun || !liveRun.active || liveRun.scheduled) return;
     sawOwnRunStartRef.current = true;
+    // Issue #1007: the same seed, kept for the catch below.
+    ownRunIdRef.current = liveRun.runId;
     if (activeRunId === null) setActiveRunId(liveRun.runId);
   }, [starting, liveRun, activeRunId]);
 
@@ -1213,8 +1360,15 @@ export function WorkflowsView({
   const watchingRun = Boolean(activeRunId) || Boolean(liveRun?.active);
   useEffect(() => {
     if (!watchingRun || !historySupported) return;
-    const timer = window.setInterval(() => setRunsTick((n) => n + 1), 2_000);
-    return () => window.clearInterval(timer);
+    // Issue #1009: a bare `setInterval` kept firing in a hidden tab, so a run
+    // wedged "running" (a finish that never journaled) had a background console
+    // re-reading history every 2s forever. `startVisiblePolling` pauses the
+    // cadence while the tab is hidden and resumes — with one immediate read — on
+    // the visible edge, so a backgrounded console stops asking. Foreground
+    // behaviour is unchanged: the same 2s tick, and the backend's #1009
+    // cross-check now settles the row so the next read clears `activeRunId`
+    // (see the effect above) and this poll unmounts on its own.
+    return startVisiblePolling(() => setRunsTick((n) => n + 1), 2_000);
   }, [watchingRun, historySupported]);
 
   // Switching workflow (or company) clears the canvas: another graph's node ids
@@ -1237,6 +1391,11 @@ export function WorkflowsView({
     setActiveRunId(null);
     setResult(null);
     setRunRefusal(null);
+    // Issue #1007: and the failed run's drawer, for exactly the same reason —
+    // it names a run of the workflow being left, and left up it would read as
+    // the newly-selected one's.
+    setRunFailure(null);
+    setPendingRun(null);
     // Issue #863: the adopted run belonged to the workflow being left. Holding
     // it across the switch would keep painting one graph's trail onto another's
     // canvas the moment the two share a node id.
@@ -1378,7 +1537,14 @@ export function WorkflowsView({
       if (!overlayOutput.record) return { state: "unavailable" };
       const value = nodeOutputFor(overlayOutput.record.nodes, selectedNode.id);
       if (value === undefined) return { state: "unavailable" };
-      return { state: "present", value, truncated: overlayOutput.record.truncated };
+      // Issue #1008: a failed/blocked run's snapshot is flagged partial; carry it
+      // so the inspector badges the capture. A live run (below) is never partial.
+      return {
+        state: "present",
+        value,
+        truncated: overlayOutput.record.truncated,
+        partial: overlayOutput.record.partial,
+      };
     }
     if (result) {
       const value = nodeOutputFor(result.output, selectedNode.id);
@@ -1391,6 +1557,45 @@ export function WorkflowsView({
   const onNodeClick = useCallback((_: unknown, node: Node) => {
     setSelectedNodeId(node.id);
   }, []);
+
+  // Issue #1007: what the history drawer renders — the host's rows, with one
+  // optimistic row on top while this console has a run in flight that the host
+  // has not journaled yet.
+  //
+  // Deliberately NOT folded into `runs`: everything else that reads that list
+  // reads it as the host's record. The last-run chip, the copilot's grounding,
+  // the in-flight seed and the settled-run set would all be reasoning about a
+  // row the host has never seen.
+  const historyRows = useMemo<WorkflowRunOutcome[]>(() => {
+    // A dry run journals nothing (#542), so a row for it would appear in "Run
+    // history" and then vanish when the request settles — worse than the button
+    // spinner it was meant to improve on.
+    if (!pendingRun || pendingRun.dryRun) return runs;
+    // Settled, either way: `starting` is the POST still open, `activeRunId` the
+    // run this console adopted from the live fold. With neither, the journal is
+    // the whole answer and a synthetic row could only contradict it.
+    if (!starting && !activeRunId) return runs;
+    // The host's own row for this run has arrived. It carries the per-node
+    // trail, so it supersedes this one rather than sitting under it.
+    if (activeRunId && runs.some((r) => r.runId === activeRunId)) return runs;
+    return [
+      {
+        // `seq` is this list's React key and the id `selectedRunSeq` compares
+        // against, so it has to be stable and unable to collide with a real
+        // journal position. Negative is both.
+        seq: -1,
+        atMillis: pendingRun.startedAtMillis,
+        startedAtMillis: pendingRun.startedAtMillis,
+        workflowId: selectedId ?? "",
+        scheduled: false,
+        runId: activeRunId ?? undefined,
+        deliveries: [],
+        pendingApprovals: [],
+        running: true,
+      },
+      ...runs,
+    ];
+  }, [runs, pendingRun, starting, activeRunId, selectedId]);
 
   // `runs` already holds only the selected workflow's runs, newest first — the
   // host filters and orders them. Re-filtering here would be a second source of
@@ -1601,9 +1806,9 @@ export function WorkflowsView({
             >
               <History className="mr-1.5 size-4" />
               History
-              {runs.length > 0 && (
+              {historyRows.length > 0 && (
                 <Badge variant="secondary" className="ml-1.5 h-4 px-1.5 text-3xs font-normal">
-                  {runs.length}
+                  {historyRows.length}
                 </Badge>
               )}
             </Button>
@@ -1936,12 +2141,34 @@ export function WorkflowsView({
           graph={graph}
           request={ranWith}
           onClose={() => setResult(null)}
+          // Issue #1002: the whole queue, narrowed by the panel to this run.
+          // Handed in unfiltered on purpose — the Approvals page reads the same
+          // array and must keep showing every row.
+          approvals={approvals}
+          now={approvalsNow}
+          askerNames={askerNames}
+          deciding={decidingApprovals}
+          decided={decidedApprovals}
+          failed={failedApprovals}
+          onDecide={onDecideApproval}
+        />
+      )}
+
+      {/* Issue #1007: the same slot, for the outcome that had no surface at all.
+          The two are mutually exclusive by construction — `run()` clears both on
+          dispatch and only one of its arms sets one — so they are rendered as
+          siblings rather than as a branch. */}
+      {runFailure && (
+        <RunFailurePanel
+          failure={runFailure}
+          onClose={() => setRunFailure(null)}
         />
       )}
 
       {historyOpen && historySupported && (
         <RunHistoryPanel
-          runs={runs}
+          runs={historyRows}
+          graph={graph}
           workflowName={selected?.name ?? selectedId ?? ""}
           onClose={() => setHistoryOpen(false)}
           selectedRunSeq={overlayRun?.seq ?? null}
