@@ -241,7 +241,7 @@ recall it into later turns. See `src/harness/mod.rs`
 (`TurnOutcome::hit_iteration_cap`), `src/runtime/delegation.rs` for the fold, and
 `src/harness/brain.rs` for the notice.
 
-### In-turn spend — $5.00, or the teammate's daily cap, whichever is lower
+### In-turn spend — armed only for a teammate with a declared daily budget
 
 The company's other two spend controls — the plan-level token ceiling and a
 teammate's `budget_usd_daily` — are both **pre-dispatch**. They decide whether a
@@ -249,20 +249,26 @@ turn may *start*; neither can see inside one. So a turn that begins one cent
 under a cap can finish arbitrarily far over it, and raising the iteration ceiling
 widens that window in proportion.
 
-A running turn is therefore also metered against an in-turn ceiling, checked
-between iterations, and halted the moment cumulative spend reaches it. The
-ceiling is the **lower** of $5.00 and this teammate's `budget_usd_daily`: a
-teammate capped at $2/day must not be able to spend $5 inside the one turn that
-slipped past the pre-dispatch gate, while a generous daily cap does not raise the
-per-turn ceiling above the absolute one.
+A running turn is therefore additionally metered by an in-turn brake — openhuman's
+`BudgetStopHook` — checked between iterations and halted the moment cumulative
+spend reaches the cap. The brake is installed **only** for a teammate who
+declares a `budget_usd_daily` cap, and it halts the turn at exactly that value:
+one daily cap then bounds the worst-case overshoot ("one cap" rather than "one
+turn, of unknown size").
 
-$5.00 is several times what a legitimate turn that spends the whole 25-iteration
-ceiling costs on the managed tiers, so it does not ration ordinary work. It exists
-to bound a pathological loop, and to put a number on a worst case that previously
-had none.
+This mirrors the vendored runtime's own posture rather than inventing one.
+OpenHuman constructs `BudgetStopHook` nowhere — it is an available primitive, not
+an applied policy — and the only hook it installs is `GoalBudgetStopHook`, opt-in
+and tied to a user-declared goal. Its own docs are explicit: *"we never
+hard-stop a user-present turn that isn't actively burning a live budget."* So a
+teammate with no declared budget gets no in-turn brake, and there is deliberately
+no blanket per-turn dollar figure that no operator can see or change (it would
+not be in `company.toml` and not in the console). Four shipped templates do set
+`budget_usd_daily` — three agents in `signals_opportunity_studio` and one in
+`e2e_harness` — so the opt-in path is genuinely exercised, not dead code.
 
-A budget halt is **not** an iteration-cap pause, and the runtime reports them
-separately: `TurnOutcome::hit_iteration_cap` is read from
+Since a budget halt and an iteration-cap pause are different outcomes, the
+runtime reports them separately: `TurnOutcome::hit_iteration_cap` is read from
 [`Agent::last_turn_hit_cap`](oh::agent::Agent::last_turn_hit_cap), which stays
 `false` for a hook-driven stop — the run paused below the 25-round ceiling, so
 the cap predicate never held. A cap pause means the teammate ran out of rounds

@@ -174,9 +174,10 @@ pub(crate) const TOOL_RESULT_BUDGET_BYTES: usize =
 /// never takes — setting either here would compile, read as a fix, and change
 /// nothing.
 ///
-/// The in-turn spend brake that makes a longer ceiling safe is
-/// [`MAX_TURN_SPEND_USD`](crate::harness::MAX_TURN_SPEND_USD), installed on the
-/// turn itself.
+/// An in-turn spend brake ([`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook))
+/// is installed on the turn itself, but only for a teammate who declares a
+/// `budget_usd_daily` cap — see [`CompanyAgent::turn_spend_cap_usd`]
+/// (crate::harness::CompanyAgent::turn_spend_cap_usd).
 pub const MAX_TOOL_ITERATIONS: usize = 25;
 
 /// Map a manifest cognition-tier hint to a hosted model/tier name.
