@@ -73,7 +73,10 @@ async function pickAssignee(page: Page, trigger: string, option: RegExp | string
 
 /** The board card whose title matches, once the board has rendered it. */
 function card(page: Page, title: string) {
-  return page.locator("div[draggable=true]").filter({ hasText: title }).first();
+  // The shared `LedgerBoard` puts `draggable` on the wrapper it drags rather
+  // than on the card itself, so the attribute — not the element — is what
+  // identifies a card.
+  return page.locator("[draggable=true]").filter({ hasText: title }).first();
 }
 
 test("the edit dialog offers Unassigned, desks and teammates instead of a text field", async ({

@@ -1253,12 +1253,14 @@ async fn a_plan_fills_a_blank_assignee_but_never_reassigns_one() {
 /// silence that has to keep being true.
 #[tokio::test]
 async fn a_re_plan_does_not_erase_what_an_earlier_attempt_produced() {
-    use crate::ports::tasks::TaskOutput;
+    use crate::ports::tasks::{TaskOutput, TaskOutputSource};
 
     let (_home, runtime) = runtime_with(ScriptedModel::replying(CLEAN_PLAN)).await;
     let produced = TaskOutput {
-        run_id: "run-7".to_string(),
-        attempt: Some(2),
+        source: TaskOutputSource::Run {
+            run_id: "run-7".to_string(),
+            attempt: Some(2),
+        },
         at_millis: 1_000,
         artifacts: Vec::new(),
         workflows: Vec::new(),

@@ -331,6 +331,9 @@ pub struct ConfigFile {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct WorkspaceSection {
+    /// Turn each agent's private filesystem workspace into a Git repository and
+    /// checkpoint changes after tool calls. Default: false.
+    pub git_enabled: Option<bool>,
     /// Empty the ephemeral `tmp/` scratch directory on startup. Default: true.
     pub clear_tmp_on_startup: Option<bool>,
     /// Soft quota on the whole workspace, in gibibytes. Absent or `<= 0` means
@@ -361,6 +364,7 @@ impl WorkspaceSection {
     /// Resolves the section against its defaults.
     pub fn resolve(&self) -> WorkspaceConfig {
         WorkspaceConfig {
+            git_enabled: self.git_enabled.unwrap_or(false),
             clear_tmp_on_startup: self.clear_tmp_on_startup.unwrap_or(true),
             storage_quota_bytes: gib_to_bytes(self.storage_quota_gb),
             tmp_quota_bytes: gib_to_bytes(self.tmp_quota_gb),
@@ -386,6 +390,8 @@ fn gib_to_bytes(gb: Option<f64>) -> Option<u64> {
 /// Resolved `[workspace]` configuration.
 #[derive(Clone, Debug)]
 pub struct WorkspaceConfig {
+    /// Whether private agent workspaces keep automatic Git checkpoints.
+    pub git_enabled: bool,
     /// Whether the ephemeral `tmp/` scratch is cleared on startup.
     pub clear_tmp_on_startup: bool,
     /// Soft whole-workspace quota in bytes; `None` is unlimited.
@@ -399,6 +405,7 @@ pub struct WorkspaceConfig {
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
+            git_enabled: false,
             clear_tmp_on_startup: true,
             storage_quota_bytes: None,
             tmp_quota_bytes: None,
@@ -1064,6 +1071,7 @@ mod test {
         let env = MapEnv::default();
         let file = ConfigFile {
             workspace: WorkspaceSection {
+                git_enabled: Some(true),
                 clear_tmp_on_startup: Some(false),
                 ..WorkspaceSection::default()
             },
@@ -1071,10 +1079,12 @@ mod test {
         };
         let (cfg, _) = resolve(&env, Some(&file), &default_manifest()).unwrap();
         assert!(!cfg.workspace.clear_tmp_on_startup);
+        assert!(cfg.workspace.git_enabled);
 
         // An absent `[workspace]` section resolves to the default (clear on boot).
         let (cfg, _) = resolve(&env, None, &default_manifest()).unwrap();
         assert!(cfg.workspace.clear_tmp_on_startup);
+        assert!(!cfg.workspace.git_enabled);
     }
 
     #[test]
@@ -1611,12 +1621,14 @@ mod test {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join(CONFIG_FILE),
-            "[workspace]\nclear_tmp_on_startup = false\n",
+            "[workspace]\ngit_enabled = true\nclear_tmp_on_startup = false\n",
         )
         .unwrap();
         let file = ConfigFile::load(&dir).unwrap().unwrap();
         assert_eq!(file.workspace.clear_tmp_on_startup, Some(false));
+        assert_eq!(file.workspace.git_enabled, Some(true));
         assert!(!file.workspace.resolve().clear_tmp_on_startup);
+        assert!(file.workspace.resolve().git_enabled);
         std::fs::remove_dir_all(&dir).ok();
     }
 

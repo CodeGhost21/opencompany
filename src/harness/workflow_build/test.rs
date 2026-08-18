@@ -403,7 +403,8 @@ fn the_outcome_resolves_graph_versus_not_automatable() {
             assert!(summary.contains("digest"));
             assert_eq!(spec.nodes.len(), 2);
         }
-        BuildOutcome::NotAutomatable(_) => panic!("a valid graph must build"),
+        BuildOutcome::NotAutomatable(r) => panic!("a valid graph must build, declined: {r}"),
+        BuildOutcome::NoAnswer(r) => panic!("a valid graph must build, no answer: {r}"),
     }
 
     let refused = parse_draft(r#"{"automatable":false,"reason":"only runs once"}"#)
@@ -418,11 +419,20 @@ fn the_outcome_resolves_graph_versus_not_automatable() {
             .into_outcome();
     assert!(matches!(both, BuildOutcome::NotAutomatable(_)));
 
-    // No workflow, no reason → a truthful default reason rather than an empty one.
+    // Issue #873: no workflow, no reason and no refusal decided NOTHING, so it
+    // is a non-answer rather than a verdict. The distinction is load-bearing —
+    // a verdict now settles Succeeded and converts the card to a one-off, and an
+    // empty object must do neither.
     let empty = parse_draft(r#"{"automatable":true}"#)
         .unwrap()
         .into_outcome();
-    assert!(matches!(empty, BuildOutcome::NotAutomatable(r) if !r.is_empty()));
+    assert!(matches!(empty, BuildOutcome::NoAnswer(r) if !r.is_empty()));
+
+    // An explicit refusal with no prose is still a refusal, not a non-answer.
+    let bare_no = parse_draft(r#"{"automatable":false}"#)
+        .unwrap()
+        .into_outcome();
+    assert!(matches!(bare_no, BuildOutcome::NotAutomatable(r) if !r.is_empty()));
 }
 
 /// Untrusted text embedded in the fix prompt cannot open or close a markdown
@@ -677,12 +687,15 @@ pub(crate) fn agent_deps(
     model: Arc<dyn HarnessModel>,
 ) -> crate::harness::HarnessDeps {
     crate::harness::HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: model,
         provider_slug: "managed".to_string(),
         context: runtime.context.clone(),
         store: runtime.store().clone(),
         meter: None,
         workspace_root: std::env::temp_dir(),
+        workspace_git_enabled: false,
         audit_root: std::env::temp_dir(),
         model_override: None,
         tasks: None,
@@ -714,6 +727,7 @@ pub(crate) fn agent_deps(
         chargebee: None,
         #[cfg(feature = "paypal")]
         paypal: None,
+        hosting: None,
         search: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -878,7 +892,11 @@ async fn a_card_with_no_plan_builds_from_title_and_note() {
 }
 
 /// A not-automatable answer returns the card to To-do with the reason and no
-/// proposal (decision D2c); the attempt settles Failed.
+/// proposal (decision D2c).
+///
+/// Issue #873: the attempt settles **Succeeded**, and the card is converted to a
+/// `once` deliverable. It used to settle Failed and keep `workflow`, which is
+/// what trapped the card — see the loop test below.
 #[tokio::test]
 async fn a_not_automatable_answer_returns_the_card_to_todo() {
     let reply = r#"{"automatable":false,"reason":"this only ever runs once"}"#;
@@ -904,7 +922,126 @@ async fn a_not_automatable_answer_returns_the_card_to_todo() {
         "no proposal on a not-automatable card"
     );
     assert!(after.note.unwrap().contains("done once"));
+    assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Succeeded);
+}
+
+/// The loop #873 reports, asserted at the seam that closes it.
+///
+/// `CompanyRuntime::dispatch_task` sends a `workflow`-deliverable card to the
+/// builder pass rather than to its assignee. So a verdict that returned the card
+/// to To-do still carrying `workflow` guaranteed the next dispatch re-entered
+/// the builder, drew the same verdict, and failed again — builder → To-do →
+/// builder, with a red error on every pass and no way for the card to reach the
+/// person who could just do the work.
+///
+/// Converting the deliverable is what breaks it: the card keeps its assignee and
+/// becomes ordinary one-off work.
+#[tokio::test]
+async fn a_not_automatable_verdict_converts_the_card_so_it_stops_re_entering_the_builder() {
+    let reply = r#"{"automatable":false,"reason":"a workflow for this already exists"}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    let before = card("t-loop", None);
+    assert_eq!(
+        before.deliverable,
+        TaskDeliverable::Workflow,
+        "the card starts as builder-routed work"
+    );
+    runtime.tasks().upsert(runtime.id(), &before).await.unwrap();
+    let run_id = open_run(&runtime, "t-loop").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-loop".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let after = read(&runtime, "t-loop").await;
+    assert_eq!(
+        after.deliverable,
+        TaskDeliverable::Once,
+        "a declined card must stop routing to the builder, or it loops forever"
+    );
+    assert_eq!(
+        after.assignee, "maya",
+        "the assignee is who the verdict hands the work to; it must survive"
+    );
+    assert_eq!(after.column, COLUMN_TODO);
+}
+
+/// The operator-facing half. The reason is on the card, and the run row carries
+/// **no** error — a decision filed with an error is how the console showed red
+/// for a reasoned "do this by hand" in the first place.
+#[tokio::test]
+async fn a_not_automatable_verdict_files_no_error_and_says_what_happened_to_the_card() {
+    let reply = r#"{"automatable":false,"reason":"the search tool is not wired here"}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-note", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-note").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-note".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let row = runtime
+        .runs()
+        .get_run(runtime.id(), &run_id)
+        .await
+        .expect("read")
+        .expect("the attempt row exists");
+    assert_eq!(row.status, RunStatus::Succeeded);
+    assert!(
+        row.error.is_none(),
+        "a verdict is not an error: {:?}",
+        row.error
+    );
+
+    let note = read(&runtime, "t-note").await.note.expect("a note");
+    assert!(note.contains("the search tool is not wired here"), "{note}");
+    assert!(
+        note.contains("one-off"),
+        "the note must say what became of the card, not only the verdict: {note}"
+    );
+}
+
+/// The discrimination that makes the change safe: a build that could not be
+/// *attempted* is still a failure, and its card still routes to the builder so a
+/// retry re-attempts the build rather than landing on a person.
+#[tokio::test]
+async fn a_genuine_build_failure_still_fails_and_stays_builder_routed() {
+    // A draft that parses and decides nothing: no graph, no reason, no refusal.
+    // This is the `BuildOutcome::NoAnswer` path — the case that used to share a
+    // variant with a real verdict and would otherwise now convert the card.
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(r#"{"automatable":true}"#)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-fault", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-fault").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-fault".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
+    let after = read(&runtime, "t-fault").await;
+    assert_eq!(
+        after.deliverable,
+        TaskDeliverable::Workflow,
+        "a fault must stay builder-routed — retrying the build is the right next move"
+    );
+    assert_eq!(after.column, COLUMN_TODO);
 }
 
 /// An unparseable answer returns the card to To-do with no proposal; the attempt
@@ -1854,12 +1991,21 @@ fn roster_entry(id: &str, role: &str, name: Option<&str>) -> RosterEntry {
         role: role.to_string(),
         name: name.map(str::to_string),
         description: None,
+        global: false,
     }
 }
 
 /// A `WorkflowGraphSpec` from a JSON literal.
 fn spec_from(value: serde_json::Value) -> WorkflowGraphSpec {
     serde_json::from_value(value).expect("the spec parses")
+}
+
+/// A global-baseline roster teammate for the local-vs-global precedence tests.
+fn global_roster_entry(id: &str, role: &str, name: Option<&str>) -> RosterEntry {
+    RosterEntry {
+        global: true,
+        ..roster_entry(id, role, name)
+    }
 }
 
 /// The normalizer collapses `-`, `_` and whitespace runs so a role, an id and a
@@ -1936,6 +2082,83 @@ fn the_resolver_names_the_roster_on_an_unknown_agent() {
     );
     // The already-valid `ceo` node is untouched.
     assert_eq!(spec.nodes[1].agent.as_deref(), Some("ceo"));
+}
+
+/// (a) A company's own teammate wins a label collision against a global of the
+/// same normalized role — the baseline ships a `writer`/`researcher`, and a
+/// vertical that names its own "Writer" must still resolve to its own, not the
+/// global one, or "the writer" would become unaddressable in every company
+/// that has its own.
+#[test]
+fn the_resolver_prefers_the_local_agent_over_a_same_label_global() {
+    let roster = vec![
+        global_roster_entry("writer", "Writer", None),
+        roster_entry("copy_lead", "Writer", None),
+    ];
+    let mut spec = spec_from(json!({
+        "nodes": [
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "Writer" }
+        ],
+        "edges": []
+    }));
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    resolve_agent_ids(&mut spec, &roster, &mut notes, &mut errors);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(
+        spec.nodes[0].agent.as_deref(),
+        Some("copy_lead"),
+        "the company's own teammate must win, not the global"
+    );
+}
+
+/// (a) Two LOCAL teammates sharing a label stays a genuine, reported ambiguity
+/// — the local-over-global tie-break only resolves a local-vs-global
+/// collision, never a local-vs-local one, since there is no meaningful
+/// precedence between two teammates the company itself declared.
+#[test]
+fn two_local_agents_sharing_a_label_stay_ambiguous() {
+    let roster = vec![
+        roster_entry("writer_a", "Writer", None),
+        roster_entry("writer_b", "Writer", None),
+    ];
+    let mut spec = spec_from(json!({
+        "nodes": [
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "Writer" }
+        ],
+        "edges": []
+    }));
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    resolve_agent_ids(&mut spec, &roster, &mut notes, &mut errors);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("matches more than one teammate"),
+        "{errors:?}"
+    );
+    assert_eq!(spec.nodes[0].agent.as_deref(), Some("Writer"), "unresolved");
+}
+
+/// (a) A label that only a global teammate answers to still resolves — the
+/// local-preference tie-break only narrows a multi-hit collision, it never
+/// drops a global-only match down to zero hits.
+#[test]
+fn a_global_only_label_still_resolves() {
+    let roster = vec![
+        global_roster_entry("researcher", "Researcher", None),
+        roster_entry("ceo", "Chief Executive", None),
+    ];
+    let mut spec = spec_from(json!({
+        "nodes": [
+            { "id": "a", "kind": "agent", "name": "Dig in", "agent": "Researcher" }
+        ],
+        "edges": []
+    }));
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    resolve_agent_ids(&mut spec, &roster, &mut notes, &mut errors);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(spec.nodes[0].agent.as_deref(), Some("researcher"));
 }
 
 /// (b) The delivery gate fires when a delivery is asked for and no `output` node

@@ -298,6 +298,7 @@ fn company_builder(
     .with_default_mcp_servers(state.config().default_mcp_servers.clone())
     .with_host_base_url(state.config().host_base_url())
     .with_workspace_quota(state.config().workspace_quota)
+    .with_workspace_git_enabled(state.config().workspace_git_enabled)
     // Issue #752: the backend that serves this host's secrets, which the
     // repository-credential gates refuse on. Threaded through `company_builder`
     // rather than read from the environment further down, so a rebuild gets the
@@ -572,8 +573,18 @@ fn attach_harness(builder: RuntimeBuilder) -> RuntimeBuilder {
     use opencompany::app::config::ProcessEnv;
     use opencompany::harness::HarnessPool;
     use opencompany::harness::provider::{
-        harness_inference_from_env, media_backend_from_env, search_backend_from_env,
+        PlatformCredentialStatus, harness_inference_from_env, media_backend_from_env,
+        search_backend_from_env,
     };
+
+    // Issue #879: every managed surface below fails closed and says nothing at
+    // boot, so a tenant provisioned without its platform token comes up looking
+    // healthy and only reveals the gap when an agent is built or a workflow node
+    // 500s. Say it once, here, where an operator reading the pod's first lines
+    // will see it.
+    if let Some(warning) = PlatformCredentialStatus::resolve(&ProcessEnv).boot_warning() {
+        tracing::warn!("[boot] {warning}");
+    }
 
     let builder = builder.with_harness(Arc::new(HarnessPool::new()));
     // Issue #109: the MANAGED media-generation backend, resolved from the
@@ -1166,6 +1177,7 @@ async fn async_main() -> Result<()> {
                 // the same `[workspace]` section as the soft disk quotas above
                 // and handed to every company's builder below.
                 workspace_quota: workspace_cfg.quota,
+                workspace_git_enabled: workspace_cfg.git_enabled,
                 ..AppConfig::default()
             })
             .with_cors(opencompany::server::cors::CorsConfig::from_env()?)
@@ -1225,7 +1237,14 @@ async fn async_main() -> Result<()> {
             // the storage backend.
             if let Some(overlay) = opencompany::store::open_memory_overlay(&storage_settings)? {
                 state = state.with_memory_overlay(overlay);
-                println!("memory backend: {:?}", storage_settings.memory_backend);
+                // `as_str`, not `{:?}`: the enum's Debug name is `Tinycortex`
+                // while `/spec` and the docs call that engine `embedded`. An
+                // operator comparing a boot log against a status response should
+                // not have to work out that those are the same thing.
+                println!(
+                    "memory backend: {}",
+                    storage_settings.memory_backend.as_str()
+                );
             }
             // Platform (multi-tenant) auth: either credential enables the
             // provisioning/lifecycle surface. Without both the prosumer operator

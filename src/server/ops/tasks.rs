@@ -25,7 +25,8 @@ use crate::company::{WorkflowGraphSpec, create_company_workflow, raw_workflow_fr
 use crate::error::OpenCompanyError;
 use crate::ports::tasks::{
     BOARD_COLUMNS, COLUMN_DONE, COLUMN_TODO, TaskDeliverable, TaskOutput, TaskOutputAction,
-    TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion, is_board_column,
+    TaskOutputSource, TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion,
+    is_board_column,
 };
 use crate::ports::types::CompanyEvent;
 use crate::ports::{generate_id, now_millis};
@@ -606,8 +607,10 @@ async fn apply_workflow_proposal(
         .flatten()
         .map(|run| run.attempt);
     record.output = Some(TaskOutput {
-        run_id: proposal.run_id.clone(),
-        attempt,
+        source: TaskOutputSource::Run {
+            run_id: proposal.run_id.clone(),
+            attempt,
+        },
         at_millis: now_millis(),
         artifacts: Vec::new(),
         workflows: vec![TaskOutputWorkflow {

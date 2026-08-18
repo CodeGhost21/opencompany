@@ -1,0 +1,35 @@
+# The global baseline: what every company gets, whichever vertical it starts
+# from. See `../docs/spec/runtime/globals.md`.
+#
+# The agents and workflows beside this file are the rest of the baseline; they
+# need no entry here, because a definition that exists is a definition that
+# ships. This file carries only what cannot be a file: the default tool belt,
+# and the subset of the shared skill library that is installed rather than
+# offered.
+
+[tools]
+# The tool belt a company gets when its manifest declares no `[tools]` section
+# at all — every vertical's starting point, authored here rather than hardcoded
+# in `src/company/types.rs`.
+#
+# Deliberately **not** a floor. A floor — namespaces granted on top of whatever
+# a company allows, which no company could drop below — would silently re-grant
+# authority a company withheld on purpose: `workspace` confers workspace
+# *writes*, which even a `*` grant deliberately does not, and an agent with no
+# `files` grant is meant to be offered no file tools at all. A default a company
+# can override is the version of "global tools" that does not quietly widen
+# anyone's blast radius.
+#
+# `*` covers files/docs/shell/code/web/subagent. `media` and `composio` are
+# listed literally because `*` excludes the real-money and
+# per-tenant-credential namespaces. `search` is deliberately absent: it is
+# opt-in, so a company that never asked for web search never spends on it.
+default_allow = ["*", "media", "composio"]
+
+[skills]
+# Shared-library skills installed in every company, by slug.
+#
+# The rest of `../skills/` stays what it is — a registry an operator installs
+# from. These three are here because every company does research, reports its
+# week, and walks into meetings, regardless of what it sells.
+always = ["web-research", "weekly-report", "meeting-brief"]

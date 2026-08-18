@@ -29,6 +29,7 @@ use crate::company::mcp::{
 };
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::metering::roster_display_names;
 use crate::ports::types::CompanyRecord;
 use crate::runtime::builder::agent_effective_grants;
 use crate::runtime::tools::grants_cover_server;
@@ -74,22 +75,43 @@ struct McpServerDto {
     timeout_secs: u64,
     /// Whether an outbound credential is stored — never the credential itself.
     auth_configured: bool,
-    /// The ids of the company's agents whose effective tool grants cover this
-    /// server — who can actually call it (issue #568). Computed over the same
-    /// roster the harness builds (manifest agents + promoted overlay teammates),
-    /// through the shared
-    /// [`grants_cover_server`](crate::runtime::tools::grants_cover_server), so the
-    /// console cannot disagree with the harness about reachability. **An empty
-    /// list is meaningful**: an *enabled*, healthy server no teammate can reach
-    /// is almost always a misconfiguration, and the console flags it rather than
-    /// showing an empty list silently. A **disabled** server is always empty —
-    /// the harness hands out no tool for it whatever the grants say — so the
+    /// The company's agents whose effective tool grants cover this server — who
+    /// can actually call it (issue #568). Computed over the same roster the
+    /// harness builds (manifest agents + promoted overlay teammates), through the
+    /// shared [`grants_cover_server`](crate::runtime::tools::grants_cover_server),
+    /// so the console cannot disagree with the harness about reachability. **An
+    /// empty list is meaningful**: an *enabled*, healthy server no teammate can
+    /// reach is almost always a misconfiguration, and the console flags it rather
+    /// than showing an empty list silently. A **disabled** server is always empty
+    /// — the harness hands out no tool for it whatever the grants say — so the
     /// console reads the empty case against `enabled` and stays quiet there.
     /// Always serialized (even when empty).
-    reachable_by: Vec<String>,
+    reachable_by: Vec<RosterAgentDto>,
     /// The last recorded probe outcome (scrubbed), or `None` when never probed.
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<McpHealth>,
+}
+
+/// One roster agent named on a coverage line, carried as an id **and** the label
+/// the console prints (issue #931).
+///
+/// The id alone was the whole payload until #931: readable for a manifest agent,
+/// whose id is an authored slug, but a minted `{millis}-{counter}` string for an
+/// operator-added overlay teammate — so the console's "Reachable by" line printed
+/// blueprint slugs next to raw internal ids. `name` is the same display label the
+/// Team page and the usage buckets use ([`roster_display_names`]: a manifest
+/// agent's `role`, an overlay teammate's `name`); the id stays so a client can
+/// still key or link on it.
+///
+/// `pub(super)` and named for the roster rather than for MCP because it rides
+/// out of [`roster_grants`], which the repositories surface reads too (issue
+/// #245) — its "Readable by" line is the same sentence about a different
+/// namespace and printed the same raw ids.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RosterAgentDto {
+    pub(super) id: String,
+    pub(super) name: String,
 }
 
 /// A mutating response: the resulting server, the rebuild reminder, the live
@@ -240,7 +262,7 @@ async fn manifest_servers(runtime: &CompanyRuntime) -> Result<Vec<McpServer>, Ap
 /// can reach it (issue #568), and attaching the last (scrubbed) probe health.
 fn dto_from_decl(
     decl: &mcp::McpServerDecl,
-    reachable_by: Vec<String>,
+    reachable_by: Vec<RosterAgentDto>,
     health: Option<McpHealth>,
 ) -> McpServerDto {
     McpServerDto {
@@ -259,7 +281,7 @@ fn dto_from_decl(
 }
 
 /// Every roster agent's *effective* tool grants (issue #568), as
-/// `(agent_id, grants)`.
+/// `(agent, grants)`.
 ///
 /// `pub(super)` since issue #245: the repositories surface answers the same
 /// question about a different namespace ("who can read this?"), and a second
@@ -272,15 +294,26 @@ fn dto_from_decl(
 /// `overlay_agent_to_manifest` gives it. An overlay id already claimed by a
 /// manifest agent is skipped, both mirroring the harness so console
 /// reachability equals what an agent is actually granted.
-pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)> {
+///
+/// Each agent carries its display label alongside its id (issue #931), resolved
+/// through [`roster_display_names`] — the same map the Team page and the usage
+/// buckets read, so one teammate is named identically everywhere in the console.
+/// An id absent from that map (it cannot be, over this roster) falls back to the
+/// id, matching `bucket_usage`.
+pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(RosterAgentDto, Vec<String>)> {
     let allow = &record.manifest.tools.allow;
-    let mut grants: Vec<(String, Vec<String>)> = record
+    let names = roster_display_names(&record.manifest.agents, &record.overlay_agents);
+    let roster_agent = |id: &str| RosterAgentDto {
+        id: id.to_string(),
+        name: names.get(id).cloned().unwrap_or_else(|| id.to_string()),
+    };
+    let mut grants: Vec<(RosterAgentDto, Vec<String>)> = record
         .manifest
         .agents
         .iter()
         .map(|agent| {
             (
-                agent.id.clone(),
+                roster_agent(&agent.id),
                 agent_effective_grants(allow, &agent.tools),
             )
         })
@@ -307,30 +340,33 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)
         // server, and the console asserted a connection the harness does not
         // grant.
         grants.push((
-            overlay.id.clone(),
+            roster_agent(&overlay.id),
             agent_effective_grants(allow, &overlay.tools),
         ));
     }
     grants
 }
 
-/// The ids of the agents whose effective `grants` reach `decl` (issue #568),
-/// read through the shared [`grants_cover_server`] so this agrees with the
-/// harness registry. Empty ⇒ no teammate can reach the server.
+/// The agents whose effective `grants` reach `decl` (issue #568), read through
+/// the shared [`grants_cover_server`] so this agrees with the harness registry.
+/// Empty ⇒ no teammate can reach the server.
 ///
 /// A **disabled** server reaches nobody regardless of grants: `registry_for_agent`
 /// filters on `decl.enabled && grants_cover_server(..)`, so an agent granted
 /// `mcp:<slug>` still gets no such tool while the server is off. Mirroring both
 /// halves of that filter here is what keeps the console from claiming a
 /// reachability the harness does not hand out.
-fn reachers_of(roster_grants: &[(String, Vec<String>)], decl: &mcp::McpServerDecl) -> Vec<String> {
+fn reachers_of(
+    roster_grants: &[(RosterAgentDto, Vec<String>)],
+    decl: &mcp::McpServerDecl,
+) -> Vec<RosterAgentDto> {
     if !decl.enabled {
         return Vec::new();
     }
     roster_grants
         .iter()
         .filter(|(_, grants)| grants_cover_server(grants, &decl.name))
-        .map(|(id, _)| id.clone())
+        .map(|(agent, _)| agent.clone())
         .collect()
 }
 
@@ -945,7 +981,7 @@ role = "Chief Executive"
         let grants = roster_grants(&scoped);
         let jamie = grants
             .iter()
-            .find(|(id, _)| id == "jamie")
+            .find(|(agent, _)| agent.id == "jamie")
             .expect("the overlay teammate is on the roster");
         assert_eq!(
             jamie.1,
@@ -957,11 +993,42 @@ role = "Chief Executive"
         // the narrowing above is the teammate's own and not a company change.
         let ceo = grants
             .iter()
-            .find(|(id, _)| id == "ceo")
+            .find(|(agent, _)| agent.id == "ceo")
             .expect("on roster");
         assert_eq!(
             ceo.1,
             vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
+    /// Issue #931: every roster entry carries a printable label, so no console
+    /// coverage line has to fall back to the id.
+    ///
+    /// The id is the wrong thing to print for exactly the teammates an operator
+    /// created: `POST …/team` mints `{millis:012x}-{counter:012x}`, which is
+    /// what "Reachable by" and "Readable by" showed. The two halves resolve
+    /// differently and both are asserted — a manifest agent has no name of its
+    /// own, so its label is its `role`; an overlay teammate's is its `name`.
+    #[test]
+    fn every_roster_entry_carries_a_printable_label() {
+        let minted = "019fa75dbc9b-000000000001";
+        let mut teammate = teammate(minted, Vec::new());
+        teammate.name = "Jamie".to_string();
+        let grants = roster_grants(&record(vec![teammate]));
+        let label = |id: &str| {
+            grants
+                .iter()
+                .find(|(agent, _)| agent.id == id)
+                .unwrap_or_else(|| panic!("`{id}` is on the roster"))
+                .0
+                .name
+                .clone()
+        };
+        assert_eq!(label(minted), "Jamie", "an overlay teammate's own name");
+        assert_eq!(
+            label("ceo"),
+            "Chief Executive",
+            "a manifest agent has no name of its own, so its role is the label"
         );
     }
 
@@ -971,7 +1038,10 @@ role = "Chief Executive"
     #[test]
     fn an_unscoped_overlay_teammate_still_inherits_the_company_grant() {
         let grants = roster_grants(&record(vec![teammate("jamie", Vec::new())]));
-        let jamie = grants.iter().find(|(id, _)| id == "jamie").expect("roster");
+        let jamie = grants
+            .iter()
+            .find(|(agent, _)| agent.id == "jamie")
+            .expect("roster");
         assert_eq!(
             jamie.1,
             vec!["mcp:notion".to_string(), "mcp:linear".to_string()]

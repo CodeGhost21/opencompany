@@ -57,6 +57,11 @@ pub mod delegation;
 /// catalog, and desk-lead resolver shared by BOTH the harness and hosted paths.
 /// Compiled in every build (the hosted brain ships in the default build).
 pub mod delegation_tools;
+/// The write guard on the `derived/` folder: a
+/// [`WorkspaceStore`](crate::ports::WorkspaceStore) decorator that refuses a
+/// hand-written edit to a file a ledger renders, and names the tool that
+/// actually writes the row.
+pub mod derived_guard;
 /// Single-use grants minted when an operator approves a blocked tool call
 /// (issue #243). Compiled in every build: the journal records and their replay
 /// are feature-independent, so a company that ran under the harness stays
@@ -91,6 +96,11 @@ pub mod scheduler;
 pub mod telegram_poller;
 pub mod tools;
 pub mod types;
+/// Issue #978: which gate node each parked workflow approval is deciding, and
+/// the trigger input its run paused with — the two facts a run-scoped
+/// continuation needs and the journal cannot give back once an approval has
+/// resolved. See [`workflow_gates`].
+pub mod workflow_gates;
 /// Issue #228: the single place a finished workflow run is journaled, shared by
 /// the console's run route and the cron [`WorkflowScheduler`] so a run's history
 /// is uniform no matter what started it. See [`workflow_outcome`].
@@ -118,6 +128,7 @@ pub use builder::{RuntimeBuilder, company_id_from_name};
 pub use channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
 pub use cron::{CivilTime, CronExpr};
 pub use cycle::CycleRunner;
+pub use derived_guard::DerivedGuardWorkspace;
 pub use handover::RuntimeHandover;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;

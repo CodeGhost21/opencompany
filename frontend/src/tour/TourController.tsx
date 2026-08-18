@@ -241,6 +241,27 @@ export function TourController({
             initialStepIndex={startIndex}
             continuous
             tooltipComponent={TourTooltip}
+            // Clamp the card into the viewport on BOTH axes (issue #583).
+            //
+            // joyride positions with floating-ui, and neither of its two
+            // defaults can save a stop anchored to a full-viewport element —
+            // which the Overview graph is (`h-svh`, top edge at y=0). Asking
+            // for `placement: "top"` there resolves to `0 - height - offset`,
+            // measured at y=-238: rendered, visible, mounted, and entirely
+            // above the fold. Which is what gets reported as "the tour is
+            // stuck on step 2".
+            //
+            // `flip` cannot fix it: against a full-height anchor the *bottom*
+            // side overflows by exactly as much as the top, so floating-ui's
+            // best-fit tie-break keeps the side it started on. And `shift`
+            // clamps only its main axis, which for a top/bottom placement is
+            // the horizontal one — the broken axis is the one left alone.
+            //
+            // Turning on `crossAxis` is the missing half: the card slides back
+            // inside on the axis the placement runs along. It may then overlap
+            // the element it points at, which for a full-bleed anchor is
+            // unavoidable and strictly better than being unreachable.
+            floatingOptions={{ shiftOptions: { crossAxis: true } }}
             options={{
               zIndex: 1200,
               overlayColor: "rgba(0,0,0,0.45)",

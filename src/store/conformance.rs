@@ -3478,6 +3478,128 @@ pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
 ///   a document, the agent grounds an answer in it, and nothing anywhere says
 ///   so.
 ///
+/// Sibling-name uniqueness for files, which every backend must enforce **in the
+/// store** (issue #894).
+///
+/// SQLite had no equivalent of fs's `reject_path_collision` or MongoDB's partial
+/// unique index: `workspace_nodes` is `PRIMARY KEY (company_id, id)` and nothing
+/// else, so `create` checked only that the *id* was fresh. Two nodes could share
+/// `(company_id, parent_id, name)`, and from then on `render_path` yields one
+/// path for two nodes — `read` answers `Ambiguous` while `list` still shows
+/// both, and one duplicated ancestor folder poisons every descendant path.
+///
+/// This case is the contract, not the race: it runs sequentially, so it holds
+/// every backend to the *rule* without depending on scheduling. The race itself
+/// is decided by machinery only each backend has — see the SQLite store's
+/// `two_stores_racing_one_name_have_one_winner`, which is where the guard
+/// actually earns its transaction.
+///
+/// **Files only, deliberately.** Folder-vs-folder is `adopt_or_create_folder`'s
+/// to adopt rather than refuse (issue #759), and file-vs-folder is left
+/// unasserted because the backends genuinely disagree — see the note at the end
+/// of the body. Asserting more here would make this a new tree rule rather than
+/// a race fix, and would fail one backend or the other whichever way it went.
+pub async fn assert_workspace_sibling_names(ws: Arc<dyn WorkspaceStore>) {
+    use crate::ports::workspace::WorkspaceOrigin;
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+    let agent = || WorkspaceOrigin::Agent {
+        id: "ceo".to_string(),
+    };
+    let file = |id: &str, name: &str, parent: Option<&str>| WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: NodeKind::File,
+        parent_id: parent.map(str::to_string),
+        created_by: agent(),
+        updated_by: agent(),
+        updated_at_millis: now_millis(),
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+
+    // A folder to hold the contended name, plus the root as a second scope.
+    let folder = WorkspaceNode {
+        kind: NodeKind::Folder,
+        ..file("dup-folder", "Reports", None)
+    };
+    ws.create(&alpha, &folder, None)
+        .await
+        .expect("a folder at a free root name");
+
+    ws.create(
+        &alpha,
+        &file("dup-a", "report.md", Some("dup-folder")),
+        Some("A"),
+    )
+    .await
+    .expect("the first file claims the name");
+
+    // -- The rule ---------------------------------------------------------
+    let err = ws
+        .create(
+            &alpha,
+            &file("dup-b", "report.md", Some("dup-folder")),
+            Some("B"),
+        )
+        .await
+        .expect_err("a second file at one path must be refused by the store");
+    assert!(
+        matches!(err, crate::error::OpenCompanyError::Conflict(_)),
+        "a taken sibling name is a Conflict, not a storage fault: {err:?}"
+    );
+
+    // -- And it left nothing behind ---------------------------------------
+    let tree = ws.tree(&alpha).await.expect("tree reads");
+    let named: Vec<&WorkspaceNode> = tree
+        .iter()
+        .filter(|n| n.name == "report.md" && n.parent_id.as_deref() == Some("dup-folder"))
+        .collect();
+    assert_eq!(
+        named.len(),
+        1,
+        "exactly one node may hold the path; the loser must not be stored: {named:?}"
+    );
+    assert_eq!(named[0].id, "dup-a", "the first writer keeps the name");
+    let (_, winner_body) = ws
+        .read(&alpha, "dup-a")
+        .await
+        .expect("winner reads")
+        .expect("the winner is still there");
+    assert_eq!(
+        winner_body, "A",
+        "the winner's payload is untouched by the refusal"
+    );
+
+    // -- Scope: the same name under a different parent is a different path -
+    ws.create(&alpha, &file("dup-root", "report.md", None), None)
+        .await
+        .expect("the root is a different folder, so the name is free there");
+
+    // -- Scope: and a different company shares nothing ---------------------
+    let beta_folder = WorkspaceNode {
+        kind: NodeKind::Folder,
+        ..file("dup-folder", "Reports", None)
+    };
+    ws.create(&beta, &beta_folder, None)
+        .await
+        .expect("beta's own folder");
+    ws.create(&beta, &file("dup-a", "report.md", Some("dup-folder")), None)
+        .await
+        .expect("another company's tree is not consulted");
+
+    // A folder taking a file's name is deliberately NOT asserted either way.
+    // The backends genuinely disagree and always have: fs's
+    // `reject_path_collision` compares the rendered path and so refuses it,
+    // while MongoDB keys files and folders under separate partial indexes and
+    // so permits it. Pinning either answer here would force one of them to
+    // change behaviour — loosening the strictest backend, or widening a race
+    // fix into a new tree rule. The suite states the rule all three must keep
+    // and stays silent on the rest.
+}
+
 /// A retry only ever addresses the first. So the body is deliberately built from
 /// multi-byte characters and checked for **equality with a whole revision**
 /// rather than for decodability: length and content, not just "no error".

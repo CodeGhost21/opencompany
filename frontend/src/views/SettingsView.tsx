@@ -18,6 +18,7 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -115,38 +116,44 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
         {/* Domain & email */}
         <DomainSettings company={company} />
 
-        {/* Appearance */}
+        {/* Appearance.
+
+            The trailing control goes in `CardAction`, not a bare child:
+            `CardHeader` is a grid, so `flex-row justify-between` on it is inert
+            and the control drops onto a row of its own below the description.
+            `CardAction` is what switches the header to `grid-cols-[1fr_auto]`
+            and parks the control at the top right. */}
         <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div className="space-y-1">
-              <CardTitle className="text-base">Appearance</CardTitle>
-              <CardDescription>Switch between light, dark, and system themes.</CardDescription>
-            </div>
-            <ThemeToggle />
+          <CardHeader>
+            <CardTitle className="text-base">Appearance</CardTitle>
+            <CardDescription>Switch between light, dark, and system themes.</CardDescription>
+            <CardAction>
+              <ThemeToggle />
+            </CardAction>
           </CardHeader>
         </Card>
 
         {/* Product tour */}
         <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div className="space-y-1">
-              <CardTitle className="text-base">Product tour</CardTitle>
-              <CardDescription>Replay the guided walkthrough of the console.</CardDescription>
-            </div>
-            <Button
-              variant="outline"
-              // The tour's code is lazily loaded, so without this the download
-              // starts on the click and the button appears to do nothing until
-              // it lands. Pointing at it is intent enough to fetch.
-              onPointerEnter={preloadTour}
-              onFocus={preloadTour}
-              onClick={() => {
-                restartTour(scope);
-                toast.success("Starting the product tour.");
-              }}
-            >
-              <Compass className="size-4" /> Replay tour
-            </Button>
+          <CardHeader>
+            <CardTitle className="text-base">Product tour</CardTitle>
+            <CardDescription>Replay the guided walkthrough of the console.</CardDescription>
+            <CardAction>
+              <Button
+                variant="outline"
+                // The tour's code is lazily loaded, so without this the download
+                // starts on the click and the button appears to do nothing until
+                // it lands. Pointing at it is intent enough to fetch.
+                onPointerEnter={preloadTour}
+                onFocus={preloadTour}
+                onClick={() => {
+                  restartTour(scope);
+                  toast.success("Starting the product tour.");
+                }}
+              >
+                <Compass className="size-4" /> Replay tour
+              </Button>
+            </CardAction>
           </CardHeader>
         </Card>
 

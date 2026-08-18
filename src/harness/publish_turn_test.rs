@@ -301,6 +301,8 @@ fn brain_with(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
             base_url,
             credential: Credential::from_value("stub-key"),
@@ -311,6 +313,7 @@ fn brain_with(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
         workspace_root: dir.to_path_buf(),
+        workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
         tasks: Some(ops.clone()),
@@ -342,6 +345,7 @@ fn brain_with(
         chargebee: None,
         #[cfg(feature = "paypal")]
         paypal: None,
+        hosting: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
@@ -908,8 +912,12 @@ async fn a_published_card_links_to_the_version_its_run_wrote() {
         .await
         .output
         .expect("a successful run stamps its card");
-    assert_eq!(output.run_id, "run-1");
-    assert_eq!(output.attempt, Some(1), "the first attempt at this card");
+    assert_eq!(output.source.run_id(), Some("run-1"));
+    assert_eq!(
+        output.source.attempt(),
+        Some(1),
+        "the first attempt at this card"
+    );
     assert_eq!(output.artifacts.len(), 1, "got {:?}", output.artifacts);
 
     let linked = &output.artifacts[0];
@@ -957,7 +965,7 @@ async fn a_task_that_produced_no_file_still_links_to_its_trace() {
         .await
         .output
         .expect("no artifact must not mean no link");
-    assert_eq!(output.run_id, "run-1");
+    assert_eq!(output.source.run_id(), Some("run-1"));
     assert!(output.artifacts.is_empty());
     assert!(output.workflows.is_empty());
 }
@@ -1005,8 +1013,8 @@ async fn a_re_run_repins_the_link_to_the_attempt_that_last_succeeded() {
         .expect("run 2");
 
     let second = card_after(&ops, "t-1").await.output.expect("re-stamped");
-    assert_eq!(second.run_id, "run-2");
-    assert_eq!(second.attempt, Some(2));
+    assert_eq!(second.source.run_id(), Some("run-2"));
+    assert_eq!(second.source.attempt(), Some(2));
     assert_eq!(second.artifacts.len(), 1, "one path, one record, one link");
     assert_eq!(
         second.artifacts[0].version, 2,
@@ -1017,7 +1025,7 @@ async fn a_re_run_repins_the_link_to_the_attempt_that_last_succeeded() {
         "republishing one path extends one record"
     );
     // The earlier attempt is not erased — it is still reachable as its own run.
-    assert_ne!(second.run_id, first.run_id);
+    assert_ne!(second.source.run_id(), first.source.run_id());
 }
 
 /// *"A retried task links to the successful one."* The failing half: a later
@@ -1068,7 +1076,7 @@ async fn a_failed_retry_does_not_erase_the_link_to_the_success_before_it() {
     let still = after
         .output
         .expect("the success's link survives the failure");
-    assert_eq!(still.run_id, succeeded.run_id);
+    assert_eq!(still.source.run_id(), succeeded.source.run_id());
     assert_eq!(still.artifacts, succeeded.artifacts);
 }
 

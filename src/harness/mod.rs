@@ -50,9 +50,15 @@ pub mod acp_run_turn;
 pub mod audit;
 pub mod brain;
 pub mod build;
+/// Issue #926: end-to-end proof that a turn which exhausts its tool-iteration
+/// budget pauses **visibly** — the flag is read, the operator gets a second
+/// bubble saying so, and the notice never reaches memory. Test-only.
+#[cfg(test)]
+mod cap_turn_test;
 pub mod capability_budget;
 #[cfg(feature = "chargebee")]
 pub mod chargebee;
+mod checkpoint;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
 /// agent, and why every cut it makes describes itself. Pure and un-gated (the
@@ -75,6 +81,12 @@ pub mod cost;
 /// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
 #[cfg(feature = "tinycortex")]
 pub mod embeddings;
+/// Hosting (TinyHosts): the per-company connection and the agent tools over it.
+/// The keys it reads live in `company::hosting`, which is compiled in every
+/// build — the console's Hosting settings write them whether or not this
+/// harness exists to use them.
+pub mod hosting;
+pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;
 pub mod mcp_probe;
@@ -212,6 +224,10 @@ pub struct HarnessDeps {
     /// Root under which per-agent workspace directories are created
     /// (`{root}/{company}/{agent}/workspace`).
     pub workspace_root: PathBuf,
+    /// Whether each private agent workspace is initialized as a Git repository
+    /// and checkpointed after tool calls. Host-level `[workspace]` config owns
+    /// this switch; false preserves the pre-checkpoint behavior exactly.
+    pub workspace_git_enabled: bool,
     /// The **instance data root** the shell audit sink hangs off, resolved
     /// through [`DataLayout::agent_audit_dir`](crate::store::DataLayout::agent_audit_dir)
     /// to `companies/<slug>/audit/<agent>/` (issue #775).
@@ -246,6 +262,23 @@ pub struct HarnessDeps {
     /// written either way, so an unwired artifact store loses nothing that
     /// existed previously.
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
+    /// The company's ledgers, so an agent can read what has already been
+    /// decided, goaled or ruled out, record what it decides, and declare an axis
+    /// nobody anticipated. `None` builds no ledger tools at all — which is right
+    /// for a path with no company behind it, and is what every construction site
+    /// that predates them does.
+    pub ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
+    /// The company's ledgers as they stood when the agent was built, for the
+    /// prompt catalogue.
+    ///
+    /// Resolved to **data** before deps construction because `build_agent` is
+    /// synchronous, the same shape the MCP servers already take. A ledger
+    /// declared mid-run is therefore reachable by every tool immediately (the
+    /// `ledger` argument is checked against the live registry at call time) and
+    /// appears in the *prompt* only from the next build — which is the honest
+    /// limit: system prompts are assembled once, and nothing can retroactively
+    /// edit one already in flight.
+    pub ledger_registry: crate::ledger::Registry,
     /// The company's skill-delta store, so a built agent can see its effective
     /// skill set (company-dir skills ∪ operator deltas ∪ custom docs) as read
     /// tools + a prompt catalogue. `None` leaves the agent skill-less (the chat
@@ -444,6 +477,14 @@ pub struct HarnessDeps {
     /// and re-resolved each turn, like `chargebee`.
     #[cfg(feature = "paypal")]
     pub paypal: Option<paypal::TenantPaypal>,
+
+    /// The per-company hosting connection. `None` (the default at every
+    /// construction site) fails closed — no hosting tools are wired. Resolved
+    /// from that company's own secret store and re-resolved each turn, like
+    /// `chargebee`: two companies on one host deploy to two different hosting
+    /// accounts, and a deployment publishes files to the internet under the
+    /// account's own name.
+    pub hosting: Option<hosting::TenantHosting>,
     /// The MANAGED web-search backend (issue #238). `None` (the default at every
     /// construction site but the production runtime builder) **fails closed** —
     /// no `web_search` tool is wired and agents behave exactly as before.
@@ -601,6 +642,25 @@ pub struct TurnOutcome {
     /// The scrubbed, folded processing steps (empty for a memory-served or
     /// tool-less turn — the zero-steps tell).
     pub steps: Vec<TurnStep>,
+    /// Whether this turn **paused at its tool-iteration cap** rather than
+    /// finishing what it set out to do (issue #926).
+    ///
+    /// A capped turn is not an error and never has been: openhuman stops the
+    /// tool loop, makes one extra tools-disabled call asking the model for a
+    /// resumable "Done so far / Next steps" checkpoint, and returns that as an
+    /// ordinary `Ok(reply)`. So the reply reads like a finished answer, and
+    /// nothing in the text, the steps or the error channel distinguishes "I
+    /// answered you" from "I ran out of steps mid-task" — which is exactly what
+    /// the operator could not tell.
+    ///
+    /// Read from openhuman's public
+    /// [`Agent::last_turn_hit_cap`](oh::agent::Agent::last_turn_hit_cap) while
+    /// the agent lock is still held, the same under-lock idiom
+    /// [`read_turn_usage`] uses. `false` on every path that returns an outcome
+    /// **without** running a model turn (the two pre-turn budget refusals, the
+    /// ACP fold) — a refusal is not a pause, and labelling one as a cap hit
+    /// would tell the operator to reply "continue" to a turn that never ran.
+    pub hit_iteration_cap: bool,
 }
 
 impl CompanyAgent {
@@ -762,12 +822,45 @@ impl CompanyAgent {
         // still runs this cleanup before propagating, so the collector never
         // leaks.
         agent.set_on_progress(None);
+        // Issue #926: read the cap flag while the lock is still held, the same
+        // under-lock idiom `read_turn_usage` uses above. Not draining, so the
+        // retry path's second attempt simply overwrites the first's value —
+        // which is right: the outcome describes the attempt that produced the
+        // reply being returned.
+        let hit_iteration_cap = agent.last_turn_hit_cap();
         drop(agent);
         let events = collector.await.unwrap_or_default();
+        // The cap openhuman was actually enforcing, for the trace only. Taken
+        // from the last `IterationStarted` rather than from config, so the log
+        // reports the number the turn ran under instead of the one this crate
+        // believes it configured. Deliberately NOT plumbed into the operator
+        // notice: one notice can cover a responder turn, a desk turn and a
+        // relay turn, and naming one of their caps would be a number the
+        // operator cannot map back to anything.
+        let iteration_cap = events.iter().rev().find_map(|event| match event {
+            oh::agent::progress::AgentProgress::IterationStarted { max_iterations, .. } => {
+                Some(*max_iterations)
+            }
+            _ => None,
+        });
+        if hit_iteration_cap {
+            tracing::info!(
+                agent = %self.agent_id,
+                iteration_cap,
+                "[turn] paused at the tool-iteration cap; the reply is a resumable checkpoint, not a finished answer"
+            );
+        }
         let steps = steps::fold_steps(events);
 
         let reply = reply?;
-        Ok((TurnOutcome { reply, steps }, usages))
+        Ok((
+            TurnOutcome {
+                reply,
+                steps,
+                hit_iteration_cap,
+            },
+            usages,
+        ))
     }
 
     /// Classify one `agent.turn` result for the retry wrapper.
@@ -1137,18 +1230,20 @@ impl HarnessPool {
         let chargebee_config = self.resolve_chargebee(company, deps).await;
         #[cfg(feature = "paypal")]
         let paypal_config = self.resolve_paypal(company, deps).await;
+        // The hosting credential is set from the same settings surface and goes
+        // stale the same way, so it rides the same axis.
+        let hosting_config = self.resolve_hosting(company, deps).await;
         // A build without either feature has no billing axis to go stale on, so
         // the fingerprint is a constant and this company never rebuilds on it.
         let billing_fp = {
             use std::hash::Hasher;
-            // `mut` is only exercised when a billing feature is compiled in; a
-            // build with neither writes nothing and the hasher stays untouched.
-            #[cfg_attr(not(any(feature = "chargebee", feature = "paypal")), allow(unused_mut))]
+            // Always written to: the hosting axis below is ungated.
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             #[cfg(feature = "chargebee")]
             hasher.write_u64(chargebee::TenantChargebee::fingerprint(&chargebee_config));
             #[cfg(feature = "paypal")]
             hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
+            hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
             hasher.finish()
         };
 
@@ -1168,10 +1263,18 @@ impl HarnessPool {
         // surfaces until a restart (the regression). `build_roster`/`build_agent`
         // stay synchronous and fold these deltas into each agent's effective
         // skill set; the same Vec is reused for the rebuild below (no re-fetch).
-        let skill_deltas = match &deps.skills {
+        let mut skill_deltas = match &deps.skills {
             Some(store) => store.list(&company.id).await?,
             None => Vec::new(),
         };
+        // `[globals].disable = ["skill:…"]` reaches the effective set as a
+        // synthesized disabling delta rather than a second opt-out mechanism
+        // inside `EffectiveSkills`: the manifest and the console are then saying
+        // the same thing in the same vocabulary, and a disable always beats an
+        // enable there, so the company's own declaration wins over a console
+        // re-enable of a skill it opted out of.
+        skill_deltas.extend(globals_skill_disables(&company.manifest.globals.disable));
+        let skill_deltas = skill_deltas;
         let skill_fp = skill_delta_fingerprint(&skill_deltas);
 
         // Resolve the routed workspace documents (context routing) before the
@@ -1237,6 +1340,7 @@ impl HarnessPool {
         {
             fresh_deps.paypal = paypal_config;
         }
+        fresh_deps.hosting = hosting_config;
         // And the freshly-read bindings (issue #245), so a repository bound or
         // revoked in the console is what the rebuilt agents' tools resolve
         // against — including the descriptions that name what is bound.
@@ -1440,6 +1544,42 @@ impl HarnessPool {
                      connection: {err}"
                 );
                 deps.chargebee.clone()
+            }
+        }
+    }
+
+    /// The hosting equivalent, for the same reasons.
+    ///
+    /// Only companies that **explicitly** grant `hosting` read at all: a
+    /// deployment publishes a company's files to the public internet and can
+    /// provision a database it is billed for, so the catch-all `*` does not
+    /// confer it.
+    ///
+    /// A transient read error keeps the last known connection with a warning,
+    /// like `chargebee` and for the same reason: a stale hosting key is refused
+    /// by the provider, which the agent surfaces as a tool error it can report,
+    /// whereas a tool that has vanished is invisible to the agent — it simply
+    /// stops being able to deploy and says nothing.
+    async fn resolve_hosting(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<hosting::TenantHosting> {
+        if !crate::company::grants_hosting_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.hosting.clone();
+        };
+        match hosting::TenantHosting::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[hosting] could not read the hosting credential; keeping the last known \
+                     connection: {err}"
+                );
+                deps.hosting.clone()
             }
         }
     }
@@ -1858,6 +1998,9 @@ impl HarnessPool {
                             return Some(TurnOutcome {
                                 reply: TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
                                 steps: Vec::new(),
+                                // No model call ran, so no cap was reached
+                                // (issue #926). A refusal is not a pause.
+                                hit_iteration_cap: false,
                             });
                         }
                     }
@@ -2101,6 +2244,9 @@ impl HarnessPool {
                                 return Ok(TurnOutcome {
                                     reply: agent_budget_exhausted_notice(agent_id, cap),
                                     steps: Vec::new(),
+                                    // No model call ran, so no cap was reached
+                                    // (issue #926). A refusal is not a pause.
+                                    hit_iteration_cap: false,
                                 });
                             }
                         }
@@ -2535,6 +2681,28 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
 /// (and drop live agent conversation state) whenever the store returned the
 /// same skills in a different row order. The full `custom_doc` body is hashed so
 /// an *edited* skill (same slug, new content) also triggers a rebuild. No
+/// The disabling [`SkillState`] deltas a company's `[globals].disable` implies.
+///
+/// One per `skill:<slug>` entry, and nothing else: an entry naming another kind
+/// is that kind's business, and manifest validation has already refused an entry
+/// naming nothing at all.
+pub(crate) fn globals_skill_disables(disable: &[String]) -> Vec<SkillState> {
+    disable
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("skill:"))
+        .map(|slug| SkillState {
+            slug: slug.to_string(),
+            enabled: false,
+            // The shared library is where these skills are authored, so that is
+            // what they are a delta over. The value is inert here in any case:
+            // this delta is synthesized per rebuild, never stored, and only its
+            // `enabled = false` is read.
+            source: crate::ports::SkillSource::Registry,
+            custom_doc: None,
+        })
+        .collect()
+}
+
 /// secrets are involved — a skill delta is operator-authored content.
 fn skill_delta_fingerprint(deltas: &[SkillState]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -2757,6 +2925,7 @@ pub(crate) fn build_roster(
 /// ([`build::persona_prompt`]).
 fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
     ManifestAgent {
+        global: false,
         id: overlay.id.clone(),
         role: overlay.role.clone(),
         description: overlay.description.clone(),
@@ -2777,6 +2946,8 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         prompt_files: Vec::new(),
         prompt_files_resolved: Vec::new(),
         classes: Vec::new(),
+        ledgers: None,
+        can_declare_ledgers: true,
     }
 }
 
@@ -3169,12 +3340,15 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                ledgers: None,
+                ledger_registry: Default::default(),
                 provider: Arc::new(MockProvider::new("mock: ")),
                 provider_slug: "mock".to_string(),
                 context: Arc::new(MockContext::default()),
                 store: store.clone(),
                 meter: Some(meter.clone()),
                 workspace_root: dir.path().to_path_buf(),
+                workspace_git_enabled: false,
                 audit_root: dir.path().to_path_buf(),
                 model_override: None,
                 tasks: None,
@@ -3206,6 +3380,7 @@ description = "Builds the product."
                 chargebee: None,
                 #[cfg(feature = "paypal")]
                 paypal: None,
+                hosting: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 run_supervisor: crate::runtime::RunSupervisor::default(),
                 delivery: None,
@@ -3378,12 +3553,15 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -3415,6 +3593,7 @@ description = "Builds the product."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4069,12 +4248,15 @@ description = "Builds the product."
     fn scripted_agent(outcomes: Vec<Result<String, String>>) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(outcomes)),
             provider_slug: "scripted".to_string(),
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4106,6 +4288,7 @@ description = "Builds the product."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4251,12 +4434,15 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4288,6 +4474,7 @@ description = "Builds the product."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4918,12 +5105,15 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
             store: live_store.clone(),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4955,6 +5145,7 @@ description = "Builds the product."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -5095,12 +5286,15 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -5132,6 +5326,7 @@ description = "Sets direction."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -5156,10 +5351,12 @@ description = "Sets direction."
             before.contains(&"read_workspace_state".to_string()),
             "got {before:?}"
         );
-        assert!(
-            before.contains(&"memory_store".to_string()),
-            "intrinsic memory tool must be present: {before:?}"
-        );
+        // `memory_store`/`memory_recall` are currently withheld altogether
+        // (see `harness::build::memory_tools`'s doc comment) — openhuman
+        // removed the constructor seam that let either tool act on a
+        // company's own `ContextStore` rather than one shared,
+        // unconfigured store. `file_read` is this test's example of an
+        // intrinsic, ungated tool instead.
         assert!(
             before.contains(&"file_read".to_string()),
             "ungated files namespace must be present: {before:?}"
@@ -5206,10 +5403,6 @@ description = "Sets direction."
             "the whole shell namespace drops: {after:?}"
         );
         assert!(
-            after.contains(&"memory_store".to_string()),
-            "intrinsic memory tool survives gating: {after:?}"
-        );
-        assert!(
             after.contains(&"file_read".to_string()),
             "ungated files namespace survives gating: {after:?}"
         );
@@ -5252,12 +5445,15 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context,
             store: Arc::new(RecordingStore::default()),
             meter,
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -5288,6 +5484,7 @@ description = "Sets direction."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -6080,6 +6277,7 @@ budget_usd_daily = 0.0
             }];
         }
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -6092,6 +6290,8 @@ budget_usd_daily = 0.0
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -6196,6 +6396,7 @@ budget_usd_daily = 0.0
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -6208,6 +6409,8 @@ budget_usd_daily = 0.0
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let agent = build::build_agent(
             &CompanyId::new("acme"),

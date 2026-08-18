@@ -19,11 +19,22 @@ pub mod desktop;
 pub mod economy;
 pub mod error;
 pub mod feedback;
+/// The global baseline every company gets, whichever vertical it started from:
+/// a small roster, the workflow graphs that are not vertical-specific, the
+/// always-installed skills, and the tool namespaces a company with no
+/// `[tools]` section of its own starts with. Authored in `globals/`, embedded
+/// at build time.
+pub mod globals;
 /// WS4: openhuman embedded as a library (the harness). Compiled only under the
 /// `openhuman` feature; the default build links none of it and keeps the
 /// echo-brained, offline behaviour unchanged.
 #[cfg(feature = "openhuman")]
 pub mod harness;
+/// Dynamic ledgers: the company's own record — goals, decisions, and whatever
+/// axis a workspace declares — as a folded append-only log rendered into the
+/// `derived/` folder. The task board is registered here as a native ledger so
+/// one discovery surface reaches every one of them.
+pub mod ledger;
 /// WS5: pure Usage & Finances projections over the runtime's accounting data
 /// (usage samples, ledger, `[budget]`). No I/O; WS2 wraps these in GraphQL.
 pub mod metering;

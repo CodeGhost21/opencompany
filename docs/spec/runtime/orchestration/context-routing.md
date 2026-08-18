@@ -26,7 +26,9 @@ calls it has to think to make.
 > record why each exclusion is an exclusion.
 
 `role_context` MUST decide, per role, which workspace documents enter the system
-prompt. Exactly one document is universal: the company's method policy.
+prompt. Two documents are universal: the company's method policy (`METHOD.md`)
+and its per-workspace working agreement (`AGENTS.md`) — see
+[`UNIVERSAL_DOCUMENTS`](../../../src/company/context_routing.rs).
 
 **This is data, not code.** The sibling runtime encodes its table as a Rust
 `match` on role name, which is right for 22 compiled-in roles and wrong for us:
@@ -41,12 +43,12 @@ context = ["GOAL.md", "INDEX.md", "CLAIMS.md"]
 ```
 
 An omitted `context` key takes a per-tier default. `context = []` means the role
-gets the universal document and nothing else.
+gets the universal documents and nothing else.
 
 **The per-tier default table**, keyed on the [tier](../../glossary.md) a
 role's `[[agent]]` entry declares (unqualified "context" below means the
-routed-workspace-documents section only, on top of the universal method
-policy every role always gets):
+routed-workspace-documents section only, on top of the universal `METHOD.md`
+and `AGENTS.md` every role always gets):
 
 | Tier | Default `context` | Why |
 | --- | --- | --- |
@@ -145,9 +147,10 @@ into, not of the manifest text**:
 
 An exclusion **outranks** both the tier default and an explicit `context` list.
 That is what makes a declared class a control rather than a routing line
-somebody can edit away. The universal method document is the one exemption — it
-is method, not assertion, so no class has cause to withhold it, and a role
-excluded from the method could not follow it.
+somebody can edit away. The two universal documents are the exemption — neither
+asserts anything about the work in progress, so no class has cause to withhold
+either, and a role excluded from the method or the working agreement could not
+follow it.
 
 The rule this preserves: an exclusion applies because something *declared* the
 role's job, and a company can add one but cannot silently remove one by
@@ -264,8 +267,8 @@ no bearing on cache-prefix stability.
 - **An omitted `context` and an explicit `context = []` do not collapse.** Two
   fixtures, because one value cannot prove both: an agent with no `context` key
   receives its per-tier default in full, and an agent with `context = []`
-  receives nothing beyond the universal method policy. This is the entire reason
-  the field is `Option<Vec<String>>` rather than a defaulted `Vec<String>`, so
+  receives nothing beyond the two universal documents. This is the entire reason
+  the field is `Option<Vec<ContextEntry>>` rather than a defaulted `Vec`, so
   a suite that asserts only the empty case would pass against an implementation
   that had silently lost the distinction.
 - **An agent with no `tier` receives the `reasoning` row**, not an empty

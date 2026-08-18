@@ -78,6 +78,7 @@ import {
   AWAITING_APPROVAL_LABEL,
   ApiError,
   STEP_FAILURE_LABEL,
+  type ApprovalSummary,
 } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { hasFocus, type TaskFocus } from "@/lib/task-output";
@@ -110,8 +111,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { effectDone } from "@/lib/language";
-import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
+import { approvalAction, effectDone } from "@/lib/language";
+
+import { labelFor, PRIORITY_STYLES, type TaskColumn } from "@/lib/board-columns";
+import { useBoardColumns } from "@/hooks/use-board-columns";
 import { toast } from "sonner";
 import { ArtifactsTab } from "./ArtifactsTab";
 import { TaskPlanBrief, tallyPrerequisites } from "./TaskPlanBrief";
@@ -129,9 +132,16 @@ function priorityStyle(priority: string): string {
   );
 }
 
-/** The column id → human label ("in_progress" → "In progress"), tolerating unknowns. */
-function columnLabel(column: string): string {
-  return TASK_COLUMNS.find((c) => c.id === column)?.label ?? column;
+/**
+ * The column id → human label ("in_progress" → "In progress").
+ *
+ * Takes the columns because they come from the `tasks` ledger now rather than
+ * from a list this module could read at import time. `labelFor` humanises an
+ * id the host has not named, so a card whose column predates this build still
+ * reads as words.
+ */
+function columnLabel(columns: TaskColumn[], column: string): string {
+  return labelFor(columns, column);
 }
 
 /**
@@ -195,6 +205,13 @@ export function waitingBandHeight(millis: number): number {
   return Math.round(Math.min(112, Math.max(12, raw)));
 }
 
+/**
+ * A stable empty default for the `parked` prop (issue #883). A `[]` literal in
+ * the parameter list is a new array every render, which would re-run the memo
+ * that reads it on a screen with a 1s clock.
+ */
+const EMPTY_PARKED: readonly ApprovalSummary[] = [];
+
 /** `1h 04m 09s` / `4m 09s` / `9s`. */
 function formatDuration(millis: number): string {
   const s = Math.floor(millis / 1000);
@@ -256,6 +273,7 @@ export function TaskDetailView({
   company,
   taskId,
   focus,
+  parked = EMPTY_PARKED,
   onBack,
   onNavigate,
   onOpenThread,
@@ -265,6 +283,12 @@ export function TaskDetailView({
   client: OpenCompanyClient;
   company: string | null;
   taskId: string;
+  /**
+   * The company's parked approvals, for naming what this card is waiting on
+   * (issue #883). Optional and defaulting to empty, which renders the pre-#883
+   * row — this screen's own read is what decides *whether* it is waiting.
+   */
+  parked?: readonly ApprovalSummary[];
   /**
    * What the address asked this screen to open (issue #339): a pinned artifact
    * or an attempt's trace. Empty — the ordinary "open the card" navigation —
@@ -282,6 +306,9 @@ export function TaskDetailView({
   /** Tell the board a card was deleted. */
   onDeleted: (id: string) => void;
 }) {
+  // The board's columns, so this screen and the board label a status the same
+  // way without either keeping a list. See `lib/board-columns`.
+  const columns = useBoardColumns(client, company);
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [inflight, setInflight] = useState<InflightRun | null>(null);
   const [loading, setLoading] = useState(true);
@@ -453,6 +480,7 @@ export function TaskDetailView({
               task={detail.task}
               worked={worked}
               waiting={waiting}
+              columns={columns}
             />
 
             <ControlBar
@@ -472,9 +500,18 @@ export function TaskDetailView({
               onOpenThread={onOpenThread}
             />
 
-            <LineageRail lineage={detail.lineage} onNavigate={onNavigate} />
+            <LineageRail
+              lineage={detail.lineage}
+              onNavigate={onNavigate}
+              columns={columns}
+            />
 
-            <AwaitingApprovalRow approvals={detail.approvals} now={now} />
+            <AwaitingApprovalRow
+              approvals={detail.approvals}
+              parked={parked}
+              taskId={detail.task.id}
+              now={now}
+            />
 
             {/* Issue #580: the built workflow awaiting approval, shown only while
                 the card sits In Review with a proposal. Apply creates the
@@ -603,10 +640,15 @@ function DetailHeader({
   task,
   worked,
   waiting,
+  columns,
 }: {
   task: Task;
   worked: { millis: number; live: boolean } | null;
   waiting: { millis: number; live: boolean } | null;
+  /** The board's columns, for the status badge's label. Passed rather than
+      read here: they come from the `tasks` ledger, so the one component that
+      can fetch them is the one that already holds the client. */
+  columns: TaskColumn[];
 }) {
   const hasDispatch = worked !== null && (worked.millis > 0 || worked.live);
   // Issue #465: "Not yet dispatched" is only sayable where it can still be true.
@@ -639,7 +681,7 @@ function DetailHeader({
         <span className="inline-flex items-center gap-1.5">
           <span className="font-medium text-foreground">Status</span>
           <Badge variant="secondary" className="font-normal">
-            {columnLabel(task.column)}
+            {columnLabel(columns, task.column)}
           </Badge>
         </span>
         {/* Issue #580: this card builds a reusable workflow rather than doing
@@ -1035,9 +1077,11 @@ function OriginThreadRow({
 function LineageRail({
   lineage,
   onNavigate,
+  columns,
 }: {
   lineage: TaskDetail["lineage"];
   onNavigate: (id: string) => void;
+  columns: TaskColumn[];
 }) {
   if (!lineage.parent && lineage.children.length === 0) return null;
   return (
@@ -1056,7 +1100,7 @@ function LineageRail({
               {lineage.parent.title}
             </span>
             <Badge variant="secondary" className="shrink-0 font-normal">
-              {columnLabel(lineage.parent.column)}
+              {columnLabel(columns, lineage.parent.column)}
             </Badge>
           </button>
         )}
@@ -1072,7 +1116,7 @@ function LineageRail({
             <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate">{child.title}</span>
             <Badge variant="secondary" className="shrink-0 font-normal">
-              {columnLabel(child.column)}
+              {columnLabel(columns, child.column)}
             </Badge>
           </button>
         ))}
@@ -1812,22 +1856,58 @@ function RunDrawer({
  * Renders nothing when nothing is pending — an always-present "no approvals"
  * line is the clutter the tab was removed for.
  */
-function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; now: number }) {
+function AwaitingApprovalRow({
+  approvals,
+  parked,
+  taskId,
+  now,
+}: {
+  approvals: TaskApproval[];
+  /**
+   * The company's parked queue, for naming (issue #883). Deliberately **not**
+   * the source of truth for whether the card is waiting: `approvals` is, because
+   * the host computed it with an ownership rule (`approval_owner`) that has an
+   * attempt-level key this side cannot see. These rows are matched into it by
+   * id, so an approval the host counts and the feed has not caught up on is
+   * still counted — it just goes unnamed for one poll rather than disappearing.
+   */
+  parked: readonly ApprovalSummary[];
+  taskId: string;
+  now: number;
+}) {
   const pending = pendingApprovalWait(approvals, now);
+  const named = useMemo(() => {
+    if (!pending) return null;
+    const ids = new Set(approvals.filter((a) => a.status === "pending").map((a) => a.id));
+    const hits = parked.filter((p) => ids.has(p.id));
+    // Only when *every* pending row is named, and there is exactly one. Naming
+    // "the" blocked call while a second one the feed has not delivered sits
+    // beside it would tell the operator one decision clears the card when two
+    // do — the precise mistake issue #883 is about.
+    return hits.length === 1 && pending.count === 1 ? hits[0] : null;
+  }, [approvals, parked, pending]);
   if (!pending) return null;
   const { waited } = pending;
+  const href = `#/approvals/${encodeURIComponent(taskId)}`;
 
   return (
     <div className="flex items-center gap-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2 text-xs">
       <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
       <span className="min-w-0 flex-1 text-status-blocked-text">
-        {pending.count === 1
-          ? "Waiting on an approval"
-          : `Waiting on ${pending.count} approvals`}{" "}
+        {/* Issue #883: name the call, not the mechanism. "Waiting on an
+            approval" is true of every one of these rows and therefore answers
+            nothing — the same complaint #372 made of the chat card and #846 of
+            the workflow one. `approvalAction` is the function both of those were
+            fixed with, so all three surfaces say one thing about one approval. */}
+        {named
+          ? `Waiting on your approval — ${approvalAction(named).toLowerCase()}`
+          : pending.count === 1
+            ? "Waiting on an approval"
+            : `Waiting on ${pending.count} approvals`}{" "}
         <span className="tabular-nums">for {formatDuration(waited)}</span>
       </span>
       <a
-        href="#/approvals"
+        href={href}
         className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
         aria-label={
           pending.count === 1

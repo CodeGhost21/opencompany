@@ -600,6 +600,7 @@ mod test {
                         message_id: None,
                         task_id: None,
                         channel: "operator".into(),
+                        agent: None,
                         text: format!("scheduled: {prompt}"),
                         steps: Vec::new(),
                         reply_to: None,

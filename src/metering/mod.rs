@@ -113,6 +113,7 @@ mod tests {
     fn roster_uses_role_then_overlay_name() {
         let agents = vec![
             Agent {
+                global: false,
                 id: "strategy".into(),
                 role: "Strategy desk".into(),
                 description: None,
@@ -125,8 +126,11 @@ mod tests {
                 prompt_files: Vec::new(),
                 prompt_files_resolved: Vec::new(),
                 classes: Vec::new(),
+                ledgers: None,
+                can_declare_ledgers: true,
             },
             Agent {
+                global: false,
                 id: "creative".into(),
                 role: "Creative studio".into(),
                 description: None,
@@ -139,6 +143,8 @@ mod tests {
                 prompt_files: Vec::new(),
                 prompt_files_resolved: Vec::new(),
                 classes: Vec::new(),
+                ledgers: None,
+                can_declare_ledgers: true,
             },
         ];
         let overlay = vec![OverlayAgent {

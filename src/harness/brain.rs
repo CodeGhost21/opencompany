@@ -60,11 +60,34 @@ const NO_TASK_STORE: &str = "this company has no task board wired, so the card c
 /// time the cycle reaches it (deleted, or never persisted).
 const CARD_VANISHED: &str = "the card was gone by the time its dispatch ran";
 
+/// The system bubble appended when a turn paused at its tool-iteration cap
+/// (issue #926).
+///
+/// Three things it must say, and one it must not:
+///
+/// - **It paused** — the reply above is a checkpoint, so it reads like a plan
+///   the agent simply chose not to carry out. QA reported this as agents
+///   "getting permanently stuck mid-task", which is what an unexplained pause
+///   looks like from the outside.
+/// - **Nothing failed** — a cap is a budget, not an error. Without saying so,
+///   the notice reads as a crash report for a turn that worked fine.
+/// - **How to carry on** — the operator's move is to reply.
+///
+/// What it must NOT do is promise the agent resumes where it left off. The
+/// pooled `Agent` keeps its history in memory, and `HarnessPool::ensure`
+/// rebuilds the agent whenever the roster / skill / MCP fingerprint moves — so
+/// "continue" is an instruction to the operator, phrased as a request to the
+/// agent, never a durability guarantee this layer cannot make.
+pub(crate) const ITERATION_CAP_PAUSE_NOTICE: &str = "\
+The reply above is a pause, not a finished answer: this turn reached the maximum number of steps \
+it may take for a single reply, so it stopped and wrote up where it had got to. Nothing errored — \
+the work so far stands. Reply \"continue\" to ask it to pick up from there.";
+
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact};
+use crate::ports::tasks::{COLUMN_IN_REVIEW, TaskOutput, TaskOutputArtifact, TaskOutputSource};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
     TokenUsage, TurnStep, TurnStepKind, TurnStepStatus, Verdict,
@@ -549,6 +572,7 @@ impl HarnessBrain {
             // instead of pointing at nothing.
             task_id: drained.spawned_task,
             channel: grant.agent.clone(),
+            agent: None,
             text,
             steps: Vec::new(),
             reply_to: None,
@@ -1171,8 +1195,10 @@ impl HarnessBrain {
         // failed retry cannot erase the link to the success before it.
         if succeeded && let Some(sink) = sink.as_ref() {
             card.output = Some(TaskOutput {
-                run_id: sink.run_id().to_string(),
-                attempt: self.attempt_ordinal(sink.run_id()).await,
+                source: TaskOutputSource::Run {
+                    run_id: sink.run_id().to_string(),
+                    attempt: self.attempt_ordinal(sink.run_id()).await,
+                },
                 at_millis: now_millis(),
                 artifacts: recorded,
                 workflows: staged_workflows,
@@ -2545,6 +2571,7 @@ impl HarnessBrain {
                             // not open one from a copilot message either.
                             task_id: None,
                             channel: "operator".to_string(),
+                            agent: None,
                             text: outcome.reply,
                             reply_to: None,
                             steps: outcome.steps,
@@ -2703,10 +2730,44 @@ impl HarnessBrain {
                         // turn's own card takes the slot exactly as before.
                         task_id: published_card.or(turn.spawned_task),
                         channel: "operator".to_string(),
+                        // Issue #885: who spoke, as distinct from where it goes.
+                        // `responder_for` already picked this agent to answer the
+                        // turn; before this the identity died here and the reply
+                        // was journaled as `agent_id: "operator"` forever.
+                        agent: Some(responder.clone()),
                         text: operator_reply,
                         reply_to: None,
                         steps: operator_steps,
                     });
+                    // Issue #926: a turn that paused at its step cap says so,
+                    // in its own bubble.
+                    //
+                    // A SIBLING bubble rather than text appended to the reply,
+                    // for the reason the approval-overflow notice below gives:
+                    // the reply is the agent's answer and this is the system
+                    // saying the agent was cut off. Here that separation is
+                    // load-bearing rather than tidy — `HarnessPool::run`
+                    // persists `outcome.reply` to the context store, so
+                    // appending would write "you hit the step limit" into
+                    // memory and recall it as something the agent said in a
+                    // later turn.
+                    //
+                    // Unauthored (`agent: None`) for the same reason: no
+                    // teammate said this, and attributing it to the responder
+                    // would put the platform's words in its mouth. Empty steps
+                    // — the turn's timeline is already on the bubble above, and
+                    // repeating it would double every row in the console.
+                    if turn.hit_iteration_cap {
+                        channel_responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: "operator".to_string(),
+                            agent: None,
+                            text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                        });
+                    }
                     channel_responses.extend(turn.bubbles);
                 }
                 CompanyEvent::TaskDispatched { task_id, run_id } => {
@@ -2752,6 +2813,7 @@ impl HarnessBrain {
                 message_id: None,
                 task_id: None,
                 channel: "operator".to_string(),
+                agent: None,
                 text: notice,
                 steps: Vec::new(),
                 reply_to: None,
@@ -2764,6 +2826,7 @@ impl HarnessBrain {
                 message_id: None,
                 task_id: None,
                 channel: "operator".to_string(),
+                agent: None,
                 text: "Acknowledged.".to_string(),
                 steps: Vec::new(),
                 reply_to: None,
@@ -2906,12 +2969,15 @@ description = "Runs Acme."
 
     fn brain_over_mock(dir: &std::path::Path) -> HarnessBrain {
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -2943,6 +3009,7 @@ description = "Runs Acme."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3078,12 +3145,15 @@ description = "Builds it."
     fn brain_with_tasks(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
@@ -3115,6 +3185,7 @@ description = "Builds it."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3198,12 +3269,15 @@ members = ["engineer"]
         with_workspace: bool,
     ) -> (HarnessBrain, Arc<FsOps>) {
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(ops.clone()),
@@ -3235,6 +3309,7 @@ members = ["engineer"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -5107,12 +5182,15 @@ members = ["engineer"]
     fn brain_over(dir: &std::path::Path, record: CompanyRecord) -> (HarnessBrain, Arc<FsOps>) {
         let tasks = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
@@ -5144,6 +5222,7 @@ members = ["engineer"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -6066,12 +6145,15 @@ members = ["eng1", "eng2"]
         let events: Arc<dyn EventLog> = Arc::new(FsEventLog::new(dir.path()));
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir.path())),
             store: Arc::new(FsCompanyStore::new(dir.path())),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -6103,6 +6185,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -6210,12 +6293,15 @@ members = ["eng1", "eng2"]
         let log = Arc::new(FailFirstLog::default());
         let failures = crate::harness::mcp_probe::McpFailureQueue::default();
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir.path())),
             store: Arc::new(FsCompanyStore::new(dir.path())),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -6247,6 +6333,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -6300,12 +6387,15 @@ members = ["eng1", "eng2"]
         requests: crate::harness::policy::ApprovalRequestQueue,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -6337,6 +6427,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -6630,12 +6721,15 @@ members = ["eng1", "eng2"]
         events: Arc<dyn crate::ports::EventLog>,
     ) -> HarnessBrain {
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -6667,6 +6761,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -7127,6 +7222,8 @@ members = ["eng1", "eng2"]
         use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(HostedProvider::new(HostedProviderConfig {
                 base_url,
                 credential: Credential::from_value("stub-key"),
@@ -7137,6 +7234,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: Some("stub-model".to_string()),
             tasks: Some(Arc::new(FsOps::new(dir))),
@@ -7168,6 +7266,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -7451,12 +7550,15 @@ members = ["eng1", "eng2"]
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: provider.clone(),
             provider_slug: "steering".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
@@ -7490,6 +7592,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer,
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -7853,12 +7956,15 @@ members = ["eng1", "eng2"]
             steer: steer.clone(),
         });
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: provider.clone(),
             provider_slug: "delegating".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks),
@@ -7890,6 +7996,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer,
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,

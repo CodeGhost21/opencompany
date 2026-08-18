@@ -390,11 +390,15 @@ pub struct RuntimeBuilder {
     /// manifest to answer.
     auth_mode_override: Option<AuthMode>,
     tasks: Option<Arc<dyn TaskStore>>,
+    ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
     /// Issue #553: the byte limits the workspace is held to. Defaults to a
     /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
     /// naming a quota is still not a way to write an unbounded file.
     workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Whether private per-agent filesystem workspaces keep automatic Git
+    /// checkpoints after tool calls.
+    workspace_git_enabled: bool,
     /// Issue #752: which storage backend is serving this host's secrets. Only
     /// the repository-credential gates read it, and the default is the refusing
     /// side (`fs`) — a runtime built without naming a backend is assumed to keep
@@ -507,8 +511,10 @@ impl RuntimeBuilder {
             bootstrap_admin: None,
             auth_mode_override: None,
             tasks: None,
+            ledgers: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            workspace_git_enabled: false,
             storage_kind: crate::store::StorageKind::default(),
             facts: None,
             artifacts: None,
@@ -631,6 +637,7 @@ impl RuntimeBuilder {
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
         self.tasks = Some(handles.tasks.clone());
+        self.ledgers = Some(handles.ledgers.clone());
         self.workspace = Some(handles.workspace.clone());
         self.facts = Some(handles.facts.clone());
         self.artifacts = Some(handles.artifacts.clone());
@@ -654,15 +661,27 @@ impl RuntimeBuilder {
             .with_inbox(handles.inbox.clone())
     }
 
-    /// Overlays just the memory + context ports from a selected memory engine
+    /// Overlays the memory ports from a selected memory engine
     /// (`OPENCOMPANY_MEMORY`, see [`crate::store::select`]).
     ///
     /// Applied *after* [`with_stores`](Self::with_stores) (or over the fs
-    /// defaults), so a dedicated memory engine such as TinyCortex backs recall
-    /// while the base backend keeps every other durable port.
+    /// defaults), so a dedicated memory engine backs recall while the base
+    /// backend keeps every other durable port.
+    ///
+    /// Memory and context always come from the overlay. `FactStore` comes from
+    /// it only when the engine serves facts as well — the embedded engine
+    /// implements memory + context alone and leaves facts on the base backend,
+    /// while an engine bound through the `MemoryProvider` contract covers all
+    /// three ports. Taking whichever the overlay offers is what keeps one
+    /// company's memory on one engine instead of split across two (issue #914).
     pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
-        self.with_memory(overlay.memory.clone())
-            .with_context(overlay.context.clone())
+        let builder = self
+            .with_memory(overlay.memory.clone())
+            .with_context(overlay.context.clone());
+        match &overlay.facts {
+            Some(facts) => builder.with_facts(facts.clone()),
+            None => builder,
+        }
     }
 
     /// Swaps just the runtime journal's durable sink (default: the company
@@ -682,6 +701,13 @@ impl RuntimeBuilder {
     }
 
     /// Swaps the task board store (default: fs-backed).
+    /// Injects the ledger store.
+    #[must_use]
+    pub fn with_ledgers(mut self, ledgers: Arc<dyn crate::ports::ledgers::LedgerStore>) -> Self {
+        self.ledgers = Some(ledgers);
+        self
+    }
+
     pub fn with_tasks(mut self, tasks: Arc<dyn TaskStore>) -> Self {
         self.tasks = Some(tasks);
         self
@@ -715,6 +741,13 @@ impl RuntimeBuilder {
     /// tree). See [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace).
     pub fn with_workspace_quota(mut self, quota: crate::runtime::WorkspaceQuota) -> Self {
         self.workspace_quota = quota;
+        self
+    }
+
+    /// Enables or disables automatic Git checkpoints in private agent
+    /// workspaces. Disabled by default.
+    pub fn with_workspace_git_enabled(mut self, enabled: bool) -> Self {
+        self.workspace_git_enabled = enabled;
         self
     }
 
@@ -1115,6 +1148,11 @@ impl RuntimeBuilder {
             .unwrap_or_else(|| Arc::new(FsInboxStore::new(home.clone())));
         // The WS3 console ports default to a single shared fs backend.
         let fs_ops = Arc::new(FsOps::new(home.clone()));
+        // Chosen before the ops struct because two of its members need it: the
+        // ledger store itself, and the workspace guard that names a refusal
+        // after the ledger owning the file.
+        let ledgers_for_guard: Arc<dyn crate::ports::ledgers::LedgerStore> =
+            self.ledgers.clone().unwrap_or_else(|| fs_ops.clone());
         let ops = match handover.as_ref() {
             // A rebuild inherits the ops it was handed, announcer and all — the
             // wrap below happens once, at first construction. Re-wrapping an
@@ -1138,13 +1176,22 @@ impl RuntimeBuilder {
                 // wrapped INSIDE the announcer so a refused write is never
                 // announced — the feed must not claim a file appeared that the
                 // quota rejected. See [`QuotaEnforcedWorkspace`].
+                // And the `derived/` folder refuses a hand-written edit,
+                // wrapped INSIDE both so a refused edit is never announced and
+                // never charged — and so that every writer, console or agent or
+                // workflow node, obeys without knowing it does. See
+                // [`DerivedGuardWorkspace`].
                 workspace: Arc::new(WorkspaceAnnouncer::new(
                     Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
-                        self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                        Arc::new(crate::runtime::DerivedGuardWorkspace::new(
+                            self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                            ledgers_for_guard.clone(),
+                        )),
                         self.workspace_quota,
                     )),
                     events.clone(),
                 )),
+                ledgers: ledgers_for_guard.clone(),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
@@ -1662,6 +1709,27 @@ impl RuntimeBuilder {
             }
         };
 
+        // Issue #978: the run-scoped half of the same fact, on exactly the same
+        // terms. A boot rebuilds it from the gates the replay left parked — the
+        // journal keeps their whole effect while they are parked, which is what
+        // makes a rehydrated batch re-dispatchable — and a rebuild inherits the
+        // live one, because that one also knows the verdicts taken since the
+        // replay and a fresh copy would re-ask about them.
+        let workflow_gates = match handover.as_ref() {
+            Some(h) => h.workflow_gates.clone(),
+            None => {
+                let gates = crate::runtime::workflow_gates::WorkflowGateQueue::default();
+                let parked = journal.pending();
+                gates.rearm(parked.iter().filter_map(|entry| {
+                    entry
+                        .batch
+                        .clone()
+                        .map(|turn| (turn, entry.id.clone(), &entry.effect))
+                }));
+                gates
+            }
+        };
+
         // Brain selection, in precedence order:
         //   1. an explicit brain (test injection) always wins;
         //   2. under the `openhuman` feature, an attached harness pool + a
@@ -2158,6 +2226,30 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // The per-company hosting connection, resolved
+                            // from this company's own secret store for the same
+                            // reason the billing pair above is: two companies on
+                            // one host deploy to two different hosting accounts,
+                            // and a deployment publishes files to the internet
+                            // under the account's own name. An ambient
+                            // environment variable could only ever be somebody
+                            // else's account, so none is consulted.
+                            let hosting_config = if crate::company::grants_hosting_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::hosting::TenantHosting::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[hosting] could not read the hosting credential at \
+                                             boot; wiring no hosting tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2184,6 +2276,21 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // Resolved to data here because `build_agent` is
+                            // synchronous. A store that cannot answer yields an
+                            // empty registry, which costs the prompt its
+                            // catalogue and leaves every tool working.
+                            let ledger_registry = crate::ledger::Registry::build(
+                                ops.ledgers.list_specs(&id).await.unwrap_or_else(|error| {
+                                    tracing::warn!(
+                                        company = %id,
+                                        %error,
+                                        "could not read this company's ledger declarations; \
+                                         agents get the built-ins only"
+                                    );
+                                    Vec::new()
+                                }),
+                            );
                             let deps = HarnessDeps {
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
@@ -2205,6 +2312,7 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                workspace_git_enabled: self.workspace_git_enabled,
                                 // Issue #775: the shell audit sink is HOST-owned
                                 // and hangs off the data root, resolving to
                                 // `companies/<slug>/audit/<agent>/` — a sibling
@@ -2217,6 +2325,8 @@ impl RuntimeBuilder {
                                 model_override,
                                 tasks: Some(ops.tasks.clone()),
                                 artifacts: Some(ops.artifacts.clone()),
+                                ledgers: Some(ops.ledgers.clone()),
+                                ledger_registry,
                                 // Skill read surface (#28): the operator delta
                                 // store + the company source dir (`companies/<name>`,
                                 // held as `seed_dir`) whose `skills/` subtree
@@ -2334,6 +2444,7 @@ impl RuntimeBuilder {
                                 chargebee: chargebee_config,
                                 #[cfg(feature = "paypal")]
                                 paypal: paypal_config,
+                                hosting: hosting_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's
@@ -2377,6 +2488,13 @@ impl RuntimeBuilder {
                                     parking: Some(crate::workflows::DeliveryParking {
                                         approvals: gate.clone(),
                                         journal: journal.clone(),
+                                        // Issue #978: the SAME two queues the
+                                        // runtime gets below. A gate parked by a
+                                        // run has to arm the counters the
+                                        // resolve path releases, or the run is
+                                        // never continued at all.
+                                        continuations: continuations.clone(),
+                                        gates: workflow_gates.clone(),
                                     }),
                                     // Issue #529: the same journal the runner
                                     // writes its start/per-node trail to, so a
@@ -2642,6 +2760,7 @@ impl RuntimeBuilder {
             runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
         }
         runtime.adopt_continuations(continuations);
+        runtime.adopt_workflow_gates(workflow_gates);
 
         // MCP uses OpenHuman's process-global live connection registry. Keep a
         // runtime-owned config for this OpenCompany home so REST and agents see
@@ -3081,6 +3200,31 @@ mod test {
             .prefix(prefix)
             .tempdir()
             .expect("tempdir")
+    }
+
+    /// Automatic Git checkpoints are opt-in and stay off unless the operator
+    /// flips the switch. The default is asserted here so a silent change to the
+    /// host default — which would start shelling out to `git` in every agent
+    /// workspace — cannot slip past.
+    #[test]
+    fn workspace_git_checkpoints_default_off_and_switchable() {
+        let home = tmp_home("opencompany-workspace-git-");
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+                .expect("manifest");
+        let builder = RuntimeBuilder::new(home.path().to_path_buf(), manifest);
+        assert!(
+            !builder.workspace_git_enabled,
+            "workspace Git checkpoints must default to off"
+        );
+        let enabled = builder.with_workspace_git_enabled(true);
+        assert!(enabled.workspace_git_enabled);
+        assert!(
+            !enabled
+                .with_workspace_git_enabled(false)
+                .workspace_git_enabled,
+            "the switch must also be able to turn checkpoints back off"
+        );
     }
 
     mod scoped_grants {
@@ -3676,7 +3820,11 @@ mod test {
             let manifest = CompanyManifest::from_path(&path)
                 .unwrap_or_else(|e| panic!("{company} manifest must parse: {e}"));
 
-            for agent in &manifest.agents {
+            // The company's own roster only: the global baseline is appended to
+            // every manifest, and what it is granted is the company-wide belt
+            // like any teammate that requests nothing — not something this
+            // bundle's author decided, so not something this test pins.
+            for agent in manifest.agents.iter().filter(|agent| !agent.global) {
                 let grants = agent_effective_grants(&manifest.tools.allow, &agent.tools);
                 assert!(
                     grants_cover(&grants, "workspace"),
@@ -4083,18 +4231,24 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md — plus the system roots
-        // boot always scaffolds beside them (issue #551), which are not seeded
-        // content and so are not what the re-seed gate is about. Filtering by
-        // `SYSTEM_ROOTS` rather than by name keeps this honest as that set
-        // changes (issue #645 took `Desks/` out of it).
+        // Seeded: README.md, Brand/, Brand/voice.md — plus runtime scaffold
+        // (`Agents/` and `secrets/README.md`) which is not what the re-seed
+        // gate is about.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
+            let secrets = tree
+                .iter()
+                .find(|node| {
+                    node.parent_id.is_none()
+                        && node.name == crate::company::workspace_scaffold::SECRETS_ROOT
+                })
+                .map(|node| node.id.as_str());
             let mut names: Vec<String> = tree
                 .iter()
-                .map(|n| n.name.clone())
-                .filter(|name| {
-                    !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&name.as_str())
+                .filter(|node| {
+                    !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&node.name.as_str())
+                        && node.parent_id.as_deref() != secrets
                 })
+                .map(|node| node.name.clone())
                 .collect();
             names.sort();
             names
@@ -4124,9 +4278,8 @@ mod test {
         assert!(runtime.store().load(&id).await.unwrap().is_some());
     }
 
-    /// Issue #551: boot lays down the workspace's system roots — and nothing
-    /// inside them. Since issue #645 that is `Agents/` alone: `Desks/` had no
-    /// producer, so it is minted on first use instead of standing empty here.
+    /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
+    /// has no producer, so it is minted on first use instead of standing empty.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
     /// that agent produces something, so a roster of teammates who have done
@@ -4138,7 +4291,7 @@ mod test {
     /// an existing company picks the root up.
     #[tokio::test]
     async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
-        use crate::company::workspace_scaffold::AGENTS_ROOT;
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -4163,15 +4316,19 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT],
-            "boot provisions the managed root with no seed dir — no `Desks/`, and no \
+            vec![AGENTS_ROOT, "README.md", SECRETS_ROOT],
+            "boot provisions the managed roots with no seed dir — no `Desks/`, and no \
              folder for a teammate that has produced nothing"
         );
         for node in &tree {
-            assert!(node.parent_id.is_none());
-            assert_eq!(node.kind, NodeKind::Folder);
             assert_eq!(node.created_by, WorkspaceOrigin::Seed);
         }
+        assert_eq!(
+            tree.iter()
+                .filter(|node| node.parent_id.is_none() && node.kind == NodeKind::Folder)
+                .count(),
+            2
+        );
 
         // An existing, non-empty workspace: an `is_empty` gate would have
         // skipped this boot entirely, and a company that predates the feature
@@ -4213,7 +4370,13 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, "Desks", "creative_studio"],
+            vec![
+                AGENTS_ROOT,
+                "Desks",
+                "README.md",
+                "creative_studio",
+                SECRETS_ROOT,
+            ],
             "the deleted root was re-provisioned, and the unmanaged `Desks/` left as it stood"
         );
     }
@@ -4222,7 +4385,7 @@ mod test {
     /// roster: a company with no agents at all still gets it.
     #[tokio::test]
     async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
-        use crate::company::workspace_scaffold::AGENTS_ROOT;
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
 
         let home_dir = tmp_home("oc-noagents-");
         let id = CompanyId::new("acme");
@@ -4238,7 +4401,7 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT]);
+        assert_eq!(names, vec![AGENTS_ROOT, "README.md", SECRETS_ROOT]);
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the

@@ -31,7 +31,10 @@ use crate::harness::orchestrator::{self, Delegation, DelegationQueue};
 use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::run_trace::RunTraceSink;
 use crate::harness::workflow_refs::WorkflowRefQueue;
-use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO, TaskOutputAction, TaskOutputWorkflow};
+use crate::ports::tasks::{
+    COLUMN_PLANNING, COLUMN_TODO, TaskOutput, TaskOutputAction, TaskOutputSource,
+    TaskOutputWorkflow,
+};
 use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
@@ -297,6 +300,13 @@ pub(crate) struct DeskReply {
     pub(crate) member: String,
     pub(crate) reply: String,
     pub(crate) steps: Vec<TurnStep>,
+    /// Whether this teammate's turn — or any turn nested beneath it — paused at
+    /// its tool-iteration cap (issue #926).
+    ///
+    /// Folded the same way `reply` and `steps` are: a deeper delegate's work is
+    /// folded INTO this member's answer rather than surfacing on its own, so a
+    /// cap two levels down is a cap on what the operator reads here.
+    pub(crate) hit_iteration_cap: bool,
 }
 
 /// What was already decided about the operator message a drain belongs to,
@@ -384,6 +394,16 @@ pub(crate) struct OperatorTurn {
     /// on. The resulting claim is incomplete but never wrong, and the bubble's
     /// step timeline still shows every `spawn_task` the turn made.
     pub(crate) spawned_task: Option<String>,
+    /// Whether **any** turn behind this bubble paused at its tool-iteration cap
+    /// (issue #926) — the responder's, a desk lead's, or the CEO relay's.
+    ///
+    /// A sticky OR rather than "the last turn's value", because one operator
+    /// message can run several turns and the operator gets exactly ONE bubble
+    /// for the whole chain. The relay turn in particular *replaces* the reply
+    /// text, so tracking the last value would erase a cap the responder or a
+    /// delegate hit — the operator would read a relayed answer that quietly
+    /// omits that a branch of it stopped half-done.
+    pub(crate) hit_iteration_cap: bool,
 }
 
 /// What a **dispatched card's** turn handed off (issue #204).
@@ -870,12 +890,11 @@ impl<'a> DelegationRunner<'a> {
         // settles from `pending_publishes`, which `create_workflow` never
         // populates. The operator got the workflow; the card lagged (issue #678).
         //
-        // The drain below closes that. What it does NOT do is give the card an
-        // output link: `TaskOutput.run_id` is required and an operator chat turn
-        // has no run row, so a card settled here names its workflows in the note
-        // and carries no `TaskOutput`. Output-without-a-run remains unbuilt — it
-        // was #183's territory and #183 closed without it — so the note is the
-        // record until it exists.
+        // The drain below closes that, and since #806 the settled card also
+        // carries a real output link: a `TaskOutput` whose source is the
+        // conversation rather than a run row, naming the workflows the turn
+        // authored. Run records stay reserved for actual work attempts (#183
+        // §4), so this turn mints none — see `TaskOutputSource`.
         let handler_card = match carded_by_handler {
             true => self.chat_handler_card(message).await?,
             false => None,
@@ -914,6 +933,10 @@ impl<'a> DelegationRunner<'a> {
         // case the relay turn's reply replaces it (below).
         let mut operator_steps = outcome.steps;
         let mut operator_reply = outcome.reply;
+        // Issue #926: sticky from here to the `OperatorTurn` below — never
+        // reassigned, only OR'd — so a cap the responder hit survives the relay
+        // turn replacing the reply text.
+        let mut hit_iteration_cap = outcome.hit_iteration_cap;
         // Settle the direct-answer card from the turn that just ran. Done before
         // the delegation drain because a direct responder queues nothing — it
         // has no delegation tools — so there is no relay turn coming that could
@@ -960,6 +983,7 @@ impl<'a> DelegationRunner<'a> {
             // Fold the teammate's activity onto the operator timeline, then
             // remember the answer to relay.
             operator_steps.extend(desk.steps);
+            hit_iteration_cap |= desk.hit_iteration_cap;
             desk_replies.push((desk.member, desk.reply));
         }
         // CEO-relay hand-back: when a synchronous desk delegation answered, run
@@ -1028,6 +1052,7 @@ impl<'a> DelegationRunner<'a> {
             }
             operator_reply = relay.reply;
             operator_steps.extend(relay.steps);
+            hit_iteration_cap |= relay.hit_iteration_cap;
         }
         // Drained after the relay, not before it: a relay turn carries the same
         // inline `create_workflow` tool, so draining at the responder's turn
@@ -1041,6 +1066,7 @@ impl<'a> DelegationRunner<'a> {
                     responder,
                     parked,
                     &authored,
+                    chat_id,
                 )
                 .await;
             }
@@ -1050,6 +1076,7 @@ impl<'a> DelegationRunner<'a> {
             steps: operator_steps,
             bubbles,
             spawned_task,
+            hit_iteration_cap,
         })
     }
 
@@ -1065,17 +1092,24 @@ impl<'a> DelegationRunner<'a> {
     /// mode of this function is exactly the bug it fixes — never something
     /// worse.
     ///
-    /// # No `TaskOutput`
+    /// # The output link (issue #806)
     ///
-    /// The card names its workflows in the note and gets no output link.
-    /// `TaskOutput.run_id` is required and an operator chat turn has no run row;
-    /// see the note at the adoption site.
+    /// The card is stamped with a [`TaskOutput`] whose source is
+    /// [`TaskOutputSource::ChatTurn`] — the conversation this turn happened in,
+    /// which is `chat_id`, not the card's `origin_chat_id` (always `None` on an
+    /// adopted handler card) — carrying the workflows this turn authored.
+    /// The note stays — it is prose a person reads — but the *link* is what the
+    /// board's contract is written in terms of (#339), and until #806 this card
+    /// could not have one: `TaskOutput` required a `run_id` and an operator chat
+    /// turn has no run row. Minting one was rejected deliberately; see
+    /// [`TaskOutputSource`].
     async fn settle_authored_workflow_card(
         &self,
         handler_card: Option<&str>,
         responder: &str,
         parked: usize,
         authored: &[TaskOutputWorkflow],
+        chat_id: Option<&str>,
     ) {
         let Some(task_id) = handler_card else {
             // The turn authored a workflow with no card in scope to record it
@@ -1126,6 +1160,41 @@ impl<'a> DelegationRunner<'a> {
             );
             return;
         };
+        // Issue #806: the link, stamped before the settle writes the card so one
+        // store round-trip carries both.
+        //
+        // The source is the conversation, not a run: this turn made no work
+        // attempt, and #183 §4 keeps run records meaning exactly that. Written
+        // wholesale like every other stamp, so a card the orchestrator later
+        // works for real overwrites this with the run that did it — a chat turn
+        // is the weakest producer, never one that outranks an attempt.
+        //
+        // The TURN's own `chat_id` is what addresses it — deliberately not the
+        // card's `origin_chat_id`, which is always `None` here by construction:
+        // `chat_handler_card` only adopts a card whose `origin_chat_id.is_none()`,
+        // so the #463 handler card this settles can never carry one. A turn with
+        // no thread at all (a dispatched path) keeps the note-only behaviour
+        // rather than getting a stamp pointing nowhere.
+        match chat_id {
+            Some(chat_id) => {
+                card.output = Some(TaskOutput {
+                    source: TaskOutputSource::ChatTurn {
+                        chat_id: chat_id.to_string(),
+                    },
+                    at_millis: now_millis(),
+                    artifacts: Vec::new(),
+                    workflows: authored.to_vec(),
+                });
+            }
+            None => {
+                tracing::debug!(
+                    company = %self.company,
+                    task_id = %task_id,
+                    "[delegation] this turn has no chat thread to address, so its card is \
+                     recorded in the note without an output link"
+                );
+            }
+        }
         if let Err(err) = self
             .settle_work_card(&mut card, responder, TaskRunEnd::Completed, parked, &body)
             .await
@@ -1548,12 +1617,17 @@ impl<'a> DelegationRunner<'a> {
         // the operator's timeline shows the deeper member working.
         let mut reply = outcome.reply;
         let mut steps = outcome.steps;
+        // Issue #926: the cap folds in exactly as the reply and steps do. A
+        // deeper delegate that stopped half-done is folded into THIS member's
+        // answer, so its pause is a pause on what the operator ends up reading.
+        let mut hit_iteration_cap = outcome.hit_iteration_cap;
         for deeper in nested.desk_replies {
             reply.push_str(&format!(
                 "\n\n{} (delegated by {member}) replied:\n{}",
                 deeper.member, deeper.reply
             ));
             steps.extend(deeper.steps);
+            hit_iteration_cap |= deeper.hit_iteration_cap;
         }
         // A cancelled nested run folds in as a cancellation, NEVER as a
         // reply: the member said it was handing that slice on, and an
@@ -1593,6 +1667,7 @@ impl<'a> DelegationRunner<'a> {
                 member,
                 reply,
                 steps,
+                hit_iteration_cap,
             }),
             cancelled: false,
             // Issue #442: the hand-off's own card, reported the same way
@@ -2618,6 +2693,7 @@ mod tests {
     use crate::ports::TaskStore;
     use crate::ports::tasks::{
         COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_TODO,
+        TaskOutputSource,
     };
     use crate::ports::types::LedgerEntry;
     use crate::store::FsOps;
@@ -3059,6 +3135,9 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             TurnOutcome {
                 reply: turn.reply,
                 steps: Vec::new(),
+                // These fixtures script delegation shapes, not cap behaviour;
+                // the cap path is proved end-to-end in `cap_turn_test`.
+                hit_iteration_cap: false,
             }
         }
     }
@@ -3966,12 +4045,126 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         let note = cards[0].note.clone().unwrap_or_default();
         assert!(
             note.contains("nightly-digest"),
-            "the note is the record of what was authored (there is no TaskOutput              without a run row): {note}"
+            "the note is the prose record of what was authored: {note}"
         );
         assert_eq!(
             fx.workflow_refs.queued(),
             0,
             "the drain empties the queue, or the next turn inherits this turn's workflows"
+        );
+    }
+
+    /// The other side of the stamp: a turn with **no** chat thread to address
+    /// gets the note and no output link. There is no conversation to point at,
+    /// and a stamp pointing nowhere is worse than none — the same reason
+    /// `primaryLink` falls back to the card rather than synthesising a target.
+    #[tokio::test]
+    async fn a_turn_with_no_chat_thread_settles_without_an_output_link() {
+        let imperative = "create a workflow named nightly digest";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        let handler = handler_card_in(title, COLUMN_TODO);
+        TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
+            .await
+            .expect("seed the handler card");
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::authoring(
+                "authored it",
+                vec![authored("nightly-digest")],
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", imperative, None)
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(
+            cards[0].column,
+            lifecycle::settled_landing_column(TaskRunEnd::Completed, 0),
+            "the settle itself does not depend on having a thread"
+        );
+        assert!(
+            cards[0]
+                .note
+                .clone()
+                .unwrap_or_default()
+                .contains("nightly-digest"),
+            "the note still records what was authored"
+        );
+        assert!(
+            cards[0].output.is_none(),
+            "no thread to address, so no link is written"
+        );
+    }
+
+    /// Issue #806: the settled card carries a real **output link**, not just a
+    /// note. `TaskOutput` used to require a `run_id` and an operator chat turn
+    /// has no run row, so this card could carry no output at all — the board's
+    /// contract (#339, *"Done carries a link to what it produced"*) is written
+    /// in terms of links, and prose is not one.
+    ///
+    /// The source is the conversation. Asserting `run_id()` is `None` is half
+    /// the point: minting a run for a turn that attempted no work would make the
+    /// Attempts tab lie, which #183 §4 settled deliberately.
+    #[tokio::test]
+    async fn a_workflow_authored_in_a_chat_turn_gives_its_card_an_output_link() {
+        let imperative = "create a workflow named nightly digest";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        // NOTE: no `origin_chat_id` on the seeded card, and that is not an
+        // oversight — `chat_handler_card` only adopts a card whose
+        // `origin_chat_id.is_none()`, so setting one here makes the card
+        // unadoptable and nothing settles at all. The conversation the stamp
+        // addresses is the TURN's, passed to `handle_operator_message` below.
+        let handler = handler_card_in(title, COLUMN_TODO);
+        TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
+            .await
+            .expect("seed the handler card");
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::authoring(
+                "authored it",
+                vec![authored("nightly-digest")],
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", imperative, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        let output = cards[0]
+            .output
+            .clone()
+            .expect("a settled chat turn stamps an output link");
+        assert_eq!(
+            output.source,
+            TaskOutputSource::ChatTurn {
+                chat_id: "general".to_string()
+            },
+            "the producer is the conversation this turn happened in"
+        );
+        assert_eq!(
+            output.source.run_id(),
+            None,
+            "an operator chat turn attempted no work, so it mints no run"
+        );
+        assert_eq!(
+            output
+                .workflows
+                .iter()
+                .map(|w| w.workflow_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nightly-digest"],
+            "the link points at what the turn actually produced"
+        );
+        assert!(
+            output.artifacts.is_empty(),
+            "this turn published no file — the workflow is the deliverable"
         );
     }
 

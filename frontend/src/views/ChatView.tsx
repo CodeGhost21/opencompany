@@ -55,10 +55,13 @@ import {
   dmChannelId,
   findChannel,
   firstChannel,
+  historyReady,
+  HISTORY_UNTRACKED,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
   type DecidedApproval,
+  type HistoryHydration,
   type Transcripts,
 } from "./chat/model";
 
@@ -79,6 +82,14 @@ interface Props {
    */
   transcripts: Transcripts;
   setTranscripts: Dispatch<SetStateAction<Transcripts>>;
+  /**
+   * How far the shell's rehydration of each channel's history has got, so the
+   * timeline can hold a loading state instead of claiming a channel is empty
+   * while its history is still on the wire (issue #934). Optional, and absent
+   * means "nothing is pending" — a mount with no shell behind it renders as it
+   * always did rather than spinning forever.
+   */
+  hydration?: HistoryHydration;
   /**
    * Called around the awaited chat POST with the **host thread id** it was sent
    * on, so the shell can suppress the SSE echo of our own turn while it is in
@@ -158,6 +169,7 @@ export function ChatView({
   onReply,
   transcripts,
   setTranscripts,
+  hydration = HISTORY_UNTRACKED,
   onSendStart,
   onSendEnd,
   liveStepsByThread,
@@ -442,6 +454,18 @@ export function ChatView({
   }, [inChannel, members]);
 
   const messages = channel ? (transcripts[channel.id] ?? []) : [];
+  /**
+   * Whether this channel's history is still on the wire.
+   *
+   * `messages` cannot tell you — the `?? []` above collapses "never fetched"
+   * into "empty", which is why the timeline could claim a reloaded DM was brand
+   * new (issue #934). The roster is part of the answer too: a DM's channel only
+   * exists once `members` lands, and until then nothing has even asked the shell
+   * to hydrate it.
+   */
+  const historyPending = channel
+    ? loadingTeam || !historyReady(hydration, channel.id)
+    : false;
   const entries = useMemo(
     () => (channel ? buildTimeline(messages, channel) : []),
     [messages, channel],
@@ -833,6 +857,7 @@ export function ChatView({
             <MessageTimeline
               channel={channel}
               items={items}
+              historyPending={historyPending}
               openThreadId={openThreadId}
               typing={sending && !openThreadId}
               liveSteps={openThreadId ? undefined : liveSteps}

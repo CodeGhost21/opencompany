@@ -2012,7 +2012,28 @@ pub struct ReplyTo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundMessage {
     /// The channel to emit on.
+    ///
+    /// A **destination**, never an author. Issue #885: all three
+    /// [`AgentReply`](CompanyEvent::AgentReply) writers used to copy this into
+    /// `agent_id`, whose contract is "the agent that produced the reply" — so
+    /// every bubble emitted on the operator channel was journaled as though the
+    /// operator had written it, permanently. Use [`agent`](Self::agent) for who
+    /// spoke; this only says where it goes.
     pub channel: String,
+    /// The roster teammate that produced this message (issue #885).
+    ///
+    /// `None` for a message no agent authored — a system notice, a scheduler
+    /// tick, a channel-level ack — and for every producer that does not know
+    /// its responder. A writer journaling an `AgentReply` falls back to
+    /// [`channel`](Self::channel) when this is absent, which is exactly the
+    /// pre-#885 behaviour, so nothing regresses on a path that has not been
+    /// taught to fill it in.
+    ///
+    /// Additive on the wire: omitted when absent, so the POST `/chat` body and
+    /// every stored record round-trip byte-identically for a producer that
+    /// sets nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// The message text.
     pub text: String,
     /// The visible processing steps behind this bubble — the agent's tool calls,
@@ -2279,7 +2300,20 @@ pub enum TurnStepFailure {
     /// The host lacks an operating-system permission the call needed.
     MissingPermission,
     /// A program or application the call needed is not available.
+    ///
+    /// Only ever claimed for a call that could actually invoke an external
+    /// program. A path-reading tool that runs in this process has no app to
+    /// install, so its "not there" is [`NotFound`](Self::NotFound) — see
+    /// [`crate::harness::steps`] (issue #924).
     MissingApp,
+    /// The file, folder, or bundled resource the call named does not exist.
+    ///
+    /// Distinct from [`MissingApp`](Self::MissingApp) because the remedy is
+    /// different in kind: a missing path is fixed by naming a different path,
+    /// not by installing software. Both arrive as one `ENOENT` from the
+    /// operating system, and telling a server operator to "install or open the
+    /// app" when a note is simply absent is unactionable (issue #924).
+    NotFound,
     /// The call ran past its deadline and was stopped.
     Timeout,
     /// A service the call depends on — an upstream API, or the model provider —
@@ -3586,6 +3620,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
@@ -3601,6 +3636,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "done".to_string(),
             steps: vec![TurnStep {
                 kind: TurnStepKind::Note,
@@ -3626,6 +3662,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
@@ -3644,6 +3681,7 @@ mod test {
             message_id: None,
             task_id: Some("t-42".to_string()),
             channel: "operator".to_string(),
+            agent: None,
             text: "opened one".to_string(),
             steps: Vec::new(),
             reply_to: None,

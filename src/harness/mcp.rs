@@ -655,6 +655,7 @@ mod tests {
 
     fn agent(grants: &[&str]) -> ManifestAgent {
         ManifestAgent {
+            global: false,
             id: "ceo".into(),
             role: "Chief".into(),
             description: None,
@@ -667,6 +668,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         }
     }
 

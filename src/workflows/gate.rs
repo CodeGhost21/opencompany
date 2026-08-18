@@ -381,14 +381,20 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
         // gating here would park the same call twice.
         NodeKind::Agent
         // Capabilities that are explicit stubs today: `CodeRunner`,
-        // `MemoryProvider`, and the `ShellRunner` (new in tinyflows 0.6.1) are
-        // wired to error / left `None` (see `caps`), so there is no call to
-        // classify. **These are the next three to gate** — sandboxed code, a
-        // memory *write*, and a shell script are all effectful — and the
-        // decision belongs with whoever wires the capability, in the same PR.
+        // `MemoryProvider`, the `ShellRunner` (new in tinyflows 0.6.1), and the
+        // `ApprovalProvider` (new in a later tinyflows 0.8.x) are wired to
+        // error / left `None` (see `caps`), so there is no call to classify.
+        // `Approval` falls back to pausing the run for the host to settle
+        // through `engine::resume` rather than reaching anywhere on its own,
+        // which is why it belongs in this group rather than being classified
+        // like `tool_call`/`http_request`. **These are the next four to
+        // gate** — sandboxed code, a memory *write*, a shell script, and a
+        // wired approval notification are all effectful — and the decision
+        // belongs with whoever wires the capability, in the same PR.
         | NodeKind::Code
         | NodeKind::Memory
         | NodeKind::Shell
+        | NodeKind::Approval
         // A child graph is resolved and run *inside* the engine
         // (`run_sub_workflow`), so its nodes never pass this function at all —
         // this arm is not what excludes them. The module docs give the reason
@@ -410,7 +416,10 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
         | NodeKind::SplitOut
         | NodeKind::Switch
         | NodeKind::Transform
-        | NodeKind::Trigger => None,
+        | NodeKind::Trigger
+        // Terminal sink: discards its input and activates nothing further.
+        // Pure control flow, like the group above.
+        | NodeKind::Void => None,
     }
 }
 
@@ -761,6 +770,39 @@ description = "Runs Acme."
             let node = kind_node("control", kind.clone());
             assert_eq!(call_of(&node), None, "{kind:?}");
         }
+    }
+
+    /// The three newest additions to `NodeKind` (tinyflows 0.8.x), classified
+    /// directly against `call_of` rather than only through `apply_policy_gates`
+    /// — a regression lock on the two new match arms added alongside
+    /// `Capabilities.approvals`.
+    ///
+    /// `Approval` and `Void` join `tinyflows_parallel_control_nodes_do_not_describe_outward_calls`
+    /// in reaching nothing on this path (`Approval`'s own doc comment on the
+    /// match arm says why: it is a stub, like `Code`/`Memory`/`Shell`, not a
+    /// classified capability call); `Trigger` was already exhaustive-matched to
+    /// `None` and gets the same direct check for symmetry.
+    #[test]
+    fn the_newest_node_kinds_reach_nothing_on_this_path() {
+        for kind in [NodeKind::Approval, NodeKind::Trigger, NodeKind::Void] {
+            let node = kind_node("n", kind.clone());
+            assert_eq!(call_of(&node), None, "{kind:?}");
+        }
+    }
+
+    /// The two node kinds `call_of` *does* classify, checked directly rather
+    /// than only through the higher-level `apply_policy_gates` tests above —
+    /// so a future new `None` arm accidentally shadowing one of these two would
+    /// fail here even if a specific gating test happened not to exercise it.
+    #[test]
+    fn tool_call_and_http_request_are_the_two_classified_kinds() {
+        let tool = tool_node("run-it", "shell");
+        assert!(call_of(&tool).is_some(), "{tool:?}");
+
+        let mut http = tool_node("fetch", "unused");
+        http.kind = NodeKind::HttpRequest;
+        http.config = json!({ "method": "GET", "url": "https://example.com" });
+        assert!(call_of(&http).is_some(), "{http:?}");
     }
 
     /// `always_approve` outranks the tier, exactly as it does on the agent

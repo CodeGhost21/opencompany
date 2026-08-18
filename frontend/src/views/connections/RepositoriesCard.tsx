@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
 import { bindRepo, listRepos, revokeRepo, type Repo } from "@/api/repos";
-import { ApiError } from "@/api/types";
+import { ApiError, type RosterAgent } from "@/api/types";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -58,7 +58,7 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [repos, setRepos] = useState<Repo[]>([]);
   const [diffsAvailable, setDiffsAvailable] = useState(false);
-  const [grantedAgents, setGrantedAgents] = useState<string[]>([]);
+  const [grantedAgents, setGrantedAgents] = useState<RosterAgent[]>([]);
   const [repoGranted, setRepoGranted] = useState<boolean | undefined>(undefined);
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
@@ -260,13 +260,15 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
             </ul>
           )}
 
-          {/* Who can actually open them. The names are the roster ids the host
-              resolved through the same grant walk the harness builds agents
-              with, so this says what is wired rather than what the manifest
-              looks like it should wire. */}
+          {/* Who can actually open them, from the same grant walk the harness
+              builds agents with — so this says what is wired rather than what
+              the manifest looks like it should wire. Each teammate's display
+              name, never its id (issue #931): an operator-added teammate's id
+              is a minted internal string. */}
           {load === "ready" && readableBy.length > 0 && (
             <p className="text-xs text-muted-foreground">
-              Readable by {readableBy.join(", ")}. A checkout lands in that teammate&apos;s own
+              Readable by {readableBy.map((agent) => agent.name).join(", ")}. A checkout lands in
+              that teammate&apos;s own
               workspace, is disconnected from this host&apos;s copy, and is deleted when the task
               ends.
             </p>
