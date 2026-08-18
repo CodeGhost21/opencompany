@@ -67,6 +67,19 @@ function stubClient(): OpenCompanyClient & { puts: unknown[] } {
   } as unknown as OpenCompanyClient & { puts: unknown[] };
 }
 
+/**
+ * jsdom implements no scrolling at all, so `Element.prototype.scrollIntoView`
+ * simply does not exist. The dialog scrolls its error banner into view from a
+ * `requestAnimationFrame` after a failed save, which puts the resulting
+ * TypeError outside every test body — Vitest reports 899 passing tests and
+ * then fails the run on one unhandled error. Supplying the missing method is
+ * the honest fix: the production call is correct in a browser, and guarding it
+ * in `WorkflowCreateDialog` would only be guarding against jsdom.
+ */
+if (!Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+
 let container: HTMLDivElement;
 let root: Root;
 let confirmed: boolean;
