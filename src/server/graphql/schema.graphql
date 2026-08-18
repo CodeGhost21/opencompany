@@ -10,6 +10,10 @@ type AgentTokens {
 	Total tokens attributed to them.
 	"""
 	tokens: Float!
+	"""
+	Source-currency USD attributed to the teammate, when visible.
+	"""
+	costUsd: Float
 }
 
 """
@@ -921,6 +925,10 @@ type Usage {
 	Aggregate totals.
 	"""
 	totals: UsageTotals!
+	"""
+	Whether positive cost was withheld by the reader's role.
+	"""
+	costHidden: Boolean!
 }
 
 """
@@ -978,7 +986,7 @@ type UsageTotals {
 	"""
 	Total inference cost, USD.
 	"""
-	costUsd: Float!
+	costUsd: Float
 	"""
 	Total OAuth calls.
 	"""
