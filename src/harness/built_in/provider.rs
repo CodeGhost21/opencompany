@@ -883,11 +883,11 @@ pub async fn request_plan(
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
 ) -> anyhow::Result<RequestPlan> {
-    // Tier -> concrete OpenRouter slug, resolved HERE rather than left to the
-    // endpoint: the direct path talks to OpenRouter, which has never heard of
-    // `chat-v1`. Resolving in one place is what keeps proxied and direct on the
-    // same model when a tenant adds a key.
-    let model = inference::model_for_tier(abstract_model, &decl.models);
+    // Tier -> what this endpoint understands. The direct path talks to
+    // OpenRouter, which has never heard of `chat-v1`, so the tier is resolved
+    // here; the proxied path keeps the tier, which is what the platform's
+    // registry routes on.
+    let model = inference::model_for_tier(abstract_model, &decl.models, decl.is_proxied());
     let url = format!("{}/chat/completions", decl.base_url.trim_end_matches('/'));
     let bearer = decl
         .bearer()

@@ -80,8 +80,17 @@ prompt = """                            # appended to the generated persona
 Write for the reader, not the client.
 """
 prompt_files = ["prompts/house-style.md"]   # checked-in, bundle-relative
-context = ["Brand/Brand voice.md"]          # live workspace documents
+context = [                                 # live workspace documents
+    "Brand/Brand voice.md",                 #   read only (the bare-string shorthand)
+    { path = "Agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
+]
 classes = ["evidence"]                      # routing exclusions — see below
+
+ledgers = [                                 # per-agent ledger access (omit for unrestricted)
+    { name = "tasks", access = "record" },
+    { name = "decisions", access = "read" },
+]
+can_declare_ledgers = false                 # may this agent `define_ledger`? default true
 ```
 
 ### `tier` versus `harness`
@@ -97,6 +106,48 @@ models — which is the point of naming more than one.
 Naming a harness the company does not declare is a validation error, reported
 against both the agent and the id. Naming none is not: every roster written
 before `[[harness]]` existed binds nobody, and all of them keep working.
+### `context` write access
+
+A bare string in `context` is read-only — routed into the prompt, nothing
+more. `{ path, access = "write" }` additionally puts that exact path in this
+agent's `workspace_write`/`workspace_create` scope.
+
+**Omitting every write entry is unconfined**, matching every manifest written
+before this existed: `workspace_write`/`workspace_create` reach anywhere in the
+company's tree, as they always could. Declaring **at least one** write entry
+confines this agent's `workspace_write`/`workspace_create` to exactly the paths
+it declared, plus its own `Agents/<id>/` home, which stays writable regardless
+— a role narrowed to a real access list must not also lose the ability to
+produce and revise its own work. See `src/harness/workspace_tools.rs` for the
+enforcement and why the pre-existing unconfined default is otherwise
+unchanged.
+
+### `ledgers`
+
+Which of the company's ledgers this agent's five ledger tools
+(`list_ledgers`, `read_ledger`, `record_entry`, `close_entry`,
+`define_ledger`) can see and use, and at what access.
+
+An omitted `ledgers` key is **unrestricted** — every ledger, at `record`
+access — the tool surface every agent had before this field existed. A
+declared list restricts `list_ledgers`/`read_ledger` to exactly the slugs
+named (an undeclared slug is invisible, not merely unwritable), and
+`record_entry`/`close_entry` additionally require `access = "record"` on that
+entry. A bare `{ name = "tasks" }` with no `access` key defaults to `read` —
+the safer of the two.
+
+This is the **visibility and read/record** half of ledger access; a ledger's
+own `writers` list (`docs/spec/runtime/ledgers.md`) stays the authoritative
+check for whether a write actually lands. Declaring `access = "record"` for a
+built-in ledger whose `writers` excludes this agent is a manifest validation
+error — the two must not silently disagree. A company-declared ledger is not
+cross-checked at manifest-load time, since it may not exist yet; any
+disagreement there is an ordinary tool refusal at call time.
+
+`can_declare_ledgers` (default `true`) governs `define_ledger` alone — a
+company discovers which axes it needs while running, so declaring one is
+unrestricted by default; set it `false` to keep a narrow role from growing the
+registry.
 
 ## The prompt
 

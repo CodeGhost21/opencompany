@@ -537,7 +537,9 @@ impl CompanyStore for MongoStore {
         else {
             return Ok(None);
         };
-        let manifest: CompanyManifest = toml::from_str(&get_str(&company, "manifest_toml")?)
+        // `from_stored_toml` applies the global baseline — see
+        // `CompanyManifest::apply_globals`.
+        let manifest = CompanyManifest::from_stored_toml(&get_str(&company, "manifest_toml")?)
             .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
 
         let mut cursor = self
@@ -3106,7 +3108,20 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         self.collection("workspace_nodes")
             .insert_one(document)
             .await
-            .map_err(mongo_err)?;
+            // Issue #894: the index refusing a second file at one path is a
+            // *contract* outcome, not a storage fault. It reached callers as
+            // `Store("mongodb error: E11000 …")` — a 500 carrying a driver
+            // string — where fs and SQLite both answer `Conflict`. The users
+            // -email index has been mapped this way since it was added.
+            .map_err(|e| {
+                if is_duplicate_key(&e) {
+                    OpenCompanyError::Conflict(crate::ports::workspace::duplicate_file_refusal(
+                        &node.name,
+                    ))
+                } else {
+                    mongo_err(e)
+                }
+            })?;
         Ok(())
     }
 
@@ -3252,7 +3267,16 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         self.collection("workspace_nodes")
             .insert_one(document)
             .await
-            .map_err(mongo_err)?;
+            // Issue #894, as in `create`.
+            .map_err(|e| {
+                if is_duplicate_key(&e) {
+                    OpenCompanyError::Conflict(crate::ports::workspace::duplicate_file_refusal(
+                        &node.name,
+                    ))
+                } else {
+                    mongo_err(e)
+                }
+            })?;
         // The stamped node, so the digest a caller records can only have come
         // from the store (issue #668).
         Ok(node)
@@ -4472,6 +4496,13 @@ mod test {
     async fn conformance_workspace_store() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_sibling_names() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_sibling_names(s.clone()).await;
         drop_db(&s).await;
     }
 

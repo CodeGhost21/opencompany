@@ -162,6 +162,7 @@ mod tests {
 
     fn agent(role: &str) -> Agent {
         Agent {
+            global: false,
             id: "a".into(),
             role: role.into(),
             description: None,
@@ -175,6 +176,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         }
     }
 

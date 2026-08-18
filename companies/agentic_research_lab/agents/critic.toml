@@ -6,3 +6,12 @@ description = "Attack the lab's own conclusions before the operator sees them."
 # what it believes, and a critic given it argues with the summary rather than
 # with the evidence.
 context = ["GOAL.md", "CLAIMS.md", "INDEX.md"]
+
+# Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
+# manages its own work on the board and sees, but does not redefine, company
+# direction. The orchestrator keeps unrestricted access.
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+]

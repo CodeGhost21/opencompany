@@ -162,7 +162,15 @@ const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
 
 fn load_company(name: &str) -> CompanyManifest {
     let dir = repo_root().join("companies").join(name);
-    CompanyManifest::from_path(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()))
+    let mut manifest =
+        CompanyManifest::from_path(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()));
+    // These tests are about what a bundle's author declared, so the global
+    // baseline appended to every roster is dropped: a global teammate's tool
+    // request is not this company's search posture, and holding a shipped
+    // bundle responsible for one would make every company look like it granted
+    // whatever the baseline asks for.
+    manifest.agents.retain(|agent| !agent.global);
+    manifest
 }
 
 /// One agent's effective grants: the company `[tools].allow` narrowed by that

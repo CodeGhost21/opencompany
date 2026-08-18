@@ -2444,6 +2444,13 @@ mod test {
         conformance::assert_workspace_folder_claims(Arc::new(FsOps::new(&root))).await;
     }
 
+    #[tokio::test]
+    async fn conformance_workspace_sibling_names() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_sibling_names(Arc::new(FsOps::new(&root))).await;
+    }
+
     /// Issue #887, and the backend the case was written against: this is the
     /// one that failed it. Node content was written with a bare
     /// `tokio::fs::write`, so a reader inside the `O_TRUNC` window saw a

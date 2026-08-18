@@ -549,6 +549,7 @@ impl HarnessBrain {
             // instead of pointing at nothing.
             task_id: drained.spawned_task,
             channel: grant.agent.clone(),
+            agent: None,
             text,
             steps: Vec::new(),
             reply_to: None,
@@ -2547,6 +2548,7 @@ impl HarnessBrain {
                             // not open one from a copilot message either.
                             task_id: None,
                             channel: "operator".to_string(),
+                            agent: None,
                             text: outcome.reply,
                             reply_to: None,
                             steps: outcome.steps,
@@ -2705,6 +2707,11 @@ impl HarnessBrain {
                         // turn's own card takes the slot exactly as before.
                         task_id: published_card.or(turn.spawned_task),
                         channel: "operator".to_string(),
+                        // Issue #885: who spoke, as distinct from where it goes.
+                        // `responder_for` already picked this agent to answer the
+                        // turn; before this the identity died here and the reply
+                        // was journaled as `agent_id: "operator"` forever.
+                        agent: Some(responder.clone()),
                         text: operator_reply,
                         reply_to: None,
                         steps: operator_steps,
@@ -2754,6 +2761,7 @@ impl HarnessBrain {
                 message_id: None,
                 task_id: None,
                 channel: "operator".to_string(),
+                agent: None,
                 text: notice,
                 steps: Vec::new(),
                 reply_to: None,
@@ -2766,6 +2774,7 @@ impl HarnessBrain {
                 message_id: None,
                 task_id: None,
                 channel: "operator".to_string(),
+                agent: None,
                 text: "Acknowledged.".to_string(),
                 steps: Vec::new(),
                 reply_to: None,
@@ -2948,6 +2957,7 @@ description = "Runs Acme."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3123,6 +3133,7 @@ description = "Builds it."
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3247,6 +3258,7 @@ members = ["engineer"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -5159,6 +5171,7 @@ members = ["engineer"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -6119,6 +6132,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -6267,6 +6281,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -6361,6 +6376,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -6695,6 +6711,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -7200,6 +7217,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -7526,6 +7544,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer,
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -7930,6 +7949,7 @@ members = ["eng1", "eng2"]
             chargebee: None,
             #[cfg(feature = "paypal")]
             paypal: None,
+            hosting: None,
             steer,
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,

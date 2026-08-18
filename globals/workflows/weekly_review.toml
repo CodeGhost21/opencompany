@@ -1,0 +1,51 @@
+# A global workflow: enabled in every company without a `[workflows].enabled`
+# entry. A company that wants a different weekly review commits its own
+# `workflows/weekly_review.toml`, which supersedes this graph outright.
+#
+# Every agent node names a *global* teammate, because this graph runs in
+# companies whose rosters this file has never seen.
+
+id = "weekly_review"
+name = "Weekly review"
+description = "Compile the week into a short report the operator can act on."
+
+[[node]]
+id = "week_end"
+kind = "trigger"
+name = "End of the week"
+summary = "Runs every Friday afternoon."
+schedule = "0 16 * * 5"
+
+[[node]]
+id = "gather"
+kind = "agent"
+name = "Gather the week"
+summary = "Collect what moved, what closed, and what is overdue."
+agent = "operations"
+
+[[node]]
+id = "write"
+kind = "agent"
+name = "Write the report"
+summary = "Turn the week into a short report with the decisions on top."
+agent = "writer"
+
+[[node]]
+id = "deliver"
+kind = "output"
+name = "Send to the operator"
+summary = "Deliver the report to whoever owns the company."
+[node.destination]
+kind = "owner"
+
+[[edge]]
+from = "week_end"
+to = "gather"
+
+[[edge]]
+from = "gather"
+to = "write"
+
+[[edge]]
+from = "write"
+to = "deliver"

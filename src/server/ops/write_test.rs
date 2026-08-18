@@ -1333,7 +1333,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
     // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
-    // `Agents/` root (issue #551). The manifest here has an agent and it gets
+    // `Agents/` root and operator-only `secrets/README.md`. The manifest here has an agent and it gets
     // no folder — a member folder is minted on first use, not on joining the
     // roster. `Desks/` is absent for the same reason since issue #645: nothing
     // writes into it, so it is minted on first use rather than scaffolded.
@@ -1341,8 +1341,8 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["Agents"],
-        "a fresh company starts with the one system root and nothing else"
+        vec!["Agents", "README.md", "secrets"],
+        "a fresh company starts with its system scaffold and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
 
@@ -1548,7 +1548,10 @@ async fn workspace_reads_are_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(provisioned_names(&tree_b), vec!["Agents"]);
+    assert_eq!(
+        provisioned_names(&tree_b),
+        vec!["Agents", "README.md", "secrets"]
+    );
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
     let (status, _) = send_auth(
@@ -1826,8 +1829,10 @@ async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
         vec![
             "Agents".to_string(),
             "README.md".to_string(),
+            "README.md".to_string(),
             "cmo".to_string(),
             "launch-brief.md".to_string(),
+            "secrets".to_string(),
         ],
         "the folder holding a deliverable, the operator's note and the root all stay"
     );
@@ -2516,11 +2521,15 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     // named `null` (the console falls back to the role).
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
+    // The company's own teammate; the global baseline is appended to every
+    // roster and is not what this test is about.
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 1);
-    assert_eq!(roster[0]["id"], "ceo");
-    assert_eq!(roster[0]["role"], "Chief");
-    assert!(roster[0]["name"].is_null());
+    let ceo = roster
+        .iter()
+        .find(|row| row["id"] == "ceo")
+        .expect("the manifest teammate is listed");
+    assert_eq!(ceo["role"], "Chief");
+    assert!(ceo["name"].is_null());
 
     // Add an overlay teammate.
     let (status, member) = send(
@@ -2538,7 +2547,6 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 2);
     let dana = roster.iter().find(|m| m["id"] == id).unwrap();
     assert_eq!(dana["name"], "Dana");
     assert_eq!(dana["role"], "Designer");
@@ -2562,8 +2570,11 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
     assert_eq!(status, StatusCode::OK);
     let roster = roster.as_array().unwrap();
-    assert_eq!(roster.len(), 1);
-    assert_eq!(roster[0]["id"], "ceo");
+    assert!(
+        roster.iter().all(|row| row["id"] != id.as_str()),
+        "the deleted overlay teammate is still listed: {roster:?}"
+    );
+    assert!(roster.iter().any(|row| row["id"] == "ceo"));
 
     // Toggle an inbox on.
     let (status, ack) = send(
@@ -3799,7 +3810,20 @@ async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() 
     // `GET …/workflows` (seed ∪ overlay) now lists it.
     let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = list.as_array().unwrap();
+    // The company's own graphs; the baseline is listed in every company.
+    // Id heuristic, not provenance — `greet` never collides with a global id
+    // here, so this is safe; see
+    // `workflow_create_of_an_id_matching_a_global_wins_by_content` for the
+    // colliding case, asserted by content rather than this filter.
+    let rows: Vec<&serde_json::Value> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::workflows().iter().any(|w| w.id == id)
+        })
+        .collect();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["id"], "greet");
 
@@ -3807,6 +3831,61 @@ async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() 
     let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(graph["name"], "greet");
+}
+
+/// A company workflow whose id matches a global's must win — checked by its
+/// own content (the name it was created with), not by an id-membership
+/// filter, which would misclassify this exact row as "the baseline's" because
+/// the ids match. `create_company_workflow` does not special-case global ids
+/// (only seed files, overlays and `[workflows].enabled` reserve one), so
+/// creating over a global id is exactly this: the company's overlay
+/// definition of that id supersedes the global on every read.
+#[tokio::test]
+async fn workflow_create_of_an_id_matching_a_global_wins_by_content() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let seed_dir = home.join("seed");
+    std::fs::create_dir_all(&seed_dir).unwrap();
+    let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
+    let taken = crate::globals::workflows()[0].id.clone();
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workflows",
+        Some(workflow_body(&taken)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["id"], taken);
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let matching: Vec<&serde_json::Value> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["id"] == taken.as_str())
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the shadowed global must not be listed alongside the override: {list}"
+    );
+    assert_eq!(
+        matching[0]["name"], taken,
+        "the company's own definition (named after its id, per `workflow_body`) must win"
+    );
+
+    let (status, graph) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workflows/{taken}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(graph["name"], taken);
 }
 
 #[tokio::test]

@@ -704,7 +704,11 @@ impl CompanyStore for FsCompanyStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(io_err(&toml_path, e)),
         };
-        let manifest = toml::from_str(&toml_src)
+        // `from_stored_toml`, not `toml::from_str`: a stored company is read far
+        // more often than it is provisioned, and the global baseline has to
+        // reach the companies that already exist — see
+        // `CompanyManifest::apply_globals`.
+        let manifest = crate::company::CompanyManifest::from_stored_toml(&toml_src)
             .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
 
         let meta_src = read_optional(&bundle.meta_json()).await?;
@@ -1994,7 +1998,21 @@ mod test {
         let loaded = store.load(&id).await.unwrap().expect("record exists");
         assert_eq!(loaded.manifest.company.name, "Acme");
         assert_eq!(loaded.lifecycle, "running");
-        assert_eq!(loaded.manifest.agents.len(), 1);
+        // One authored teammate, plus the global baseline the load path merges
+        // into every stored manifest.
+        assert_eq!(
+            loaded
+                .manifest
+                .agents
+                .iter()
+                .filter(|agent| !agent.global)
+                .count(),
+            1
+        );
+        assert_eq!(
+            loaded.manifest.agents.len(),
+            1 + crate::globals::agents().len()
+        );
 
         let summaries = store.list().await.unwrap();
         assert_eq!(summaries.len(), 1);
