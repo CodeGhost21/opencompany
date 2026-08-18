@@ -130,6 +130,26 @@ Every new field carries `#[serde(default)]`. `CompanyEvent::WorkflowRunFinished`
 is replayed at boot, so a field without one makes every pre-existing journal
 line fail to parse — silent history loss, not a compile error.
 
+### The reserved keys a continuation's trigger input carries
+
+Approving a gate does not resume a paused run — it starts a new one (see
+[approvals](../company-brain/approvals.md)). Four keys on that run's trigger
+input carry what the lineage already knows, three of them reserved and
+host-only: an author never writes them, the engine never reads them as anything
+but opaque trigger data, and all three are stripped before two parked gates are
+compared for dedupe.
+
+| Key | Issue | Carries |
+| --- | --- | --- |
+| `approvals` | #395 | the gate node ids the replay may proceed through. Since #978 this is **every** node the run's batch approved, not just the last one clicked |
+| `__opencompany_delivered` | #438 | `{node, kind}` per `output` node whose report already went out, so a continuation does not re-mail it |
+| `__opencompany_performed` | #846 | `{node, tool, result}` per `tool_call` node whose call already left the building, replayed instead of re-made |
+| `__opencompany_denied` | #978 | gate node ids the operator refused, or that expired to a default-deny. `park_pending_gates` skips them, so a refusal is final rather than re-asked |
+
+All four **accumulate down the lineage**: a two-gate graph unions what its own
+card carried with what the run added, or the second gate forgets the first's
+decisions and the third run re-sends, re-calls or re-asks.
+
 ## What an `agent` node receives from upstream, and its bound
 
 `translate()` binds `input = "=items"` on every `agent` node, so a node's turn
