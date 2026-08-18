@@ -169,6 +169,78 @@ describe("live-reply suppression", () => {
 });
 
 /**
+ * The race issue #1000 closes: a detached turn's own `agent_reply` beating the
+ * `202` back to the browser. `onSendStart` arms suppression before the POST's
+ * shape is known, and a fast enough turn's frame can land before
+ * `onSendDetached` ever fires to lift it. The old boolean dropped that frame
+ * outright — a silent, permanent loss of the only reply the operator was going
+ * to get. `capture` holds it instead, and `detached`/`ended` resolve it for
+ * good once the POST's shape is known — dedupe by identity (which thread, what
+ * the POST turned out to be), never by how long the frame waited.
+ */
+describe("live-reply capture — the frame that beats the 202 home", () => {
+  it("holds a frame that arrives before the POST's shape is known", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+
+    // `capture` returning true means "held — do not render this yet", the
+    // caller's signal to skip its own render for this frame.
+    expect(pending.capture({ chatId: "main" })).toBe(true);
+  });
+
+  it("hands back a held frame, in order, once the turn detaches", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    const first = { chatId: "main", seq: 1 };
+    const second = { chatId: "main", seq: 2 };
+    pending.capture(first);
+    pending.capture(second);
+
+    // Nothing here was ever going to arrive twice: it is the same frame that
+    // would have been dropped before, now returned so the caller can render it
+    // for the first and only time.
+    expect(pending.detached("main")).toEqual([first, second]);
+  });
+
+  it("discards held frames once the post turns out to be synchronous", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    pending.capture({ chatId: "main" });
+
+    // The awaited POST is about to render this same reply directly — a held
+    // frame here is the echo the suppression exists to drop, not a reply that
+    // would otherwise be lost.
+    pending.ended("main");
+    // Nothing left to leak into a later turn on the same thread.
+    pending.started("main");
+    expect(pending.detached("main")).toEqual([]);
+  });
+
+  it("captures nothing for a thread with no post in flight", () => {
+    const pending = new PendingSyncPosts();
+
+    // Same rule `suppressesLiveReply` already pins for this case: an inbound
+    // frame this console did not post for is never this console's to hold.
+    expect(pending.capture({ chatId: "ops" })).toBe(false);
+  });
+
+  it("keeps each thread's held frames apart from a sibling's", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    pending.started("design");
+    const mainFrame = { chatId: "main" };
+    const designFrame = { chatId: "design" };
+    pending.capture(mainFrame);
+    pending.capture(designFrame);
+
+    expect(pending.detached("design")).toEqual([designFrame]);
+    // `main` is still mid-flight — its own held frame must not have travelled
+    // with `design`'s.
+    expect(pending.detached("main")).toEqual([mainFrame]);
+  });
+});
+
+/**
  * Re-arming the working indicator after a reload — the leg that was impossible
  * before the turn had a durable row, and the one that proves the whole design.
  */

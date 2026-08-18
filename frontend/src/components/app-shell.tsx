@@ -438,12 +438,16 @@ export function AppShell({
   const activeTurnThreadRef = useRef<string | null>(null);
   /**
    * Threads with a **synchronous** chat POST in flight — the only ones whose
-   * live `agent_reply` echo must be suppressed (see `injectAgentReply`).
+   * live `agent_reply` frames must be held back rather than rendered
+   * immediately (see `injectAgentReply`).
    *
    * A thread joins on `onSendStart` and leaves on `onSendEnd`, or *early* on
    * `onSendDetached` when the host answers `202`: from that moment the POST is
-   * never going to deliver the reply, so the live frame is the answer and
-   * suppressing it would mean the reply never appears at all (issue #983).
+   * never going to deliver the reply, so the live frame is the answer. A frame
+   * that arrives before either of those fires is not dropped — `capture` queues
+   * it, and `onSendDetached`/`onSendEnd` resolve the queue once the POST's
+   * shape is known (issue #1000). That is what makes this safe against a
+   * detached turn's reply beating the `202` itself back to the browser.
    */
   const pendingPostThreadsRef = useRef<PendingSyncPosts>(new PendingSyncPosts());
   /**
@@ -944,33 +948,20 @@ export function AppShell({
     }));
   };
 
-  // Inject an `AgentReply` pushed over the SSE feed (issue #66) into its desk
-  // thread's transcript. Dedupe against our own optimistic echo: the backend
-  // journals an `AgentReply` for the operator's own chat turn too, and
-  // Conversation already rendered that reply locally. Local message ids are
-  // ephemeral counters (not content-addressed), so we key the dedupe on an
-  // identical company line already present in the thread's recent tail. Only
-  // desks that exist as a thread receive an injection; an unmatched chatId is a
-  // no-op rather than polluting the wrong thread.
-  const injectAgentReply = useCallback(
+  // Render one `AgentReply` (issue #66) into its desk thread's transcript.
+  // Dedupe against our own optimistic echo: the backend journals an
+  // `AgentReply` for the operator's own chat turn too, and Conversation
+  // already rendered that reply locally. Local message ids are ephemeral
+  // counters (not content-addressed), so we key the dedupe on an identical
+  // company line already present in the thread's recent tail. Only desks that
+  // exist as a thread receive an injection; an unmatched chatId is a no-op
+  // rather than polluting the wrong thread.
+  //
+  // Split out from {@link injectAgentReply} so a frame `PendingSyncPosts` held
+  // back (issue #983) can be rendered from the same code once its thread's POST
+  // resolves, instead of the shell needing a second copy of this logic.
+  const renderAgentReply = useCallback(
     (event: AgentReplyEvent) => {
-      // The operator's own chat turn is delivered synchronously by the awaited
-      // POST (and that copy carries the steps timeline). The backend ALSO journals
-      // an `AgentReply` for it, which arrives over SSE — first, mid-await — so a
-      // blind inject here would double the bubble. Suppress the echo for any
-      // thread with a POST in flight; the POST reply is authoritative. The
-      // recent-tail content check below still guards a late echo that lands just
-      // after the POST resolved.
-      //
-      // **Conditional since issue #983, and this is the load-bearing part.** The
-      // rule above only holds while the POST is going to *deliver* the reply. A
-      // detached turn answers `202` immediately and delivers nothing, so for it
-      // this live frame IS the answer — suppressing it would mean the reply never
-      // appears at all, which is a strictly worse failure than the double bubble
-      // this guard exists to prevent. `onSendDetached` drops the thread from the
-      // set the moment the 202 lands, so the set means "synchronous post in
-      // flight" and never merely "a turn is running".
-      if (pendingPostThreadsRef.current.suppressesLiveReply(event.chatId)) return;
       setThreads((ts) =>
         ts.map((t) => {
           if (t.id !== event.chatId) return t;
@@ -1058,6 +1049,47 @@ export function AppShell({
   );
 
   /**
+   * The live half of the `agent_reply` handler `useEvents` actually subscribes
+   * with — routes each frame through `pendingPostThreadsRef` before it ever
+   * reaches {@link renderAgentReply}.
+   *
+   * The operator's own chat turn is delivered synchronously by the awaited
+   * POST (and that copy carries the steps timeline). The backend ALSO journals
+   * an `AgentReply` for it, which arrives over SSE — first, mid-await — so a
+   * blind render here would double the bubble. A thread with a POST in flight
+   * therefore has its frames held rather than rendered; the POST reply is
+   * authoritative once it lands, and the recent-tail content check inside
+   * `renderAgentReply` still guards a late echo that arrives just after.
+   *
+   * **Conditional since issue #983, and this is the load-bearing part.** The
+   * rule above only holds while the POST is going to *deliver* the reply. A
+   * detached turn answers `202` immediately and delivers nothing, so for it
+   * this live frame IS the answer — dropping it would mean the reply never
+   * appears at all, which is a strictly worse failure than the double bubble
+   * this guard exists to prevent.
+   *
+   * `capture` never drops what it holds. A detached turn's own `agent_reply`
+   * can — and in a fast turn regularly does — arrive before this browser has
+   * even parsed the `202` body that would have told `onSendDetached` to stop
+   * holding: `onSendStart` arms synchronously, but nothing makes that race
+   * resolve before the network does. Earlier code suppressed by a boolean and
+   * threw the frame away for the whole window, which is exactly the bug (issue
+   * #1000) — a fast enough reply vanished with nothing left to render. Holding
+   * it instead means `onSendDetached` (or `onSendEnd`, for a host that ignored
+   * `detach`) always has something correct to do with it: replay it once the
+   * shape turns out to be detached, discard it once it turns out to be a
+   * synchronous echo. Dedupe by *what the POST turned out to be*, never by how
+   * long the frame waited.
+   */
+  const injectAgentReply = useCallback(
+    (event: AgentReplyEvent) => {
+      if (pendingPostThreadsRef.current.capture(event)) return;
+      renderAgentReply(event);
+    },
+    [renderAgentReply],
+  );
+
+  /**
    * Post the card-linked system marker for a settled dispatch into the channel
    * the card was raised in (issue #377).
    *
@@ -1139,11 +1171,21 @@ export function AppShell({
    *
    * What it does do is lift the echo suppression, because from here the stream
    * is the delivery path rather than a duplicate of one.
+   *
+   * `PendingSyncPosts.detached` hands back whatever `injectAgentReply` held
+   * for this thread while its shape was still unknown — a fast turn's reply
+   * can and does arrive before this callback does (issue #1000). Rendering
+   * those now, in the order they arrived, is what makes lifting the
+   * suppression lose nothing: the frame was never dropped, only queued.
    */
-  const onSendDetached = useCallback((threadId: string, turnId?: string) => {
-    pendingPostThreadsRef.current.detached(threadId);
-    setOpenTurns((prev) => ({ ...prev, [threadId]: { turnId, queued: true } }));
-  }, []);
+  const onSendDetached = useCallback(
+    (threadId: string, turnId?: string) => {
+      const held = pendingPostThreadsRef.current.detached(threadId);
+      setOpenTurns((prev) => ({ ...prev, [threadId]: { turnId, queued: true } }));
+      held.forEach((frame) => renderAgentReply(frame as AgentReplyEvent));
+    },
+    [renderAgentReply],
+  );
 
   // Fold one live turn frame into the in-flight thread's timeline: a `tool_call`
   // upserts a `running` row keyed by `toolCallId`; a `tool_result` flips that row

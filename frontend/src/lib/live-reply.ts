@@ -28,8 +28,25 @@
  * which is why {@link detached} removes a thread the moment the `202` lands even
  * though its turn is still very much running.
  */
+/**
+ * The one field {@link PendingSyncPosts.capture} needs off a live `agent_reply`
+ * frame. A local shape rather than importing the hook's event type, matching
+ * {@link OpenTurnRow} / {@link OpenRunRow} below — this module stays testable
+ * without dragging in `hooks/use-events`.
+ */
+export interface LiveReplyFrame {
+  chatId: string;
+}
+
 export class PendingSyncPosts {
   private readonly threads = new Set<string>();
+  /**
+   * Frames {@link capture} held back because their thread's POST shape was
+   * still unknown when they arrived, keyed by thread and kept in arrival
+   * order. Resolved for good — never left to expire — by whichever of
+   * {@link ended} / {@link detached} the POST turns out to reach.
+   */
+  private readonly held = new Map<string, LiveReplyFrame[]>();
 
   /**
    * A chat POST has gone out on this thread.
@@ -48,19 +65,63 @@ export class PendingSyncPosts {
    *
    * The turn is still running — this is emphatically not `ended` — but this POST
    * has stopped being the delivery path, so the stream takes over.
+   *
+   * Returns whatever {@link capture} held for this thread, oldest first, so the
+   * caller can render it now. This is the fix for the race the boolean alone
+   * could not close: `onSendStart` arms suppression synchronously, but nothing
+   * makes the browser learn the `202`'s shape before a fast turn's SSE frame
+   * already arrived — a detached echo brain can answer in milliseconds, well
+   * inside the round trip. A frame landing in that window used to be dropped
+   * outright, which is a silent, permanent loss of the operator's only reply.
+   * Holding it and handing it back here — identity by thread, not a timer —
+   * closes the window instead of narrowing it: no frame captured while a
+   * thread's shape was unknown is ever thrown away, no matter when it lands
+   * relative to the `202`.
    */
-  detached(threadId: string): void {
+  detached(threadId: string): LiveReplyFrame[] {
     this.threads.delete(threadId);
+    const frames = this.held.get(threadId) ?? [];
+    this.held.delete(threadId);
+    return frames;
   }
 
-  /** The synchronous POST resolved (or threw); its reply is already rendered. */
+  /**
+   * The synchronous POST resolved (or threw); its reply is already rendered.
+   *
+   * Whatever {@link capture} held for this thread was, by the same reasoning,
+   * a live echo of that same reply — the awaited response is authoritative, so
+   * the held frames are discarded rather than replayed.
+   */
   ended(threadId: string): void {
     this.threads.delete(threadId);
+    this.held.delete(threadId);
   }
 
   /** Whether a live `agent_reply` for this thread would be a duplicate. */
   suppressesLiveReply(threadId: string): boolean {
     return this.threads.has(threadId);
+  }
+
+  /**
+   * Route one live `agent_reply` frame: render it now, or hold it because this
+   * thread's POST has not yet told the console what it delivers.
+   *
+   * Returns `true` when the frame was held — the caller must not render it,
+   * {@link detached} or {@link ended} will dispose of it — and `false` when
+   * there is nothing pending on this thread and the frame is the caller's to
+   * render immediately, same as before this thread ever posted.
+   *
+   * This is the only place a frame's fate is decided, and it decides by
+   * identity — is this thread's POST still unresolved — never by how long it
+   * has been unresolved. See {@link detached} for why that distinction is the
+   * whole fix.
+   */
+  capture(frame: LiveReplyFrame): boolean {
+    if (!this.suppressesLiveReply(frame.chatId)) return false;
+    const queue = this.held.get(frame.chatId);
+    if (queue) queue.push(frame);
+    else this.held.set(frame.chatId, [frame]);
+    return true;
   }
 }
 
