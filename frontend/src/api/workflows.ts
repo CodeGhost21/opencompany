@@ -685,7 +685,9 @@ export function listWorkflowRuns(
  *
  * `nodes` is the engine's `{ "<node id>": { "items": [ … ] } }` map, bounded for
  * storage; `truncated` says whether any value was clipped to fit the caps, so the
- * inspector can badge it honestly.
+ * inspector can badge it honestly. `partial` says the run FAILED or BLOCKED, so
+ * the map is only what the runner captured from the nodes that finished before
+ * the stop — not a complete outcome (issue #1008).
  */
 export interface WorkflowRunOutputRecord {
   runId: string;
@@ -696,6 +698,13 @@ export interface WorkflowRunOutputRecord {
   nodes: unknown;
   /** Whether any value was clipped to fit the durable size caps. */
   truncated: boolean;
+  /**
+   * Whether this is a partial capture from a run that failed or blocked rather
+   * than a clean settled outcome (issue #1008). Optional so a snapshot written
+   * before this field existed (always a clean settle) reads back as absent,
+   * which the inspector treats as `false`.
+   */
+  partial?: boolean;
 }
 
 /**
