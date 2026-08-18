@@ -58,6 +58,54 @@ impl CompanyStore for MemStore {
     }
 }
 
+/// Wraps a [`MemStore`], counting `load` calls and failing every one after
+/// the first.
+///
+/// A stand-in for a transient store hiccup between two reads of what should
+/// be "the same" record. `read_workflow`'s overlay body and its
+/// `[globals].disable` list must come from **one** load — a second, later
+/// load disagreeing with the first is exactly the shape that let a
+/// company-disabled global slip through a fallback that turned that second
+/// load's failure into an empty (not-disabled) list.
+#[derive(Default)]
+struct FailsAfterFirstLoadStore {
+    inner: MemStore,
+    calls: StdMutex<u32>,
+}
+
+impl FailsAfterFirstLoadStore {
+    fn seeded(record: CompanyRecord) -> Self {
+        Self {
+            inner: MemStore::seeded(record),
+            calls: StdMutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl CompanyStore for FailsAfterFirstLoadStore {
+    async fn load(&self, id: &CompanyId) -> Result<Option<CompanyRecord>> {
+        let mut calls = self.calls.lock().unwrap();
+        *calls += 1;
+        if *calls > 1 {
+            return Err(crate::error::OpenCompanyError::Store(
+                "simulated store failure on a second read".to_string(),
+            ));
+        }
+        drop(calls);
+        self.inner.load(id).await
+    }
+    async fn save(&self, record: &CompanyRecord) -> Result<()> {
+        self.inner.save(record).await
+    }
+    async fn list(&self) -> Result<Vec<CompanySummary>> {
+        self.inner.list().await
+    }
+    async fn append_ledger(&self, id: &CompanyId, entry: LedgerEntry) -> Result<()> {
+        self.inner.append_ledger(id, entry).await
+    }
+}
+
 #[derive(Default)]
 struct MemLog {
     events: StdMutex<Vec<CompanyEvent>>,
