@@ -944,6 +944,14 @@ async fn set_workflow_enabled(
             "workflow {wid}"
         ))));
     }
+    // Issue #1046: the arm-time delivery check needs the deployment's delivery
+    // capability, which lives on the runtime and the arm path cannot otherwise
+    // see: whether a mailbox is wired (so `owner`/`email` outputs can land) and
+    // which channels are deliverable (`deliverable_channel_ids` already excludes
+    // the operator channel, and is the console destination picker's own source
+    // of truth, #813).
+    let mail_configured = company.runtime.mail().is_some();
+    let wired_channels = company.runtime.deliverable_channel_ids();
     set_company_workflow_enabled(
         company.id(),
         company.runtime.source_dir(),
@@ -951,6 +959,8 @@ async fn set_workflow_enabled(
         Some(company.runtime.events()),
         &wid,
         body.enabled,
+        mail_configured,
+        &wired_channels,
     )
     .await
     .map_err(ApiError)?;
