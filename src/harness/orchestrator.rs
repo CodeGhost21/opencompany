@@ -6313,7 +6313,10 @@ members = ["legal_counsel"]
                     .cloned()
                     .collect())
             }
-            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
                 Box::pin(stream::empty())
             }
         }
@@ -6415,7 +6418,10 @@ members = ["legal_counsel"]
                     .cloned()
                     .collect())
             }
-            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
                 Box::pin(stream::empty())
             }
         }

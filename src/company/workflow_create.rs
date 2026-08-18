@@ -1796,7 +1796,10 @@ mod tests {
         ) -> Result<Vec<StoredEvent>> {
             Ok(Vec::new())
         }
-        fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
             Box::pin(stream::empty())
         }
     }

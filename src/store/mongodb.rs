@@ -48,7 +48,7 @@ use crate::Result;
 use crate::company::CompanyManifest;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
+use crate::ports::events::{EventLog, EventStreamItem, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::login_codes::LoginCodeRecord;
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
@@ -732,13 +732,15 @@ impl EventLog for MongoStore {
         Ok(out)
     }
 
-    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
         let rx = self.sender_for(id).subscribe();
         let stream = futures::stream::unfold(rx, |mut rx| async move {
             loop {
                 match rx.recv().await {
-                    Ok(event) => return Some((event, rx)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Ok(event) => return Some((EventStreamItem::Event(event), rx)),
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        return Some((EventStreamItem::Gap { missed }, rx));
+                    }
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
             }
@@ -4371,6 +4373,12 @@ mod test {
         let Some(s) = store().await else { return };
         conformance::assert_monotonic_event_seq(s.clone()).await;
         drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_event_subscription_surfaces_gap() {
+        let Some(s) = store().await else { return };
+        conformance::assert_event_subscription_surfaces_gap(s).await;
     }
 
     #[tokio::test]
