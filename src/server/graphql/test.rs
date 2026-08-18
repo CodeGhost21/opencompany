@@ -1517,6 +1517,7 @@ async fn graphql_lists_a_company_override_of_a_global_id_by_its_own_content() {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1589,6 +1590,7 @@ async fn graphql_hides_a_company_disabled_global_workflow() {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();

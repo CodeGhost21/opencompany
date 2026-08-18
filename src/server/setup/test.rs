@@ -1056,9 +1056,22 @@ async fn an_apply_seeds_the_company_the_wizard_designed() {
         "the seeded company is registered"
     );
     let manifest = seeded_manifest(home.path(), seeded).await;
+    // Every designed teammate is on the roster. NOT an exact count: a company
+    // also receives the global baseline agents (`src/globals/`), so asserting a
+    // total here would pin this test to how many globals ship rather than to
+    // anything this flow decides.
     let roles: Vec<&str> = manifest.agents.iter().map(|a| a.role.as_str()).collect();
-    assert!(roles.contains(&"Order Dispatch Coordinator"), "{roles:?}");
-    assert_eq!(manifest.agents.len(), 4, "{roles:?}");
+    for designed in [
+        "Meta Ads Specialist",
+        "Order Dispatch Coordinator",
+        "Accountant",
+        "Operations Lead",
+    ] {
+        assert!(
+            roles.contains(&designed),
+            "{designed} is missing from {roles:?}"
+        );
+    }
     // The dead end this closes: without the address, email sign-in completes
     // and nobody can log in.
     assert_eq!(manifest.users.admins, vec!["ada@example.com".to_string()]);
@@ -1089,10 +1102,21 @@ async fn a_designed_company_wins_over_a_template() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(state.registry().list().len(), 1, "exactly one company");
     let seeded = body["seeded_company"].as_str().expect("seeded");
-    assert_eq!(
-        seeded_manifest(home.path(), seeded).await.agents.len(),
-        4,
-        "the designed roster, not the template's"
+    let roles: Vec<String> = seeded_manifest(home.path(), seeded)
+        .await
+        .agents
+        .into_iter()
+        .map(|a| a.role)
+        .collect();
+    // The designed roster landed; the template's did not. Named rather than
+    // counted, because the global baseline agents are on here too.
+    assert!(
+        roles.iter().any(|r| r == "Order Dispatch Coordinator"),
+        "the designed roster is missing: {roles:?}"
+    );
+    assert!(
+        !roles.iter().any(|r| r == "Creative Director"),
+        "the marketing template's roster leaked in: {roles:?}"
     );
 }
 
