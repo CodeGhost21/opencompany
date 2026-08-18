@@ -55,4 +55,5 @@ export const {
   useTransition,
   version,
 } = React;
+export { jsx, jsxs };
 export { createRoot, hydrateRoot };
