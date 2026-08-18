@@ -417,6 +417,13 @@ export function WorkflowCreateDialog({
    * itself. Degrades to a free-text id field when the host offers no list. */
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  /** The same "a write is in flight" fact as `submitting`, held where `submit()`
+   * can read it SYNCHRONOUSLY (issue #1005). `submitting` is captured from the
+   * render that produced the handler, so two calls landing before React commits
+   * `setSubmitting(true)` — a double activation, an Enter keypress arriving with
+   * a click, any caller added later — would both read `false` and both post. The
+   * state stays because the render needs it; the ref is what actually guards. */
+  const submittingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   /** The submit-time error banner, so a failed submit can scroll it into view
    * and focus it rather than leave the message off-screen (#813 defect 6). */
@@ -940,16 +947,24 @@ export function WorkflowCreateDialog({
 
   async function submit() {
     // Re-entrancy guard (issue #1005). The Create button disables while a write
-    // is in flight, but `disabled` is a property of one DOM node: a second click
-    // landing in the same tick as the first, an Enter keypress, or any future
-    // caller would otherwise post the graph twice — and for create that means
-    // two workflows, or a 409 the operator did nothing to earn.
-    if (submitting) return;
+    // is in flight, but `disabled` is a property of one DOM node: a second
+    // activation landing in the same tick as the first, an Enter keypress, or
+    // any future caller would otherwise post the graph twice — and for create
+    // that means two workflows, or a 409 the operator did nothing to earn.
+    //
+    // It reads the REF, not `submitting`: the state value here is the one from
+    // the render that built this closure, so two calls in the same tick would
+    // both see `false` and the guard would pass twice. The ref is written below
+    // before the first `await`, which makes it true for every later caller.
+    if (submittingRef.current) return;
     const problem = validate();
     if (problem) {
       showError(problem);
       return;
     }
+    // Set before the first `await` — after `validate()`, so a draft the client
+    // rejects never latches the guard and the operator can fix it and retry.
+    submittingRef.current = true;
     setSubmitting(true);
     setError(null);
     const graph: WorkflowGraph = {
@@ -1038,6 +1053,7 @@ export function WorkflowCreateDialog({
         onConflict?.(e.message);
       }
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }

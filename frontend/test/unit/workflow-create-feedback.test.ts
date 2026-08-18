@@ -153,25 +153,27 @@ describe("the create dialog while a create is in flight", () => {
     );
   });
 
-  it("posts once when the operator clicks Create twice", async () => {
+  it("posts once when the operator clicks Create twice in one tick", async () => {
     const post = vi.fn(() => new Promise<never>(() => {}));
     await open(stubClient(post));
     await fillValidDraft();
 
+    // BOTH clicks inside ONE `act`, deliberately. React commits state at the
+    // end of the block, so the button is still enabled for the second one and
+    // `submit()` is genuinely re-entered — which is the only way to reach the
+    // guard. Split across two `act`s the first commit has landed, `disabled` is
+    // set, React drops the event on the disabled fiber, and the assertion below
+    // passes for a reason that has nothing to do with `submit()`.
+    //
+    // So this is the assertion that pins `submittingRef`: against a guard
+    // reading the `submitting` STATE both calls see the pre-commit `false` and
+    // this fails with two posts.
     await act(async () => {
       submitButton().click();
-    });
-    await act(async () => {
       submitButton().click();
     });
 
     expect(post).toHaveBeenCalledTimes(1);
-    // What stopped the second click here is the `disabled` attribute — React
-    // drops events on a disabled fiber, so no test driving this button can
-    // reach `submit()` a second time. That is exactly why the `if (submitting)
-    // return;` guard inside `submit()` is not redundant with this assertion:
-    // `disabled` is a property of one DOM node, and the guard is what holds for
-    // a keyboard activation, a re-render race, or any caller added later.
   });
 });
 
