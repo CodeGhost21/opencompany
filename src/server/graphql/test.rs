@@ -1471,6 +1471,80 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
     assert_eq!(rest_ids, gql_ids, "REST and GraphQL disagree on the id set");
 }
 
+/// A company workflow whose id collides with a global's must win — checked by
+/// its own distinguishing content, not by `own_workflows`' id heuristic, which
+/// would misclassify this exact row as "the baseline's" because the ids match.
+///
+/// This is the case the `own_workflows` doc comment calls out directly: a
+/// company definition of the same id as a global supersedes it (see
+/// `crate::company::list_workflows_with_globals`), so `Company.workflows` must
+/// list exactly one row for that id, carrying the company's own name.
+#[tokio::test]
+async fn graphql_lists_a_company_override_of_a_global_id_by_its_own_content() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    let taken = crate::globals::workflows()[0].id.clone();
+
+    let store = FsCompanyStore::new(home.to_path_buf());
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: vec![crate::ports::types::OverlayWorkflow {
+                id: taken.clone(),
+                toml: format!(
+                    "id = \"{taken}\"\nname = \"Ours, Not The Baseline's\"\n\
+                     [[node]]\nid = \"n1\"\nkind = \"trigger\"\nname = \"Start\"\n\
+                     [[node]]\nid = \"n2\"\nkind = \"output\"\nname = \"Done\"\n\
+                     [[edge]]\nfrom = \"n1\"\nto = \"n2\"\n"
+                ),
+            }],
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    state.registry().insert(id, Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ workflows { id name } } }"}"#,
+    )
+    .await;
+    let summaries = value["data"]["company"]["workflows"].as_array().unwrap();
+    let matching: Vec<&serde_json::Value> = summaries
+        .iter()
+        .filter(|row| row["id"] == taken.as_str())
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the shadowed global must not be listed alongside the override: {value}"
+    );
+    assert_eq!(
+        matching[0]["name"], "Ours, Not The Baseline's",
+        "the company's own definition must win, not the global's: {value}"
+    );
+}
+
 /// `Company.workspaceSearch` (issue #607), over the same shared helper the REST
 /// route and the agent tool use.
 ///
