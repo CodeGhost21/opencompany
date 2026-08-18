@@ -672,9 +672,11 @@ pub fn attach_upstream_content(
 /// `run_id` is deliberately **not** part of it: it differs by construction on
 /// every re-run, so including it would make the dedupe a no-op. Neither is the
 /// [`PAYLOAD_DELIVERED`] ledger, nor the [`CONTINUATION_DELIVERED_KEY`] the
-/// input carries it under (issue #438) — both differ by construction between a
-/// paused run and the continuation it started, and both describe what has
-/// *already happened* rather than what is being decided. Counting either would
+/// input carries it under (issue #438), nor either of their siblings — the
+/// outward-call ledger (#846) and the denial ledger (#978). All of them differ
+/// by construction between a paused run and the continuation it started, and
+/// all describe what has *already happened* rather than what is being decided
+/// (a decision already made is the clearest case of that). Counting any would
 /// make every continuation gate read as a new decision, which is precisely the
 /// duplicate-card failure this function exists to prevent.
 fn is_same_gate(a: &Effect, b: &Effect) -> bool {
@@ -699,9 +701,11 @@ fn decided_input(effect: &Effect) -> Option<Value> {
 /// `input` with the reserved host-threaded ledger keys removed. A non-object
 /// input is returned as-is — there is nothing to strip.
 ///
-/// Both keys, and neither is optional: a continuation's input differs from the
-/// paused run's by exactly these, so letting either difference count would make
-/// every continuation gate a "new" decision and stack a duplicate card.
+/// All three keys, and none is optional: a continuation's input differs from
+/// the paused run's by exactly these — the delivery ledger (#438), the
+/// outward-call ledger (#846) and the denial ledger (#978) — so letting any of
+/// those differences count would make every continuation gate a "new" decision
+/// and stack a duplicate card.
 fn without_ledger(mut input: Value) -> Value {
     if let Value::Object(map) = &mut input {
         map.remove(CONTINUATION_DELIVERED_KEY);
