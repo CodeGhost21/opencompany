@@ -79,6 +79,9 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
   test.setTimeout(150_000);
 
   let cuts = 0;
+  // Named before the route is registered so the premise assertion inside it
+  // can target this turn's own reply.
+  const marker = `cut-${Date.now()}`;
   await page.route("**/chat", async (route) => {
     if (route.request().method() !== "POST") {
       await route.continue();
@@ -89,12 +92,18 @@ test("a chat POST killed in flight still shows the reply the host went on to wri
     await route.fetch();
     await new Promise((resolve) => setTimeout(resolve, CUT_AFTER_MS));
     cuts += 1;
+    // The premise, asserted rather than assumed: at the moment the connection
+    // is cut, nothing has drawn this reply yet — it can only appear later from
+    // the released frame, which is exactly what the assertions below pin.
+    // `reply` targets this turn's own echo, not the total bubble count, so a
+    // line that would render the answer early fails the test instead of this
+    // assertion hardening nothing.
+    expect(await reply(page, marker).count()).toBe(0);
     await route.abort("connectionaborted");
   });
 
   await openChannel(page, ENGINEERING.id);
 
-  const marker = `cut-${Date.now()}`;
   await page.getByPlaceholder(/^Message /).fill(marker);
   await page.keyboard.press("Enter");
 
