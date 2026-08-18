@@ -1,4 +1,6 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
+
+import { openChannel, reply, workingRow } from "./chat-helpers";
 
 import { LIVE_BRAIN } from "./capabilities";
 
@@ -68,23 +70,6 @@ test.beforeEach(async ({ page }) => {
     /* deliberately never fulfilled, aborted, or continued */
   });
 });
-
-async function openChannel(page: Page, channelId: string) {
-  await page.goto(`/#/chat/${channelId}`);
-  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
-}
-
-function bubbles(page: Page): Locator {
-  return page.locator("article[data-message-id]");
-}
-
-function reply(page: Page, marker: string): Locator {
-  return bubbles(page).filter({ hasText: `You said: ${marker}` });
-}
-
-function workingRow(page: Page): Locator {
-  return page.getByTestId("working-indicator");
-}
 
 test("with /events unreachable, a detached turn's reply still lands and the working row still settles", async ({
   page,
