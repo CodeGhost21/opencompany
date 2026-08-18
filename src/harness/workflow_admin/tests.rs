@@ -1045,3 +1045,62 @@ fn the_descriptions_route_the_model_and_name_the_contract() {
     assert!(schema["properties"]["nodes"].is_object(), "{schema}");
     assert!(schema["properties"]["edges"].is_object(), "{schema}");
 }
+
+// ---------------------------------------------------------------------------
+// 11. one record load, not two (globals opt-out)
+// ---------------------------------------------------------------------------
+
+/// A company that disabled a global workflow must never see it through
+/// `read_workflow`, even when a *second* read of the record — which the tool
+/// must not perform — would fail.
+///
+/// Before the fix, `read_workflow`'s fallback path re-loaded the record just
+/// to fetch `[globals].disable`, and turned a failed second load into an
+/// empty (i.e. nothing-disabled) list. With
+/// [`FailsAfterFirstLoadStore`] failing every load after the first, that bug
+/// would surface the disabled global's graph as a success; the fix reads the
+/// overlay body and the disable list from one load, so only one `load` call
+/// ever happens and the global stays hidden.
+#[tokio::test]
+async fn a_disabled_global_stays_hidden_even_if_a_second_read_would_fail() {
+    let dropped = crate::globals::workflows()[0].id.clone();
+    let company = CompanyId::new("acme");
+    let manifest: CompanyManifest = toml::from_str(&format!(
+        "[company]\nname = \"Acme\"\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n\n\
+         [globals]\ndisable = [\"workflow:{dropped}\"]\n"
+    ))
+    .expect("valid manifest");
+    let record = CompanyRecord {
+        id: company.clone(),
+        manifest,
+        ledger: Vec::new(),
+        lifecycle: "running".to_string(),
+        overlay_agents: Vec::new(),
+        overlay_desk_members: Vec::new(),
+        overlay_desk_order: Vec::new(),
+        overlay_desks: Vec::new(),
+        overlay_workflows: Vec::new(),
+        overlay_budgets: Vec::new(),
+        overlay_policy: None,
+        overlay_desk_tools: Default::default(),
+        disabled_workflows: Vec::new(),
+        template_provenance: None,
+    };
+    let store: Arc<dyn CompanyStore> = Arc::new(FailsAfterFirstLoadStore::seeded(record));
+    let admin = WorkflowAdmin::new(company, None, store, None, None);
+    let read = ReadWorkflowTool::new(admin);
+
+    let result = read
+        .execute(json!({ "id": dropped }))
+        .await
+        .expect("tool call succeeds");
+    assert!(
+        result.is_error,
+        "a company-disabled global must stay hidden, not succeed with its graph: {result:?}"
+    );
+    assert!(
+        err_text(&result).contains("No workflow"),
+        "{}",
+        err_text(&result)
+    );
+}
