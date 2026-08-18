@@ -224,6 +224,15 @@ pub struct SetupCompanyAgent {
     name: String,
     role: String,
     description: String,
+    /// The job shape the design pass assigned, round-tripped through the review
+    /// screen untouched — it is what decides this teammate's tool belt
+    /// (`crate::company::setup::AgentFocus`).
+    ///
+    /// A `String` here rather than the enum, resolved through `from_wire`: this
+    /// is the one field the console never shows and never edits, so an older or
+    /// unknown spelling should cost that teammate its narrowing rather than
+    /// reject the whole apply an operator has just confirmed.
+    focus: Option<String>,
 }
 
 /// What the apply returns.
@@ -720,6 +729,10 @@ async fn apply_inner(
                     name: a.name.clone(),
                     role: a.role.clone(),
                     description: a.description.clone(),
+                    focus: a
+                        .focus
+                        .as_deref()
+                        .and_then(crate::company::setup::AgentFocus::from_wire),
                 })
                 .collect();
             // Validated again on the way in, for the same reason the roster pass
@@ -865,6 +878,10 @@ pub struct SetupAgentDto {
     name: String,
     role: String,
     description: String,
+    /// The job shape that decides this teammate's tool belt. Sent so the review
+    /// step can hand it straight back on apply — the console never shows or
+    /// edits it, it only carries it.
+    focus: Option<String>,
 }
 
 /// The proposal.
@@ -876,6 +893,13 @@ pub struct SetupRosterDto {
     template: String,
     /// `model` or `fallback` — the review step says which, in a sentence.
     source: String,
+    /// The jobs the operator named, as the host split them. Echoed back so the
+    /// list the roster was judged against is the list they can see — a bad split
+    /// is then visible to the person who typed it.
+    jobs: Vec<String>,
+    /// The jobs no teammate owns. Non-empty only on the `model` path; a curated
+    /// team makes no coverage claim about a list it never read.
+    uncovered: Vec<String>,
 }
 
 /// `POST /api/v1/setup/roster` — propose a starting team for a company that
@@ -918,10 +942,13 @@ async fn propose_roster(
                 name: a.name,
                 role: a.role,
                 description: a.description,
+                focus: a.focus.map(|f| f.as_str().to_string()),
             })
             .collect(),
         template: proposal.template_key.to_string(),
         source: proposal.source.as_str().to_string(),
+        jobs: proposal.jobs,
+        uncovered: proposal.uncovered,
     }))
 }
 

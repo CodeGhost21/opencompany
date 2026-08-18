@@ -89,6 +89,8 @@ struct ProposedAgentDto {
     name: String,
     role: String,
     description: String,
+    /// The job shape that decides this teammate's tool belt.
+    focus: Option<String>,
 }
 
 impl From<ProposedAgent> for ProposedAgentDto {
@@ -97,6 +99,7 @@ impl From<ProposedAgent> for ProposedAgentDto {
             name: agent.name,
             role: agent.role,
             description: agent.description,
+            focus: agent.focus.map(|f| f.as_str().to_string()),
         }
     }
 }
@@ -117,6 +120,10 @@ struct RosterProposalDto {
     /// with no indication believes a model read their answers and produced it,
     /// and judges the product on a roster it never wrote.
     source: String,
+    /// The jobs the operator named, as the host split them.
+    jobs: Vec<String>,
+    /// The jobs no teammate owns — non-empty only on the `model` path.
+    uncovered: Vec<String>,
 }
 
 impl From<RosterProposal> for RosterProposalDto {
@@ -125,6 +132,8 @@ impl From<RosterProposal> for RosterProposalDto {
             agents: proposal.agents.into_iter().map(Into::into).collect(),
             template: proposal.template_key.to_string(),
             source: proposal.source.as_str().to_string(),
+            jobs: proposal.jobs,
+            uncovered: proposal.uncovered,
         }
     }
 }

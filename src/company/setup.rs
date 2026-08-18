@@ -62,6 +62,11 @@ pub struct ProposedAgent {
     pub role: String,
     /// What this agent owns, in the operator's terms.
     pub description: String,
+    /// The shape of work this teammate does, which is what decides its tool
+    /// belt. See [`AgentFocus`]. Absent means "inherit the company belt", which
+    /// is what every setup-built agent did before focus existed.
+    #[serde(default, deserialize_with = "focus_from_wire")]
+    pub focus: Option<AgentFocus>,
 }
 
 /// A curated agent inside a [`RosterTemplate`]. Static so the table costs no
@@ -71,6 +76,128 @@ pub struct TemplateAgent {
     pub name: &'static str,
     pub role: &'static str,
     pub description: &'static str,
+    /// The belt this curated teammate needs. Declared here rather than derived
+    /// from the role, so the fallback team is scoped exactly as a designed one
+    /// is — an operator with no credential must not end up with the *wider*
+    /// company.
+    pub focus: AgentFocus,
+}
+
+/// The shape of work a teammate does, and the only thing that decides its tool
+/// belt.
+///
+/// ## Why the model names a job shape and never a tool
+///
+/// A setup roster is authored by a model reading free text a stranger typed, and
+/// tool grants are a permission boundary. Letting the answer name grants
+/// directly would put `[tools]` inside the blast radius of the prompt — the one
+/// place a hostile "what do you do?" could pay off. A closed enum means the
+/// worst a hostile answer achieves is the wrong belt from a list of four, all of
+/// which the host wrote.
+///
+/// ## Why this exists at all
+///
+/// [`manifest_from_setup`] builds its manifest from a name-only base, so
+/// `[tools]` took [`Tools::default`](crate::company::Tools) — the globals
+/// baseline `["*", "media", "composio"]` — and every agent left `tools` empty,
+/// which [`agent_effective_grants`](crate::runtime::builder) reads as *inherit
+/// the lot*. So each teammate a first-run operator created held shell, code,
+/// web, subagent, files, docs, **media** (which spends real money) and
+/// **composio** (which reaches per-tenant credentials), for a company they had
+/// described in three sentences.
+///
+/// The globals teammates next to them already do the opposite, and say why in
+/// `globals/agents/researcher.toml`: a request is intersected with
+/// `[tools].allow`, so naming one *can only ever narrow*. These belts are that
+/// file's, verbatim, for exactly that reason — the strings are already exercised
+/// in every company rather than invented here.
+///
+/// `search` is deliberately absent from every belt even though the globals
+/// researcher names it: it bills per call, and a team nobody has met yet should
+/// not arrive holding a spend authority. A company that wants it grants it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentFocus {
+    /// Finds things out. Reads the workspace without writing it, and browses.
+    Research,
+    /// Produces the written work. Writes the workspace; no web.
+    Writing,
+    /// Keeps work moving. Same belt as [`Writing`](Self::Writing) today.
+    Operations,
+    /// Measures and reports. Writes the workspace, and browses to source the
+    /// numbers.
+    Analysis,
+}
+
+impl AgentFocus {
+    /// Every focus, so a test can quantify over the whole vocabulary rather
+    /// than over the four a reader happened to remember.
+    pub const ALL: [Self; 4] = [
+        Self::Research,
+        Self::Writing,
+        Self::Operations,
+        Self::Analysis,
+    ];
+
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Research => "research",
+            Self::Writing => "writing",
+            Self::Operations => "operations",
+            Self::Analysis => "analysis",
+        }
+    }
+
+    /// The focus this string names, or `None`.
+    ///
+    /// Unknown is `None` rather than an error on purpose: this parses model
+    /// output, and a model that invents `"marketing"` should cost that teammate
+    /// its narrowing, not cost the operator the whole roster. `None` is the
+    /// pre-focus behaviour, which is worse but never broken.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "research" => Some(Self::Research),
+            "writing" => Some(Self::Writing),
+            "operations" => Some(Self::Operations),
+            "analysis" => Some(Self::Analysis),
+            _ => None,
+        }
+    }
+
+    /// This focus's tool belt.
+    ///
+    /// `Writing` and `Operations` return the same list today, and that is not an
+    /// oversight: they differ in mandate and in what the prompt routes to them,
+    /// not in the tools they need. Keeping them distinct is what lets the belts
+    /// diverge later without re-deciding which agents are which.
+    pub fn tools(self) -> Vec<String> {
+        let belt: &[&str] = match self {
+            Self::Research => &["workspace.read", "docs.*", "files.*", "web.*"],
+            Self::Writing | Self::Operations => &["workspace.*", "docs.*", "files.*"],
+            Self::Analysis => &["workspace.*", "docs.*", "files.*", "web.*"],
+        };
+        belt.iter().map(|t| (*t).to_string()).collect()
+    }
+}
+
+/// The belt for an optional focus. `None` inherits the company belt, which is
+/// what every setup-built agent did before focus existed — so an unreadable or
+/// absent focus degrades to the old behaviour rather than to a mute teammate.
+pub fn tools_for_focus(focus: Option<AgentFocus>) -> Vec<String> {
+    focus.map(AgentFocus::tools).unwrap_or_default()
+}
+
+/// Reads a focus off the wire, treating anything unrecognised as absent.
+///
+/// The derived `Option<AgentFocus>` would *fail* on an unknown string and take
+/// the surrounding roster down with it. See [`AgentFocus::from_wire`].
+fn focus_from_wire<'de, D>(deserializer: D) -> Result<Option<AgentFocus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    Ok(raw.as_deref().and_then(AgentFocus::from_wire))
 }
 
 /// A hand-written starting roster for one kind of business.
@@ -95,6 +222,7 @@ impl RosterTemplate {
                 name: a.name.to_string(),
                 role: a.role.to_string(),
                 description: a.description.to_string(),
+                focus: Some(a.focus),
             })
             .collect()
     }
@@ -143,26 +271,31 @@ const ECOMMERCE: RosterTemplate = RosterTemplate {
             name: "Meta Ads",
             role: "Meta Ads Specialist",
             description: "Runs paid campaigns, budgets, and creative testing.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "SEO",
             role: "SEO Specialist",
             description: "Product listings, organic traffic, and search rankings.",
+            focus: AgentFocus::Analysis,
         },
         TemplateAgent {
             name: "Logistics",
             role: "Logistics Coordinator",
             description: "Dispatch, tracking, and returns.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Ops",
             role: "Operations Manager",
             description: "Keeps the rest of the team moving and unblocks them.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Accounts",
             role: "Accountant",
             description: "Reconciliation, margins, and spend.",
+            focus: AgentFocus::Analysis,
         },
     ],
 };
@@ -190,26 +323,31 @@ const CONTENT: RosterTemplate = RosterTemplate {
             name: "Strategy",
             role: "Content Strategist",
             description: "Decides what to publish, and when.",
+            focus: AgentFocus::Analysis,
         },
         TemplateAgent {
             name: "Writer",
             role: "Writer",
             description: "Drafts posts, scripts, and captions.",
+            focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Editor",
             role: "Editor",
             description: "Reviews everything before it goes out.",
+            focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Social",
             role: "Social Media Manager",
             description: "Schedules posts and works the comments.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Analyst",
             role: "Analytics Analyst",
             description: "Measures what landed and reports back.",
+            focus: AgentFocus::Analysis,
         },
     ],
 };
@@ -233,26 +371,31 @@ const AGENCY: RosterTemplate = RosterTemplate {
             name: "Accounts",
             role: "Account Manager",
             description: "Owns the client relationship and the brief.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Creative",
             role: "Creative Director",
             description: "Holds the concept and the creative bar.",
+            focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Copy",
             role: "Copywriter",
             description: "Writes ads, pages, and campaign copy.",
+            focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Media",
             role: "Paid Media Buyer",
             description: "Plans and runs paid acquisition.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Analyst",
             role: "Analytics Analyst",
             description: "Reports performance back to the client.",
+            focus: AgentFocus::Analysis,
         },
     ],
 };
@@ -276,26 +419,31 @@ const CONSULTING: RosterTemplate = RosterTemplate {
             name: "Engagement",
             role: "Engagement Manager",
             description: "Runs the engagement and keeps it on scope.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Research",
             role: "Research Analyst",
             description: "Gathers facts, sources, and context.",
+            focus: AgentFocus::Research,
         },
         TemplateAgent {
             name: "Modelling",
             role: "Financial Analyst",
             description: "Builds the models and sanity-checks the numbers.",
+            focus: AgentFocus::Analysis,
         },
         TemplateAgent {
             name: "Decks",
             role: "Deck Builder",
             description: "Turns findings into something presentable.",
+            focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Writer",
             role: "Report Writer",
             description: "Drafts the written deliverable.",
+            focus: AgentFocus::Writing,
         },
     ],
 };
@@ -320,26 +468,31 @@ const SOFTWARE: RosterTemplate = RosterTemplate {
             name: "Product",
             role: "Product Manager",
             description: "Decides what gets built, and in what order.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Engineer",
             role: "Software Engineer",
             description: "Builds and ships the product.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "QA",
             role: "QA Engineer",
             description: "Tests changes before they reach anyone.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Design",
             role: "Product Designer",
             description: "Creates the interface and holds the brand.",
+            focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Support",
             role: "Support Specialist",
             description: "Answers customers and closes the loop.",
+            focus: AgentFocus::Operations,
         },
     ],
 };
@@ -357,26 +510,31 @@ const GENERIC: RosterTemplate = RosterTemplate {
             name: "Ops",
             role: "Operations Lead",
             description: "Keeps work moving and unblocks the team.",
+            focus: AgentFocus::Operations,
         },
         TemplateAgent {
             name: "Research",
             role: "Researcher",
             description: "Gathers facts, sources, and context.",
+            focus: AgentFocus::Research,
         },
         TemplateAgent {
             name: "Writer",
             role: "Writer",
             description: "Drafts copy, docs, and outbound messages.",
+            focus: AgentFocus::Writing,
         },
         TemplateAgent {
             name: "Analyst",
             role: "Analyst",
             description: "Measures performance and reports back.",
+            focus: AgentFocus::Analysis,
         },
         TemplateAgent {
             name: "Support",
             role: "Support Specialist",
             description: "Answers customers and closes the loop.",
+            focus: AgentFocus::Operations,
         },
     ],
 };
@@ -423,6 +581,80 @@ pub fn match_template(answers: &SetupAnswers) -> &'static RosterTemplate {
     best.map(|(template, _)| template).unwrap_or(&GENERIC)
 }
 
+/// The jobs the operator named, one per item, in the order they wrote them.
+///
+/// ## Why the host splits this and not the model
+///
+/// Coverage is only a check if something other than the answer decides what was
+/// asked for. If the model both listed the jobs and reported which it had
+/// covered, it would be marking its own homework — the list would always match,
+/// because both halves come from the same pass. So the host parses the items,
+/// numbers them, and verifies the claim against *its* list.
+///
+/// The split is deliberately dumb: commas, semicolons and newlines, which is how
+/// people write a list when a field asks for one. Prose with no separators comes
+/// back as a single item, and coverage is then trivially satisfied — that is the
+/// honest answer, not a failure. The parsed items are shown back on the review
+/// screen, so a bad split is visible to the person who typed it rather than
+/// silently shaping a prompt.
+///
+/// Shared with the console through `tests/fixtures/setup-jobs.json`, which both
+/// this module's tests and the frontend's read — two implementations of one rule
+/// is exactly how the first version of this feature drifted.
+pub fn job_items(automate: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    for raw in automate.split([',', ';', '\n', '\r']) {
+        let item = raw.trim().trim_end_matches('.').trim();
+        if item.is_empty() {
+            continue;
+        }
+        // De-duplicated case-insensitively: someone who writes the same job
+        // twice should not make it impossible to cover their list.
+        if items
+            .iter()
+            .any(|seen: &String| seen.eq_ignore_ascii_case(item))
+        {
+            continue;
+        }
+        items.push(item.to_string());
+        if items.len() >= MAX_JOBS {
+            break;
+        }
+    }
+    items
+}
+
+/// The most jobs a checklist may carry.
+///
+/// Not a limit on what someone may want — a limit on what one prompt can be
+/// asked to cover with six teammates. Past this the list stops being a checklist
+/// and becomes a backlog, and a roster that "covers" forty items covers none of
+/// them.
+pub const MAX_JOBS: usize = 12;
+
+/// The positions in `jobs` that no agent claimed, in the order they were
+/// written.
+///
+/// Indices are the model's claim and are bounds-checked by construction rather
+/// than trusted: this walks the host's own list, so an out-of-range claim covers
+/// nothing because it names nothing.
+///
+/// Positions rather than strings because the re-ask has to speak the *same*
+/// numbering as the first ask. Renumbering the gaps from zero — which the first
+/// version of the re-ask did — makes the second answer's `covers` refer to a
+/// different list than the first's, and the two silently disagree.
+pub fn uncovered_indices(jobs: &[String], claimed: &[usize]) -> Vec<usize> {
+    (0..jobs.len()).filter(|i| !claimed.contains(i)).collect()
+}
+
+/// The items in `jobs` that no agent claimed, in the order they were written.
+pub fn uncovered_jobs(jobs: &[String], claimed: &[usize]) -> Vec<String> {
+    uncovered_indices(jobs, claimed)
+        .into_iter()
+        .filter_map(|i| jobs.get(i).cloned())
+        .collect()
+}
+
 /// A roster a setup pass is offering the operator, and where it came from.
 ///
 /// Carries its provenance because the console says so out loud — decision D2 is
@@ -438,6 +670,17 @@ pub struct RosterProposal {
     pub template_key: &'static str,
     /// Who wrote this team.
     pub source: RosterSource,
+    /// The jobs the operator named, as [`job_items`] split them. Echoed back on
+    /// the review screen so the list a roster was judged against is the list
+    /// they can see.
+    pub jobs: Vec<String>,
+    /// The jobs no teammate on this roster owns.
+    ///
+    /// Only ever non-empty on the [`Model`](RosterSource::Model) path: coverage
+    /// is a claim the design pass makes and the host checks, and a curated team
+    /// makes no claim about a list it never read. A fallback roster reports its
+    /// provenance instead, which is the honest thing to say about it.
+    pub uncovered: Vec<String>,
 }
 
 /// Who wrote a proposed roster.
@@ -480,6 +723,11 @@ pub fn template_proposal(answers: &SetupAnswers) -> RosterProposal {
         agents: validate_roster(template.proposed()),
         template_key: template.key,
         source: RosterSource::Fallback,
+        jobs: job_items(&answers.automate),
+        // A curated team was chosen by keyword, not designed against this list,
+        // so it claims nothing about it. Saying "all of it is uncovered" would
+        // be as misleading as saying none of it is.
+        uncovered: Vec::new(),
     }
 }
 
@@ -545,6 +793,13 @@ pub fn manifest_from_setup(
             built.id = unique_agent_id(&agent.role, &mut seen);
             built.role = agent.role.trim().to_string();
             built.description = non_empty(&agent.description);
+            // Asked for explicitly, exactly as `globals/agents/*.toml` do. An
+            // agent that requests nothing inherits the company belt whole —
+            // which here is the globals default `["*", "media", "composio"]`,
+            // so every teammate a first-run operator created held real-money
+            // media and per-tenant Composio credentials. Intersected with
+            // `[tools].allow`, so this can only ever narrow.
+            built.tools = tools_for_focus(agent.focus);
             built
         })
         .collect();
@@ -732,6 +987,10 @@ pub fn validate_roster(proposed: Vec<ProposedAgent>) -> Vec<ProposedAgent> {
             },
             role: role.to_string(),
             description: clamp_description(&agent.description),
+            // Carried through untouched. Validation bounds the *shape* of a
+            // roster; the belt is decided by `tools_for_focus`, and an unknown
+            // focus has already become `None` at the wire.
+            focus: agent.focus,
         });
     };
 
@@ -758,6 +1017,7 @@ mod tests {
             name: role.to_string(),
             role: role.to_string(),
             description: "does the thing".to_string(),
+            focus: None,
         }
     }
 
@@ -895,11 +1155,13 @@ mod tests {
                 name: "Ghost".into(),
                 role: "   ".into(),
                 description: String::new(),
+                focus: None,
             },
             ProposedAgent {
                 name: "  ".into(),
                 role: "Data Analyst".into(),
                 description: String::new(),
+                focus: None,
             },
         ]);
         assert!(roster.iter().all(|a| !a.role.trim().is_empty()));
@@ -916,6 +1178,7 @@ mod tests {
             name: "A".into(),
             role: "Analyst".into(),
             description: essay,
+            focus: None,
         }]);
         let clamped = &roster[0].description;
         assert!(clamped.chars().count() <= MAX_DESCRIPTION + 1, "{clamped}");
@@ -963,6 +1226,7 @@ mod tests {
             name: role.split_whitespace().next().unwrap_or(role).to_string(),
             role: role.to_string(),
             description: format!("Owns {}.", role.to_lowercase()),
+            focus: None,
         }
     }
 
@@ -1130,6 +1394,193 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SetupAnswers>("{}").expect("empty"),
             SetupAnswers::default()
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Focus, and the belt it decides
+    // ---------------------------------------------------------------------
+
+    /// The control, quantified over the **whole** vocabulary rather than the
+    /// four focuses a reader happened to remember.
+    ///
+    /// `media` spends real money, `composio` reaches per-tenant credentials,
+    /// `search` bills per call, `repo` reaches bound source, and `shell` is
+    /// arbitrary execution. None of them may be reachable from a job shape a
+    /// model chose after reading free text a stranger typed — those stay
+    /// company-level grants an operator makes on purpose. A fifth focus added
+    /// later fails here unless it obeys the same rule.
+    #[test]
+    fn no_focus_ever_confers_money_credentials_or_a_shell() {
+        const FORBIDDEN: [&str; 5] = ["media", "composio", "search", "repo", "shell"];
+        for focus in AgentFocus::ALL {
+            for grant in focus.tools() {
+                let namespace = grant.split(['.', '_', ':']).next().unwrap_or(&grant);
+                assert!(
+                    !FORBIDDEN.contains(&namespace),
+                    "{} grants `{grant}`",
+                    focus.as_str()
+                );
+                // A bare `*` would confer everything the wildcard covers, which
+                // is the inherit-the-lot behaviour focus exists to end.
+                assert_ne!(grant, "*", "{} grants the catch-all", focus.as_str());
+            }
+        }
+    }
+
+    /// The bug this whole seam exists to close.
+    ///
+    /// `manifest_from_setup` parses a name-only base, so `[tools]` takes the
+    /// globals default `["*", "media", "composio"]` — and an agent that asks for
+    /// nothing inherits that belt whole. Every teammate a first-run operator
+    /// created therefore held real-money media and per-tenant Composio
+    /// credentials for a company described in three sentences.
+    #[test]
+    fn a_designed_teammate_asks_for_a_belt_instead_of_inheriting_the_company_one() {
+        let roster = vec![ProposedAgent {
+            name: "Research".into(),
+            role: "Research Analyst".into(),
+            description: "Finds things out.".into(),
+            focus: Some(AgentFocus::Research),
+        }];
+        let manifest = manifest_from_setup(&answers("a shop", ""), &roster, None);
+        let asked = &manifest.agents[0].tools;
+
+        assert!(!asked.is_empty(), "an empty list inherits the company belt");
+        assert!(!asked.iter().any(|t| t == "media" || t == "composio"));
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+
+        // The company belt itself is untouched: narrowing happens per teammate,
+        // so an operator who later widens `[tools].allow` is not fighting a
+        // decision setup made for them.
+        assert!(manifest.tools.allow.iter().any(|g| g == "*"));
+    }
+
+    /// A model that invents `"marketing"` costs that teammate its narrowing —
+    /// never the operator their roster. `None` is the pre-focus behaviour: worse,
+    /// but working.
+    #[test]
+    fn an_unreadable_focus_degrades_to_inheriting_rather_than_failing() {
+        for invented in ["marketing", "", "  ", "RESEARCH!"] {
+            assert_eq!(AgentFocus::from_wire(invented), None, "{invented:?}");
+        }
+        assert!(tools_for_focus(None).is_empty());
+        // And it must not take the surrounding roster down at the wire.
+        let wire = r#"{"name":"A","role":"Analyst","description":"d","focus":"marketing"}"#;
+        let parsed: ProposedAgent = serde_json::from_str(wire).expect("unknown focus must parse");
+        assert_eq!(parsed.focus, None);
+        assert_eq!(parsed.role, "Analyst");
+    }
+
+    /// The fallback team is scoped exactly as a designed one is. An operator
+    /// with no credential must not end up with the *wider* company — which is
+    /// what would happen if only the model path carried a focus.
+    #[test]
+    fn the_curated_fallback_is_scoped_too() {
+        let proposal = template_proposal(&answers("I sell homeware online", ""));
+        assert!(proposal.agents.iter().all(|a| a.focus.is_some()));
+        let manifest = manifest_from_setup(
+            &answers("I sell homeware online", ""),
+            &proposal.agents,
+            None,
+        );
+        for agent in &manifest.agents {
+            assert!(!agent.tools.is_empty(), "{} inherits the lot", agent.id);
+        }
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+    }
+
+    /// Focus survives the round trip through the review screen, which is the
+    /// only reason the belt an operator approves is the belt they get.
+    #[test]
+    fn focus_round_trips_through_serde() {
+        for focus in AgentFocus::ALL {
+            let agent = ProposedAgent {
+                name: "A".into(),
+                role: "Analyst".into(),
+                description: "d".into(),
+                focus: Some(focus),
+            };
+            let json = serde_json::to_string(&agent).expect("serialize");
+            assert!(json.contains(focus.as_str()), "{json}");
+            let back: ProposedAgent = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back.focus, Some(focus));
+        }
+        // A roster written before focus existed still loads.
+        let old = r#"{"name":"A","role":"Analyst","description":"d"}"#;
+        assert_eq!(
+            serde_json::from_str::<ProposedAgent>(old)
+                .expect("legacy")
+                .focus,
+            None
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The job checklist coverage is judged against
+    // ---------------------------------------------------------------------
+
+    /// The splitting rule, from the fixture the console's test reads too.
+    ///
+    /// The fixture is the whole mitigation for having two implementations of one
+    /// rule: the console echoes the items live while someone types, and the host
+    /// numbers them for the prompt. The first version of this feature shipped a
+    /// hand-copied keyword list in the browser and it drifted within a week.
+    #[test]
+    fn job_items_matches_the_shared_fixture() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            why: String,
+            input: String,
+            items: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            #[serde(rename = "maxJobs")]
+            max_jobs: usize,
+            cases: Vec<Case>,
+        }
+
+        let raw = include_str!("../../tests/fixtures/setup-jobs.json");
+        let fixture: Fixture = serde_json::from_str(raw).expect("fixture parses");
+        assert_eq!(
+            fixture.max_jobs, MAX_JOBS,
+            "the fixture and the host disagree about the cap"
+        );
+        assert!(
+            !fixture.cases.is_empty(),
+            "an empty fixture asserts nothing"
+        );
+        for case in fixture.cases {
+            assert_eq!(job_items(&case.input), case.items, "{}", case.why);
+        }
+    }
+
+    /// Coverage is set maths over the host's list, not a sentence from the
+    /// model. An index that names nothing covers nothing.
+    #[test]
+    fn an_out_of_range_claim_covers_nothing() {
+        let jobs = job_items("ads, dispatch, invoices");
+        assert_eq!(
+            uncovered_jobs(&jobs, &[0, 99]),
+            vec!["dispatch", "invoices"]
+        );
+        assert!(uncovered_jobs(&jobs, &[0, 1, 2]).is_empty());
+        assert_eq!(uncovered_jobs(&jobs, &[]), jobs);
+    }
+
+    /// A curated team was chosen by keyword and never read the list, so it
+    /// reports its provenance rather than a coverage claim it cannot make.
+    #[test]
+    fn the_fallback_echoes_the_jobs_but_claims_no_coverage() {
+        let proposal = template_proposal(&answers(
+            "I sell homeware online",
+            "Meta ads, order dispatch",
+        ));
+        assert_eq!(proposal.jobs, vec!["Meta ads", "order dispatch"]);
+        assert!(
+            proposal.uncovered.is_empty(),
+            "a fallback must not claim a gap it never looked for"
         );
     }
 }
