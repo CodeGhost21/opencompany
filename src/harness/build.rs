@@ -7,19 +7,19 @@
 //! * **Tools**: [`memory_tools`] (`memory_store` + `memory_recall`) is called
 //!   but currently returns nothing — see its doc comment for why openhuman's
 //!   API no longer gives embedders a way to point either tool at a company's
-//!   own memory. **File tools** (read,
-//!     write, edit, list, grep, glob) are granted per-agent when the effective
-//!     `tools ∩ agent.tools` grants cover the `files`/`docs` namespace, and are
-//!     sandboxed to the agent's own workspace via a `workspace_only`
-//!     [`SecurityPolicy`] ([`file_tools`]). **Exec-grade tools** (Cell A) now
-//!     slot in beside them via [`toolbelt`](crate::harness::toolbelt): `shell`
-//!     (shell + `read_workspace_state`) and `code` (`apply_patch`,
-//!     `git_operations`, `csv_export`) behind a strict [`toolbelt::exec_security`]
-//!     policy + native runtime + per-workspace audit; `web` (`web_fetch`,
-//!     `http_request`, `curl`, `image_info`) behind the same policy plus a
-//!     per-company SSRF domain allowlist. The `subagent` namespace is reserved
-//!     but empty in v1. Still deferred: browser automation (needs a backend)
-//!     and Node/NPM exec (need a managed bootstrap).
+//!   own memory. **File tools** (read, write, edit, list, grep, glob) are
+//!   granted per-agent when the effective `tools ∩ agent.tools` grants cover
+//!   the `files`/`docs` namespace, and are sandboxed to the agent's own
+//!   workspace via a `workspace_only` [`SecurityPolicy`] ([`file_tools`]).
+//!   **Exec-grade tools** (Cell A) now slot in beside them via
+//!   [`toolbelt`](crate::harness::toolbelt): `shell` (shell +
+//!   `read_workspace_state`) and `code` (`apply_patch`, `git_operations`,
+//!   `csv_export`) behind a strict [`toolbelt::exec_security`] policy + native
+//!   runtime + per-workspace audit; `web` (`web_fetch`, `http_request`,
+//!   `curl`, `image_info`) behind the same policy plus a per-company SSRF
+//!   domain allowlist. The `subagent` namespace is reserved but empty in v1.
+//!   Still deferred: browser automation (needs a backend) and Node/NPM exec
+//!   (need a managed bootstrap).
 //! * **Metered web search** (issue #238, [`search`](crate::harness::search)):
 //!   `web_search` over the managed backend, the discovery half the `web` tools
 //!   never had — they read a *known* URL and cannot find one. Two hard gates
@@ -1293,7 +1293,11 @@ mod tests {
             Arc::new(NoopContext),
         ));
         let tools = memory_tools(&memory);
-        assert!(tools.is_empty(), "expected no intrinsic memory tools while withheld, got {:?}", tools.iter().map(|t| t.name()).collect::<Vec<_>>());
+        assert!(
+            tools.is_empty(),
+            "expected no intrinsic memory tools while withheld, got {:?}",
+            tools.iter().map(|t| t.name()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

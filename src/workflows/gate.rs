@@ -771,6 +771,39 @@ description = "Runs Acme."
         }
     }
 
+    /// The three newest additions to `NodeKind` (tinyflows 0.8.x), classified
+    /// directly against `call_of` rather than only through `apply_policy_gates`
+    /// — a regression lock on the two new match arms added alongside
+    /// `Capabilities.approvals`.
+    ///
+    /// `Approval` and `Void` join `tinyflows_parallel_control_nodes_do_not_describe_outward_calls`
+    /// in reaching nothing on this path (`Approval`'s own doc comment on the
+    /// match arm says why: it is a stub, like `Code`/`Memory`/`Shell`, not a
+    /// classified capability call); `Trigger` was already exhaustive-matched to
+    /// `None` and gets the same direct check for symmetry.
+    #[test]
+    fn the_newest_node_kinds_reach_nothing_on_this_path() {
+        for kind in [NodeKind::Approval, NodeKind::Trigger, NodeKind::Void] {
+            let node = kind_node("n", kind.clone());
+            assert_eq!(call_of(&node), None, "{kind:?}");
+        }
+    }
+
+    /// The two node kinds `call_of` *does* classify, checked directly rather
+    /// than only through the higher-level `apply_policy_gates` tests above —
+    /// so a future new `None` arm accidentally shadowing one of these two would
+    /// fail here even if a specific gating test happened not to exercise it.
+    #[test]
+    fn tool_call_and_http_request_are_the_two_classified_kinds() {
+        let tool = tool_node("run-it", "shell");
+        assert!(call_of(&tool).is_some(), "{tool:?}");
+
+        let mut http = tool_node("fetch", "unused");
+        http.kind = NodeKind::HttpRequest;
+        http.config = json!({ "method": "GET", "url": "https://example.com" });
+        assert!(call_of(&http).is_some(), "{http:?}");
+    }
+
     /// `always_approve` outranks the tier, exactly as it does on the agent
     /// path — so a company can gate a metered read it wants to be asked about
     /// even though `supervised` alone would let it through.
