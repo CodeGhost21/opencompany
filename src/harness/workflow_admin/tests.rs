@@ -85,14 +85,16 @@ impl FailsAfterFirstLoadStore {
 #[async_trait]
 impl CompanyStore for FailsAfterFirstLoadStore {
     async fn load(&self, id: &CompanyId) -> Result<Option<CompanyRecord>> {
-        let mut calls = self.calls.lock().unwrap();
-        *calls += 1;
-        if *calls > 1 {
+        let count = {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if count > 1 {
             return Err(crate::error::OpenCompanyError::Store(
                 "simulated store failure on a second read".to_string(),
             ));
         }
-        drop(calls);
         self.inner.load(id).await
     }
     async fn save(&self, record: &CompanyRecord) -> Result<()> {
