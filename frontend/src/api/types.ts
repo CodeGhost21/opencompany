@@ -824,8 +824,10 @@ export interface SetBudgetInput {
 export interface PageManifestDto {
   slug: string;
   title: string;
-  description: string;
-  icon: string;
+  /** Optional in the DTO: `page.toml`'s `description` is omitted when absent. */
+  description?: string;
+  /** Optional in the DTO: `page.toml`'s `icon` is omitted when absent. */
+  icon?: string;
   navVisible: boolean;
 }
 
