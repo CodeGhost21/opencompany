@@ -256,6 +256,13 @@ export function CopilotPanel({
     setRoster(undefined);
     setToolSlugs(undefined);
     setToolSlugsKnown(false);
+    // Cleared with the rest of the grounding, and for the same reason. Left
+    // behind, the previous company's unwired list rides along with THIS
+    // company's "the granted tools could not be listed here" for the whole
+    // in-flight window — a prompt that names tools as off-limits in the same
+    // breath as admitting it cannot name the granted ones, built from another
+    // company's wiring.
+    setUnwiredTools(undefined);
     (async () => {
       try {
         const team = await client.listTeam(company);
