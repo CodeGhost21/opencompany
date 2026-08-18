@@ -60,6 +60,7 @@ use crate::company::workspace_scaffold::{
     PAGE_COMPILED_MIME as COMPILED_MIME, PAGE_COMPILED_NAME as COMPILED_NAME,
     PAGE_MANIFEST_NAME as MANIFEST_NAME, PAGE_SOURCE_NAME as SOURCE_NAME, PAGES_ROOT,
 };
+use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::harness::workspace_tools::store_reason;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{
@@ -75,14 +76,24 @@ pub const PAGES_WRITE_TOOL: &str = "pages_write";
 /// Tool name: remove one page.
 pub const PAGES_DELETE_TOOL: &str = "pages_delete";
 
+/// Headroom reserved out of [`TOOL_RESULT_BUDGET_BYTES`] for `pages_read`'s
+/// preamble and its `--- BEGIN/END Page.tsx ---` fences, mirroring the
+/// `workspace_tools` read-overhead convention.
+const READ_OVERHEAD_BYTES: usize = 1024;
+
 /// Max bytes of `Page.tsx` source one `pages_write` call accepts.
 ///
-/// Generous relative to [`crate::harness::workspace_tools`]'s note cap — a
-/// page's source is read back whole for the next edit turn the same way a
+/// A page's source is read back whole for the next edit turn the same way a
 /// workspace note is, so the same "a write must stay a write the agent can
-/// read back in full" invariant applies, sized instead against a page's
-/// actual shape (a UI component, not a long-form document).
-const MAX_SOURCE_BYTES: usize = 262_144;
+/// read back in full" invariant applies — the compiled CAS edit loop this
+/// module is built around breaks if a written page is too large for
+/// [`pages_read`](PagesReadTool) to return whole under the harness's
+/// per-tool-result budget. Sized against [`TOOL_RESULT_BUDGET_BYTES`] minus
+/// read overhead, not a page's theoretical shape as a UI component, precisely
+/// so the ceiling and the budget can never drift apart.
+const MAX_SOURCE_BYTES: usize = TOOL_RESULT_BUDGET_BYTES - READ_OVERHEAD_BYTES;
+
+const _: () = assert!(MAX_SOURCE_BYTES + READ_OVERHEAD_BYTES <= TOOL_RESULT_BUDGET_BYTES);
 
 /// A slug: the path segment naming one page, `Pages/<slug>/`.
 ///
