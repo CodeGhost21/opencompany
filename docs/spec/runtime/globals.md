@@ -7,7 +7,7 @@ has whichever vertical it was started from, plus the tool belt it starts with.
 
 The authored source is `globals/`, beside `companies/`:
 
-```
+```text
 globals/
   globals.toml      # [tools].default_allow, [skills].always
   agents/*.toml     # one file per global teammate
