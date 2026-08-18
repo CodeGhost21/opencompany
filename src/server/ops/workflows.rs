@@ -4318,6 +4318,7 @@ mod tests {
                     "writer": { "items": [{ "json": { "text": "the draft" } }] }
                 }),
                 truncated: false,
+                partial: false,
             };
             runtime
                 .workflow_run_outputs()
