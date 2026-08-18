@@ -39,15 +39,34 @@ and it stays off the wire so a one-off card is byte-identical to a pre-#580 card
 | **Cost** | one `SampleKind::Inference` sample, charged to the card's **assignee**, carrying the attempt's `run_id` |
 | **Run row** | one — building the workflow *is* the card's In-Progress work |
 | **Locks** | none |
-| **Exit** | automatic, three-way (below) — the card never stays in `in_progress` |
+| **Exit** | automatic, four-way (below) — the card never stays in `in_progress` |
 
-### The three exits
+### The four exits
 
 | Outcome | Landing | Card carries | Attempt |
 |---|---|---|---|
 | a graph that could be created | `in_review` | the `TaskWorkflowProposal` awaiting approval | Succeeded |
-| the plan is not automatable | `todo` | the model's reason, no proposal (decision D2c) | Failed |
-| the pass itself failed | `todo` | the reason only, no proposal | Failed |
+| the plan is not automatable | `todo` | the model's reason, no proposal (decision D2c), and `deliverable: once` | Succeeded |
+| the model decided nothing | `todo` | the reason only, no proposal; stays `deliverable: workflow` | Failed |
+| the pass itself failed | `todo` | the reason only, no proposal; stays `deliverable: workflow` | Failed |
+
+A **not-automatable verdict is an answer, not a fault** (issue #873). The builder
+was asked whether the work should be automated and it decided; that settles
+**Succeeded**, with the reason on the card note and **no** `error` on the run row
+— the same convention the [draft-from-description endpoint](../../../src/server/ops/workflows.rs)
+already follows in answering `200` for the identical verdict.
+
+The verdict also **converts the card to `deliverable: once`**. This is what lets
+the card proceed: dispatch routes a `workflow`-deliverable card to this pass
+rather than to its assignee, so a declined card left carrying `workflow` would
+re-enter the builder on its next dispatch, draw the same verdict, and fail again
+— builder → To-do → builder, with no path to the person who could simply do the
+work. As `once`, the next dispatch reaches the card's assignee.
+
+A build that could not be *attempted* — an unreadable company state, a model
+timeout or error, or a draft that parsed but decided nothing — keeps
+`deliverable: workflow` on purpose, because retrying the **build** is the right
+next move for a fault.
 
 An operator who moves the card out from under the pass wins: the pass discards
 its result and the attempt settles **Cancelled** — the tokens stay metered
