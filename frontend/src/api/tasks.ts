@@ -397,7 +397,16 @@ export interface TimelineEntry {
   waitedMillis?: number;
 }
 
-/** What became of an approval (#333). `pending` is still waiting on a human. */
+/**
+ * What became of an approval (#333). `pending` is still waiting on a human.
+ *
+ * `expired` was declared here from the start and was **unreachable** until
+ * #971: nothing swept approvals for a company without a manifest schedule, so
+ * no approval ever aged out and no surface ever needed to render this. It is
+ * reachable now. Render it through `approvalStatusLabel` in `lib/language` —
+ * an operator must be able to tell the no they made from the one the deadline
+ * made, and neither should ever appear as a raw identifier.
+ */
 export type TaskApprovalStatus = "pending" | "approved" | "denied" | "expired";
 
 /**
