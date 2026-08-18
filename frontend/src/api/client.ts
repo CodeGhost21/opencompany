@@ -847,6 +847,13 @@ export class OpenCompanyClient {
    * `react-dom/client`, and `@opencompany/site`, then mounts the page's own
    * `bundle.mjs`. Absolute, since the iframe's `src` is resolved against its
    * own (opaque, sandboxed) document rather than the console's.
+   *
+   * The iframe is a normal navigation and so can only carry the credentials a
+   * browser attaches to a same-origin request — the operator's HttpOnly
+   * session cookie. It cannot send this client's `authorization` /
+   * `x-opencompany-session` headers, so the shell and its bundle load only
+   * when the console is same-origin with the host (the console's supported
+   * deployment); a cross-origin console therefore cannot host pages.
    */
   pageUrl(slug: string, company?: string | null): string {
     return `${this.baseUrl}${this.scope(company)}/pages/${encodeURIComponent(slug)}`;
