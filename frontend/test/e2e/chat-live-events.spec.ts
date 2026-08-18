@@ -2,6 +2,8 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
 
 import { LIVE_BRAIN } from "./capabilities";
 
+import { bubbles, openChannel, reply, workingRow } from "./chat-helpers";
+
 /**
  * End-to-end proof for issue #367 — the Chat tab receives what the company
  * says, not only what this browser tab typed.
@@ -50,12 +52,6 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-/** Opens one channel by id and waits for its transcript to be on screen. */
-async function openChannel(page: Page, channelId: string) {
-  await page.goto(`/#/chat/${channelId}`);
-  await expect(page.getByPlaceholder(/^Message /)).toBeVisible({ timeout: 30_000 });
-}
-
 /**
  * A channel's row in the rail, located by the name the rail renders.
  *
@@ -65,25 +61,6 @@ async function openChannel(page: Page, channelId: string) {
  */
 function railRow(page: Page, channelName: string): Locator {
   return page.getByRole("complementary").first().getByRole("button", { name: channelName });
-}
-
-/** Every non-system bubble currently rendered in the open channel. */
-function bubbles(page: Page): Locator {
-  return page.locator("article[data-message-id]");
-}
-
-/**
- * The bubble carrying the reply to `marker`, in the open transcript.
- *
- * Scoped to a bubble, not matched across the page: the rail renders a one-line
- * preview of each channel's last message, so a bare
- * `getByText("You said: <marker>")` resolves to two elements the moment the
- * preview catches up — the assertion then fails on strict mode rather than on
- * anything it was written to check, and only sometimes, depending on which
- * arrives first. Found while standing up the live-brain lane (#467).
- */
-function reply(page: Page, marker: string): Locator {
-  return bubbles(page).filter({ hasText: `You said: ${marker}` });
 }
 
 /**
@@ -270,11 +247,6 @@ test("a running turn shows its tool rows in the channel", async ({ page }) => {
  * nothing to ask about a turn in flight, so a console reloaded mid-turn showed a
  * settled-looking transcript with an answer still on its way.
  * -------------------------------------------------------------------------- */
-
-/** The working/queued row, however it is currently worded. */
-function workingRow(page: Page): Locator {
-  return page.getByTestId("working-indicator");
-}
 
 test("a detached turn's reply arrives over the stream, not on the POST", async ({ page }) => {
   // The regression guard for the conditional suppression. Before #983 the
