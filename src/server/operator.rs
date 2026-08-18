@@ -4896,15 +4896,25 @@ mode = "full"
     }
 
     /// `detach: true` answers `202` with the ids the accept already established,
-    /// and claims nothing about a turn that has not settled — the half that
-    /// removes the 504 from the operator's path (issue #983).
+    /// claims nothing about a turn that has not settled, and — the half that
+    /// removes the 504 from the operator's path — arrives while the turn is
+    /// demonstrably still going (issue #983).
     #[tokio::test]
-    async fn a_detached_turn_answers_202_with_the_ids_and_no_settled_keys() {
+    async fn a_detached_turn_answers_202_before_the_turn_finishes() {
         let home_dir = home();
-        let home = home_dir.path().to_path_buf();
-        let state = state_with_company(&home, "running").await;
+        // The same blocking brain the queue tests use: it parks inside the cycle
+        // until released, so the turn is provably unfinished when the response
+        // below is read.
+        let (brain, entered, release) = BlockingChatBrain::new();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(brain),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
         let app = router(state);
-        let cookie = crate::server::test_support::fixed_cookie("acme");
 
         let response = app
             .clone()
@@ -4912,13 +4922,14 @@ mode = "full"
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/company/chat")
-                    .header("cookie", &cookie)
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"text":"do the long thing","detach":true}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
+
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -4942,6 +4953,29 @@ mode = "full"
             body.get("stillAwaiting").is_none(),
             "a detached response must not look settled: {body}"
         );
+
+        // And the turn really had not finished when that body was written — the
+        // brain is still parked, holding the cycle open.
+        entered.acquire().await.expect("the turn entered").forget();
+        let statuses: Vec<String> = turn_rows(&runtime)
+            .await
+            .into_iter()
+            .map(|(_, status)| status)
+            .collect();
+        assert!(
+            statuses.iter().any(|s| s == "running" || s == "pending"),
+            "the response beat the turn, which is the point: {statuses:?}"
+        );
+
+        // It settles on its own, with nobody waiting on it.
+        release.add_permits(1);
+        until("the detached turn never settled", async || {
+            turn_rows(&runtime)
+                .await
+                .iter()
+                .any(|(_, status)| status == "succeeded")
+        })
+        .await;
     }
 
     /// The wire-compat guarantee in the other direction: a caller that sends no
