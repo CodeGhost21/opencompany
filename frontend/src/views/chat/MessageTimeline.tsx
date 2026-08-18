@@ -28,6 +28,12 @@ interface Props {
   /** Someone on the company side is composing a reply. */
   typing: boolean;
   /**
+   * The turn is accepted but has not started — queued on the per-company serial
+   * lock rather than working (issue #983). Words the row honestly instead of
+   * showing a spinner that implies progress.
+   */
+  queued?: boolean;
+  /**
    * The tool rows of a turn running *right now* on this channel's thread, off
    * the transient `tool_call` / `tool_result` / `thinking` frames. Present
    * whether or not this console started the turn, which is the point — a turn
@@ -81,6 +87,7 @@ export function MessageTimeline({
   historyPending = false,
   openThreadId,
   typing,
+  queued,
   liveSteps,
   onOpenThread,
   onReact,
@@ -184,10 +191,10 @@ export function MessageTimeline({
             />
           ),
         )}
-        {liveStepCount > 0 ? (
+        {liveStepCount > 0 && !queued ? (
           <LiveTurnRow channel={channel} steps={liveSteps ?? []} />
         ) : (
-          typing && <TypingRow channel={channel} />
+          typing && <TypingRow channel={channel} queued={queued} />
         )}
       </div>
     </div>
@@ -329,7 +336,7 @@ function LiveTurnRow({ channel, steps }: { channel: Channel; steps: TurnStep[] }
   );
 }
 
-function TypingRow({ channel }: { channel: Channel }) {
+function TypingRow({ channel, queued }: { channel: Channel; queued?: boolean }) {
   return (
     <div className="flex items-center gap-2.5 px-4 py-1">
       <Avatar
@@ -338,7 +345,7 @@ function TypingRow({ channel }: { channel: Channel }) {
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9"
       />
-      <WorkingIndicator srLabel="Replying…" />
+      <WorkingIndicator srLabel="Replying…" queued={queued} />
     </div>
   );
 }
