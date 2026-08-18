@@ -3828,6 +3828,61 @@ async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() 
     assert_eq!(graph["name"], "greet");
 }
 
+/// A company workflow whose id matches a global's must win — checked by its
+/// own content (the name it was created with), not by an id-membership
+/// filter, which would misclassify this exact row as "the baseline's" because
+/// the ids match. `create_company_workflow` does not special-case global ids
+/// (only seed files, overlays and `[workflows].enabled` reserve one), so
+/// creating over a global id is exactly this: the company's overlay
+/// definition of that id supersedes the global on every read.
+#[tokio::test]
+async fn workflow_create_of_an_id_matching_a_global_wins_by_content() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let seed_dir = home.join("seed");
+    std::fs::create_dir_all(&seed_dir).unwrap();
+    let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
+    let taken = crate::globals::workflows()[0].id.clone();
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workflows",
+        Some(workflow_body(&taken)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["id"], taken);
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let matching: Vec<&serde_json::Value> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["id"] == taken.as_str())
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the shadowed global must not be listed alongside the override: {list}"
+    );
+    assert_eq!(
+        matching[0]["name"], taken,
+        "the company's own definition (named after its id, per `workflow_body`) must win"
+    );
+
+    let (status, graph) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workflows/{taken}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(graph["name"], taken);
+}
+
 #[tokio::test]
 async fn workflow_create_duplicate_id_is_conflict() {
     let home_dir = home();
