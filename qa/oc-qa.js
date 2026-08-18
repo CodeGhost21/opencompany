@@ -561,27 +561,61 @@
   /**
    * The company's approval tier.
    *
-   * **No read surface exists.** `[policy].mode` — `readonly` / `supervised` /
-   * `auto` / `full` — decides whether an effect parks at all, and no REST or
-   * GraphQL route reports it. So this check cannot pass: it reports what can be
-   * observed (whether the gate is wired and has ever held anything) and states
-   * plainly that the tier itself is unverified. A green row here would be the
-   * harness claiming to have checked the single setting that decides whether
-   * any of the approvals checks mean anything.
+   * `{scope}/policy` is a real read surface (`src/server/ops/policy.rs`, #562):
+   * `read_policy` takes only `ScopedCompany` and answers the tier the approval
+   * gate itself reads — `effective_policy()`, resolved ahead of the manifest —
+   * plus the manifest's tier and whether an operator override is producing it.
+   * So this row verifies the single setting the approvals checks depend on
+   * instead of only reporting what the gate is holding. That upgrades the queue
+   * too: an empty queue now reads differently for `supervised` (nothing is
+   * pending) than for `full` (nothing will ever park).
    */
   async function checkApprovalTier(rows, scope, approvals) {
     const caps = await http(`${scope}/capabilities`);
     const grants = caps.ok ? caps.body || {} : {};
-    const observed = [];
-    if (approvals && approvals.length) observed.push(`${approvals.length} effects currently parked`);
-    if (grants.configured) observed.push(`plan ${grants.plan || "custom"}/${grants.period || "?"}`);
+    const policy = await http(`${scope}/policy`);
+    if (!policy.ok) {
+      // Older build without the read surface (#562 shipped after this path
+      // stopped being guessable), or a scope where the route is not mounted.
+      const observed = [];
+      if (approvals && approvals.length) observed.push(`${approvals.length} effects currently parked`);
+      if (grants.configured) observed.push(`plan ${grants.plan || "custom"}/${grants.period || "?"}`);
+      rows.push(
+        row(
+          "approval-tier",
+          SKIP,
+          observed.join(" · ") || "no observable gate activity",
+          `{scope}/policy did not answer (HTTP ${policy.status}) — the tier is unverified on this build`,
+        ),
+      );
+      return;
+    }
+    const p = policy.body || {};
+    const parked = approvals ? approvals.length : 0;
+    const mode = p.mode || "?";
+    const parts = [`mode ${mode}`];
+    if (p.manifestMode && p.manifestMode !== mode) parts.push(`manifest ${p.manifestMode}`);
+    if (p.overridden) parts.push(`overridden by ${p.setBy || "an operator"}`);
+    parts.push(`${parked} parked`);
+    const note = [];
+    if (p.overridden) {
+      note.push(`an override is in force (${p.setBy || "an operator"}${p.setAtMillis ? ` at ${new Date(p.setAtMillis).toISOString()}` : ""}) — the manifest tier is not what runs`);
+    }
+    if (mode === "full" && parked > 0) {
+      rows.push(
+        row(
+          "approval-tier",
+          WARN,
+          parts.join(" · "),
+          `\`full\` tier yet ${parked} effects are parked — the gate should not be holding anything`,
+        ),
+      );
+      return;
+    }
+    if (mode === "full") note.push("full tier — no effect ever parks, so an empty queue is the norm, not a sign of no gate");
+    else if (parked === 0) note.push(`\`${mode}\` tier with nothing pending — an empty queue means nothing is awaiting the gate`);
     rows.push(
-      row(
-        "approval-tier",
-        SKIP,
-        observed.join(" · ") || "no observable gate activity",
-        "[policy].mode has no read surface, so the tier this tenant runs is unverified by any API client",
-      ),
+      row("approval-tier", PASS, parts.join(" · "), note.join(" ")),
     );
   }
 

@@ -80,6 +80,14 @@ CI job.
 Each row reports `PASS` / `WARN` / `FAIL` / `SKIP` **next to the value it judged**,
 so a verdict can be checked rather than trusted.
 
+The `approval-tier` row reads `{scope}/policy` (`src/server/ops/policy.rs`, #562) —
+`read_policy` is a GET that needs no admin token — and reports the tier actually
+in force next to the manifest's tier and any override producing it. On a build
+before that read surface, the row reports what the gate is holding and `SKIP`s
+with the tier unverified. With the tier in hand an empty approvals queue stops
+reading the same for a `supervised` tenant (nothing pending) as for a `full`
+tenant (nothing will ever park).
+
 `SKIP` means the surface could not be read — a 404, an error, a feature absent
 from this build, or a precondition that did not exist. **`SKIP` is untested, not
 passed**, and the summary counts it separately. Writing a skipped check up as
@@ -131,10 +139,6 @@ file loudly rather than silently re-greening a bad run.
 
 Closed when they become testable, and reported as `SKIP` until then:
 
-- **Approval tier.** `[policy].mode` (`readonly` / `supervised` / `auto` / `full`)
-  has no read surface on any API. It decides whether an effect parks at all, so no
-  API client can verify the setting the approvals checks depend on. The
-  `approval-tier` row reports what is observable and states the tier is unverified.
 - **Board drag** (`U2`) and **approvals resolve** (`U3`) are browser-only; U3 also
   needs a queued approval, which the 2026-08-18 pass could not create without
   changing the tenant's approval tier. See MASTER-QA for two ways to get one.

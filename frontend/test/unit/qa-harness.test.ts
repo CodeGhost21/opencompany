@@ -175,8 +175,9 @@ describe("read() against a host whose surfaces do not answer", () => {
   it("reports every unreadable surface as untested rather than as passed", async () => {
     const rows = await runRead();
     const unreadable = rows.filter((r) => r.check !== "host" && r.check !== "company-lifecycle");
-    // `approval-tier` and `repo-binding` are SKIP by construction, not by 404 —
-    // the tier has no read surface at all and the build binding needs a human.
+    // `repo-binding` is SKIP by construction — the build binding needs a human.
+    // `approval-tier` is SKIP here because this host 404s `{scope}/policy`; the
+    // real pass over a readable policy is pinned in the describe below.
     for (const r of unreadable) {
       expect(r.verdict, `${r.check} judged a surface it never read`).toBe("SKIP");
     }
@@ -190,6 +191,93 @@ describe("read() against a host whose surfaces do not answer", () => {
     for (const r of rows.filter((x) => x.verdict === "SKIP")) {
       expect(r.note, `${r.check} skipped without saying why`).not.toBe("");
     }
+  });
+});
+
+describe("read() can verify the approval tier", () => {
+  // `{scope}/policy` is a real read surface (`src/server/ops/policy.rs`, #562):
+  // a GET that `read_policy` answers with the tier actually in force, well
+  // before the approval gate's own resolver rebuilt the roster. These lock
+  // that the row grades it a real PASS instead of always SKIP, and that it
+  // tells a `supervised` tenant with nothing pending apart from a `full` one.
+  function policyHost(extra: Record<string, unknown>) {
+    const reachable: Record<string, unknown> = {
+      "/healthz": { status: "ok" },
+      "/spec": {
+        name: "opencompany",
+        version: "0.1.0",
+        capabilities: ["rest", "graphql"],
+        storage: "memory",
+        instance_id: "abcdef0123456789",
+      },
+      "/api/v1/company": { id: "acme", name: "Acme", lifecycle: "running", pending_approvals: 0 },
+      ...extra,
+    };
+    const ocqa = loadHarness(async (path: string) =>
+      path in reachable ? response(200, reachable[path]) : response(404, { error: "not found" }),
+    );
+    return ocqa;
+  }
+
+  const policyDto = {
+    mode: "supervised",
+    alwaysApprove: [],
+    manifestMode: "full",
+    manifestAlwaysApprove: [],
+    overridden: true,
+    setBy: "alice@acme",
+    setAtMillis: 1_700_000_000_000,
+    tiers: [],
+    takesEffect: "on the next turn",
+  };
+
+  it("passes approval-tier with the tier in force when {scope}/policy answers", async () => {
+    const ocqa = policyHost({ "/api/v1/company/policy": policyDto });
+    const rows = await ocqa.read();
+    const tier = rows.find((r) => r.check === "approval-tier");
+    expect(tier).toBeDefined();
+    expect(tier!.verdict).toBe("PASS");
+    expect(tier!.value).toContain("mode supervised");
+    expect(tier!.value).toContain("manifest full");
+    expect(tier!.value).toContain("overridden by alice@acme");
+  });
+
+  it("distinguishes a full-tier tenant with nothing parked from a missing gate", async () => {
+    const ocqa = policyHost({
+      "/api/v1/company/policy": {
+        mode: "full",
+        alwaysApprove: [],
+        manifestMode: "full",
+        manifestAlwaysApprove: [],
+        overridden: false,
+        tiers: [],
+        takesEffect: "on the next turn",
+      },
+    });
+    const rows = await ocqa.read();
+    const tier = rows.find((r) => r.check === "approval-tier");
+    expect(tier!.verdict).toBe("PASS");
+    expect(tier!.value).toContain("mode full");
+    expect(tier!.note).toContain("no effect ever parks");
+  });
+
+  it("warns when a full tier is nonetheless holding parked effects", async () => {
+    const ocqa = policyHost({
+      "/api/v1/company/policy": {
+        mode: "full",
+        alwaysApprove: [],
+        manifestMode: "full",
+        manifestAlwaysApprove: [],
+        overridden: false,
+        tiers: [],
+        takesEffect: "on the next turn",
+      },
+      "/api/v1/company/approvals": [{ id: "a1", kind: "chase", at_millis: 1_700_000_000_000 }],
+    });
+    const rows = await ocqa.read();
+    const tier = rows.find((r) => r.check === "approval-tier");
+    expect(tier!.verdict).toBe("WARN");
+    expect(tier!.value).toContain("1 parked");
   });
 });
 
