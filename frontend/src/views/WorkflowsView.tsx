@@ -49,6 +49,7 @@ import {
 import type { CompanyStreamEvent } from "@/hooks/use-events";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
+import type { ApprovalSummary, GrantScope, Verdict } from "@/api/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -74,6 +75,10 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
 import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
+// Issue #1002: the run drawer decides a run's parked cards in place, using the
+// same shared approval card the Approvals page and the inline chat card use.
+import { useAskerNames } from "@/components/approval-card";
+import type { DecidedApproval } from "@/views/chat/model";
 import { cn } from "@/lib/utils";
 import type { NodeRunState } from "@/lib/workflow-sample";
 // Issue #303: the canvas arithmetic, the run-state folds and the three drawers
@@ -92,10 +97,17 @@ import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
 import { CopilotPanel } from "@/views/workflows/CopilotPanel";
 import { classifyRunError } from "@/views/workflows/run-error";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
+import { approvalsForRun } from "@/views/workflows/run-approvals";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
 const NODE_TYPES = { oc: WorkflowNode };
+
+/** Stable empty defaults, so an omitted approvals prop cannot churn renders. */
+const EMPTY_APPROVALS: ApprovalSummary[] = [];
+const EMPTY_DECIDING: ReadonlyMap<string, Verdict> = new Map();
+const EMPTY_DECIDED: Record<string, DecidedApproval> = {};
+const EMPTY_FAILED: Record<string, string> = {};
 
 /** A stable empty default for `runEvents`, so an omitted prop does not hand the
  * fold a fresh array identity on every render. */
@@ -160,6 +172,12 @@ export function WorkflowsView({
   runEventTick = 0,
   runEvents = EMPTY_RUN_EVENTS,
   listEventTick = 0,
+  approvals = EMPTY_APPROVALS,
+  approvalsNow,
+  decidingApprovals = EMPTY_DECIDING,
+  decidedApprovals = EMPTY_DECIDED,
+  failedApprovals = EMPTY_FAILED,
+  onDecideApproval,
 }: {
   client: OpenCompanyClient;
   company: string | null;
@@ -209,6 +227,38 @@ export function WorkflowsView({
    * the fresh list no longer has.
    */
   listEventTick?: number;
+  /**
+   * The company's parked approvals — the **whole** queue (issue #1002), passed
+   * straight through to the run drawer, which narrows it to the run on screen.
+   *
+   * The same array the Approvals page renders and the sidebar badge counts, and
+   * that is the point: this view is a second *reader* of one queue, so it can
+   * never make the page show less or the badge disagree with it. Live, because
+   * the feed refreshes it on every `approval_resolved` frame — which is what
+   * stops a run drawer calling a step blocked after somebody else cleared it.
+   */
+  approvals?: ApprovalSummary[];
+  /** The feed's clock, for the cards' "waiting N minutes" line. */
+  approvalsNow?: number;
+  /** The verdict an approval is waiting on, keyed by id (issue #1002). */
+  decidingApprovals?: ReadonlyMap<string, Verdict>;
+  /** Verdicts already witnessed, with their last-seen summary (issue #1002). */
+  decidedApprovals?: Record<string, DecidedApproval>;
+  /** Decisions that did not land, keyed by approval id (issue #1002). */
+  failedApprovals?: Record<string, string>;
+  /**
+   * Record one decision on one approval — the shell's handler, which calls the
+   * same per-id `resolveApproval` the Approvals page calls (issue #1002).
+   *
+   * Absent when the caller has not wired the surface, in which case the drawer
+   * renders exactly as it did before #1002: it says the run parked cards and
+   * points at the queue, without offering to decide them.
+   */
+  onDecideApproval?: (
+    approval: ApprovalSummary,
+    verdict: Verdict,
+    scope: GrantScope,
+  ) => void;
 }) {
   const { resolvedTheme } = useTheme();
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
@@ -226,6 +276,16 @@ export function WorkflowsView({
   // shown output came from, not whatever has been typed since.
   const [request, setRequest] = useState("");
   const [ranWith, setRanWith] = useState("");
+  // Issue #1002: the roster read behind the cards' "Asked by" line, keyed to the
+  // approvals of the run on screen rather than to the whole queue — so a console
+  // with a run drawer closed does not fetch the roster for cards it is not
+  // rendering. `useAskerNames` itself is keyed on the asker id set, so this stays
+  // one read per company rather than one per poll.
+  const runApprovalCards = useMemo(
+    () => approvalsForRun(approvals, result?.runId),
+    [approvals, result?.runId],
+  );
+  const askerNames = useAskerNames(client, company, runApprovalCards);
   const [error, setError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   // Issue #259: the same dialog, hydrated from the selected graph. Separate
@@ -1936,6 +1996,16 @@ export function WorkflowsView({
           graph={graph}
           request={ranWith}
           onClose={() => setResult(null)}
+          // Issue #1002: the whole queue, narrowed by the panel to this run.
+          // Handed in unfiltered on purpose — the Approvals page reads the same
+          // array and must keep showing every row.
+          approvals={approvals}
+          now={approvalsNow}
+          askerNames={askerNames}
+          deciding={decidingApprovals}
+          decided={decidedApprovals}
+          failed={failedApprovals}
+          onDecide={onDecideApproval}
         />
       )}
 

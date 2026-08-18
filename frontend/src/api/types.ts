@@ -377,6 +377,29 @@ export interface ApprovalSummary {
    */
   thread?: string | null;
   /**
+   * Which **workflow run** parked this approval (#880) — the run's correlation
+   * id, the same value `WorkflowRunResult.runId` carries back to the console
+   * that pressed Run.
+   *
+   * The join, and the only one there is: it is what lets a second surface — the
+   * run drawer (#1002) — show the cards *this* run is held on without the host
+   * growing a run-scoped approvals route. Compare it for equality and nothing
+   * else; like every other id here it never reaches the screen.
+   *
+   * **Absent is not "unknown", it is "no workflow run behind this card"** — a
+   * chat turn, a scheduler tick, a task attempt. The host stamps it only for an
+   * *unlinked* park that carries a run id, precisely because `Effect::run_id`
+   * also carries task-attempt ids that must never be read as a workflow run
+   * (`workflow_run_of` in `src/company/runtime.rs`). Absent on a host predating
+   * the field too, and both must read the same way: such a card belongs to the
+   * Approvals page alone, exactly as every approval did before this shipped.
+   *
+   * Snake-case because the REST projection is
+   * (`ApprovalSummary::workflow_run_id` in `src/runtime/types.rs`); the GraphQL
+   * schema camel-cases the same field, and this console reads REST.
+   */
+  workflow_run_id?: string | null;
+  /**
    * Which turn's gated calls this one belongs to (#842) — an opaque key shared
    * by every approval a single agent turn parked.
    *
