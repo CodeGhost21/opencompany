@@ -93,6 +93,7 @@ pub mod repo_manager;
 /// still stop, so `POST …/workflows/runs/{runId}/cancel` has something to reach.
 /// Compiled in every build: it is a plain map of stop signals and touches no
 /// engine. See [`run_supervisor`].
+pub mod run_events;
 pub mod run_supervisor;
 pub mod scheduler;
 /// Issue #203: the Telegram `getUpdates` long-polling listener — the inbound

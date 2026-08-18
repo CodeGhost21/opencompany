@@ -272,6 +272,7 @@ export function TaskDetailView({
   client,
   company,
   taskId,
+  attemptEventTick,
   focus,
   parked = EMPTY_PARKED,
   onBack,
@@ -283,6 +284,11 @@ export function TaskDetailView({
   client: OpenCompanyClient;
   company: string | null;
   taskId: string;
+  /**
+   * Bumped on every `run_status_changed` (issue #1015) — the push half of this
+   * screen's liveness, beside the poll below rather than instead of it.
+   */
+  attemptEventTick?: number;
   /**
    * The company's parked approvals, for naming what this card is waiting on
    * (issue #883). Optional and defaulting to empty, which renders the pre-#883
@@ -379,6 +385,36 @@ export function TaskDetailView({
       dispose();
     };
   }, [load]);
+
+  // Issue #1015: the push half. Re-read the detail the moment the host says an
+  // attempt moved, rather than up to `POLL_MS` later — and at all, which the
+  // poll above deliberately does not do while the tab is hidden.
+  //
+  // Its own effect rather than a dependency of the one above, for the reason
+  // `TasksView` gives for the same split (issue #464): folding the tick in there
+  // would tear down and restart the fallback timer on every frame, so a busy
+  // company would keep resetting the interval and the fallback would effectively
+  // stop existing on exactly the companies that need it most.
+  //
+  // The poll STAYS. A frame can be missed — the stream can drop, and the store
+  // swallows an append that fails rather than failing the transition it
+  // describes (`runtime::run_events`) — so the timer is the floor under a
+  // liveness this does not otherwise guarantee.
+  const seenAttemptTick = useRef(attemptEventTick);
+  useEffect(() => {
+    if (attemptEventTick === undefined || attemptEventTick === seenAttemptTick.current) return;
+    // Gated like the poll it complements (issue #581), or the visibility gate
+    // buys nothing on a busy company. Deliberately NOT consumed on the way out:
+    // marking it seen here would drop it, since this effect does not re-run on a
+    // visibility change.
+    if (document.visibilityState === "hidden") return;
+    seenAttemptTick.current = attemptEventTick;
+    let cancelled = false;
+    void load(() => !cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [attemptEventTick, load]);
 
   const worked = useMemo(
     () =>

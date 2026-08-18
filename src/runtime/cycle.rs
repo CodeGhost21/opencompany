@@ -1943,6 +1943,12 @@ fn cycle_task_id(
             // either as a stimulus would make a turn re-trigger itself.
             | CompanyEvent::TurnStarted { .. }
             | CompanyEvent::TurnFailed { .. }
+            // Issue #1015: an attempt row announcing its own move. The same
+            // argument as `TaskCardChanged` directly above, and it matters more
+            // here — the store appends it *after* the status write, and the
+            // write is made by this very cycle, so treating it as a stimulus
+            // would let a run re-trigger itself on every transition it makes.
+            | CompanyEvent::RunStatusChanged { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -2122,6 +2128,12 @@ fn cycle_conversation(
             // either as a stimulus would make a turn re-trigger itself.
             | CompanyEvent::TurnStarted { .. }
             | CompanyEvent::TurnFailed { .. }
+            // Issue #1015: an attempt row announcing its own move. The same
+            // argument as `TaskCardChanged` directly above, and it matters more
+            // here — the store appends it *after* the status write, and the
+            // write is made by this very cycle, so treating it as a stimulus
+            // would let a run re-trigger itself on every transition it makes.
+            | CompanyEvent::RunStatusChanged { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };

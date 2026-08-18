@@ -1116,6 +1116,36 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["turnId"] = json!(turn_id);
             o
         }
+        // Issue #1015: the push half of attempt status. Structural, and for the
+        // same sharper reason as `turn_settled` directly above — `error` is a
+        // failure reason in our own words that can name internals, so the
+        // console learns *that* the attempt moved here and reads *why* from the
+        // run row, which is tenant-scoped.
+        //
+        // `from` rides along so a consumer holding a row can tell a live frame
+        // from a replayed or out-of-order one, which a bare `to` cannot. It is
+        // omitted rather than null on the mint, where there is no prior state —
+        // the same presence-check discipline `turn_started`'s `parentId` uses.
+        CompanyEvent::RunStatusChanged {
+            run_id,
+            task_id,
+            attempt,
+            from,
+            to,
+            ..
+        } => {
+            let mut o = envelope("run_status_changed");
+            o["runId"] = json!(run_id);
+            o["attempt"] = json!(attempt);
+            o["status"] = json!(to);
+            if let Some(task_id) = task_id {
+                o["taskId"] = json!(task_id);
+            }
+            if let Some(from) = from {
+                o["from"] = json!(from);
+            }
+            o
+        }
         // Not an attention signal, or carries a raw payload we never put on the
         // wire — dropped.
         _ => return None,
