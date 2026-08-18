@@ -483,6 +483,166 @@ pub fn template_proposal(answers: &SetupAnswers) -> RosterProposal {
     }
 }
 
+/// Turns a proposed roster into a company the runtime can register.
+///
+/// The wizard's apply needs a [`CompanyManifest`], not a template directory:
+/// [`register`](crate::desktop::register) has always taken one, and
+/// `first_run_manifest` builds a preset the same way — parse a base, then set
+/// `agents`. Generating a company is therefore this function plus that call,
+/// rather than a new subsystem.
+///
+/// ## What it decides, and what it refuses to
+///
+/// * **`[policy].mode` comes from [`PROVISIONED_POLICY_MODE`], not from a
+///   literal here.** A company this flow creates must be indistinguishable from
+///   one `POST /api/v1/companies` provisions; hard-coding a different tier would
+///   fork the meaning of "a new company's default" across two call sites, and
+///   the next person to move it would move only one.
+/// * **The admin address is written into `[users].admins`.** Without it a laptop
+///   operator who chose email sign-in completes setup and can then sign in as
+///   nobody — no shipped template invites anyone, so the address they typed is
+///   the only thing standing between them and a locked-out host.
+/// * **It does not invent desks, workflows, schedules or budgets.** The roster
+///   is what the operator reviewed; everything else stays at its manifest
+///   default, where a later edit is an ordinary change rather than an
+///   unpicking of something setup assumed.
+///
+/// Agent ids are derived from roles rather than minted from a counter, so the
+/// same reviewed roster always produces the same ids — and de-duplicated with a
+/// numeric suffix, because `validate` rejects a repeat and two roles can slug
+/// alike.
+pub fn manifest_from_setup(
+    answers: &SetupAnswers,
+    agents: &[ProposedAgent],
+    admin_email: Option<&str>,
+) -> crate::company::CompanyManifest {
+    let name = company_name(answers);
+    let mut manifest: crate::company::CompanyManifest =
+        toml::from_str("[company]\nname = \"placeholder\"\n")
+            .expect("a name-only manifest is always parseable");
+
+    manifest.company.name = name;
+    manifest.company.output = non_empty(&answers.automate);
+    manifest.company.human_role = Some(HUMAN_ROLE.to_string());
+    manifest.policy.mode = crate::company::PROVISIONED_POLICY_MODE.to_string();
+
+    if let Some(email) = admin_email.map(str::trim).filter(|e| !e.is_empty()) {
+        manifest.users.admins = vec![email.to_string()];
+    }
+
+    // Parsed rather than constructed field-by-field: `Agent` carries a dozen
+    // optional fields with serde defaults, and enumerating them here would mean
+    // this function silently missing whichever one is added next.
+    let blank: crate::company::Agent =
+        toml::from_str("id = \"placeholder\"\nrole = \"placeholder\"\n")
+            .expect("an id+role agent is always parseable");
+
+    let mut seen: Vec<String> = Vec::new();
+    manifest.agents = agents
+        .iter()
+        .map(|agent| {
+            let mut built = blank.clone();
+            built.id = unique_agent_id(&agent.role, &mut seen);
+            built.role = agent.role.trim().to_string();
+            built.description = non_empty(&agent.description);
+            built
+        })
+        .collect();
+
+    manifest
+}
+
+/// What the human keeps, stated the same way for every company this flow builds.
+///
+/// `[company].human_role` is a required-feeling field an operator has not been
+/// asked about, and inventing a per-company answer from three sentences would be
+/// guessing at the one thing the product says is theirs. A constant is honest
+/// and editable.
+const HUMAN_ROLE: &str = "Direction, and the calls that matter";
+
+/// The company's display name, drawn from what they said they do.
+///
+/// Deliberately not a fifth question. A name is the easiest thing in the world
+/// to change later and the most annoying thing to be asked for before you have
+/// seen anything — so the first clause of their own sentence becomes the name,
+/// and the Settings page renames it in one field.
+fn company_name(answers: &SetupAnswers) -> String {
+    let raw = answers.industry.trim();
+    if raw.is_empty() {
+        return "My Company".to_string();
+    }
+    // The first clause: people write "E-commerce — I sell homeware online", and
+    // the half before the dash is the name they would have typed.
+    //
+    // A *spaced* hyphen is a clause break; a bare one is part of a word, and
+    // splitting on it turned "E-commerce" into "E". So the spaced forms are
+    // folded to an em dash first and the bare hyphen is never a separator.
+    let normalised = raw.replace(" - ", "—").replace(" – ", "—");
+    let head = normalised
+        .split(['—', ',', '.', ':', ';', '\n'])
+        .map(str::trim)
+        .find(|part| !part.is_empty())
+        .unwrap_or(raw)
+        .to_string();
+    let head = head.as_str();
+    let trimmed: String = head.chars().take(60).collect();
+    if trimmed.trim().is_empty() {
+        "My Company".to_string()
+    } else {
+        trimmed.trim().to_string()
+    }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// A snake_case id for this role that no earlier row has taken.
+///
+/// `validate` rejects a duplicate id and a non-snake_case one, so both are
+/// handled here rather than surfaced to an operator who typed nothing wrong.
+fn unique_agent_id(role: &str, seen: &mut Vec<String>) -> String {
+    let base = snake_id(role);
+    if !seen.contains(&base) {
+        seen.push(base.clone());
+        return base;
+    }
+    for n in 2..1000 {
+        let candidate = format!("{base}_{n}");
+        if !seen.contains(&candidate) {
+            seen.push(candidate.clone());
+            return candidate;
+        }
+    }
+    base
+}
+
+/// Lowercase letters, digits and underscores, starting with a letter — the
+/// shape `is_snake_case` demands.
+fn snake_id(role: &str) -> String {
+    let mut id = String::with_capacity(role.len());
+    let mut pending = false;
+    for ch in role.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending && !id.is_empty() {
+                id.push('_');
+            }
+            pending = false;
+            id.push(ch.to_ascii_lowercase());
+        } else {
+            pending = true;
+        }
+    }
+    // Must start with a lowercase letter: a role like "3D Artist" would
+    // otherwise produce an id the validator refuses.
+    match id.chars().next() {
+        Some(c) if c.is_ascii_lowercase() => id,
+        _ if id.is_empty() => "teammate".to_string(),
+        _ => format!("a_{id}"),
+    }
+}
+
 /// A role's identity for de-duplication: lowercase alphanumerics, everything
 /// else collapsed to a single `-`.
 fn role_slug(role: &str) -> String {
@@ -792,6 +952,164 @@ mod tests {
                 a.role
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Synthesising a company from the answers
+    // ---------------------------------------------------------------------
+
+    fn proposed(role: &str) -> ProposedAgent {
+        ProposedAgent {
+            name: role.split_whitespace().next().unwrap_or(role).to_string(),
+            role: role.to_string(),
+            description: format!("Owns {}.", role.to_lowercase()),
+        }
+    }
+
+    /// The whole point of the synthesis: what comes out must be a company the
+    /// runtime will accept. `validate` is what `opencompany check` runs, so an
+    /// empty problem list is the same bar a hand-written manifest clears.
+    #[test]
+    fn a_synthesised_company_passes_validation() {
+        let answers = answers("E-commerce — I sell homeware online", "Meta ads, dispatch");
+        let roster = vec![
+            proposed("Meta Ads Specialist"),
+            proposed("Order Dispatch Coordinator"),
+            proposed("Accountant"),
+            proposed("Operations Lead"),
+        ];
+        let manifest = manifest_from_setup(&answers, &roster, Some("ada@example.com"));
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+        assert_eq!(manifest.agents.len(), 4);
+    }
+
+    /// The dead end this flow exists to close: no shipped template invites
+    /// anybody, so an operator who picks email sign-in and is not written into
+    /// `[users].admins` completes setup and can then sign in as nobody.
+    #[test]
+    fn the_operator_is_invited_as_an_admin() {
+        let manifest = manifest_from_setup(
+            &answers("a shop", ""),
+            &[proposed("Accountant")],
+            Some("  ada@example.com  "),
+        );
+        assert_eq!(manifest.users.admins, vec!["ada@example.com".to_string()]);
+    }
+
+    /// A host that needs no sign-in supplies no address, and inviting `""`
+    /// would put an unusable row in the admin list.
+    #[test]
+    fn no_address_invites_nobody() {
+        for email in [None, Some(""), Some("   ")] {
+            let manifest = manifest_from_setup(&answers("a shop", ""), &[proposed("Ops")], email);
+            assert!(manifest.users.admins.is_empty(), "{email:?}");
+        }
+    }
+
+    /// Setup-created and provision-created companies must be indistinguishable.
+    /// Reading the constant rather than a literal is what keeps them that way
+    /// when the product next moves the default (#605).
+    #[test]
+    fn the_policy_tier_is_the_provisioned_default_not_a_literal() {
+        let manifest = manifest_from_setup(&answers("a shop", ""), &[proposed("Ops")], None);
+        assert_eq!(
+            manifest.policy.mode,
+            crate::company::PROVISIONED_POLICY_MODE
+        );
+    }
+
+    /// `validate` rejects duplicate ids, and two roles can slug alike — so the
+    /// de-duplication has to happen here rather than surface to an operator who
+    /// typed nothing wrong.
+    #[test]
+    fn roles_that_slug_alike_still_get_distinct_ids() {
+        let manifest = manifest_from_setup(
+            &answers("a shop", ""),
+            &[
+                proposed("Ops Lead"),
+                proposed("ops  lead"),
+                proposed("OPS-LEAD"),
+            ],
+            None,
+        );
+        let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+    }
+
+    /// A role that starts with a digit slugs to something `is_snake_case`
+    /// refuses, and the operator never sees why. Handled here instead.
+    #[test]
+    fn a_role_starting_with_a_digit_still_yields_a_valid_id() {
+        let manifest =
+            manifest_from_setup(&answers("a studio", ""), &[proposed("3D Artist")], None);
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+        assert!(
+            manifest.agents[0]
+                .id
+                .starts_with(|c: char| c.is_ascii_lowercase()),
+            "{}",
+            manifest.agents[0].id
+        );
+    }
+
+    /// The name is taken from the first clause of their own sentence rather
+    /// than asked for — a name is trivial to change later and tedious to be
+    /// asked for before you have seen anything.
+    #[test]
+    fn the_company_is_named_from_the_first_clause() {
+        for (typed, expected) in [
+            ("E-commerce — I sell homeware online", "E-commerce"),
+            // A spaced hyphen is the same clause break, typed by someone whose
+            // keyboard has no em dash.
+            ("E-commerce - I sell homeware online", "E-commerce"),
+            (
+                "A yoga studio in Pune, drop-in classes",
+                "A yoga studio in Pune",
+            ),
+            // No separator at all: the whole sentence is the name.
+            ("Homeware shop", "Homeware shop"),
+        ] {
+            let manifest = manifest_from_setup(&answers(typed, ""), &[proposed("Ops")], None);
+            assert_eq!(manifest.company.name, expected, "typed: {typed}");
+        }
+    }
+
+    /// The hyphen regression, kept as its own case because it is the one a
+    /// reader would not predict: "E-commerce" must never become "E".
+    #[test]
+    fn a_hyphen_inside_a_word_does_not_split_the_name() {
+        let manifest = manifest_from_setup(
+            &answers("e-commerce and drop-shipping", ""),
+            &[proposed("Ops")],
+            None,
+        );
+        assert_eq!(manifest.company.name, "e-commerce and drop-shipping");
+    }
+
+    /// Someone who typed nothing still gets a valid, named company.
+    #[test]
+    fn an_unnamed_business_still_yields_a_valid_company() {
+        let manifest = manifest_from_setup(&SetupAnswers::default(), &[proposed("Ops")], None);
+        assert!(!manifest.company.name.trim().is_empty());
+        assert_eq!(manifest.validate(), Vec::<String>::new());
+    }
+
+    /// Setup builds a roster and nothing else. Desks, workflows, schedules and
+    /// budgets stay at their defaults, so a later edit is an ordinary change
+    /// rather than an unpicking of something setup assumed.
+    #[test]
+    fn synthesis_invents_nothing_beyond_the_roster() {
+        let manifest = manifest_from_setup(
+            &answers("a shop", "everything"),
+            &[proposed("Ops"), proposed("Accountant")],
+            None,
+        );
+        assert!(manifest.group_chats.is_empty(), "no desks were asked for");
+        assert!(manifest.schedules.is_empty(), "no schedule was asked for");
     }
 
     /// The answers ride on the company record, so they must survive the round
