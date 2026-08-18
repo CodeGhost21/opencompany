@@ -749,12 +749,18 @@ export function AppShell({
    * that effect. {@link reReadSettledThread} is that case; see its doc.
    */
   const mountedRef = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Re-armed on mount, which is not redundant with the initial `true`:
+    // `main.tsx` renders under `StrictMode`, so in development React mounts,
+    // unmounts and remounts every component once. Without this line the
+    // cleanup below would latch the ref to `false` on that first throwaway
+    // mount and the re-read would be dead for the rest of the dev session —
+    // and only in dev, which is the worst place for a difference to hide.
+    mountedRef.current = true;
+    return () => {
       mountedRef.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   /**
    * Rebuild one thread's transcript from `chat/history` after its turn settled
