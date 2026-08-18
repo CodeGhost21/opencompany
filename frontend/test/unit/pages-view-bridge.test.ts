@@ -1,0 +1,134 @@
+// @vitest-environment jsdom
+
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { OpenCompanyClient } from "@/api/client";
+import type { PageManifestDto } from "@/api/types";
+import { PagesView } from "@/views/PagesView";
+
+/**
+ * `PagesView`'s postMessage bridge is the actual security boundary between an
+ * agent-authored page and the console's real GraphQL endpoint
+ * (docs/spec/runtime/pages.md §6): the sandboxed iframe holds no session
+ * cookie, so `event.source === iframe.contentWindow` is the only thing that
+ * tells the console this request really came from its own embedded page and
+ * not some other frame or tab posting the same shape of message. This is the
+ * one piece of that view worth a unit test — everything else is either a
+ * plain fetch-and-render list or the iframe element itself, which needs a
+ * real browser to say anything about.
+ */
+
+const PAGE: PageManifestDto = {
+  slug: "metrics",
+  title: "Metrics",
+  description: "The daily numbers.",
+  icon: "chart",
+  navVisible: true,
+};
+
+function clientWith(graphqlRequest: OpenCompanyClient["graphqlRequest"]): OpenCompanyClient {
+  return {
+    listPages: () => Promise.resolve([PAGE]),
+    pageUrl: (slug: string) => `/api/v1/company/pages/${slug}`,
+    graphqlRequest,
+  } as unknown as OpenCompanyClient;
+}
+
+let container: HTMLDivElement;
+let root: Root;
+
+async function show(client: OpenCompanyClient) {
+  await act(async () => {
+    root.render(createElement(PagesView, { client, company: "acme" }));
+  });
+}
+
+function iframe(): HTMLIFrameElement | null {
+  return container.querySelector("iframe");
+}
+
+/** Lets any pending `.then`/`.catch` microtasks (the bridge's own reply) run. */
+async function flush() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+beforeEach(() => {
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+  vi.restoreAllMocks();
+});
+
+describe("PagesView bridge", () => {
+  it("ignores an oc:graphql message whose source isn't the embedded iframe", async () => {
+    const graphqlRequest = vi.fn();
+    await show(clientWith(graphqlRequest));
+
+    const frame = iframe();
+    expect(frame).not.toBeNull();
+
+    // Same shape as a legitimate request, but posted as if from `window`
+    // itself rather than the iframe's own `contentWindow` — exactly what a
+    // spoofing frame/tab would send.
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "oc:graphql", id: "spoofed", query: "{ ping }" },
+        source: window,
+      }),
+    );
+    await flush();
+
+    expect(graphqlRequest).not.toHaveBeenCalled();
+  });
+
+  it("forwards an oc:graphql message from the embedded iframe and replies on its contentWindow", async () => {
+    const graphqlRequest = vi.fn().mockResolvedValue({ data: { ping: "pong" }, errors: undefined });
+    await show(clientWith(graphqlRequest));
+
+    const frame = iframe();
+    const contentWindow = frame?.contentWindow;
+    expect(contentWindow).toBeTruthy();
+    const postMessage = vi.spyOn(contentWindow as Window, "postMessage").mockImplementation(() => {});
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "oc:graphql", id: "req-1", query: "{ ping }", variables: { a: 1 } },
+        source: contentWindow,
+      }),
+    );
+    await flush();
+
+    expect(graphqlRequest).toHaveBeenCalledWith("{ ping }", { a: 1 });
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: "oc:graphql:result", id: "req-1", data: { ping: "pong" }, errors: undefined },
+      "*",
+    );
+  });
+
+  it("ignores a same-source message that isn't the oc:graphql shape", async () => {
+    const graphqlRequest = vi.fn();
+    await show(clientWith(graphqlRequest));
+
+    const contentWindow = iframe()?.contentWindow;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "some-other-message" },
+        source: contentWindow,
+      }),
+    );
+    await flush();
+
+    expect(graphqlRequest).not.toHaveBeenCalled();
+  });
+});
