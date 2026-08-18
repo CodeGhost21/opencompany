@@ -4127,7 +4127,7 @@ mod tests {
             store
                 .save(&CompanyRecord {
                     id: id.clone(),
-                    manifest,
+                    manifest: manifest.clone(),
                     ledger: Vec::new(),
                     lifecycle: "running".to_string(),
                     overlay_agents: Vec::new(),
@@ -4143,7 +4143,17 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            let state = state_over(&home, &id, true).await;
+            // Not `state_over`: it always builds with `empty_manifest()`, which
+            // would overwrite this test's `[globals].disable` and silently pass
+            // for the wrong reason.
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id, std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
 
             let response = router(state)
                 .oneshot(request(
