@@ -9,6 +9,13 @@ import { defineConfig } from "vite";
 // `vite.config.ts`: that build marks React external so it does not end up
 // bundled twice, and this one exists specifically to bundle it.
 export default defineConfig({
+  // React/ReactDOM's own CJS entry points branch on `process.env.NODE_ENV` to
+  // pick their dev vs. production build; without this pinned explicitly the
+  // bundler cannot dead-code-eliminate the (much larger, warning-laden) dev
+  // branch, and a page ships that dev bundle to the browser.
+  define: {
+    "process.env.NODE_ENV": '"production"',
+  },
   build: {
     outDir: path.resolve(__dirname, "../dist/pages-sdk"),
     emptyOutDir: false,
