@@ -119,6 +119,7 @@ export type View =
   | "memory"
   | "approvals"
   | "workflows"
+  | "pages"
   | "finances"
   | "settings"
   | "feedback";
