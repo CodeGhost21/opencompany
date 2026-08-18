@@ -77,6 +77,7 @@ struct SlugPath {
 /// Field names match what `PagesView.tsx` (the frontend nav, built alongside
 /// this route) reads: `slug`, `title`, `description`, `icon`, `navVisible`.
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PageListing {
     slug: String,
     title: String,
@@ -257,8 +258,9 @@ async fn page_shell(
 <body>
 <div id="root"></div>
 <script type="module">
+  import * as React from "react";
   import * as ReactDOM from "react-dom/client";
-  import Page from "./bundle.mjs";
+  import Page from "./{slug}/bundle.mjs";
   const root = ReactDOM.createRoot(document.getElementById("root"));
   root.render(React.createElement(Page));
 </script>
