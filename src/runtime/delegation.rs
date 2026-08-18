@@ -309,14 +309,18 @@ pub(crate) struct DeskReply {
     pub(crate) hit_iteration_cap: bool,
 }
 
-/// What was already decided about the operator message a drain belongs to,
-/// before the model said anything (issues #463, #267).
+/// What was already decided about the operator message a drain belongs to
+/// (issues #463, #267, #984).
 ///
-/// Two facts carried together because they answer the same question and because
-/// a pair of bare `bool` parameters at a call site is a swap waiting to happen.
-/// Both default to `false`, which is the honest reading for every drain with no
+/// Facts carried together because they answer the same question and because a
+/// run of bare `bool` parameters at a call site is a swap waiting to happen.
+/// All default to `false`, which is the honest reading for every drain with no
 /// operator message in scope — a dispatched card's turn, the approval
 /// re-dispatch — neither of which has a message to have carded or triaged.
+///
+/// Two of the three are settled before the model says anything; `chatter` is
+/// the exception (issue #984) and is the model's own verdict, which is why it
+/// is a separate field rather than another reading of `answering`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct MessageContext {
     /// The REST chat handler already opened a To-do card for this message
@@ -328,6 +332,21 @@ pub(crate) struct MessageContext {
     /// question the orchestrator cannot answer alone gets answered — but it
     /// opens no card, because nobody commissioned work.
     pub(crate) answering: bool,
+    /// The lexical layer abstained and the **model** read this message as
+    /// conversation (issue #984).
+    ///
+    /// Distinct from [`answering`](Self::answering) on purpose. That flag also
+    /// narrows the model's own board tools; this one must not, because `Chatter`
+    /// is the ambiguous bucket and withdrawing tools on a maybe is the expensive
+    /// direction. All this does is stand the two deterministic card paths down —
+    /// the paths that would otherwise open a card because
+    /// [`is_trackable_work`]'s default is "everything is work".
+    ///
+    /// Only ever `true` where the lexical layer already abstained, so it can
+    /// **subtract** a card and never mint one. Every degraded path — no harness,
+    /// no escalation wired, an unparseable or slow verdict — leaves it `false`
+    /// and behaves exactly as before.
+    pub(crate) chatter: bool,
 }
 
 /// Whether a drain may run the hand-offs it finds, or must drop them.
@@ -836,6 +855,21 @@ impl<'a> DelegationRunner<'a> {
         // orphan it. `Work` and `Chatter` therefore both leave the gate where
         // the abstention left it, and only `Answer` moves it.
         let mut answering = triage.is_answer();
+        // Issue #984: the same escalation, read for BOTH of its useful answers.
+        //
+        // `Answer` narrows the claim, as it always has. `Chatter` was computed,
+        // logged and thrown away — and it is the verdict that matters here: the
+        // lexical card detector's default is "everything is work", so a message
+        // the model has just read as conversation still opened a card. We had
+        // already paid for the call.
+        //
+        // Carried as its OWN fact rather than by folding it into `answering`.
+        // They are different claims about the turn and only one of them touches
+        // the model's board tools: `Chatter` deliberately does not gate those
+        // (the comment above says why — taking them away on a maybe turns a
+        // triage miss into work the company silently refuses), while it *does*
+        // stand the deterministic card paths down.
+        let mut chatter = false;
         if !answering
             && triaged.abstained()
             && let Some(escalation) = self.triage
@@ -848,6 +882,13 @@ impl<'a> DelegationRunner<'a> {
                      narrowing the claim to answering-only"
                 );
                 answering = true;
+            } else if verdict.is_chatter() {
+                tracing::debug!(
+                    company = %self.company,
+                    "[triage] the lexical layer abstained and the model read this as \
+                     conversation; opening no card for it"
+                );
+                chatter = true;
             }
         }
         // Claim the delegation queue for this turn and its drain (issue #453).
@@ -875,6 +916,7 @@ impl<'a> DelegationRunner<'a> {
         let ctx = MessageContext {
             carded_by_handler,
             answering,
+            chatter,
         };
         // …and *which* card that is, when it is still on the board. Adopting it
         // is what carries "one message, one card" through the publish drain too:
@@ -1717,7 +1759,7 @@ impl<'a> DelegationRunner<'a> {
         assignee: &str,
         request: &str,
         chat_id: Option<&str>,
-        carded_by_handler: bool,
+        ctx: MessageContext,
     ) -> Result<Option<TaskRecord>> {
         let Some(tasks) = self.tasks else {
             return Ok(None);
@@ -1725,12 +1767,32 @@ impl<'a> DelegationRunner<'a> {
         if self.task.is_some() {
             return Ok(None);
         }
+        // Issue #984: the model already read this as conversation, so no card.
+        //
+        // Placed HERE, in the shared helper, rather than beside the `answering`
+        // check in each caller: `answering` differs between the two paths (a
+        // hand-off and a direct ask log different things about a question), but
+        // "the model called this chatter" is one fact about the message and both
+        // paths owe it the same answer. #442 put its stand-down in one caller
+        // only and the other path kept opening cards; this is that lesson.
+        //
+        // Below the `self.task.is_some()` guard deliberately: a dispatched
+        // card's turn has no operator message to have triaged, and `ctx`
+        // defaults to all-false there anyway.
+        if ctx.chatter {
+            tracing::debug!(
+                company = %self.company,
+                assignee = %assignee,
+                "[delegation] not opening a card: the model read this message as conversation"
+            );
+            return Ok(None);
+        }
         // Issue #463: the REST chat handler read the operator's original words
         // and already opened a To-do card for them. One message must not become
         // two cards, whichever of the two card-opening paths below is running —
         // #442 guarded only the direct path, and a recognised imperative that
         // was handed off doubled through this one.
-        if carded_by_handler {
+        if ctx.carded_by_handler {
             tracing::debug!(
                 company = %self.company,
                 assignee = %assignee,
@@ -1822,8 +1884,7 @@ impl<'a> DelegationRunner<'a> {
             );
             return Ok(None);
         }
-        self.open_work_card(member, instruction, chat_id, ctx.carded_by_handler)
-            .await
+        self.open_work_card(member, instruction, chat_id, ctx).await
     }
 
     /// The card for a **desk lead or teammate asked directly** (issue #442,
@@ -1894,8 +1955,7 @@ impl<'a> DelegationRunner<'a> {
             );
             return Ok(None);
         }
-        self.open_work_card(responder, message, chat_id, ctx.carded_by_handler)
-            .await
+        self.open_work_card(responder, message, chat_id, ctx).await
     }
 
     /// Whether a card assigned to `assignee` is assigned to whoever `chat_id`
@@ -2540,7 +2600,15 @@ const TRACK_ALWAYS_WORDS: usize = 25;
 /// The longest an utterance opening with small talk may run before it stops
 /// being small talk. "thanks!" is chatter; "thanks — now pull together the Q3
 /// numbers, the deck and the board memo" is not.
-const SMALLTALK_MAX_WORDS: usize = 6;
+///
+/// Raised from 6 to 8 by issue #984, which is a real trade and not a free one:
+/// every word added here is a short instruction that opens with an
+/// acknowledgement and now goes untracked. 8 is chosen to cover the common
+/// two-clause ack ("noted, thanks — will pick that up tomorrow") without
+/// reaching the length at which a sentence is usually carrying an instruction.
+/// The model layer, not this number, is what handles the long conversational
+/// message; pushing this much higher would buy those at the cost of real work.
+const SMALLTALK_MAX_WORDS: usize = 8;
 
 /// Verbs that name something being **produced or changed**. Their presence is
 /// decisive: whatever else the sentence is doing, it is asking for work.
@@ -2617,6 +2685,28 @@ const SMALLTALK_OPENERS: &[&str] = &[
     "got",
     "haha",
     "lol",
+    // Issue #984: acknowledgement and meta vocabulary. A message opening with
+    // one of these, and staying short, is somebody closing a loop rather than
+    // opening one.
+    //
+    // This list is deliberately NARROWER than the issue proposed. `qa`, `test`
+    // and `ignore` were suggested and are left out on purpose: each of them
+    // opens a legitimate short instruction to a desk — "test the checkout flow
+    // on staging", "ignore the stale rows and rebuild the index" — and this
+    // rung has no way to tell those from chatter. Words that essentially never
+    // open an instruction are safe here; words that often do are exactly the
+    // ones the model layer above exists to judge.
+    "ack",
+    "acked",
+    "fyi",
+    "nvm",
+    "nevermind",
+    "disregard",
+    "oops",
+    "np",
+    "agreed",
+    "indeed",
+    "ditto",
 ];
 
 /// The lowercase alphanumeric word tokens of `text`.
@@ -2806,6 +2896,49 @@ mod tests {
                 !is_trackable_work(chatter),
                 "should NOT be tracked: {chatter:?}"
             );
+        }
+    }
+
+    /// Issue #984 widened the acknowledgement vocabulary and raised the length
+    /// cap from 6 to 8. These are the messages that changed answer.
+    ///
+    /// This rung is the fallback for builds with no triage model, so it is kept
+    /// deliberately timid — it catches the loop-closing ack, not the long
+    /// conversational message. The staging probe in #984 is 15 words and is
+    /// still tracked here on purpose; that one is the model layer's to judge.
+    #[test]
+    fn acknowledgement_vocabulary_is_not_tracked() {
+        for chatter in [
+            "ack",
+            "acked, nothing needed here",
+            "fyi the staging host is back up",
+            "nvm, found it",
+            "nevermind that last one",
+            "disregard the previous message please",
+            "oops wrong thread",
+            "np",
+            "agreed",
+            "indeed, that reads better",
+            "ditto",
+        ] {
+            assert!(
+                !is_trackable_work(chatter),
+                "should NOT be tracked: {chatter:?}"
+            );
+        }
+    }
+
+    /// The trade the widened cap makes, pinned so it stays deliberate: an
+    /// acknowledgement that carries a real instruction is still tracked, because
+    /// a work verb outranks the small-talk rung whatever the length.
+    #[test]
+    fn a_widened_opener_does_not_hide_an_instruction() {
+        for request in [
+            "ack — now draft the Q3 board memo",
+            "fyi, please write up the incident review",
+            "agreed, compile the pricing comparison",
+        ] {
+            assert!(is_trackable_work(request), "should be tracked: {request:?}");
         }
     }
 
@@ -3711,6 +3844,115 @@ members = ["brand_strategist", "seo_specialist", "copywriter"]
         assert_eq!(cards[0].column, COLUMN_IN_REVIEW);
         assert_eq!(cards[0].origin_chat_id.as_deref(), Some("eng_desk"));
         assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    }
+
+    /// **Issue #984, the reported probe.** The message that opened a card on
+    /// staging, run through the path that opened it.
+    ///
+    /// `"verifying the Send button responds to a real mouse click. No action
+    /// needed from anyone."` is 15 words, so it clears
+    /// [`SMALLTALK_MAX_WORDS`]; it names no [`WORK_VERBS`] entry (`verifying`
+    /// and `send` are both deliberately absent — `send` is a noun here); and it
+    /// is not interrogative. So [`is_trackable_work`] falls through to its
+    /// "anything else is work" rung and returns true, which is how a message
+    /// that explicitly disclaimed any action became a card assigned to a desk.
+    ///
+    /// The lexical layer cannot fix this without inverting its own default, so
+    /// the model is asked — and having been asked, its answer is now used.
+    #[tokio::test]
+    async fn a_desk_asked_something_the_model_calls_chatter_opens_no_card() {
+        let probe = "verifying the Send button responds to a real mouse click. \
+                     No action needed from anyone.";
+        assert!(
+            crate::company::task_intent::triage_message_detailed(probe).abstained(),
+            "fixture must be a message no lexical rule decides"
+        );
+        assert!(
+            is_trackable_work(probe),
+            "fixture must be one the card detector would otherwise track — that \
+             is the bug this closes"
+        );
+
+        let fx = Fixture::new();
+        let escalation = ScriptedTriage::new(crate::harness::triage::TriageVerdict::Chatter);
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("ack")]);
+        let turn = fx
+            .runner(&turns)
+            .with_triage(&escalation)
+            .handle_operator_message("engineer", probe, Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            escalation.asked(),
+            vec![probe.to_string()],
+            "the abstention is what gets escalated"
+        );
+        assert!(
+            fx.cards().await.is_empty(),
+            "a message the model read as conversation opens no card"
+        );
+        assert_eq!(turn.spawned_task, None, "and nothing is linked to one");
+    }
+
+    /// The other direction, which is the one that must not regress: the model
+    /// says `work`, and the card is opened exactly as before.
+    ///
+    /// This is what makes the change subtractive-only. `Work` and `Unavailable`
+    /// both leave the deterministic decision alone, so an escalation that is
+    /// slow, unreachable or unparseable cannot cost a card — only an explicit
+    /// `chatter` can.
+    #[tokio::test]
+    async fn a_non_chatter_verdict_still_opens_the_direct_card() {
+        let residue = "the pricing page copy, before Friday if you can";
+        assert!(
+            crate::company::task_intent::triage_message_detailed(residue).abstained(),
+            "fixture must be a message no lexical rule decides"
+        );
+        for verdict in [
+            crate::harness::triage::TriageVerdict::Work,
+            crate::harness::triage::TriageVerdict::Unavailable,
+        ] {
+            let fx = Fixture::new();
+            let escalation = ScriptedTriage::new(verdict);
+            let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+            fx.runner(&turns)
+                .with_triage(&escalation)
+                .handle_operator_message("engineer", residue, Some("eng_desk"))
+                .await
+                .expect("operator message handled");
+            let cards = fx.cards().await;
+            assert_eq!(
+                cards.len(),
+                1,
+                "{verdict:?} must leave the card the abstention would have opened"
+            );
+            assert_eq!(cards[0].assignee, "engineer");
+        }
+    }
+
+    /// With **no escalation wired** — the default build, and any host without a
+    /// triage model — the behaviour is byte-identical to before issue #984.
+    ///
+    /// Named because it is the property that makes this safe to ship: the fix
+    /// consults a model that most deployments do not have, and where it is
+    /// absent nothing about the board changes.
+    #[tokio::test]
+    async fn without_an_escalation_the_probe_still_cards_exactly_as_before() {
+        let probe = "verifying the Send button responds to a real mouse click. \
+                     No action needed from anyone.";
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("ack")]);
+        fx.runner(&turns)
+            .handle_operator_message("engineer", probe, Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+        assert_eq!(
+            fx.cards().await.len(),
+            1,
+            "no model, no change — the bug is still here, and that is the point: \
+             this path was not touched"
+        );
     }
 
     /// **Issue #465, the reported card.** A desk asked directly, whose first
