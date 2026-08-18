@@ -462,7 +462,10 @@ export function isEmptyDiff(diff: GraphDiff): boolean {
  * ours to know.
  */
 export function proposalIsStale(proposal: WorkflowProposal, graph: WorkflowGraph): boolean {
-  if (graph.version === undefined) return false;
+  // `null` (issue #1013, a current host's honest "no token" for a non-editable
+  // graph) and `undefined` (a host predating #259 entirely) both mean the same
+  // thing here: nothing to compare against, so nothing to call stale.
+  if (graph.version == null) return false;
   return proposal.basedOnVersion !== graph.version;
 }
 
