@@ -3002,9 +3002,23 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         node: &crate::ports::workspace::WorkspaceNode,
         content: Option<&str>,
     ) -> Result<()> {
-        use crate::ports::workspace::NodeKind;
-        let conn = self.conn();
-        let nodes = self.workspace_nodes(&conn, company)?;
+        use crate::ports::workspace::{NodeKind, duplicate_file_refusal, file_name_taken};
+        let mut conn = self.conn();
+        // Issue #894: the write reservation is taken BEFORE the read, exactly as
+        // `adopt_or_create_folder` and `swap_files` already do on this backend.
+        //
+        // The `StdMutex` around the connection makes this function atomic within
+        // one `SqliteStore`, and that is not the race: two `SqliteStore`
+        // instances can point at one database file, and against a second
+        // instance a plain read-then-`INSERT` has both callers see the name free
+        // and both insert. `IMMEDIATE` is what makes the loser wait for the
+        // winner's commit and then observe it — `busy_timeout` (see
+        // `apply_pragmas`) turns the contention into a bounded block rather than
+        // an immediate `SQLITE_BUSY`.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
         if nodes.contains_key(&node.id) {
             return Err(OpenCompanyError::Conflict(format!(
                 "workspace node {} already exists",
@@ -3026,7 +3040,17 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
                 }
             }
         }
-        conn.execute(
+        // The sibling-name guard this backend never had. Files only — a folder
+        // sharing a name with a file stays legal, and folder-vs-folder is
+        // `adopt_or_create_folder`'s to decide.
+        if node.kind == NodeKind::File
+            && file_name_taken(nodes.values(), node.parent_id.as_deref(), &node.name)
+        {
+            return Err(OpenCompanyError::Conflict(duplicate_file_refusal(
+                &node.name,
+            )));
+        }
+        tx.execute(
             "INSERT INTO workspace_nodes (company_id, id, node_json, content, updated_ms) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -3038,6 +3062,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ],
         )
         .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         Ok(())
     }
 
@@ -3115,10 +3140,16 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         node: &crate::ports::workspace::WorkspaceNode,
         bytes: &[u8],
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
-        use crate::ports::workspace::NodeKind;
+        use crate::ports::workspace::{NodeKind, duplicate_file_refusal, file_name_taken};
         let node = crate::ports::workspace::stamped_binary(node, bytes)?;
-        let conn = self.conn();
-        let nodes = self.workspace_nodes(&conn, company)?;
+        let mut conn = self.conn();
+        // Issue #894, the same reservation-before-read as `create`. A binary
+        // node is a file, so it contends for a name exactly like a note does —
+        // MongoDB's `create_binary` stamps the same path key for this reason.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
         if nodes.contains_key(&node.id) {
             return Err(OpenCompanyError::Conflict(format!(
                 "workspace node {} already exists",
@@ -3140,7 +3171,14 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
                 }
             }
         }
-        conn.execute(
+        if node.kind == NodeKind::File
+            && file_name_taken(nodes.values(), node.parent_id.as_deref(), &node.name)
+        {
+            return Err(OpenCompanyError::Conflict(duplicate_file_refusal(
+                &node.name,
+            )));
+        }
+        tx.execute(
             "INSERT INTO workspace_nodes (company_id, id, node_json, content, updated_ms, blob) \
              VALUES (?1, ?2, ?3, '', ?4, ?5)",
             params![
@@ -3152,6 +3190,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ],
         )
         .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
         // The stamped node, so the digest a caller records can only have come
         // from the store (issue #668).
         Ok(node)
@@ -3762,6 +3801,103 @@ mod test {
     #[tokio::test]
     async fn conformance_workspace_folder_claims() {
         conformance::assert_workspace_folder_claims(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_sibling_names() {
+        conformance::assert_workspace_sibling_names(store()).await;
+    }
+
+    /// **The race issue #894 is actually about**, and the reason the guard is an
+    /// `IMMEDIATE` transaction rather than a check in `create`'s caller.
+    ///
+    /// One `SqliteStore` cannot reproduce it: `conn()` holds a `StdMutex` across
+    /// the read and the `INSERT`, so two tasks on one store serialize and the
+    /// old code passes. The reachable shape is **two stores over one file** —
+    /// the case `apply_pragmas`' `busy_timeout` note and
+    /// `adopt_or_create_folder`'s header both name. Before the fix both callers
+    /// read "free" and both inserted; after it the loser waits on the winner's
+    /// commit, then sees the name taken.
+    ///
+    /// A barrier makes the overlap deterministic rather than hoping the
+    /// scheduler interleaves: neither task may enter `create` until both have
+    /// arrived.
+    #[tokio::test]
+    async fn two_stores_racing_one_name_have_one_winner() {
+        use crate::ports::workspace::{NodeKind, WorkspaceOrigin, WorkspaceStore};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("opencompany.db");
+        let one: Arc<dyn WorkspaceStore> =
+            Arc::new(SqliteStore::open(&path).expect("first store over the file"));
+        let two: Arc<dyn WorkspaceStore> =
+            Arc::new(SqliteStore::open(&path).expect("second store over the SAME file"));
+
+        let company = CompanyId::new("alpha");
+        let origin = WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        };
+        let node = |id: &str| crate::ports::workspace::WorkspaceNode {
+            id: id.to_string(),
+            name: "report.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            created_by: origin.clone(),
+            updated_by: origin.clone(),
+            updated_at_millis: crate::ports::now_millis(),
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+
+        let gate = Arc::new(tokio::sync::Barrier::new(2));
+        let mut tasks = Vec::new();
+        for (store, id) in [(one.clone(), "racer-a"), (two.clone(), "racer-b")] {
+            let gate = gate.clone();
+            let node = node(id);
+            let company = company.clone();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("racer runtime");
+                rt.block_on(async move {
+                    gate.wait().await;
+                    store.create(&company, &node, Some("payload")).await
+                })
+            }));
+        }
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            outcomes.push(task.await.expect("racer did not panic"));
+        }
+
+        let winners = outcomes.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            winners, 1,
+            "exactly one create may take the name, got {outcomes:?}"
+        );
+        let loser = outcomes
+            .iter()
+            .find_map(|r| r.as_ref().err())
+            .expect("the other create must fail");
+        assert!(
+            matches!(loser, OpenCompanyError::Conflict(_)),
+            "the loser is refused, not broken: {loser:?}"
+        );
+
+        // The durable state is the real assertion: a passing error code with two
+        // rows in the table would still be the bug.
+        let tree = one
+            .tree(&CompanyId::new("alpha"))
+            .await
+            .expect("tree reads");
+        let named: Vec<_> = tree.iter().filter(|n| n.name == "report.md").collect();
+        assert_eq!(
+            named.len(),
+            1,
+            "one name, one node — a second row is the poisoned path #894 describes: {named:?}"
+        );
     }
 
     /// Issue #887's no-torn-read contract. This backend passed it before the
