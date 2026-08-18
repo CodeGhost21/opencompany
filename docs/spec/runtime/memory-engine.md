@@ -9,15 +9,184 @@ ceiling.
 ## Memory engine overlay (`OPENCOMPANY_MEMORY`)
 
 Memory is a separable concern. `OPENCOMPANY_STORAGE` picks the durable base for
-all fourteen ports; `OPENCOMPANY_MEMORY` optionally swaps **just** the two
-knowledge ports — `MemoryStore` + `ContextStore` — onto a dedicated memory
-engine layered on top of that base. The base still owns every other port
+all fourteen ports; `OPENCOMPANY_MEMORY` optionally swaps the three
+knowledge ports — `MemoryStore`, `ContextStore` and `FactStore` — onto a
+dedicated memory engine layered on top of that base. The base still owns every other port
 (companies, events, secrets, tasks, …).
 
 | Value | Engine | Feature flag | Notes |
 |---|---|---|---|
 | `store` (default) | The base backend's own memory | — | fs substring recall, or sqlite/mongodb |
-| `tinycortex` | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; vector-first recall with lexical/recency fallback when no embeddings backend resolves |
+| `embedded` (or `tinycortex`) | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; vector-first recall with lexical/recency fallback when no embeddings backend resolves |
+| `remote` | A hosted memory service | `tinymemory` | Bound through the `MemoryProvider` contract; needs a URL and a credential |
+| `null` | Nothing | `tinymemory` | Writes accepted and discarded, reads empty |
+
+`embedded` and `tinycortex` are the **same value**. Issue #914 introduced the
+first spelling; the second keeps parsing indefinitely, because renaming it would
+break every deployment that already sets it — including hosted tenants whose
+environment the control plane injects — for a cosmetic gain. The same applies to
+`cortex`, and to `mongo` on `OPENCOMPANY_STORAGE`. Only one name is reported
+back out (`/spec` says `embedded`), so a client never has to know both.
+
+## Choosing a hosted engine (`remote`)
+
+| Env var | Required | Notes |
+|---|---|---|
+| `OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE` | yes | The operator accepting that the hosted adapters are not conformance-proven. See below. |
+| `OPENCOMPANY_MEMORY_DRIVER` | yes | `supermemory`, `mem0`, or `cognee`. No default — see below. |
+| `OPENCOMPANY_MEMORY_URL` | yes | The engine's endpoint. |
+| `OPENCOMPANY_MEMORY_API_KEY` | yes | The outbound credential. |
+
+### `remote` refuses until you accept an unproven adapter
+
+`remote` routes a company's **entire memory** at a third-party HTTP service.
+The adapters that speak to those services are covered upstream by a handful of
+happy-path tests — no error mapping, no pagination, no taint preservation, no
+`Unsupported` behaviour. tinymemory#18 §E1 names a driver conformance suite as
+the gate for turning this on at all, and until that suite runs against those
+adapters, "it compiled" is the strongest available claim about them.
+
+So the mode exists, refuses by default, and lifts on
+`OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE=1`. Same shape as
+`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`, and for the same reason: a memory engine
+that loses provenance or silently drops a page fails in ways nothing surfaces
+until the memory is needed, which is far too late to notice.
+
+This is a gate on *confidence*, not on configuration, so it is meant to be
+deleted rather than lived with. When the conformance suite covers the hosted
+adapters, the flag and its refusal go — and `remote` becomes an ordinary choice
+needing only a driver, a URL, and a credential.
+
+**Every one of these refuses at boot when missing, naming the knob.** There is
+deliberately no fall back to the embedded engine. A company that believes it is
+writing to its hosted memory and is not is worse off than one that fails to
+start: the second failure is visible immediately, and the first is invisible
+until the memory is needed and turns out not to be there.
+
+There is no default driver id for the same reason. Guessing which hosted service
+an operator meant would write a company's memory somewhere it cannot be read
+back from, and that is not a recoverable mistake.
+
+### The credential is a secret; the endpoint is topology
+
+Neither appears in logs, `/healthz`, `/spec`, status output, or an export.
+`StorageSettings` and the driver config both carry hand-written `Debug` impls
+rendering `<set>` rather than the value, because both types are reachable from
+boot logging where a bare `{:?}` is one keystroke away.
+
+`driver_id()` **is** safe to surface, and `/spec` reports it alongside the
+capability families the driver negotiated at bind time — a hosted engine
+typically has no summary tree, no graph and no taint tier, and an operator
+should be able to read that rather than discover it from a failed cycle.
+
+### Class is decided by the host, never by the driver
+
+`OPENCOMPANY_MEMORY=remote` pins the driver class to `External` and cross-checks
+it against the registry's reserved table, so naming the embedded engine under
+the remote mode is refused rather than quietly resolved. The contract crate
+excludes driver class on purpose: a driver that self-reported it could claim to
+be embedded and skip the egress and trust checks that class gates.
+
+### A driver that over-claims its capabilities is refused at bind
+
+`capabilities()` is a claim the driver writes by hand; `provides()` is derived
+from the accessors it actually returns. The host compares the two once, at bind
+(`audit_capabilities` in `src/store/memory/driver.rs`), because it registers RPC
+methods and assembles agent tools from the *claim* and never re-checks. A driver
+advertising a family it does not implement would otherwise produce a surface
+that exists, is offered to an agent, and fails on its first call — inside a
+tenant, at the moment the memory is needed.
+
+The two directions of mismatch are not the same failure and are not treated
+alike:
+
+- **Advertised but absent** refuses the bind, naming the families. There is no
+  opt-in flag: this is an adapter bug, not a deployment choice, so no
+  environment variable lifts it.
+- **Present but unadvertised** logs a warning and boots. The family works but
+  nothing routes to it, because routing follows the claim. That is dead surface
+  from a forgotten `capabilities()` entry — refusing a boot over it would turn
+  an upstream oversight into a tenant outage.
+
+Structurally neither should fire: every adapter reachable from here is composed
+through `MemoryTraitProvider`, which derives its advertisement from its
+accessors. The check runs anyway because that guarantee lives upstream, in a
+submodule this repository pins by gitlink, and a gitlink bump is exactly when it
+would quietly stop holding.
+
+## Which contract this binds
+
+`tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/api` — the same path
+`vendor/openhuman` itself path-depends on, which is what keeps the
+`MemoryProvider` trait identity single across the process.
+
+**Not `tinycortex-api`.** They are distinct crates on incompatible contract
+majors (`(1, 0)` against `(2, 0)`, and `is_compatible` is major-equality only),
+and OpenHuman's own inlined contract documents `tinycortex-api` as a deprecated
+re-export. The `tinycortex` crate remains pinned as the *engine* behind the
+embedded mode; only the contract moved.
+
+## Why `embedded` does not go through the provider seam
+
+`remote` and `null` bind a provider. `embedded` keeps the `EngineCortex` overlay
+it has always had, and that is a durability decision rather than an unfinished
+edge.
+
+The obvious construction — `tinymemory_tinycortex::provider(…)` over a
+`tinycortex::memory::Memory` backend — cannot currently be durable. The only
+concrete `Memory` implementation in the vendored engine is `InMemoryMemoryStore`,
+a `BTreeMap` behind an `RwLock`. Binding it would swap the per-company SQLite
+workspaces under `<data_dir>/memory/` for a store that is empty after every
+restart, and would do so *silently*: every read would succeed, returning
+nothing. This page already documents a hard boot refusal for exactly that class
+of failure (see the `/data`-is-scratch caveat below), so introducing it through
+a contract migration would be a strange thing to do.
+
+Moving the embedded engine onto the seam needs a durable `Memory` implementation
+over the engine's KV tier first.
+
+## Tenant isolation across the seam
+
+The three memory ports take `&CompanyId` as an explicit first argument — a
+compiler-enforced isolation invariant. `MemoryProvider` has only
+`namespace: &str`, and a missing prefix would be a silent cross-tenant leak with
+no type-level guard. With a hosted engine it is worse: the namespace string is
+the only thing separating tenants inside somebody else's database.
+
+`store::memory::BoundMemory` is therefore the only public way to get a memory
+port out of a provider. Its `Namespace` type has no public constructor and is
+derived from the company id through an injective sanitize-plus-hash — sanitizing
+alone would collapse `acme:1`, `acme/1` and `acme_1` onto one namespace.
+
+The namespace is derived **per call**, from the `&CompanyId` the port method was
+given, not fixed when the facade is built. One overlay is opened per process and
+shared by every company on the host, so a namespace fixed at construction would
+be one tenant's namespace serving all of them. Deriving per call also makes the
+namespace a pure function of the argument the port contract already requires, so
+it cannot be stale or mismatched with the caller's intent.
+
+Every read is additionally re-checked against the namespace it asked for, and
+entries reported outside it are dropped with a warning. That filter should never
+fire; if it does, the alternative was serving one tenant another's memory.
+
+## What the host owns, because the contract does not
+
+The contract deliberately carries no policy, which leaves these host-side:
+
+- **Archive on evict.** `evict` *moves* traces to an archive namespace rather
+  than forgetting them, because the contract has no archive tier and
+  `docs/spec/company-brain/memory.md` makes archiving normative. The archive
+  write is ordered **before** the live delete: there is no transaction spanning
+  two provider calls, so a crash in between leaves a duplicate the next read
+  reconciles rather than a hole.
+- **The scratch firewall.** Provisional working-out lives in its own namespace,
+  a sibling of every durable scope, so durable recall cannot reach it even if a
+  driver ignores the namespace filter.
+- **Taint.** Inbound-channel writes are stamped `ExternalSync`. Note the
+  contract's `MemoryCore::store` *requires* taint on every call and has no
+  dropping default — the defaulted `store_with_taint` is on the engine-side
+  `Memory` trait, which is why nothing here wraps a bare `Memory`.
+- **Per-agent and per-desk scoping**, which neither cognition port has.
 
 This is why TinyCortex is not a `StorageKind`: it implements only memory +
 context, so it cannot be a full backend — it overlays. `serve` and platform

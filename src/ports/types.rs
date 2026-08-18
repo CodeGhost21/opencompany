@@ -276,6 +276,62 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deliverable: Option<crate::ports::tasks::TaskDeliverable>,
     },
+    /// A turn was **accepted** for an operator message (issue #983) — the
+    /// transcript line that says the company took the work on.
+    ///
+    /// # Why this is not the run row
+    ///
+    /// Stage 1 mints a [`RunRecord`](crate::ports::runs::RunRecord) for the same
+    /// turn, and the two answer different questions. The row answers *status* —
+    /// pending, running, failed, what it cost — and is read by a poll. This is
+    /// the *transcript*: the log is the one place a reader reconstructs what
+    /// happened in a conversation from, and "a turn was accepted for this
+    /// message" cannot be inferred from the log without it. An
+    /// [`OperatorMessage`](Self::OperatorMessage) with no reply after it is
+    /// indistinguishable from a chatter message that legitimately produced none,
+    /// so the absence of an answer is not evidence of a lost turn — until this
+    /// event makes the acceptance explicit.
+    ///
+    /// **Structural only.** No message text: the text is already on the
+    /// `OperatorMessage` this brackets, and putting it here would be a second
+    /// copy to redact.
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    TurnStarted {
+        /// The turn's id — the same id its
+        /// [`RunRecord`](crate::ports::runs::RunRecord) is keyed on, so a
+        /// transcript line and a status row join without a second scheme.
+        turn_id: String,
+        /// The desk / chat thread the message was addressed to.
+        chat_id: String,
+        /// The message being replied to, when the turn answers a thread reply —
+        /// the same sequence position
+        /// [`OperatorMessage::parent`](Self::OperatorMessage) carries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<EventSeq>,
+        /// Who asked, mirroring
+        /// [`OperatorMessage`](Self::OperatorMessage)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A turn that was accepted did not produce an answer (issue #983).
+    ///
+    /// The closing bracket of [`TurnStarted`](Self::TurnStarted), written by the
+    /// turn itself when its cycle errors and by the boot sweep
+    /// ([`crate::runtime::sweep_interrupted_turns`]) for a turn the host died
+    /// under. Without it a turn killed with the pod is permanent silence: the
+    /// question is in the transcript, no answer ever follows it, and nothing
+    /// says why.
+    TurnFailed {
+        /// The turn this settles — the id its
+        /// [`TurnStarted`](Self::TurnStarted) carries.
+        turn_id: String,
+        /// Why, in plain language. Tenant-scoped like
+        /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished), and
+        /// deliberately **not** projected onto the operator SSE stream.
+        error: String,
+    },
     /// An inbound webhook fired.
     WebhookReceived {
         /// The channel the webhook arrived on.
@@ -1314,6 +1370,8 @@ impl CompanyEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::OperatorMessage { .. } => "OperatorMessage",
+            Self::TurnStarted { .. } => "TurnStarted",
+            Self::TurnFailed { .. } => "TurnFailed",
             Self::WebhookReceived { .. } => "WebhookReceived",
             Self::ScheduleFired { .. } => "ScheduleFired",
             Self::A2aTaskReceived { .. } => "A2aTaskReceived",
@@ -1410,9 +1468,29 @@ impl CompanyEvent {
             // history is not kept here at all: for a published deliverable it
             // lives on the artifact chain (#552), and for an ordinary note it
             // is not kept anywhere, which pruning this does not change.
-            | Self::WorkspaceChanged { .. } => Prunable,
+            | Self::WorkspaceChanged { .. }
+            // Issue #983, and classified deliberately rather than swept in with
+            // its neighbours — the doc above asks for all three questions.
+            //
+            // Is it evidence? No: it says a turn was accepted, and what the turn
+            // did is on its `AgentReply`, its `TurnFailed`, or its run row — all
+            // of which outlive it. Does anything point at it? No: nothing is
+            // addressed by its sequence the way a reaction or a redaction
+            // tombstone addresses a chat message; the turn is joined by
+            // `turn_id`, which pruning does not disturb. Does anything read it
+            // back? The boot sweep does — and only for turns *this* host left
+            // open, which by construction predate no retention pass, since a
+            // pass runs on a live company and the sweep runs before one is.
+            //
+            // What it is instead is one frame per operator message on a
+            // high-traffic desk, whose meaning is entirely spent once the turn
+            // settles. `TurnFailed` is Permanent below for the opposite reason:
+            // it is the only record that a question was accepted and never
+            // answered.
+            | Self::TurnStarted { .. } => Prunable,
 
             Self::OperatorMessage { .. }
+            | Self::TurnFailed { .. }
             | Self::WebhookReceived { .. }
             | Self::ScheduleFired { .. }
             | Self::A2aTaskReceived { .. }

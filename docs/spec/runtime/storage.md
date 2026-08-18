@@ -95,6 +95,14 @@ Moved to [`workspace-layout.md`](workspace-layout.md) — this file was over the
 
 Moved to [`memory-engine.md`](memory-engine.md) — this file was over the repository's 500-line limit. See that page for the full detail.
 
+`OPENCOMPANY_MEMORY` selects `store` (default), `embedded` (formerly, and still,
+`tinycortex`), `remote`, or `null`. A hosted engine additionally needs
+`OPENCOMPANY_MEMORY_DRIVER`, `OPENCOMPANY_MEMORY_URL` and
+`OPENCOMPANY_MEMORY_API_KEY`; each refuses at boot when missing, naming the
+knob, and never falls back to the embedded engine. The credential and the
+endpoint never appear in logs, `/healthz`, `/spec`, status output, or an export
+— `/spec` reports the engine's `driver_id` and negotiated capabilities only.
+
 ## MongoDB backend (`src/store/mongodb.rs`)
 
 One `MongoStore` wraps a single database and implements all five ports.

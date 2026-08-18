@@ -1051,6 +1051,44 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["elapsedMs"] = json!(elapsed_ms);
             o
         }
+        // Issue #983: a turn was accepted, so a console watching the
+        // conversation can show it as under way instead of showing the
+        // operator's question with nothing after it. Three keys, all
+        // structural, and every one already reachable by the same operator
+        // through `GET {scope}/runs`.
+        //
+        // Deliberately **no message text and no actor**: the text is on the
+        // `OperatorMessage` this brackets — which stays dropped, see the
+        // module note above — and `by` is a user id, dropped here exactly as
+        // every other attributed arm drops it. The console reacts by reading
+        // the row it already knows how to read.
+        CompanyEvent::TurnStarted {
+            turn_id,
+            chat_id,
+            parent,
+            ..
+        } => {
+            let mut o = envelope("turn_started");
+            o["turnId"] = json!(turn_id);
+            o["chatId"] = json!(chat_id);
+            // Omitted rather than null for a turn answering the channel
+            // itself, so "is this in a thread?" is a presence check — the same
+            // discipline `agent_reply` above uses for the same field.
+            if let Some(parent) = parent {
+                o["parentId"] = json!(parent.value().to_string());
+            }
+            o
+        }
+        // The closing bracket. Structural for a sharper reason than its
+        // sibling: the event's `error` is a failure reason in our own words
+        // that can name internals, and this stream is the one place it must
+        // not be forwarded to. A console learns *that* the turn is over here
+        // and reads *why* from the run row, which is tenant-scoped.
+        CompanyEvent::TurnFailed { turn_id, .. } => {
+            let mut o = envelope("turn_settled");
+            o["turnId"] = json!(turn_id);
+            o
+        }
         // Not an attention signal, or carries a raw payload we never put on the
         // wire — dropped.
         _ => return None,
@@ -1172,12 +1210,20 @@ struct ChatResponse {
 /// Runs one operator-chat cycle, returning the report and, when a complaint
 /// intent captured feedback, the note that was captured (so the caller can emit
 /// the `feedback.created` webhook).
+///
+/// Takes the [`AcceptedTurn`] rather than a thread parent since issue #983: the
+/// message this cycle runs is already journaled, so the parent it carries is a
+/// fact about the event rather than something this function decides.
 async fn run_chat(
     runtime: Arc<CompanyRuntime>,
     message: ChatMessage,
     by: Option<Actor>,
-    parent: Option<EventSeq>,
+    accepted: &AcceptedTurn,
 ) -> Result<(CycleReport, Option<String>), ApiError> {
+    // Re-checked here rather than only at accept: this is also reachable
+    // directly, and a lifecycle can change between accepting a turn and running
+    // it. `accept_chat_turn` runs the same check *before* the append, so a
+    // refusal never leaves a message in the transcript that no turn answers.
     runtime.ensure_running().await?;
     // Whether this is a workflow copilot thread (issue #416): a conversation
     // ABOUT one graph, not a request to the company. Read once, because both
@@ -1318,32 +1364,222 @@ async fn run_chat(
             // here infers the choice from the text (decision D2a).
             deliverable: message.deliverable.unwrap_or_default(),
             workflow_proposal: None,
-            origin_run_id: None,
+            // Issue #983: the turn that opened it. A card raised from chat used
+            // to be the *only* visible sign that a long turn was under way, and
+            // it had nothing pointing back at the turn — so an operator looking
+            // at a card in Planning could not reach the attempt working it, and
+            // a turn that opened a card was indistinguishable from one that
+            // opened none. `origin_workflow_id` stays `None`: there is no graph
+            // behind a chat turn, and inventing one would be a lie the board
+            // then carries forever.
+            origin_run_id: accepted.turn_id.clone(),
             origin_workflow_id: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
         }
     }
+    // Issue #983: the message is already in the journal — `accept_chat_turn`
+    // appended it when the request was accepted, which is the whole point, so
+    // `chat/history` is right from that instant rather than from whenever this
+    // cycle wins the per-company serial lock. The cycle is handed the seq it
+    // landed under and skips the append; everything downstream, `input_seqs` and
+    // the response's `messageId` included, is keyed on that same seq.
     let report = runtime
-        .run_cycle(vec![CompanyEvent::OperatorMessage {
-            text: message.text,
-            by,
-            // Thread the addressed desk through so the orchestrator brain can
-            // route to that desk's lead member (issue #53).
-            chat: message.chat,
-            // …and the message being replied to, so the thread is a fact about
-            // the transcript rather than about one browser (issue #364).
-            parent,
-            // Issue #845: and the once-vs-workflow choice, so the turn that
-            // answers this message knows whether the builder pass owns the
-            // authoring. Without it the turn ran blind and denied a capability
-            // that was being exercised on the very same message — see the field
-            // docs on `CompanyEvent::OperatorMessage`.
-            deliverable: message.deliverable,
-        }])
+        .run_journaled_cycle(
+            vec![(accepted.message_seq, accepted.message_event.clone())],
+            accepted.turn_id.clone(),
+        )
         .await?;
     Ok((report, feedback_note))
+}
+
+/// What accepting a chat turn produced, before any of the turn's work runs
+/// (issue #983).
+///
+/// The three facts that have to exist the moment a request is accepted, rather
+/// than whenever the turn eventually gets the lock: the operator's message is in
+/// the transcript, a durable row says a turn is owed, and the journal carries a
+/// line saying the company took the work on.
+struct AcceptedTurn {
+    /// The seq the operator's message was appended under. The turn's own
+    /// `messageId`, and what the pre-journaled cycle is keyed on.
+    message_seq: EventSeq,
+    /// The event itself, so the cycle can hand the brain what was journaled
+    /// rather than a reconstruction of it.
+    message_event: CompanyEvent,
+    /// The turn's durable row, when one could be minted. `None` means the run
+    /// store refused — the turn still runs, untracked, because record-keeping
+    /// does not get to fail the work it records.
+    turn_id: Option<String>,
+}
+
+/// Journals an operator message and mints the turn owed for it (issue #983).
+///
+/// # Everything that can refuse, refuses first
+///
+/// `ensure_running` (a lifecycle an operator chose — paused, archived) and
+/// `ensure_accepting` (a runtime being replaced) are both checked **before** the
+/// append. Ordered the other way, a refused request would still leave the
+/// operator's question in the transcript with nothing that will ever answer it —
+/// which is worse than the pre-#983 behaviour, not better, because a message
+/// that is visibly there and permanently unanswered reads as lost work.
+///
+/// # The row is `Pending`, deliberately
+///
+/// `create_run` here, `begin_run` inside the cycle once it actually holds the
+/// serial lock. So `Pending` means "queued behind other turns" — the serial
+/// train five concurrent messages produce — and `Running` means "owns the lock".
+/// Starting the row here would collapse the two and hide exactly the wait an
+/// operator on a busy company is trying to understand.
+///
+/// The row is a [`RunRecord`](crate::ports::runs::RunRecord) rather than a store
+/// of its own, which is what makes this small: it inherits transition legality,
+/// the step trace, `list_stale_active`, the boot reaper — whose boot-only proof
+/// holds verbatim for a chat turn, since a turn is a process-local
+/// `tokio::spawn` serialising on the same per-company mutex — and the
+/// `GET {scope}/runs` / `GET {scope}/runs/{run_id}` routes that already exist.
+/// There is no new route here, and no new poll endpoint to design.
+///
+/// Best-effort on the row and on the transcript line, never on the append: the
+/// message is the thing the operator can lose, and the other two are how we
+/// describe it.
+async fn accept_chat_turn(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    message: &ChatMessage,
+    by: Option<&Actor>,
+    parent: Option<EventSeq>,
+    desk: &str,
+) -> Result<AcceptedTurn, ApiError> {
+    runtime.ensure_running().await?;
+    runtime.ensure_accepting().map_err(ApiError)?;
+
+    let message_event = CompanyEvent::OperatorMessage {
+        text: message.text.clone(),
+        by: by.cloned(),
+        // Thread the addressed desk through so the orchestrator brain can
+        // route to that desk's lead member (issue #53).
+        chat: message.chat.clone(),
+        // …and the message being replied to, so the thread is a fact about
+        // the transcript rather than about one browser (issue #364).
+        parent,
+        // Issue #845: and the once-vs-workflow choice, so the turn that
+        // answers this message knows whether the builder pass owns the
+        // authoring. Without it the turn ran blind and denied a capability
+        // that was being exercised on the very same message — see the field
+        // docs on `CompanyEvent::OperatorMessage`.
+        deliverable: message.deliverable,
+    };
+    let message_seq = runtime
+        .events()
+        .append(id, message_event.clone())
+        .await
+        .map_err(ApiError)?;
+
+    let turn_id = crate::ports::generate_id();
+    let turn_id = match runtime
+        .runs()
+        .create_run(
+            id,
+            crate::ports::runs::NewRun::for_chat(turn_id.clone(), desk, desk),
+        )
+        .await
+    {
+        Ok(run) => Some(run.id),
+        Err(err) => {
+            tracing::warn!(
+                company = %id,
+                turn = %turn_id,
+                error = %err,
+                "[runs] could not open a turn row; the turn runs untracked"
+            );
+            None
+        }
+    };
+
+    // The transcript line. Separate from the row on purpose: the row answers
+    // "what is the status", and this answers "was a turn accepted for this
+    // message at all" — which the log cannot otherwise say, because an
+    // `OperatorMessage` with no reply after it is indistinguishable from a
+    // chatter message that legitimately produced none.
+    if let Some(turn_id) = turn_id.clone()
+        && let Err(err) = runtime
+            .events()
+            .append(
+                id,
+                CompanyEvent::TurnStarted {
+                    turn_id,
+                    chat_id: desk.to_string(),
+                    parent,
+                    by: by.cloned(),
+                },
+            )
+            .await
+    {
+        tracing::warn!(
+            company = %id,
+            error = %err,
+            "could not journal a turn's acceptance; its row still records it"
+        );
+    }
+
+    Ok(AcceptedTurn {
+        message_seq,
+        message_event,
+        turn_id,
+    })
+}
+
+/// Settles a chat turn's durable row, and says so in the transcript when it
+/// failed (issue #983).
+///
+/// Runs inside the spawned turn, beside the reply journaling and for the same
+/// reason: a client that walked away must not take the record with it. A turn
+/// whose row is left active is not silently forgiven either — the boot reaper
+/// fails it on the next start, on exactly the proof it uses for a dispatch.
+async fn settle_chat_turn(
+    runtime: &Arc<CompanyRuntime>,
+    id: &CompanyId,
+    turn_id: Option<&str>,
+    failure: Option<&ApiError>,
+) {
+    let Some(turn_id) = turn_id else { return };
+    let outcome = match failure {
+        None => crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Succeeded),
+        Some(err) => crate::ports::runs::RunOutcome::new(crate::ports::runs::RunStatus::Failed)
+            .with_error(err.0.to_string()),
+    };
+    if let Err(err) = runtime.runs().finish_run(id, turn_id, outcome).await {
+        tracing::warn!(
+            company = %id,
+            turn = %turn_id,
+            error = %err,
+            "[runs] could not settle a turn row; the next boot reaps it"
+        );
+    }
+    // Only a failure gets a transcript line. A turn that answered has an
+    // `AgentReply` right there saying so, and a second "it finished" line would
+    // be one more thing to read for no information.
+    if let Some(failure) = failure
+        && let Err(err) = runtime
+            .events()
+            .append(
+                id,
+                CompanyEvent::TurnFailed {
+                    turn_id: turn_id.to_string(),
+                    error: failure.0.to_string(),
+                },
+            )
+            .await
+    {
+        tracing::warn!(
+            company = %id,
+            turn = %turn_id,
+            error = %err,
+            "could not journal a turn's failure; its row still records it"
+        );
+    }
 }
 
 /// Runs a chat cycle and emits any implied webhooks, rendering the responses.
@@ -1382,6 +1618,15 @@ async fn chat_and_emit(
     // (`CompanyRuntime::resolve_approval_spawned`, issue #380 defect 3) and the
     // workflow runner (`WorkflowSpawn::spawn_admitted`), which is why a 504'd
     // workflow run kept executing while a 504'd chat turn did not.
+    // Issue #983: the operator's message reaches the journal here, before the
+    // turn is spawned and therefore before it queues on the per-company serial
+    // lock. It used to be appended inside that lock, so five concurrent messages
+    // became a serial train in which the fifth operator's question was invisible
+    // — a reload showed an empty conversation — until the four ahead of it had
+    // finished. A durable row and a transcript line are minted alongside it, so
+    // a turn killed with the pod becomes a `Failed` row and a `TurnFailed` line
+    // rather than permanent silence.
+    let accepted = accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
     let (report, feedback_note) = join_chat_turn(spawn_chat_turn(ChatTurn {
         runtime,
         company: id.clone(),
@@ -1389,6 +1634,7 @@ async fn chat_and_emit(
         message,
         by,
         parent,
+        accepted,
     }))
     .await?;
     emit_cycle_webhooks(state, id, &report).await;
@@ -1417,6 +1663,9 @@ struct ChatTurn {
     message: ChatMessage,
     by: Option<Actor>,
     parent: Option<EventSeq>,
+    /// What accepting the turn already wrote (issue #983): the journaled
+    /// message, and the row this task owes a settle.
+    accepted: AcceptedTurn,
 }
 
 /// Runs a chat turn and journals its replies on a task of its own (issue #882).
@@ -1435,10 +1684,24 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
             message,
             by,
             parent,
+            accepted,
         } = turn;
-        let (mut report, feedback_note) =
-            run_chat(Arc::clone(&runtime), message, by, parent).await?;
+        let turn_id = accepted.turn_id.clone();
+        // Issue #983: the settle lives on this side of the spawn for the same
+        // reason the reply journaling does — a proxy that gave up must not leave
+        // a row claiming to be live. Both outcomes settle: an error here is a
+        // turn that was accepted and produced no answer, which is precisely the
+        // state that used to be indistinguishable from silence.
+        let outcome = run_chat(Arc::clone(&runtime), message, by, &accepted).await;
+        let (mut report, feedback_note) = match outcome {
+            Ok(both) => both,
+            Err(err) => {
+                settle_chat_turn(&runtime, &company, turn_id.as_deref(), Some(&err)).await;
+                return Err(err);
+            }
+        };
         journal_chat_replies(&runtime, &company, &desk, parent, &mut report).await;
+        settle_chat_turn(&runtime, &company, turn_id.as_deref(), None).await;
         Ok((report, feedback_note))
     })
 }
@@ -2738,19 +3001,25 @@ mod test {
             let id = CompanyId::new("acme");
             let runtime = state.registry().get(&id).unwrap();
 
-            run_chat(
-                runtime.clone(),
-                ChatMessage {
-                    text: ask.to_string(),
-                    chat: None,
-                    parent: None,
-                    deliverable: None,
-                },
-                by,
+            let message = ChatMessage {
+                text: ask.to_string(),
+                chat: None,
+                parent: None,
+                deliverable: None,
+            };
+            let accepted = accept_chat_turn(
+                &runtime,
+                &id,
+                &message,
+                by.as_ref(),
                 None,
+                crate::server::ops::language::DEFAULT_DESK,
             )
             .await
-            .expect("the chat cycle runs");
+            .expect("the turn is accepted");
+            run_chat(runtime.clone(), message, by, &accepted)
+                .await
+                .expect("the chat cycle runs");
 
             let tasks = runtime.tasks().list(&id).await.unwrap();
             assert_eq!(tasks.len(), 1, "{label}: one ask opens one card");
@@ -5115,6 +5384,18 @@ mod test {
             "the reply was journaled before the turn was released"
         );
 
+        // Issue #983: the turn was recorded the instant it was accepted, and
+        // the record is what a re-read resolves — so at this point the operator
+        // has walked away and the turn is still `Running` rather than absent.
+        let row = turn_rows(&runtime)
+            .await
+            .pop()
+            .expect("accepting the turn minted a row");
+        assert_eq!(
+            row.1, "running",
+            "a turn whose caller is gone must still read as under way"
+        );
+
         // The work must survive the caller giving up.
         release.notify_one();
         assert!(
@@ -5123,6 +5404,330 @@ mod test {
              message is journaled, the answer is not, and the turn can neither \
              be read back nor resumed (issue #882)"
         );
+
+        // Issue #983: and so must the settle. The row is written by the spawned
+        // task, not by the handler, so a dropped connection leaving it
+        // `Running` forever would be the #882 bug one layer down — the turn
+        // finishes, the answer lands, and the status surface still claims work
+        // is in flight until the next boot reaps it.
+        until("the settle died with the dropped connection", async || {
+            turn_rows(&runtime)
+                .await
+                .iter()
+                .all(|(_, status)| status == "succeeded")
+        })
+        .await;
+    }
+
+    // ── Issue #983: an accepted turn exists and can be read back ────────────
+
+    /// A brain that blocks every operator turn on a semaphore the test holds.
+    ///
+    /// Deliberately a `Semaphore` rather than a `Notify`: these tests run two
+    /// turns at once and release both, and `notify_one` wakes exactly one
+    /// waiter while `notify_waiters` wakes only those already parked. Permits
+    /// are held whether or not anybody is waiting yet, so the release cannot
+    /// race the turns into a hang.
+    struct BlockingChatBrain {
+        /// One permit added per turn that has entered the brain.
+        entered: Arc<tokio::sync::Semaphore>,
+        /// The test's permission for a turn to finish — one permit each.
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl BlockingChatBrain {
+        fn new() -> (
+            Arc<Self>,
+            Arc<tokio::sync::Semaphore>,
+            Arc<tokio::sync::Semaphore>,
+        ) {
+            let entered = Arc::new(tokio::sync::Semaphore::new(0));
+            let release = Arc::new(tokio::sync::Semaphore::new(0));
+            (
+                Arc::new(Self {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                }),
+                entered,
+                release,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for BlockingChatBrain {
+        async fn run_cycle(
+            &self,
+            req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            let mut channel_responses = Vec::new();
+            for event in &req.events {
+                if let CompanyEvent::OperatorMessage { text, .. } = event {
+                    self.entered.add_permits(1);
+                    self.release.acquire().await.expect("released").forget();
+                    channel_responses.push(crate::ports::types::OutboundMessage {
+                        message_id: None,
+                        task_id: None,
+                        channel: "operator".into(),
+                        agent: None,
+                        text: format!("answered: {text}"),
+                        steps: Vec::new(),
+                        reply_to: None,
+                    });
+                }
+            }
+            Ok(crate::ports::types::CycleResult {
+                channel_responses,
+                new_traces: vec![crate::ports::types::CompressedTrace::now(
+                    &req.cycle_id,
+                    "blocking chat",
+                )],
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// Polls `f` until it holds, or fails the test.
+    async fn until(label: &str, mut f: impl AsyncFnMut() -> bool) {
+        let ok = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !f().await {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .is_ok();
+        assert!(ok, "{label}");
+    }
+
+    /// The operator messages `chat/history` currently shows for the main desk.
+    async fn history_texts(app: &axum::Router) -> Vec<String> {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/chat/history")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        body.as_array()
+            .expect("the history route answers with an array")
+            .iter()
+            .filter_map(|m| m["text"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The company's turn rows, id → status.
+    async fn turn_rows(runtime: &Arc<CompanyRuntime>) -> Vec<(String, String)> {
+        let mut rows = runtime
+            .runs()
+            .list_runs(runtime.id(), &crate::ports::runs::RunFilter::default())
+            .await
+            .unwrap();
+        rows.sort_by_key(|r| r.created_at_millis);
+        rows.into_iter()
+            .map(|r| (r.id, r.status.to_string()))
+            .collect()
+    }
+
+    /// **Issue #983 — the direct regression for the observed empty history.**
+    ///
+    /// The operator's message used to be appended *inside* the per-company
+    /// serial lock, so a message sent while another turn held that lock did not
+    /// exist anywhere until the turn ahead of it finished. Reloading during a
+    /// long turn showed an empty conversation: the operator could not see their
+    /// own question, could not tell whether it had been received, and re-sent it.
+    ///
+    /// The blocking first turn is what makes this a real test. With a single
+    /// turn the lock is free and the cycle appends immediately, so the bug is
+    /// invisible — which is exactly why it survived. Two turns reproduce the
+    /// serial train the field report saw with five.
+    #[tokio::test]
+    async fn a_queued_message_is_in_the_transcript_before_its_turn_runs() {
+        let home_dir = home();
+        let (brain, entered, release) = BlockingChatBrain::new();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(brain),
+        )
+        .await;
+        let app = router(state);
+
+        // Turn one takes the lock and stops inside the brain.
+        let first = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(chat_request("the first question")).await }
+        });
+        entered.acquire().await.expect("turn one entered").forget();
+
+        // Turn two is accepted while turn one still owns the lock.
+        let second = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(chat_request("the second question")).await }
+        });
+
+        until(
+            "the queued message never reached the transcript",
+            async || {
+                history_texts(&app)
+                    .await
+                    .iter()
+                    .any(|t| t == "the second question")
+            },
+        )
+        .await;
+
+        // …and it is there while its turn is provably not finished: no answer
+        // has been journaled for either message.
+        let texts = history_texts(&app).await;
+        assert!(
+            texts.contains(&"the first question".to_string()),
+            "the running turn's own message is missing: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.starts_with("answered:")),
+            "a turn finished before the assertion could run: {texts:?}"
+        );
+
+        release.add_permits(2);
+        for turn in [first, second] {
+            let response = turn.await.unwrap().unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    /// One POST journals **exactly one** `OperatorMessage`, and the response's
+    /// `messageId` is that message's own sequence.
+    ///
+    /// The pin for the pre-journaled cycle path. The route now appends the
+    /// message itself and hands the cycle the seq; a cycle that appended again
+    /// would double every operator message in every transcript, and one that
+    /// reported a seq of its own would hand the console an id that resolves to
+    /// the wrong line — both silent, both only visible here.
+    #[tokio::test]
+    async fn one_post_journals_one_message_and_reports_its_seq() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path(), "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let response = app
+            .clone()
+            .oneshot(chat_request("just the one"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        let journaled: Vec<(EventSeq, String)> = runtime
+            .events()
+            .read_from(runtime.id(), EventSeq::new(0), 10_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::OperatorMessage { text, .. } => Some((s.seq, text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            journaled.len(),
+            1,
+            "one POST must journal one message, got {journaled:?}"
+        );
+        assert_eq!(journaled[0].1, "just the one");
+        assert_eq!(
+            body["messageId"].as_str(),
+            Some(journaled[0].0.value().to_string().as_str()),
+            "messageId must resolve to the message's own line"
+        );
+    }
+
+    /// **Issue #983 — the direct regression for the serial train.**
+    ///
+    /// The per-company cycle lock is held for a whole turn with unbounded
+    /// waiters, so five concurrent messages became a queue and the fifth
+    /// inherited the whole queue's latency. Nothing recorded that, so an
+    /// operator watching a slow company could not tell "my turn is queued" from
+    /// "my turn is wedged" from "nothing was received".
+    ///
+    /// The two statuses are what makes the wait legible, which is why the row
+    /// is created at accept and started only once the cycle holds the lock.
+    /// Collapsing them — starting the row where it is created — would make both
+    /// turns read `Running`, and this assertion is what stops that.
+    #[tokio::test]
+    async fn a_queued_turn_is_pending_while_the_running_one_holds_the_lock() {
+        let home_dir = home();
+        let (brain, entered, release) = BlockingChatBrain::new();
+        let state = build_state_with_brain(
+            home_dir.path(),
+            "running",
+            AppConfig::default(),
+            Some(brain),
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+        let app = router(state);
+
+        let first = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(chat_request("first")).await }
+        });
+        entered.acquire().await.expect("turn one entered").forget();
+        let second = tokio::spawn({
+            let app = app.clone();
+            async move { app.oneshot(chat_request("second")).await }
+        });
+
+        // Compared as a sorted pair rather than in row order: two POSTs a
+        // millisecond apart can tie on `created_at_millis`, and what is being
+        // asserted is that the two turns hold *different* statuses at once, not
+        // which row the store lists first.
+        until(
+            "the second turn never queued behind the first",
+            async || {
+                let mut statuses: Vec<String> = turn_rows(&runtime)
+                    .await
+                    .into_iter()
+                    .map(|(_, status)| status)
+                    .collect();
+                statuses.sort();
+                statuses == ["pending", "running"]
+            },
+        )
+        .await;
+
+        release.add_permits(2);
+        for turn in [first, second] {
+            assert_eq!(turn.await.unwrap().unwrap().status(), StatusCode::OK);
+        }
+
+        until("both turns must reach a terminal status", async || {
+            turn_rows(&runtime)
+                .await
+                .iter()
+                .all(|(_, status)| status == "succeeded")
+        })
+        .await;
+        assert_eq!(turn_rows(&runtime).await.len(), 2, "one row per POST");
     }
 
     /// The same proof over a **real socket**, so the keystone rests on hyper's
@@ -5581,6 +6186,94 @@ mod test {
         }))
         .expect("agent_reply is an attention signal");
         assert_eq!(v["parentId"], "4");
+    }
+
+    /// Issue #983: the accept frame carries the turn, the desk and the thread —
+    /// and **nothing else**.
+    ///
+    /// The negative half is what this test is for. `TurnStarted` is the first
+    /// frame on this stream that brackets an operator's own message, so it is
+    /// the obvious place for somebody to "helpfully" add the text or the asker
+    /// — which is exactly the payload the deny-by-default projection exists to
+    /// keep off the wire, and which `OperatorMessage` is dropped to avoid.
+    #[test]
+    fn projects_turn_started_with_structural_keys_only() {
+        use crate::ports::types::{Actor, ActorKind};
+        let v = super::project_event(&stored(CompanyEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+            chat_id: "General".into(),
+            parent: Some(EventSeq::new(4)),
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "u-1".into(),
+            }),
+        }))
+        .expect("an accepted turn is an attention signal");
+        assert_eq!(v["type"], "turn_started");
+        assert_eq!(v["turnId"], "turn-1");
+        assert_eq!(v["chatId"], "General");
+        assert_eq!(v["parentId"], "4");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["type", "seq", "atMillis", "turnId", "chatId", "parentId"],
+            "the accept frame grew a key: {v}"
+        );
+
+        // A turn answering the channel itself omits the thread rather than
+        // sending null, so the console's check is a presence check.
+        let v = super::project_event(&stored(CompanyEvent::TurnStarted {
+            turn_id: "turn-2".into(),
+            chat_id: "General".into(),
+            parent: None,
+            by: None,
+        }))
+        .expect("an accepted turn is an attention signal");
+        assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
+    }
+
+    /// The settle frame says a turn is over and **not why**.
+    ///
+    /// `TurnFailed::error` is a reason in our own words that can name
+    /// internals; the console learns the reason from the tenant-scoped run row.
+    #[test]
+    fn projects_turn_settled_without_the_failure_reason() {
+        let v = super::project_event(&stored(CompanyEvent::TurnFailed {
+            turn_id: "turn-1".into(),
+            error: "connection to db-primary.internal refused".into(),
+        }))
+        .expect("a settled turn is an attention signal");
+        assert_eq!(v["type"], "turn_settled");
+        assert_eq!(v["turnId"], "turn-1");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["type", "seq", "atMillis", "turnId"],
+            "the settle frame grew a key: {v}"
+        );
+    }
+
+    /// The operator's own message is **still** dropped (issue #983).
+    ///
+    /// Pinned because #983 added the two arms above right beside it, and the
+    /// natural next step — "the console needs the message too, project it" —
+    /// would put operator-authored free text onto this stream for the first
+    /// time. It does not need it: the message is already in the POST's own
+    /// response and in `chat/history`, which is the point of journaling it at
+    /// accept time. If somebody later decides otherwise, they say so here.
+    #[test]
+    fn projects_nothing_for_the_operators_own_message() {
+        assert!(
+            super::project_event(&stored(CompanyEvent::OperatorMessage {
+                text: "the operator's own words".into(),
+                by: None,
+                chat: Some("General".into()),
+                parent: None,
+                deliverable: None,
+            }))
+            .is_none(),
+            "the operator's own message must not reach the console over SSE"
+        );
     }
 
     /// A reaction is deliberately NOT on the attention stream (issue #364).

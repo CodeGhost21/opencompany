@@ -196,6 +196,55 @@ for now; it is a real constraint on where a gate belongs in a graph.
 A gate nobody decides ages out on the ordinary TTL to a default deny. Since the
 paused run settled long ago, that costs nothing and cancels nothing.
 
+### One run is continued once (issue #978)
+
+The continuation unit is the **run**, not the node. A graph whose trigger fans
+out to three gated nodes parks three cards, and before this each approval
+independently re-dispatched the whole run: the spawn hung off `perform_effect`,
+which fires once per approved effect, and each replay carried an `approvals`
+array naming only its own node, so the other two paused and parked again.
+Approving N gave N runs and N(N-1) new cards — 3 → 6 → 12 → 24. A staging tenant
+accumulated 77 runs of one *disabled* workflow, 17 of which executed exactly one
+node.
+
+Three rules close it, and all three are needed — the first two on their own make
+the console read correctly while the run table keeps growing.
+
+1. **Every gate of one run shares a turn key**, `workflow-run:<run id>`, written
+   by the park. Before, a workflow park recorded no key at all, so
+   `approval_cycle` answered `Some(None)` and every branch believed it was the
+   only decision outstanding: `stillAwaiting` read `0` on all three of three.
+   It now counts down 2, 1, 0.
+2. **The run is re-dispatched once**, when the last of its decisions lands,
+   through the same `ContinuationQueue` an agent turn uses. A workflow run has no
+   brain turn to continue, so the release re-runs the graph instead of running a
+   cycle.
+3. **The replay carries every approval the batch cleared**, so a sibling gate
+   does not pause it and park itself again.
+
+**Denials are final.** A refused node rides a third lineage ledger beside the
+delivery (#438) and outward-call (#846) ones, under the reserved trigger-input
+key `__opencompany_denied`. A listed node is not asked about again: the branch
+below it simply never completes. Without it a mixed verdict would still net new
+cards, and the invariant this issue exists for — **approving never increases the
+number of pending approvals** — would be false. A TTL expiry is banked as a
+default-deny on exactly these terms. A batch whose every gate was refused starts
+no run at all; a mixed one runs, carrying the approvals it did get.
+
+`stillAwaiting` stays **advisory**: it is a snapshot read on the request path
+while the release runs detached. It is confirmation copy, not a control — the
+continuation itself is decided under the queue's own lock, where no such race
+exists.
+
+**Two limits, stated rather than discovered.** A restart mid-round comes back
+knowing only the gates still parked, so a batch released after it carries the
+last decision and not the ones banked before it, and those un-carried siblings
+re-park. That is inherited from #469 rather than added here — a workflow run is
+simply the first thing to feel it. And a batch gets **one** spawn attempt: where
+each approval used to have its own, a refusal at the concurrency ceiling (#401)
+now loses the run with every card consumed, so it is announced on the operator
+channel rather than only logged.
+
 ## Where the request is raised (issue #379)
 
 An approval is not only a queue entry; it is an interruption of a conversation.

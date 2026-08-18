@@ -909,6 +909,33 @@ jobs:
       - name: Test the Composio account choice on the console plane
         run: scripts/ci/run-scoped-suite.sh "composio choice ops" openhuman,tinycortex,composio server::ops::composio::tests::gated_tests
 
+      # Issue #914. The `tinymemory` feature binds the engine-neutral
+      # `MemoryProvider` contract and adds the `remote`/`null` selection modes.
+      #
+      # Both steps pass `tinymemory` ALONE, deliberately. The feature does not
+      # imply `tinycortex` and must not be made to: `remote`/`null` bind a
+      # provider through this contract while `embedded` uses the `tinycortex`
+      # overlay, and keeping them apart is what lets a hosted-memory tenant build
+      # without linking a bundled SQLite it will never call (tinymemory#18 §D).
+      # Adding `tinycortex` here to "make the build match the lane" would hide a
+      # regression in exactly that separation, because the contract path would
+      # never again be compiled on its own.
+      #
+      # The lane is a placement choice, not a requirement — every Rust job runs
+      # `init-vendored-submodules.sh`, so the `vendor/openhuman/vendor/tinymemory`
+      # path deps resolve in all of them.
+      #
+      # Two steps because `run-scoped-suite.sh` takes exactly one filter each, and
+      # both halves need to run: `store::memory` covers the decorator's
+      # tenant-isolation and archive-on-evict properties, and `store::select`
+      # covers the boot refusals that keep a misconfigured hosted engine from
+      # starting.
+      - name: Test the TinyMemory provider contract
+        run: scripts/ci/run-scoped-suite.sh "tinymemory contract" tinymemory store::memory
+
+      - name: Test the memory engine selection surface
+        run: scripts/ci/run-scoped-suite.sh "tinymemory selection" tinymemory store::select
+
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
       # `tinyplace`-gated line and deliberately runs none of them, and no other

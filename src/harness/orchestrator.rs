@@ -1573,6 +1573,14 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn summarize_event(event: &CompanyEvent) -> String {
     match event {
         CompanyEvent::OperatorMessage { .. } => "operator message".to_string(),
+        // Issue #983. Structural only, like every arm here: the turn id, which
+        // is a minted identifier, and nothing else. Neither the desk nor the
+        // failure reason is named — the desk is operator-authored free text on
+        // an overlay-created chat, and the reason is our own prose about the
+        // host, which is exactly what a non-sensitive one-liner should not
+        // carry.
+        CompanyEvent::TurnStarted { turn_id, .. } => format!("turn accepted: {turn_id}"),
+        CompanyEvent::TurnFailed { turn_id, .. } => format!("turn unanswered: {turn_id}"),
         CompanyEvent::AgentReply { agent_id, .. } => format!("reply from {agent_id}"),
         CompanyEvent::TaskDispatched { task_id, .. } => format!("task dispatched: {task_id}"),
         // Issue #464. Structural only, like every arm here: the id, the change

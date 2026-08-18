@@ -222,6 +222,25 @@ It is a **global** default, deliberately: it reaches every shipped template
 without editing each one. A teammate cannot raise or lower it from its manifest
 today.
 
+**Reaching it is a pause, not a failure.** The runtime stops the tool loop, asks
+the model once more (with tools withheld) for a resumable "Done so far / Next
+steps" checkpoint, and returns that as an ordinary successful reply. There is no
+error to catch and no error to match on, which is precisely why a capped turn
+used to be invisible — the operator read a tidy plan with no deliverable behind
+it and no way to tell the agent had been cut off mid-task. So the harness reads
+the runtime's cap flag while the turn's agent lock is still held and carries it
+out on the turn's outcome, OR'd across every turn behind one operator bubble (the
+responder, any desk lead it handed work to, and the relay turn that folds their
+answers back together). When any of them paused, the operator gets a **second,
+unauthored bubble** after the reply saying the turn stopped at its step limit,
+that nothing errored, and that replying "continue" asks the agent to pick up
+from there. It is a separate bubble rather than an addition to the reply because
+the reply — and only the reply — is written back to the context store as memory;
+appending would file the platform's notice as something the agent said and
+recall it into later turns. See `src/harness/mod.rs`
+(`TurnOutcome::hit_iteration_cap`), `src/runtime/delegation.rs` for the fold, and
+`src/harness/brain.rs` for the notice.
+
 ### In-turn spend — $5.00, or the teammate's daily cap, whichever is lower
 
 The company's other two spend controls — the plan-level token ceiling and a
@@ -243,9 +262,14 @@ to bound a pathological loop, and to put a number on a worst case that previousl
 had none.
 
 A budget halt is **not** an iteration-cap pause, and the runtime reports them
-separately. A cap pause means the teammate ran out of rounds with work still to
-do and can be resumed; a budget halt means it ran out of money. Anything that
-renders one to an operator must not label it with the other.
+separately: `TurnOutcome::hit_iteration_cap` is read from
+[`Agent::last_turn_hit_cap`](oh::agent::Agent::last_turn_hit_cap), which stays
+`false` for a hook-driven stop — the run paused below the 25-round ceiling, so
+the cap predicate never held. A cap pause means the teammate ran out of rounds
+with work still to do and can be resumed via the "continue" bubble above; a
+budget halt means it ran out of money, returns whatever reply the model produced
+before the hook fired, and gets no such bubble today. Anything that renders one
+to an operator must not label it with the other.
 
 ## `classes`
 

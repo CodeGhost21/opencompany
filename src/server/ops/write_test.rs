@@ -6399,14 +6399,7 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
     for (id, task) in [("run-a", "t-1"), ("run-b", "t-1"), ("run-c", "t-other")] {
         runtime
             .runs()
-            .create_run(
-                &company,
-                NewRun {
-                    id: id.to_string(),
-                    task_id: task.to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
+            .create_run(&company, NewRun::for_task(id, task, "ceo"))
             .await
             .unwrap();
     }
