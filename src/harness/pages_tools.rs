@@ -742,7 +742,6 @@ impl Tool for PagesWriteTool {
                     current = existing_source.updated_at_millis,
                 )));
             }
-            let _ = source; // used below; kept in scope for the guard's borrow
         }
 
         // Compile BEFORE anything is written — a rejected import or a parse
