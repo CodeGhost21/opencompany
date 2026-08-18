@@ -3733,6 +3733,88 @@ mod test {
         .expect("adding an existing column is a no-op, not an error");
     }
 
+    /// Issue #983: a database created while `runs.task_id` was `NOT NULL` must
+    /// end up able to hold a card-less run.
+    ///
+    /// `MIGRATIONS` is all `CREATE TABLE IF NOT EXISTS`, so the relaxed DDL is a
+    /// no-op against an existing deployment — and SQLite cannot drop a column
+    /// constraint in place. Without the rebuild the *first chat turn* on any
+    /// upgraded self-hosted install fails its insert, which is a failure mode
+    /// that appears only in production and never in a test that starts fresh.
+    #[tokio::test]
+    async fn a_legacy_runs_table_learns_to_hold_a_card_less_run() {
+        use crate::ports::runs::{NewRun, RunStore};
+
+        // The table exactly as it shipped before #983, with an attempt in it.
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE runs (
+                 company_id TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 task_id    TEXT NOT NULL,
+                 status     TEXT NOT NULL,
+                 attempt    INTEGER NOT NULL,
+                 created_ms INTEGER NOT NULL,
+                 run_json   TEXT NOT NULL,
+                 PRIMARY KEY (company_id, id)
+             );
+             INSERT INTO runs (company_id, id, task_id, status, attempt, created_ms, run_json)
+             VALUES ('acme', 'old-run', 'card-7', 'succeeded', 1, 1700000000000,
+                     '{\"id\":\"old-run\",\"company\":\"acme\",\"taskId\":\"card-7\",\
+                       \"agentId\":\"ceo\",\"attempt\":1,\"status\":\"succeeded\",\
+                       \"createdAtMillis\":1700000000000}');",
+        )
+        .expect("seed a pre-#983 database");
+
+        let store = SqliteStore::from_conn(conn).expect("migrations run on a legacy database");
+        let id = CompanyId::new("acme");
+
+        // The rebuild copied the history rather than dropping it.
+        let old = store
+            .get_run(&id, "old-run")
+            .await
+            .expect("read after the rebuild")
+            .expect("the legacy attempt survived");
+        assert_eq!(old.task_id.as_deref(), Some("card-7"));
+        assert_eq!(old.attempt, 1);
+
+        // …and the constraint is gone, so a chat turn can be recorded at all.
+        let turn = store
+            .create_run(&id, NewRun::for_chat("turn-1", "general", "general"))
+            .await
+            .expect("a card-less run must be insertable after the rebuild");
+        assert_eq!(turn.task_id, None);
+        assert_eq!(
+            store.get_run(&id, "turn-1").await.unwrap().as_ref(),
+            Some(&turn)
+        );
+
+        // The per-card filter still works over the rebuilt indexes, and the
+        // card-less row does not answer it.
+        let for_card = store
+            .list_runs(&id, &crate::ports::runs::RunFilter::for_task("card-7"))
+            .await
+            .expect("list by card");
+        assert_eq!(
+            for_card.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["old-run"]
+        );
+
+        // Re-running the migration is a no-op: the constraint check is what
+        // stops it rewriting the whole run history on every single open.
+        relax_runs_task_id_nullability(&store.conn())
+            .expect("the rebuild is idempotent once the constraint is gone");
+        assert_eq!(
+            store
+                .list_runs(&id, &Default::default())
+                .await
+                .unwrap()
+                .len(),
+            2,
+            "a second pass duplicated or dropped rows"
+        );
+    }
+
     /// **Issue #392 through the port**: the host-durable append really does
     /// commit under `synchronous=FULL`, and really does put it back.
     ///
