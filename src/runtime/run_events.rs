@@ -209,7 +209,10 @@ mod tests {
         ) -> Result<Vec<StoredEvent>> {
             Ok(Vec::new())
         }
-        fn subscribe(&self, _id: &CompanyId) -> futures::stream::BoxStream<'static, StoredEvent> {
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
             Box::pin(futures::stream::empty())
         }
     }
@@ -348,7 +351,8 @@ mod tests {
             fn subscribe(
                 &self,
                 _id: &CompanyId,
-            ) -> futures::stream::BoxStream<'static, StoredEvent> {
+            ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem>
+            {
                 Box::pin(futures::stream::empty())
             }
         }

@@ -30,6 +30,7 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::events::EventStreamItem;
 use crate::ports::types::{
     Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, OutboundMessage, OverlayDesk,
     OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
@@ -611,11 +612,11 @@ async fn company_events(
         .runtime
         .events()
         .subscribe(&company)
-        .filter_map(move |stored| {
+        .filter_map(move |item| {
             // Keep the teardown guard alive for the life of the stream.
             let _ = &guard;
-            let event =
-                project_event(&stored).map(|value| Ok(Event::default().data(value.to_string())));
+            let event = project_stream_item(&item)
+                .map(|value| Ok(Event::default().data(value.to_string())));
             std::future::ready(event)
         });
     // Merge the transient live turn-progress bus (tool_call/tool_result frames a
@@ -634,6 +635,18 @@ async fn company_events(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     )
+}
+
+/// Projects a live subscription item into the operator stream's safe wire
+/// shape. A gap is an unpersisted control frame, deliberately structural-only.
+fn project_stream_item(item: &EventStreamItem) -> Option<serde_json::Value> {
+    match item {
+        EventStreamItem::Event(stored) => project_event(stored),
+        EventStreamItem::Gap { missed } => Some(serde_json::json!({
+            "type": "stream_gap",
+            "missed": missed,
+        })),
+    }
 }
 
 /// Projects a stored event into the safe SSE wire shape, or `None` to drop it.
@@ -6863,6 +6876,16 @@ mode = "full"
             event,
             at_millis: 1_700_000_000_000,
         }
+    }
+
+    #[test]
+    fn projects_a_gap_with_structural_fields_only() {
+        let value = super::project_stream_item(&EventStreamItem::Gap { missed: 44 })
+            .expect("a gap must reach the console");
+        assert_eq!(
+            value,
+            serde_json::json!({ "type": "stream_gap", "missed": 44 })
+        );
     }
 
     #[test]
