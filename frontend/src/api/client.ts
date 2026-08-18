@@ -34,6 +34,7 @@ import {
   type GrantScope,
   type InboxDto,
   type InboxMessageDto,
+  type PageManifestDto,
   type ResolveReceipt,
   type SetBudgetInput,
   type StandingGrant,
