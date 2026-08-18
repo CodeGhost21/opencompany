@@ -425,12 +425,6 @@ impl Tool for ReadWorkflowTool {
         // No overlay body: either a seed graph (readable through the union) or
         // an id this company does not answer for at all.
         let Some(raw) = raw else {
-            let disable = self
-                .admin
-                .overlays_and_globals()
-                .await
-                .map(|(_, disable)| disable)
-                .unwrap_or_default();
             return Ok(self.read_seed_or_unknown(&overlays, &disable, &wid).await);
         };
 
