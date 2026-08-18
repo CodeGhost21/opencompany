@@ -81,6 +81,12 @@ pub mod embeddings;
 /// build — the console's Hosting settings write them whether or not this
 /// harness exists to use them.
 pub mod hosting;
+/// End-to-end proof of issue #988: a turn really does get
+/// [`MAX_TOOL_ITERATIONS`](build::MAX_TOOL_ITERATIONS) tool rounds instead of the
+/// vendored ten, and the in-turn [`MAX_TURN_SPEND_USD`] brake halts a turn that
+/// outruns its money — distinguishably from an iteration-cap pause. Test-only.
+#[cfg(test)]
+mod iteration_cap_turn_test;
 pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;
