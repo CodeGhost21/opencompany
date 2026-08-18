@@ -43,6 +43,8 @@ interface Row {
   verdict: "PASS" | "WARN" | "FAIL" | "SKIP";
   value: string;
   note: string;
+  /** Tenant content, held apart from `value` so `report()` can withhold it. */
+  detail?: string;
 }
 
 /** A minimal `Response` stand-in — the four things `http()` reads. */
@@ -56,7 +58,7 @@ function response(status: number, body: unknown, headers: Record<string, string>
 }
 
 /** Loads `oc-qa.js` into a sandbox and hands back its `_internals`. */
-function loadHarness(fetchImpl?: (path: string) => Promise<unknown>) {
+function loadHarness(fetchImpl?: (path: string, init?: { method?: string }) => Promise<unknown>) {
   const source = readFileSync(SCRIPT, "utf8");
   const sandbox: Record<string, unknown> = {
     console: { log: () => {}, table: () => {} },
@@ -76,8 +78,8 @@ function loadHarness(fetchImpl?: (path: string) => Promise<unknown>) {
   const ocqa = sandbox.OCQA as {
     version: string;
     read: (options?: { company?: string }) => Promise<Row[]>;
-    probe: unknown;
-    report: unknown;
+    probe: (options?: { company?: string; workflow?: string; dryRun?: boolean }) => Promise<Row[]>;
+    report: (options?: { raw?: boolean }) => string;
     _internals: {
       runVerdict: (run: unknown) => string;
       undeliveredCount: (d: DeliveryReport[]) => number;
@@ -401,5 +403,233 @@ describe("age", () => {
     expect(age(now - 5 * 60_000, now)).toBe("5m");
     expect(age(now - 4 * 3_600_000, now)).toBe("4h");
     expect(age(now - 3 * 86_400_000, now)).toBe("3d");
+  });
+});
+
+describe("a check that throws is contained to its own row", () => {
+  /**
+   * The inverse of "unreadable is never PASS": unreadable must not be able to
+   * report *nothing at all*.
+   *
+   * `http()` promises never to throw, and it keeps that promise — but the
+   * promise stops at the transport. A check still reads fields off the body it
+   * was handed, and a host whose shape has drifted answers 200 with them
+   * absent. Before the boundary, `read()` had no `try`, so one such body threw
+   * out of the whole function: no rows, no summary, nothing printed. Shape
+   * drift on an older tenant is exactly the deployment-era condition this
+   * harness exists to catch, so it is the last place that can afford to go
+   * silent.
+   */
+  const drifted: Record<string, unknown> = {
+    "/healthz": { status: "ok" },
+    "/spec": { name: "opencompany", version: "0.1.0", capabilities: ["rest"], storage: "memory" },
+    "/api/v1/company": { id: "acme", name: "Acme", lifecycle: "running", pending_approvals: 0 },
+    // 200s whose payload is an object where the check expects an array: the
+    // roster reads `team.map`, which is `undefined` here.
+    "/api/v1/company/team": {},
+  };
+
+  async function runDrifted(): Promise<Row[]> {
+    const ocqa = loadHarness(async (path: string) =>
+      path in drifted ? response(200, drifted[path]) : response(404, { error: "not found" }),
+    );
+    return ocqa.read();
+  }
+
+  it("still returns every other check", async () => {
+    const rows = await runDrifted();
+    expect(rows).toHaveLength(22);
+  });
+
+  it("reports the thrower as untested, naming it and saying what threw", async () => {
+    const rows = await runDrifted();
+    const roster = rows.find((r) => r.check === "roster");
+    // SKIP and not FAIL: a check that could not be evaluated has not judged the
+    // surface, the same as one that 404ed.
+    expect(roster?.verdict).toBe("SKIP");
+    expect(roster?.value).toMatch(/^threw: /);
+  });
+
+  it("does not let the throw poison the check downstream of it", async () => {
+    // `tool-catalog` is handed the roster's return value. The boundary hands
+    // back the same empty list the roster's own unreadable path returns, so the
+    // downstream check reports its own verdict rather than a second throw.
+    const rows = await runDrifted();
+    const tools = rows.find((r) => r.check === "tool-catalog");
+    expect(tools?.verdict).toBe("SKIP");
+    expect(tools?.value).not.toMatch(/^threw: /);
+  });
+});
+
+describe("usage-finances against a host that answers without the figures", () => {
+  /**
+   * The concrete instance the boundary above was found through, fixed at the
+   * source too: `/finances` is Phase 1 (`src/server/ops/finances.rs`), so an
+   * older tenant can answer `200 {}`. `f.spentUsd.toFixed(2)` on that is a
+   * `TypeError`.
+   */
+  const reachable: Record<string, unknown> = {
+    "/healthz": { status: "ok" },
+    "/spec": { name: "opencompany", version: "0.1.0", capabilities: ["rest"], storage: "memory" },
+    "/api/v1/company": { id: "acme", name: "Acme", lifecycle: "running", pending_approvals: 0 },
+    "/api/v1/company/usage": { totals: { tokens: 1200, costUsd: 3.5 } },
+    "/api/v1/company/finances": {},
+  };
+
+  async function financesRow(): Promise<Row | undefined> {
+    const ocqa = loadHarness(async (path: string) =>
+      path in reachable ? response(200, reachable[path]) : response(404, { error: "not found" }),
+    );
+    const rows = await ocqa.read();
+    return rows.find((r) => r.check === "usage-finances");
+  }
+
+  it("reads it as untested rather than throwing", async () => {
+    const row = await financesRow();
+    expect(row?.verdict).toBe("SKIP");
+    // Not the boundary catching it — the check itself declining to judge.
+    expect(row?.value).not.toMatch(/^threw: /);
+  });
+
+  it("names the fields that were missing, and never prints an absent figure as $0.00", async () => {
+    // A budget rendered as `$0.00` reads as a company that has spent nothing,
+    // which is a confident answer to a question the host did not answer.
+    const row = await financesRow();
+    expect(row?.note).toContain("spentUsd");
+    expect(row?.value).toContain("finances unread");
+    expect(row?.value).not.toContain("balance $0.00");
+  });
+});
+
+describe("probe() will not choose a workflow to run for real", () => {
+  /**
+   * A real run fires real deliveries — a report into a channel, mail to a real
+   * address. The first version took `flows[0]`, which on a production tenant is
+   * whichever workflow the host happened to list first: a stranger's. There is
+   * no default that is safe to guess, so an unnamed target is SKIP.
+   */
+  const tenant: Record<string, unknown> = {
+    "/healthz": { status: "ok" },
+    "/spec": { name: "opencompany", version: "0.1.0", capabilities: ["rest"], storage: "memory" },
+    "/api/v1/company": { id: "acme", name: "Acme", lifecycle: "running", pending_approvals: 0 },
+    "/api/v1/company/workflows": [{ id: "somebody-elses-workflow" }, { id: "daily-release-readiness" }],
+    "/api/v1/company/desks": [],
+    "/api/v1/company/approvals": [],
+    "/api/v1/company/chat": { responses: [{ text: "Acme." }] },
+  };
+
+  function tenantHarness() {
+    const sent: string[] = [];
+    const ocqa = loadHarness(async (path: string, init?: { method?: string }) => {
+      const method = init?.method || "GET";
+      sent.push(`${method} ${path}`);
+      // The board is method-aware so the card probe behaves as it does against a
+      // real host — a POST creates and a GET lists — rather than throwing and
+      // taking the workflow check with it, which would make these assertions
+      // pass for the wrong reason.
+      if (path === "/api/v1/company/tasks") {
+        return response(200, method === "POST" ? { id: "card-1" } : [{ id: "card-1" }]);
+      }
+      if (path === "/api/v1/company/tasks/card-1") return response(200, { ok: true });
+      return path in tenant ? response(200, tenant[path]) : response(404, { error: "not found" });
+    });
+    return { ocqa, sent };
+  }
+
+  it("leaves the rest of the probe working, so the skip is the only thing missing", async () => {
+    // Guards the fixture as much as the code: if the board probe threw here,
+    // the assertions below would be measuring a dead probe rather than a
+    // declined workflow target.
+    const { ocqa } = tenantHarness();
+    const rows = await ocqa.probe();
+    expect(rows.find((r) => r.check === "probe-board-card")?.verdict).toBe("PASS");
+    expect(rows.find((r) => r.check === "probe-chat")?.verdict).toBe("PASS");
+  });
+
+  it("skips the run, and fires no POST at any workflow, when none is named", async () => {
+    const { ocqa, sent } = tenantHarness();
+    const rows = await ocqa.probe();
+    const row = rows.find((r) => r.check === "probe-workflow-run");
+    expect(row?.verdict).toBe("SKIP");
+    // The load-bearing assertion: not merely reported as skipped, but no run
+    // request left the page.
+    expect(sent.filter((s) => s.includes("/run"))).toEqual([]);
+  });
+
+  it("says how to run one, so the skip is a door rather than a dead end", async () => {
+    const { ocqa } = tenantHarness();
+    const rows = await ocqa.probe();
+    const row = rows.find((r) => r.check === "probe-workflow-run");
+    expect(row?.note).toContain("workflow");
+    expect(row?.note).toContain("dryRun");
+  });
+
+  it("runs the one that is named, and only that one", async () => {
+    const { ocqa, sent } = tenantHarness();
+    await ocqa.probe({ workflow: "daily-release-readiness", dryRun: true });
+    const runs = sent.filter((s) => s.includes("/run"));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toContain("daily-release-readiness");
+    expect(runs[0]).not.toContain("somebody-elses-workflow");
+  });
+
+  it("skips a name the host does not have rather than falling back to the first", async () => {
+    const { ocqa, sent } = tenantHarness();
+    const rows = await ocqa.probe({ workflow: "no-such-workflow" });
+    const row = rows.find((r) => r.check === "probe-workflow-run");
+    expect(row?.verdict).toBe("SKIP");
+    expect(sent.filter((s) => s.includes("/run"))).toEqual([]);
+  });
+});
+
+describe("report() withholds tenant message text", () => {
+  /**
+   * `report()` exists to be pasted into a GitHub issue, and `probe-chat`
+   * collected a real agent reply. The verdict is formed from the shape of the
+   * answer so the table still judges something checkable, and the reply itself
+   * rides in `detail`, which the report drops unless asked.
+   */
+  const tenant: Record<string, unknown> = {
+    "/healthz": { status: "ok" },
+    "/spec": { name: "opencompany", version: "0.1.0", capabilities: ["rest"], storage: "memory" },
+    "/api/v1/company": { id: "acme", name: "Acme", lifecycle: "running", pending_approvals: 0 },
+    "/api/v1/company/desks": [],
+    "/api/v1/company/approvals": [],
+    "/api/v1/company/workflows": [],
+    "/api/v1/company/chat": { responses: [{ text: "Acme, a maker of anvils, per the manifest." }] },
+  };
+
+  async function probed() {
+    const ocqa = loadHarness(async (path: string, init?: { method?: string }) => {
+      if (path === "/api/v1/company/tasks") {
+        return response(200, (init?.method || "GET") === "POST" ? { id: "card-1" } : [{ id: "card-1" }]);
+      }
+      if (path === "/api/v1/company/tasks/card-1") return response(200, { ok: true });
+      return path in tenant ? response(200, tenant[path]) : response(404, { error: "not found" });
+    });
+    const rows = await ocqa.probe();
+    return { ocqa, rows };
+  }
+
+  it("keeps the reply out of the row's own value, judging its shape instead", async () => {
+    const { rows } = await probed();
+    const chat = rows.find((r) => r.check === "probe-chat");
+    expect(chat?.value).not.toContain("anvils");
+    expect(chat?.value).toContain("1 replies");
+    // Still on the operator's own screen: judging whether the company answered
+    // *well* needs the words.
+    expect(chat?.detail).toContain("anvils");
+  });
+
+  it("omits it from the Markdown, and says that it did", async () => {
+    const { ocqa } = await probed();
+    const text = ocqa.report();
+    expect(text).not.toContain("anvils");
+    expect(text).toContain("withheld");
+  });
+
+  it("includes it only when explicitly asked", async () => {
+    const { ocqa } = await probed();
+    expect(ocqa.report({ raw: true })).toContain("anvils");
   });
 });

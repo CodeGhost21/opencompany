@@ -4,7 +4,7 @@ What a release is checked with, in one pass, against a real deployed tenant.
 
 | File | What it is |
 | --- | --- |
-| [`oc-qa.js`](oc-qa.js) | A zero-dependency browser-console script: 22 read-only checks and 5 live probes. |
+| [`oc-qa.js`](oc-qa.js) | A zero-dependency browser-console script: 22 read-only checks and 5 probes, 4 of them live. |
 | [`MASTER-QA.md`](MASTER-QA.md) | The seven UI checks a script cannot judge, five persona tasks with a rubric, and the prompt that hands the pass to an agent. |
 
 A release checklist points here. Nothing else has to be found first.
@@ -28,13 +28,48 @@ Open the operator console on a **signed-in** tenant, paste the whole of
 
 ```js
 OCQA.read()      // 22 read-only checks, ~10s. Spends nothing.
-OCQA.probe()     // 5 live checks. Spends tokens; may park approvals.
+OCQA.probe()     // 5 checks, 4 of them live. Spends tokens; may park approvals.
 OCQA.report()    // the last run as a Markdown table for an issue
 ```
 
 Options: `OCQA.read({ company: "acme" })` pins a company on a multi-company host
-(the scope is auto-detected otherwise); `OCQA.probe({ workflow: "id", dryRun: true })`
-picks the workflow to run and runs it over stubbed effects.
+(the scope is auto-detected otherwise).
+
+### What `probe()` actually does to the tenant
+
+`probe()` is not a read. It sends real chat turns to the orchestrator and to up
+to five desks, and creates and deletes a real board card — on whatever tenant the
+tab is signed in to. It prints that host and company before it starts anything,
+so a probe fired at the wrong tab is visible in the transcript rather than only
+in the consequences.
+
+**It will not choose a workflow for you.** A real run fires real deliveries — a
+report into a channel, mail to a real address — so `probe()` on its own reports
+`probe-workflow-run` as `SKIP` and says so. Name the one you meant:
+
+```js
+OCQA.probe({ workflow: "daily-release-readiness" })              // runs it FOR REAL
+OCQA.probe({ workflow: "daily-release-readiness", dryRun: true })// rehearses it
+```
+
+Read `dryRun` back off the response rather than trusting the flag: a host that
+predates test mode ignores it and runs for real, and the script raises a `WARN`
+when the response comes back without it.
+
+After any `probe()`, check `probe-approval-delta` and resolve whatever the probes
+parked — leaving effects at the gate freezes whatever sits behind them.
+
+### What `report()` leaves out
+
+`OCQA.report()` is written to be pasted into an issue, so it withholds the tenant
+message text a probe collected — `probe-chat` judges the reply's shape in the
+table and keeps the reply itself out of it. The table says how many rows were
+withheld. `OCQA.report({ raw: true })` includes them, for a write-up that is not
+going anywhere public.
+
+Ids are not redacted — company, desk, workflow and delivery targets are what make
+a `FAIL` actionable, and a report without them names no defect. Read the table
+before pasting it somewhere public.
 
 It rides the session cookie of the tab it is pasted into, so there is no token to
 mint or distribute — which is also why it is a console script rather than a

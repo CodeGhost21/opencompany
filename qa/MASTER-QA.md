@@ -6,7 +6,7 @@ a stale tenant reports bugs `main` has already fixed).
 
 Three parts, in this order:
 
-1. [`oc-qa.js`](oc-qa.js) — 22 read-only checks (~10s) and 5 live probes.
+1. [`oc-qa.js`](oc-qa.js) — 22 read-only checks (~10s) and 5 probes, 4 of them live.
 2. [The seven UI checks](#the-seven-ui-checks) a script cannot judge.
 3. [The five persona tasks](#the-five-persona-tasks) and their rubric.
 
@@ -21,17 +21,33 @@ Open the console on a signed-in tenant, paste [`oc-qa.js`](oc-qa.js), then:
 
 ```js
 OCQA.read()      // 22 read-only checks, ~10s, spends nothing
-OCQA.probe()     // 5 live checks — spends tokens and may park approvals
+OCQA.probe()     // 5 checks, 4 of them live — spends tokens, may park approvals
 OCQA.report()    // the last run as Markdown, for the issue
 ```
 
-`OCQA.probe({ dryRun: true })` runs the workflow probe over stubbed effects.
+`probe()` acts on the tenant the tab is signed in to: real chat turns to the
+orchestrator and to up to five desks, and a real board card created and deleted.
+It prints the host and company it is about to act on before it starts.
+
+**It will not choose a workflow for you.** A real run fires real deliveries, so
+bare `OCQA.probe()` reports `probe-workflow-run` as `SKIP`. Name the workflow to
+run one:
+
+```js
+OCQA.probe({ workflow: "<id>" })              // runs it FOR REAL
+OCQA.probe({ workflow: "<id>", dryRun: true })// rehearses it over stubbed effects
+```
+
 Read the verdict back off the response rather than trusting the flag: a host
 that predates test mode ignores it and runs for real, and the script warns when
 that happens.
 
 After `probe()`, check `probe-approval-delta`. The probes can park effects at the
 approvals gate; leaving them there freezes whatever sits behind them.
+
+`OCQA.report()` withholds the tenant message text the probes collected, because
+its output is written to be pasted into an issue. `OCQA.report({ raw: true })`
+includes it — keep that out of anything public.
 
 ## The seven UI checks
 
@@ -126,8 +142,13 @@ An agent with browser access can run parts 1–3. Paste this:
 > 2. Sign in, open the console, paste `qa/oc-qa.js`, run `OCQA.read()`. Report
 >    every row, verdict beside the value it judged. Do not summarise away the
 >    values.
-> 3. Run `OCQA.probe()`. Then check `probe-approval-delta` and resolve anything
->    the probes parked.
+> 3. Run `OCQA.probe()`. This spends real tokens and writes to the tenant, so
+>    confirm the host it names in the console is `<TENANT URL>` before going on.
+>    It reports `probe-workflow-run` as SKIP by design — a real run fires real
+>    deliveries, so re-run it as `OCQA.probe({ workflow: "<id>" })` only with a
+>    workflow you were told to run, and prefer `dryRun: true` unless a real
+>    delivery is what is being checked. Then check `probe-approval-delta` and
+>    resolve anything the probes parked.
 > 4. Walk U1–U7 in the browser. For each, state the claim you falsified and what
 >    you actually saw. If you could not create the conditions for a check, mark
 >    it SKIP — never PASS.

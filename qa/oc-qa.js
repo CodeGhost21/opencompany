@@ -46,11 +46,24 @@
  *
  * ## Usage
  *
- *   OCQA.read()                       // 22 read-only checks, ~10s
+ *   OCQA.read()                       // 22 read-only checks, ~10s. Spends nothing.
  *   OCQA.read({ company: "acme" })    // pin a company in multi-company mode
- *   OCQA.probe()                      // 5 live checks that spend tokens
- *   OCQA.probe({ workflow: "daily-release-readiness", dryRun: true })
+ *
+ *   OCQA.probe()                      // 5 checks, 4 of them live: real chat
+ *                                     // turns, a real board card, real tokens.
+ *                                     // Names the host it is about to act on
+ *                                     // before it starts. The workflow run is
+ *                                     // SKIP until you name one (see below).
+ *   OCQA.probe({ workflow: "daily-release-readiness" })              // + a REAL run
+ *   OCQA.probe({ workflow: "daily-release-readiness", dryRun: true })// + a rehearsal
+ *
  *   OCQA.report()                     // last run, as Markdown to paste in an issue
+ *   OCQA.report({ raw: true })        // ...including the tenant message text
+ *
+ * `probe()` never picks a workflow for you. A real run fires real deliveries —
+ * a report into a channel, mail to a real address — so the fifth check reports
+ * SKIP until you name the workflow you meant. Everything else in `probe()` is
+ * live either way: it spends tokens on whatever tenant the tab is signed in to.
  *
  * Both entry points resolve to an array of rows and also print a table.
  */
@@ -264,8 +277,14 @@
    * Row plumbing
    * ------------------------------------------------------------------ */
 
-  function row(check, verdict, value, note) {
-    return { check, verdict, value: String(value), note: note || "" };
+  function row(check, verdict, value, note, detail) {
+    const r = { check, verdict, value: String(value), note: note || "" };
+    // `detail` carries tenant content — a real agent reply, a real message.
+    // It is worth seeing on the operator's own screen and is exactly what must
+    // not be pasted into a public issue, so it lives in its own field and
+    // `report()` withholds it unless asked for it.
+    if (detail !== undefined && detail !== null && detail !== "") r.detail = String(detail);
+    return r;
   }
 
   /**
@@ -317,6 +336,38 @@
     return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
   }
 
+  /** The host this run is judging, safe to read outside a browser (the unit sandbox). */
+  function hostname() {
+    return global.location ? global.location.host : "unknown";
+  }
+
+  /**
+   * Runs one check, and contains a throw to that check's own row.
+   *
+   * `http()` never throws, which is what the transport docstring promises — but
+   * that defence stops at the transport. A check still reads fields off the
+   * body it got back, and a host whose shape has drifted hands back a 200 whose
+   * fields are simply absent: `f.spentUsd.toFixed(2)` on a `/finances` that
+   * answered `{}` is a `TypeError`, and without a boundary here it takes the
+   * other twenty-one checks and the summary with it. Reporting *nothing* is
+   * louder than a false green but no more useful, and shape drift on an older
+   * tenant is precisely the deployment-era condition this tool exists to catch.
+   *
+   * The row is `SKIP`, never `FAIL`: a check that could not be evaluated has
+   * not judged the surface, and the same rule applies to a check that threw as
+   * to one that 404ed. It carries the message, because a harness bug is the
+   * likeliest cause and it should be reportable without a debugger.
+   */
+  async function attempt(rows, check, fn, empty) {
+    try {
+      return await fn();
+    } catch (err) {
+      const why = (err && err.message) || String(err);
+      rows.push(row(check, SKIP, `threw: ${why}`, `${check} could not be judged — untested, not passed`));
+      return empty === undefined ? null : empty;
+    }
+  }
+
   /* ------------------------------------------------------------------ *
    * Read-only checks (22)
    * ------------------------------------------------------------------ */
@@ -338,7 +389,7 @@
       row(
         "host",
         PASS,
-        `${s.name}@${s.version} · ${location.host} · ${caps}`,
+        `${s.name}@${s.version} · ${hostname()} · ${caps}`,
         `healthz ${health.elapsedMs}ms · storage ${s.storage || "unknown"} · instance ${String(s.instance_id || "").slice(0, 8)}`,
       ),
     );
@@ -774,13 +825,27 @@
     const u = usage.ok ? usage.body || {} : null;
     const f = finances.ok ? finances.body || {} : null;
     const totals = (u && u.totals) || {};
-    const overspent = f && f.budgetUsd > 0 && f.spentUsd > f.budgetUsd;
+    // `/finances` is Phase 1 (`src/server/ops/finances.rs`), so an older tenant
+    // can answer 200 with the figures simply absent. Reading them unguarded is
+    // a `TypeError` on the one deployment this check exists to judge, and an
+    // absent figure rendered as `$0.00` would be worse still: it reads as a
+    // company that has spent nothing rather than one that did not say.
+    const figures = ["spentUsd", "budgetUsd", "balanceUsd"];
+    const missing = f ? figures.filter((k) => typeof f[k] !== "number") : figures;
+    const priced = !!f && missing.length === 0;
+    const overspent = priced && f.budgetUsd > 0 && f.spentUsd > f.budgetUsd;
     rows.push(
       row(
         "usage-finances",
-        !u || !f ? SKIP : overspent ? FAIL : PASS,
-        `${totals.tokens || 0} tokens · $${(totals.costUsd || 0).toFixed(2)} · ${f ? `spent $${f.spentUsd.toFixed(2)}/$${f.budgetUsd.toFixed(2)} · balance $${f.balanceUsd.toFixed(2)}` : "finances unread"}`,
-        overspent ? "spend is past the manifest budget" : !u || !f ? "one of the two surfaces did not answer" : "",
+        !u || !priced ? SKIP : overspent ? FAIL : PASS,
+        `${totals.tokens || 0} tokens · $${(totals.costUsd || 0).toFixed(2)} · ${priced ? `spent $${f.spentUsd.toFixed(2)}/$${f.budgetUsd.toFixed(2)} · balance $${f.balanceUsd.toFixed(2)}` : "finances unread"}`,
+        overspent
+          ? "spend is past the manifest budget"
+          : !u || !f
+            ? "one of the two surfaces did not answer"
+            : priced
+              ? ""
+              : `/finances answered without ${missing.join(", ")} — untested, not passed`,
       ),
     );
   }
@@ -839,8 +904,12 @@
     const rows = [];
     const started = Date.now();
 
-    const spec = await checkHost(rows);
-    await checkConsoleCacheHeaders(rows);
+    // Every check is run through `attempt`, so one that throws on a body whose
+    // shape has drifted costs its own row and not the whole pass. The fallback
+    // handed back is the same empty value the check's own unreadable path
+    // returns, so a throw cannot poison the check downstream of it either.
+    const spec = await attempt(rows, "host", () => checkHost(rows));
+    await attempt(rows, "console-cache-headers", () => checkConsoleCacheHeaders(rows));
 
     const scope = await resolveScope(opts.company);
     if (!scope) {
@@ -848,33 +917,33 @@
       return finish(rows, started, "read");
     }
 
-    const company = await checkLifecycle(rows, scope);
-    const team = await checkRoster(rows, scope);
-    await checkDesks(rows, scope);
-    await checkTaskBoard(rows, scope);
-    await checkWorkspace(rows, scope);
-    const approvals = await checkApprovals(rows, scope);
-    await checkApprovalTier(rows, scope, approvals);
-    await checkConnections(rows, scope);
-    await checkComposio(rows, scope);
+    const company = await attempt(rows, "company-lifecycle", () => checkLifecycle(rows, scope));
+    const team = await attempt(rows, "roster", () => checkRoster(rows, scope), []);
+    await attempt(rows, "desks", () => checkDesks(rows, scope));
+    await attempt(rows, "task-board", () => checkTaskBoard(rows, scope));
+    await attempt(rows, "workspace", () => checkWorkspace(rows, scope));
+    const approvals = await attempt(rows, "approvals-backlog", () => checkApprovals(rows, scope), []);
+    await attempt(rows, "approval-tier", () => checkApprovalTier(rows, scope, approvals));
+    await attempt(rows, "manifest-connections", () => checkConnections(rows, scope));
+    await attempt(rows, "composio-health", () => checkComposio(rows, scope));
     const caps = await http(`${scope}/capabilities`);
-    await checkMcp(rows, scope, spec, caps.ok ? caps.body : null);
-    await checkInference(rows, scope);
-    checkRepoBinding(rows, spec, company);
-    await checkWorkflows(rows, scope);
-    const runs = await checkRunHistory(rows, scope);
-    checkDeliveries(rows, runs);
-    await checkDataHygiene(rows, scope);
-    await checkSkills(rows, scope);
-    await checkUsageAndFinances(rows, scope);
-    await checkChatHistory(rows, scope);
-    await checkToolCatalog(rows, scope, team);
+    await attempt(rows, "mcp-servers", () => checkMcp(rows, scope, spec, caps.ok ? caps.body : null));
+    await attempt(rows, "inference-provider", () => checkInference(rows, scope));
+    await attempt(rows, "repo-binding", () => checkRepoBinding(rows, spec, company));
+    await attempt(rows, "workflows", () => checkWorkflows(rows, scope));
+    const runs = await attempt(rows, "run-history", () => checkRunHistory(rows, scope), []);
+    await attempt(rows, "workflow-deliveries", () => checkDeliveries(rows, runs));
+    await attempt(rows, "data-hygiene", () => checkDataHygiene(rows, scope));
+    await attempt(rows, "skills", () => checkSkills(rows, scope));
+    await attempt(rows, "usage-finances", () => checkUsageAndFinances(rows, scope));
+    await attempt(rows, "chat-history", () => checkChatHistory(rows, scope));
+    await attempt(rows, "tool-catalog", () => checkToolCatalog(rows, scope, team));
 
     return finish(rows, started, "read", scope);
   }
 
   /* ------------------------------------------------------------------ *
-   * OCQA.probe() — five live checks that spend real tokens
+   * OCQA.probe() — five checks, four of them live, that spend real tokens
    * ------------------------------------------------------------------ */
 
   /**
@@ -904,8 +973,14 @@
       row(
         "probe-chat",
         replies.length === 0 ? FAIL : res.elapsedMs > 30000 ? WARN : PASS,
-        `${secs(res.elapsedMs)} · ${replies.length} replies · "${first}"`,
+        `${secs(res.elapsedMs)} · ${replies.length} replies · ${first.length} chars`,
         replies.length === 0 ? "a 200 with no reply is a turn that answered nothing" : "",
+        // The reply itself is real tenant content and `report()` is written to
+        // be pasted into a public issue, so the verdict is formed from the
+        // shape of the answer and the text rides in `detail`, which the report
+        // withholds. It is still on the operator's own screen, where judging
+        // whether the company answered *well* needs it.
+        first ? `"${first}"` : "",
       ),
     );
   }
@@ -970,9 +1045,25 @@
     const list = await http(`${scope}/workflows`);
     if (!list.ok) return push(rows, unread("probe-workflow-run", list, "workflows"));
     const flows = list.body || [];
-    const target = opts.workflow ? flows.find((w) => w.id === opts.workflow) : flows[0];
+    // The target is never chosen for you. A real run fires real effects — a
+    // report to a channel, mail to a real address — and `flows[0]` is whatever
+    // the host happened to list first, which on a production tenant is a
+    // stranger's workflow. Naming it is the operator saying which one; there is
+    // no default that is safe to guess, so the unnamed case is SKIP.
+    if (!opts.workflow) {
+      return push(
+        rows,
+        row(
+          "probe-workflow-run",
+          SKIP,
+          flows.length ? `${flows.length} workflows, none named` : "no workflows",
+          'this check will not choose its own target — pass { workflow: "<id>" } to run one for real, or { workflow: "<id>", dryRun: true } to rehearse it',
+        ),
+      );
+    }
+    const target = flows.find((w) => w.id === opts.workflow);
     if (!target) {
-      return push(rows, row("probe-workflow-run", SKIP, opts.workflow ? `no workflow "${opts.workflow}"` : "no workflows", "nothing to run"));
+      return push(rows, row("probe-workflow-run", SKIP, `no workflow "${opts.workflow}"`, "nothing to run"));
     }
     const body = { input: {} };
     if (opts.dryRun) body.dry_run = true;
@@ -1071,12 +1162,19 @@
       rows.push(row("scope", FAIL, "no company", "sign in first"));
       return finish(rows, started, "probe");
     }
+    // Named before anything fires. These probes spend real tokens and leave
+    // real traces on whatever tenant the tab is signed in to, and the one thing
+    // an operator cannot recover from is not having known which host that was.
+    console.log(
+      `%coc-qa ${VERSION} · probe → ${hostname()} · ${scope} — real turns, real effects, on this tenant.`,
+      "color:#d97706;font-weight:bold",
+    );
     const before = await http(`${scope}/approvals`);
-    await probeChat(rows, scope, opts);
-    await probeDesks(rows, scope, opts);
-    await probeBoardCard(rows, scope);
-    await probeWorkflowRun(rows, scope, opts);
-    await probeApprovalDelta(rows, scope, before.ok ? before.body : []);
+    await attempt(rows, "probe-chat", () => probeChat(rows, scope, opts));
+    await attempt(rows, "probe-desks", () => probeDesks(rows, scope, opts));
+    await attempt(rows, "probe-board-card", () => probeBoardCard(rows, scope));
+    await attempt(rows, "probe-workflow-run", () => probeWorkflowRun(rows, scope, opts));
+    await attempt(rows, "probe-approval-delta", () => probeApprovalDelta(rows, scope, before.ok ? before.body : []));
     return finish(rows, started, "probe", scope);
   }
 
@@ -1092,7 +1190,7 @@
     lastRun = {
       mode,
       scope: scope || null,
-      host: global.location ? global.location.host : "unknown",
+      host: hostname(),
       atMillis: Date.now(),
       elapsedMs: Date.now() - started,
       tally,
@@ -1111,9 +1209,23 @@
     return rows;
   }
 
-  /** The last run as a Markdown table, for pasting straight into an issue. */
-  function report() {
+  /**
+   * The last run as a Markdown table, for pasting straight into an issue.
+   *
+   * Which is the reason for the redaction: this output is written to be moved
+   * out of the tenant and into a public artifact, so the message text a probe
+   * collected does not travel with it. `report({ raw: true })` opts back in for
+   * a private write-up, and the table says when something was withheld rather
+   * than quietly shortening a value.
+   *
+   * Ids — company, desks, workflows, delivery targets — are still in here. They
+   * are what makes a FAIL actionable, and a report with them stripped names no
+   * defect. Read the table before pasting it somewhere public.
+   */
+  function report(options) {
     if (!lastRun) return "No run yet. Call OCQA.read() first.";
+    const raw = !!(options && options.raw);
+    const withheld = lastRun.rows.filter((r) => r.detail).length;
     const lines = [
       `## oc-qa ${VERSION} — \`${lastRun.mode}\` on \`${lastRun.host}\``,
       "",
@@ -1125,7 +1237,15 @@
     ];
     for (const r of lastRun.rows) {
       const cell = (s) => String(s).replace(/\|/g, "\\|");
-      lines.push(`| \`${r.check}\` | ${r.verdict} | ${cell(r.value)} | ${cell(r.note)} |`);
+      const value = raw && r.detail ? `${r.value} · ${r.detail}` : r.value;
+      lines.push(`| \`${r.check}\` | ${r.verdict} | ${cell(value)} | ${cell(r.note)} |`);
+    }
+    if (withheld && !raw) {
+      lines.push("");
+      lines.push(
+        `_${withheld} row${withheld === 1 ? "" : "s"} carried tenant message text, withheld from this report. ` +
+          "`OCQA.report({ raw: true })` includes it — do not paste that into a public issue._",
+      );
     }
     const text = lines.join("\n");
     console.log(text);
