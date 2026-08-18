@@ -4733,6 +4733,7 @@ mod test {
             mode: mode.to_string(),
             always_approve: always.iter().map(|s| s.to_string()).collect(),
             auto_approve_under_usd: under,
+            approval_ttl_hours: None,
         }
     }
 

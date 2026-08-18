@@ -3334,6 +3334,11 @@ impl CompanyRecord {
             // for the tier and the always-ask list, and a spend threshold whose
             // console control does not exist would be a field nothing can write.
             auto_approve_under_usd: manifest.auto_approve_under_usd,
+            // Same reasoning for the approval deadline (issue #971): the knob is
+            // a manifest one, so the override carries the manifest's answer
+            // through unchanged rather than gaining a field no console control
+            // writes.
+            approval_ttl_hours: manifest.approval_ttl_hours,
         }
     }
 
