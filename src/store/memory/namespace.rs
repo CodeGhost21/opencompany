@@ -83,11 +83,9 @@ impl Scope {
             Self::TaskResults => "task-results".to_string(),
             Self::Context => "context".to_string(),
             Self::Scratch => SCRATCH_SEGMENT.to_string(),
-            // `scope_member` rather than `sanitize_segment` directly: an empty
-            // id would otherwise yield `agent/`, and `child` would build a
-            // namespace ending in a separator — one that names the scope kind
-            // rather than any member of it. The company segment has its own
-            // empty-case handling in `workspace_segment`; these do not.
+            // `scope_member`, not `sanitize_segment`: the member has to be
+            // injective. Sanitizing alone maps `a:b` and `a/b` onto one
+            // segment, which would point two agents at a single namespace.
             Self::Agent(id) => format!("agent/{}", scope_member(id)),
             Self::Desk(id) => format!("desk/{}", scope_member(id)),
         }
@@ -171,28 +169,34 @@ fn workspace_segment(company: &str) -> String {
     }
 }
 
-/// An agent or desk id as a namespace segment, never empty.
+/// An agent or desk id as a namespace segment: path-safe, never empty, and
+/// collision-resistant.
 ///
-/// `_` stands in for an id that sanitizes to nothing, so a scope always names a
-/// member rather than the scope kind itself. `Namespace::contains` is
-/// boundary-aware and would not over-match a sibling either way, but a namespace
-/// nothing can legitimately own should not be constructible.
+/// Sanitizing alone is not injective, and the consequence is the same one
+/// [`workspace_segment`] exists to prevent, one level down: `a:b` and `a/b` both
+/// sanitize to `a_b`, so two agents would address a single provider namespace
+/// and each could read the other's private partition. That stays inside one
+/// company — it is not a cross-tenant leak — but "agent A can read agent B's
+/// private memory" is not a property to concede to punctuation.
+///
+/// So the same construction is used: the sanitized prefix for legibility, plus a
+/// suffix derived from the **full raw** id, which differs whenever the raw ids
+/// do. An id that sanitizes to nothing keeps the `h-` form rather than an empty
+/// segment, so a scope always names a member instead of the scope kind itself.
+///
+/// Unlike the company segment this is not a security boundary between tenants,
+/// but it is cheap, and having one rule for both means a reader does not have to
+/// work out which segments are injective and which merely look like it.
 fn scope_member(raw: &str) -> String {
-    let cleaned = sanitize_segment(raw);
-    if cleaned.is_empty() {
-        "_".to_owned()
-    } else {
-        cleaned
-    }
+    workspace_segment(raw)
 }
 
 /// Maps a raw identifier to the path-safe alphabet, without the hash suffix.
 ///
-/// Used for agent and desk segments, which sit *inside* an already-injective
-/// company segment. A collision between two agent ids narrows one agent's
-/// private partition onto another's, which is a bug — but it is a bug within a
-/// single tenant's own data, not a cross-tenant leak, so it does not warrant
-/// making every namespace unreadable.
+/// Not injective on its own, and never used on its own: both callers
+/// ([`workspace_segment`], and [`scope_member`] through it) append a hash of the
+/// raw id. This produces the legible half of a segment, so a namespace reads as
+/// `oc/acme-<hash>` rather than as an opaque digest.
 fn sanitize_segment(raw: &str) -> String {
     raw.chars()
         .map(|c| {
@@ -293,6 +297,61 @@ mod test {
                 "two scopes collided: {scope:?}"
             );
         }
+    }
+
+    #[test]
+    fn agent_ids_that_sanitize_alike_stay_distinct() {
+        // `a:b` and `a/b` both sanitize to `a_b`. Merging them would point two
+        // agents at one namespace, and each could read the other's private
+        // partition.
+        let root = Namespace::company_root(&id("acme"));
+        let a = root.child(&Scope::Agent("a:b".into()));
+        let b = root.child(&Scope::Agent("a/b".into()));
+        let c = root.child(&Scope::Agent("a_b".into()));
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn desk_ids_that_sanitize_alike_stay_distinct() {
+        let root = Namespace::company_root(&id("acme"));
+        assert_ne!(
+            root.child(&Scope::Desk("a:b".into())),
+            root.child(&Scope::Desk("a/b".into()))
+        );
+    }
+
+    #[test]
+    fn an_agent_and_a_desk_with_the_same_id_stay_apart() {
+        // They differ by the `agent/` vs `desk/` prefix, not by the member, so
+        // this holds independently of how the member is derived.
+        let root = Namespace::company_root(&id("acme"));
+        assert_ne!(
+            root.child(&Scope::Agent("ops".into())),
+            root.child(&Scope::Desk("ops".into()))
+        );
+    }
+
+    #[test]
+    fn a_member_id_that_sanitizes_to_nothing_still_names_a_member() {
+        // Otherwise `child` builds a namespace ending in `/`, naming the scope
+        // kind rather than any member of it.
+        let root = Namespace::company_root(&id("acme"));
+        let empty = root.child(&Scope::Agent(String::new()));
+        assert!(!empty.as_str().ends_with('/'), "{}", empty.as_str());
+        assert!(empty.as_str().contains("agent/h-"), "{}", empty.as_str());
+        // And still distinct from a different unsanitizable id.
+        assert_ne!(empty, root.child(&Scope::Agent(":".into())));
+    }
+
+    #[test]
+    fn member_derivation_is_stable_across_calls() {
+        let root = Namespace::company_root(&id("acme"));
+        assert_eq!(
+            root.child(&Scope::Agent("cto".into())),
+            root.child(&Scope::Agent("cto".into()))
+        );
     }
 
     #[test]

@@ -1063,6 +1063,66 @@ mod test {
     }
 
     #[test]
+    fn from_env_reads_the_remote_memory_knobs() {
+        // The four knobs `remote` needs. Without this, a rename in `from_env`
+        // would surface as "the engine refuses and names a variable you did
+        // set", which reads as a broken deployment rather than a broken parse.
+        const KEYS: [&str; 4] = [
+            "OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE",
+            "OPENCOMPANY_MEMORY_DRIVER",
+            "OPENCOMPANY_MEMORY_URL",
+            "OPENCOMPANY_MEMORY_API_KEY",
+        ];
+        // SAFETY: single-threaded test; restores prior state.
+        let prev: Vec<_> = KEYS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+
+        unsafe {
+            std::env::set_var(KEYS[0], "1");
+            std::env::set_var(KEYS[1], "supermemory");
+            std::env::set_var(KEYS[2], "https://memory.example");
+            std::env::set_var(KEYS[3], "sk-test");
+        }
+        let settings = StorageSettings::from_env().unwrap();
+        assert!(settings.allow_unproven_remote);
+        assert_eq!(settings.memory_driver.as_deref(), Some("supermemory"));
+        assert_eq!(
+            settings.memory_url.as_deref(),
+            Some("https://memory.example")
+        );
+        assert_eq!(settings.memory_api_key.as_deref(), Some("sk-test"));
+
+        // Empty is absent, not an empty credential: `require` would otherwise
+        // accept a blank key and defer the failure to the first call.
+        unsafe {
+            std::env::set_var(KEYS[1], "");
+            std::env::set_var(KEYS[3], "");
+        }
+        let blank = StorageSettings::from_env().unwrap();
+        assert_eq!(blank.memory_driver, None);
+        assert_eq!(blank.memory_api_key, None);
+
+        unsafe {
+            for key in KEYS {
+                std::env::remove_var(key);
+            }
+        }
+        let unset = StorageSettings::from_env().unwrap();
+        assert!(!unset.allow_unproven_remote);
+        assert_eq!(unset.memory_driver, None);
+        assert_eq!(unset.memory_url, None);
+        assert_eq!(unset.memory_api_key, None);
+
+        unsafe {
+            for (key, value) in prev {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn from_env_reads_memory_backend() {
         // SAFETY: single-threaded test; restores prior state.
         let prev = std::env::var("OPENCOMPANY_MEMORY").ok();
