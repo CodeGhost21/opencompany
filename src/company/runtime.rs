@@ -2174,6 +2174,11 @@ impl CompanyRuntime {
                 expires_at_millis: Some(
                     p.at_millis.saturating_add(self.approval_gate.ttl_millis()),
                 ),
+                // Issue #1024: the host's own classification, not the console's
+                // guess. `kind` is the tool name for a harness call, so this is
+                // the only field that distinguishes an outbound send from an
+                // internal effect.
+                group: p.effect.group,
                 task: p.task,
                 agent: p.effect.agent.clone(),
                 payload: crate::runtime::approval_display::display_payload(&p.effect),

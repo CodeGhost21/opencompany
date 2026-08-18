@@ -492,6 +492,15 @@ export function WorkflowsView({
   const appliedWorkflowRef = useRef<string | null>(null);
   const appliedRunRef = useRef<string | null>(null);
 
+  // Issue #1045: the deep-link id whose absent-path re-read is in flight, so
+  // that read is started at most once per id even though the follow effect
+  // reruns on every fresh `workflows` array. Deliberately SEPARATE from
+  // `appliedWorkflowRef`: an id is "applied" only once it has RESOLVED — got
+  // selected, or was confirmed missing after a fresh read — whereas an id whose
+  // re-read is still outstanding must stay unapplied, so a refresh that finally
+  // carries a graph authored elsewhere can still select it.
+  const resolvingWorkflowRef = useRef<string | null>(null);
+
   // How many local writes have landed. Compared across the list effect's await
   // so a `GET …/workflows` that was already in flight when a create, save or
   // delete completed cannot paint the picker with rows that predate it — the
@@ -614,27 +623,87 @@ export function WorkflowsView({
   // clicks a second task card's link without ever leaving this tab, so the
   // first-load resolution above never runs again.
   //
-  // Guarded to once per distinct id: this also reruns whenever `workflows` gets
+  // Guarded to once per RESOLVED id: this also reruns whenever `workflows` gets
   // a new array (a create, a rename, a company switch), and re-applying the URL
   // then would yank the selection back from wherever the operator had moved it.
   // A no-longer-current `sub` — the operator picked something else, so the hash
   // no longer matches — is left alone precisely because it was already applied.
+  //
+  // Issue #1045: an id is recorded in `appliedWorkflowRef` ONLY once it has
+  // resolved — selected, or confirmed missing after a fresh read. An id that is
+  // merely absent from the list on screen right now must NOT be frozen there:
+  // a graph the orchestrator (or another session) authored lands in the picker
+  // a beat after its link is followed, and that later refresh has to be allowed
+  // to select it. And an absent id no longer toasts on sight — it toasts only
+  // after a fresh re-read still cannot find it, which is what tells "renamed or
+  // deleted" apart from "authored elsewhere and not pulled into this tab yet".
   useEffect(() => {
     if (!requestedWorkflowId || workflows.length === 0) return;
     if (appliedWorkflowRef.current === requestedWorkflowId) return;
-    appliedWorkflowRef.current = requestedWorkflowId;
+    // Present in the list already on screen: select it, done. Marking it applied
+    // HERE, inside the present branch, is half the #1045 fix — an absent id must
+    // never reach the ref, or a later refresh carrying it would early-return
+    // above instead of selecting it.
     if (workflows.some((w) => w.id === requestedWorkflowId)) {
+      appliedWorkflowRef.current = requestedWorkflowId;
       setSelectedId(requestedWorkflowId);
       return;
     }
-    // Say so rather than silently showing a different graph: the operator
-    // followed a link expecting one specific workflow, and a canvas quietly
-    // painting another one is worse than no canvas at all.
-    toast.error(`This company has no workflow “${requestedWorkflowId}”.`, {
-      description:
-        "It may have been renamed or deleted since the link was made. Showing the current selection instead.",
-    });
-  }, [requestedWorkflowId, workflows]);
+    // Absent from the list on screen. Before #1045 this toasted straight away,
+    // against whatever the picker happened to hold the instant the id was first
+    // seen — on a link followed to a just-authored graph, a list that predates
+    // it — so the operator got a false "no workflow" and the canvas never
+    // resolved. Re-read the list first, and decide on the fresh answer. At most
+    // one read per requested id (the effect reruns on every `workflows` array).
+    if (resolvingWorkflowRef.current === requestedWorkflowId) return;
+    resolvingWorkflowRef.current = requestedWorkflowId;
+    let live = true;
+    const target = requestedWorkflowId;
+    const writesBefore = localWriteRef.current;
+    (async () => {
+      try {
+        const rows = await listWorkflows(client, company);
+        // Same liveness discipline as the list effect above: bail if the view
+        // unmounted or a dependency changed under us (both flip `live` via this
+        // effect's cleanup), and drop the rows if a local write landed while the
+        // read was in flight — that write holds newer truth than a read which
+        // predates it.
+        if (!live) return;
+        if (localWriteRef.current !== writesBefore) return;
+        if (appliedWorkflowRef.current === target) return;
+        appliedWorkflowRef.current = target;
+        if (rows.some((r) => r.id === target)) {
+          // The graph exists after all — authored elsewhere and not yet pulled
+          // into this tab. Adopt the fresh list so the picker shows it too, and
+          // select it. No toast: nothing was wrong.
+          setWorkflows(rows);
+          setSelectedId(target);
+          return;
+        }
+        // Still absent after a fresh read: the link genuinely names a workflow
+        // this company no longer has. Say so, once.
+        toast.error(`This company has no workflow “${target}”.`, {
+          description:
+            "It may have been renamed or deleted since the link was made. Showing the current selection instead.",
+        });
+      } catch {
+        // A failed re-read is not proof the workflow is missing. Leave the id
+        // unresolved so a later refresh can still land it, rather than toasting
+        // a false "no workflow" off a transient network error.
+        if (live) resolvingWorkflowRef.current = null;
+      }
+    })();
+    return () => {
+      live = false;
+      // Let a rerun retry the re-read: this cleanup fires when a dependency
+      // changed the read out from under us (an unrelated list refresh, a company
+      // switch), and the abandoned read above will not clear the guard itself.
+      resolvingWorkflowRef.current = null;
+    };
+    // `requestedWorkflowId` and `workflows` drive the resolution; `client` and
+    // `company` scope the re-read. `listWorkflows`, `localWriteRef`,
+    // `setWorkflows`, `setSelectedId` are stable.
+  }, [requestedWorkflowId, workflows, client, company]);
 
   // Issue #339: mirror the selection back into the hash, so whatever is on the
   // canvas can be copied out of the address bar and shared.
