@@ -47,6 +47,7 @@ import {
   hasConfigForm,
 } from "@/lib/workflow-node-config";
 import { draftBanners } from "@/lib/workflow-draft";
+import { isSafeId, slugifyWorkflowId } from "@/lib/workflow-id";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
@@ -186,6 +187,17 @@ export function destinationTargetProblem(
   kind: DraftNode["destinationKind"],
   target: string,
   wiredChannels: string[],
+  /**
+   * Whether the wired-channel list has actually been answered (issue #1053).
+   *
+   * `wiredChannels.length > 0` used to stand in for this, which spells "the host
+   * offered none" and "we have not heard back yet" the same way — so an operator
+   * quick enough to press Create before the list landed got **weaker**
+   * validation than a slow one, and a wrong channel reached the host as a 400.
+   *
+   * Defaults to `true` so the pure callers that pass a real list are unchanged.
+   */
+  channelsLoaded = true,
 ): string | null {
   const value = target.trim();
   if (kind === "email" && !value.includes("@")) {
@@ -204,6 +216,15 @@ export function destinationTargetProblem(
   // who trips the pre-flight and an author who trips the 400 are told the same
   // thing. `operator` is no longer in the list the host serves — it never was a
   // delivery target — so this is what now catches it.
+  // Issue #1053: the check cannot be made yet, so say so instead of passing.
+  // Skipping here is what made a fast operator's draft *less* validated than a
+  // slow one's — they pressed Create before the list landed and met the host's
+  // 400 instead of this sentence. On a failed read the loader still reports
+  // "answered" with an empty list, so this is transient by construction and
+  // cannot wedge the form.
+  if (kind === "channel" && value && !channelsLoaded) {
+    return "Still checking which channels this company can deliver to — try again in a moment.";
+  }
   if (
     kind === "channel" &&
     value &&
@@ -359,12 +380,6 @@ function draftEdges(graph: WorkflowGraph): DraftEdge[] {
   }));
 }
 
-/** A safe on-disk id: only letters, digits, `_`, and `-` — a subset of what the
- * host's `safe_wid` accepts (any single path component), chosen to keep ids
- * simple and unambiguous without a round-trip to the server first. */
-function isSafeId(id: string): boolean {
-  return /^[A-Za-z0-9_-]+$/.test(id);
-}
 
 export function WorkflowCreateDialog({
   client,
@@ -418,6 +433,11 @@ export function WorkflowCreateDialog({
    * options for an output node's `channel` destination. Degrades to a free-text
    * box when the host offers no list, so authoring is never blocked. */
   const [wiredChannels, setWiredChannels] = useState<string[]>([]);
+  /**
+   * Whether the wired-channel read has answered (issue #1053) — success *or*
+   * failure. Both are answers; only "still in flight" is not.
+   */
+  const [channelsLoaded, setChannelsLoaded] = useState(false);
   /** The company's workflows, for the `sub_workflow` config picker (#541). The
    * graph's own id is dropped at render time — a sub-workflow can't call
    * itself. Degrades to a free-text id field when the host offers no list. */
@@ -427,6 +447,16 @@ export function WorkflowCreateDialog({
   /** The submit-time error banner, so a failed submit can scroll it into view
    * and focus it rather than leave the message off-screen (#813 defect 6). */
   const errorRef = useRef<HTMLDivElement>(null);
+  /**
+   * Whether the id is the operator's to own (issue #1053).
+   *
+   * `false` means the field is still derivable and the name may keep writing it;
+   * `true` means somebody decided it — the operator typed one, or a copilot
+   * draft supplied one — and the name must stop touching it. **Clobbering a
+   * deliberate id is a worse bug than the one being fixed**, so this latches on
+   * and only resets when the dialog reopens.
+   */
+  const [idTouched, setIdTouched] = useState(false);
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -478,6 +508,13 @@ export function WorkflowCreateDialog({
   // and keeping the edit would keep the stale token with it.
   useEffect(() => {
     if (!open) return;
+    // Issue #1053: a fresh open starts derivable again. Edit mode and the
+    // prefilled-draft branch below both re-latch it, because both arrive with an
+    // id somebody already chose.
+    setIdTouched(Boolean(workflow));
+    // Issue #1053: the read below re-runs on every open, so its answer is stale
+    // until it lands again.
+    setChannelsLoaded(false);
     setId(workflow?.id ?? "");
     setName(workflow?.name ?? "");
     setDescription(workflow?.description ?? "");
@@ -514,6 +551,9 @@ export function WorkflowCreateDialog({
     if (prefilledDraft) {
       const g = prefilledDraft.workflow;
       setId(workflow?.id ?? g.id);
+      // Issue #1053: a drafted id was chosen by the copilot, not left blank —
+      // editing the name afterwards must not slug over it.
+      setIdTouched(true);
       setName(g.name.trim());
       setDescription(g.description ?? "");
       setNodes(draftNodes(g));
@@ -552,9 +592,15 @@ export function WorkflowCreateDialog({
     (async () => {
       try {
         const channels = await listWiredChannels(client, company);
-        if (live) setWiredChannels(channels);
+        if (live) {
+          setWiredChannels(channels);
+          setChannelsLoaded(true);
+        }
       } catch {
-        if (live) setWiredChannels([]);
+        if (live) {
+          setWiredChannels([]);
+          setChannelsLoaded(true);
+        }
       }
     })();
     return () => {
@@ -666,7 +712,12 @@ export function WorkflowCreateDialog({
     if (field === "schedule") {
       problem = scheduleProblem(value);
     } else if (field === "destinationTarget") {
-      problem = destinationTargetProblem(node.destinationKind, value, wiredChannels);
+      problem = destinationTargetProblem(
+        node.destinationKind,
+        value,
+        wiredChannels,
+        channelsLoaded,
+      );
     } else if (field.startsWith("config:")) {
       const key = field.slice("config:".length);
       const spec = configFieldSpecs(node.kind).find((s) => s.key === key);
@@ -738,6 +789,7 @@ export function WorkflowCreateDialog({
         n.destinationKind,
         n.destinationTarget,
         wiredChannels,
+        channelsLoaded,
       );
       if (destinationProblem) return `Node \`${nodeLabel(n)}\`: ${destinationProblem}`;
       // Kind-specific config (issue #541): required keys, malformed JSON, the
@@ -1152,7 +1204,12 @@ export function WorkflowCreateDialog({
             <Input
               id={`${formId}-id`}
               value={id}
-              onChange={(e) => setId(e.target.value)}
+              onChange={(e) => {
+                // Issue #1053: the operator has taken the field — the name stops
+                // writing it, including when they clear it back to empty.
+                setIdTouched(true);
+                setId(e.target.value);
+              }}
               readOnly={editing}
               aria-readonly={editing || undefined}
               className={editing ? "text-muted-foreground" : undefined}
@@ -1170,7 +1227,22 @@ export function WorkflowCreateDialog({
             <Input
               id={`${formId}-name`}
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setName(next);
+                // Issue #1053: the form used to reject "Weekly digest" for a
+                // missing id, then reject "weekly digest" for an unsafe one —
+                // twice, for something it could derive. Derived only while the
+                // id is nobody's yet, and never in edit mode, where the id keys
+                // the saved graph and re-slugging it would be a rename.
+                if (editing || idTouched) return;
+                const derived = slugifyWorkflowId(next);
+                // An empty derivation means the name had nothing usable in it.
+                // Leave the field alone rather than writing "" — an empty id is
+                // itself invalid, and blanking a good id on a bad keystroke
+                // would be the clobber this guard exists to prevent.
+                if (derived) setId(derived);
+              }}
               placeholder="e.g. Campaign pipeline"
             />
           </div>

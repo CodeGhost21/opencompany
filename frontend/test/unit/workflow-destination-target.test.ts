@@ -29,3 +29,33 @@ describe("destinationTargetProblem — unwired channel", () => {
     expect(destinationTargetProblem("channel", "anything", [])).toBeNull();
   });
 });
+
+/**
+ * The load-order trap (issue #1053).
+ *
+ * `wiredChannels.length > 0` spelled two different states the same way: "the
+ * host offered no channels" and "the read has not answered yet". Skipping on
+ * both meant an operator quick enough to press Create before the list landed got
+ * *weaker* validation than a slow one — and met the host's 400 instead of this
+ * check.
+ */
+describe("destinationTargetProblem while the channel list is still loading", () => {
+  it("defers rather than passing a channel it cannot check yet", () => {
+    const problem = destinationTargetProblem("channel", "ghost", [], false);
+    expect(problem).toMatch(/still checking/i);
+  });
+
+  /**
+   * The distinction the flag exists for: an *answered* empty list is the
+   * degraded free-text case and must stay permissive, so a host that offers no
+   * channels never wrongly rejects an author.
+   */
+  it("stays permissive once an empty list is actually an answer", () => {
+    expect(destinationTargetProblem("channel", "anything", [], true)).toBeNull();
+  });
+
+  /** Not-yet-loaded only defers a check it would otherwise make. */
+  it("does not defer a destination kind it never checks against the list", () => {
+    expect(destinationTargetProblem("email", "someone@example.com", [], false)).toBeNull();
+  });
+});
