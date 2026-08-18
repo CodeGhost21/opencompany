@@ -323,6 +323,7 @@ async fn a_write_to_an_env_owned_field_is_refused() {
                 .into_iter()
                 .collect(),
             template: None,
+            company: None,
         },
         &env,
     )
@@ -997,4 +998,157 @@ async fn a_routable_host_refuses_an_anonymous_proposal() {
         StatusCode::OK,
         "an unauthenticated caller must not reach this on a routable host"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Applying a company the wizard designed
+// ---------------------------------------------------------------------------
+
+/// The manifest as it was persisted. `CompanyRuntime` exposes no accessor, and
+/// the record is the thing a restart would read back anyway.
+async fn seeded_manifest(home: &std::path::Path, id: &str) -> CompanyManifest {
+    let store = crate::store::FsCompanyStore::new(home.to_path_buf());
+    store
+        .load(&CompanyId::new(id))
+        .await
+        .expect("load")
+        .expect("the seeded company has a record")
+        .manifest
+}
+
+fn designed_company(email: Option<&str>) -> serde_json::Value {
+    let mut company = serde_json::json!({
+        "industry": "E-commerce — I sell homeware online",
+        "automate": "Meta ads, order dispatch",
+        "agents": [
+            { "name": "Meta Ads", "role": "Meta Ads Specialist", "description": "Campaigns and budgets." },
+            { "name": "Dispatch", "role": "Order Dispatch Coordinator", "description": "Paid to delivered." },
+            { "name": "Accounts", "role": "Accountant", "description": "Margins and spend." },
+            { "name": "Ops", "role": "Operations Lead", "description": "Unblocks the team." }
+        ]
+    });
+    if let Some(email) = email {
+        company["adminEmail"] = serde_json::Value::String(email.to_string());
+    }
+    company
+}
+
+/// The merge, end to end over HTTP: three answers and a reviewed roster become
+/// a registered company, with no template involved.
+#[tokio::test]
+async fn an_apply_seeds_the_company_the_wizard_designed() {
+    let home = home();
+    let state = fresh_state(home.path());
+    assert!(state.registry().is_empty(), "the premise: nothing yet");
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({ "company": designed_company(Some("ada@example.com")) }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let seeded = body["seeded_company"]
+        .as_str()
+        .expect("a company was seeded");
+    assert!(
+        state.registry().get(&CompanyId::new(seeded)).is_some(),
+        "the seeded company is registered"
+    );
+    let manifest = seeded_manifest(home.path(), seeded).await;
+    let roles: Vec<&str> = manifest.agents.iter().map(|a| a.role.as_str()).collect();
+    assert!(roles.contains(&"Order Dispatch Coordinator"), "{roles:?}");
+    assert_eq!(manifest.agents.len(), 4, "{roles:?}");
+    // The dead end this closes: without the address, email sign-in completes
+    // and nobody can log in.
+    assert_eq!(manifest.users.admins, vec!["ada@example.com".to_string()]);
+    // Indistinguishable from a provisioned company.
+    assert_eq!(
+        manifest.policy.mode,
+        crate::company::PROVISIONED_POLICY_MODE
+    );
+}
+
+/// A designed company beats a template slug. An operator who answered three
+/// questions and edited a roster has expressed a preference a preset cannot
+/// override — and sending both must never produce two companies.
+#[tokio::test]
+async fn a_designed_company_wins_over_a_template() {
+    let home = home();
+    let state = fresh_state(home.path());
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({
+            "template": "agentic_marketing_agency",
+            "company": designed_company(None),
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(state.registry().list().len(), 1, "exactly one company");
+    let seeded = body["seeded_company"].as_str().expect("seeded");
+    assert_eq!(
+        seeded_manifest(home.path(), seeded).await.agents.len(),
+        4,
+        "the designed roster, not the template's"
+    );
+}
+
+/// The re-run guard applies to a designed company exactly as it does to a
+/// template: setup must never hand an operator a second starter company.
+#[tokio::test]
+async fn a_second_apply_does_not_seed_another_company() {
+    let home = home();
+    let state = fresh_state(home.path());
+    with_company(&state, home.path()).await;
+
+    let (status, body) = post_setup(
+        state.clone(),
+        serde_json::json!({ "company": designed_company(None) }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["seeded_company"].is_null(),
+        "a host with a company must not be handed a second: {body}"
+    );
+    assert_eq!(state.registry().list().len(), 1);
+}
+
+/// The roster arrives over the wire after an operator edited it, so neither the
+/// bounds nor the de-duplication can be assumed to have survived. Validation
+/// runs again on the way in rather than trusting the client.
+#[tokio::test]
+async fn an_edited_roster_is_revalidated_on_the_way_in() {
+    let home = home();
+    let state = fresh_state(home.path());
+
+    let mut company = designed_company(None);
+    // Two rows that slug alike, and a blank one — all three are things a client
+    // could send and `validate` would refuse.
+    company["agents"] = serde_json::json!([
+        { "name": "Ops", "role": "Ops Lead", "description": "a" },
+        { "name": "Ops", "role": "ops  lead", "description": "b" },
+        { "name": "", "role": "   ", "description": "c" },
+        { "name": "Accounts", "role": "Accountant", "description": "d" }
+    ]);
+
+    let (status, body) = post_setup(state.clone(), serde_json::json!({ "company": company })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let seeded = body["seeded_company"].as_str().expect("seeded");
+    let manifest = seeded_manifest(home.path(), seeded).await;
+    assert!(
+        manifest.validate().is_empty(),
+        "a registered company must be valid: {:?}",
+        manifest.validate()
+    );
+    let ids: Vec<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+    let mut unique = ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), ids.len(), "duplicate ids survived: {ids:?}");
 }

@@ -343,6 +343,39 @@ pub async fn seed_company(
     Ok(id)
 }
 
+/// Registers a company the first-run wizard **designed**, rather than one copied
+/// from a preset.
+///
+/// The sibling of [`seed_company`], and deliberately a separate entry point: a
+/// generated company carries no [`TemplateProvenance`], because it did not come
+/// from a template. Stamping the reference roster's slug there would claim a
+/// lineage the company does not have, and provenance is exposed verbatim on the
+/// API surfaces — an operator reading `ecommerce` would reasonably conclude
+/// their company *is* that template and could be re-seeded from it.
+///
+/// The manifest is expected to have come from
+/// [`manifest_from_setup`](crate::company::setup::manifest_from_setup), which is
+/// what guarantees it validates.
+pub async fn seed_generated_company(
+    state: &AppState,
+    manifest: CompanyManifest,
+) -> Result<crate::ports::types::CompanyId> {
+    let problems = manifest.validate();
+    if !problems.is_empty() {
+        // Refused rather than registered: a company that fails validation would
+        // boot into a state the operator cannot fix from the console, and they
+        // typed nothing wrong to get here.
+        return Err(crate::OpenCompanyError::Config(format!(
+            "the company this setup designed is not valid: {}",
+            problems.join("; ")
+        )));
+    }
+    let id = company_id_from_name(&manifest.company.name);
+    register(state, id.clone(), manifest, None).await?;
+    tracing::info!(company = %id, "seeded a company designed by first-run setup");
+    Ok(id)
+}
+
 /// Builds one company over the instance home and puts it in the registry.
 async fn register(
     state: &AppState,

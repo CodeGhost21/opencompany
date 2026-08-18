@@ -190,6 +190,40 @@ pub struct SetupRequest {
     /// already has a company — setup must never hand an operator a second
     /// starter company on a re-run.
     pub template: Option<String>,
+    /// A company the wizard **designed**, from the operator's answers and the
+    /// roster they reviewed.
+    ///
+    /// Takes precedence over [`Self::template`] when both are present: an
+    /// operator who answered three questions and edited a roster has expressed
+    /// a preference that a template slug cannot override. The template path
+    /// stays for `desktop::bootstrap_companies` and for any caller that still
+    /// wants a preset.
+    pub company: Option<SetupCompany>,
+}
+
+/// The company the wizard designed, as it arrives from the review step.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SetupCompany {
+    industry: String,
+    team_hint: String,
+    automate: String,
+    /// The roster **as reviewed** — renamed, trimmed and reordered by the
+    /// operator. Sent back rather than regenerated, so what they approved is
+    /// exactly what gets built; a second pass could return something else.
+    agents: Vec<SetupCompanyAgent>,
+    /// The address that will be able to sign in. Written into `[users].admins`,
+    /// which is the only reason a laptop operator who chose email sign-in is
+    /// not locked out of the company they just made.
+    admin_email: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SetupCompanyAgent {
+    name: String,
+    role: String,
+    description: String,
 }
 
 /// What the apply returns.
@@ -670,8 +704,38 @@ async fn apply_inner(
     // Seed the template only when the host has no company. A re-run must never
     // hand the operator a second starter company, which is the same reason
     // `desktop::bootstrap_companies` seeds only as a fallback.
-    let seeded = match (&req.template, state.registry().is_empty()) {
-        (Some(template), true) => {
+    let seeded = match (&req.company, &req.template, state.registry().is_empty()) {
+        // A designed company wins over a template slug: the operator answered
+        // three questions and edited the roster, which a preset cannot override.
+        (Some(designed), _, true) => {
+            let answers = crate::company::setup::SetupAnswers {
+                industry: designed.industry.clone(),
+                team_hint: designed.team_hint.clone(),
+                automate: designed.automate.clone(),
+            };
+            let agents: Vec<crate::company::setup::ProposedAgent> = designed
+                .agents
+                .iter()
+                .map(|a| crate::company::setup::ProposedAgent {
+                    name: a.name.clone(),
+                    role: a.role.clone(),
+                    description: a.description.clone(),
+                })
+                .collect();
+            // Validated again on the way in, for the same reason the roster pass
+            // validates the model's answer: this arrived over the wire and the
+            // operator edited it, so neither the bounds nor the de-duplication
+            // can be assumed to have survived.
+            let agents = crate::company::setup::validate_roster(agents);
+            let manifest = crate::company::setup::manifest_from_setup(
+                &answers,
+                &agents,
+                designed.admin_email.as_deref(),
+            );
+            let id = crate::desktop::seed_generated_company(state, manifest).await?;
+            Some(id.as_ref().to_string())
+        }
+        (None, Some(template), true) => {
             let id = crate::desktop::seed_company(state, template).await?;
             Some(id.as_ref().to_string())
         }
