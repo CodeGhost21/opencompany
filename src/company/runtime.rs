@@ -1128,6 +1128,21 @@ impl CompanyRuntime {
         let _drained = self.serial.lock().await;
     }
 
+    /// Marks this runtime quiesced **without** draining it (issue #986).
+    ///
+    /// The drain half of [`quiesce`](Self::quiesce) proves the in-flight cycle
+    /// finished. This is for a runtime that cannot have one: the registry calls
+    /// it while a company is being registered during shutdown, before anything
+    /// can reach the runtime to start a cycle on it. There is nothing to wait
+    /// for, and waiting would mean taking `serial` — which on a rebuild
+    /// successor is the *predecessor's* lock, so this would park behind the very
+    /// turn the swap is handing over.
+    ///
+    /// Not a substitute for `quiesce` anywhere a cycle could already be running.
+    pub(crate) fn mark_quiesced(&self) {
+        self.quiesced.store(true, Ordering::SeqCst);
+    }
+
     /// Puts a quiesced runtime back to work.
     ///
     /// Called when a rebuild fails: a company left quiesced would refuse every
