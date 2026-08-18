@@ -1094,8 +1094,10 @@ struct RevisionPath {
 #[serde(rename_all = "camelCase")]
 struct RestoreRevisionBody {
     /// The token from the `GET`/`PUT` the operator was looking at when they hit
-    /// Restore. Omit for an unconditional restore; the console always sends it,
-    /// and on a `409` should reload rather than retry — the graph moved under it.
+    /// Restore. **Required** (issue #1013): an absent token — or an absent body —
+    /// is a `400`, not an unconditional restore, so a stale editor can't overwrite
+    /// a concurrent save. On a `409` reload rather than retry — the graph moved
+    /// under it.
     #[serde(default)]
     expected_version: Option<String>,
 }
@@ -1111,10 +1113,15 @@ struct RestoreRevisionBody {
 /// itself undoable), the optimistic-concurrency token, and the #276 disarm of a
 /// restored schedule.
 ///
-/// Statuses: `200` (restored), `400` (the revision is invalid against the
-/// current record — e.g. it names a since-removed teammate), `404` (unknown
-/// `wid` or unknown `rev`), `409` (seed-backed / body-less `wid`, a stale
-/// `expectedVersion`, or a name collision).
+/// `expectedVersion` is **required** (issue #1013), aligning restore with `PUT`:
+/// an absent token — or an omitted body — used to mean an unconditional restore,
+/// so a stale editor could overwrite a concurrent save. A missing token is now a
+/// `400`.
+///
+/// Statuses: `200` (restored), `400` (a missing `expectedVersion`, or the
+/// revision is invalid against the current record — e.g. it names a since-removed
+/// teammate), `404` (unknown `wid` or unknown `rev`), `409` (seed-backed /
+/// body-less `wid`, a stale `expectedVersion`, or a name collision).
 async fn restore_workflow_revision(
     company: ScopedCompany,
     Path(RevisionPath { wid, rev }): Path<RevisionPath>,
@@ -1125,7 +1132,17 @@ async fn restore_workflow_revision(
             "workflow {wid}"
         ))));
     }
-    let expected = body.and_then(|Json(b)| b.expected_version);
+    // `expectedVersion` is required (issue #1013). Resolve it from the optional
+    // body; an absent token or an absent body alike is a 400, not an
+    // unconditional restore, so a stale editor can't clobber a concurrent save.
+    let Some(expected) = body.and_then(|Json(b)| b.expected_version) else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "`expectedVersion` is required: read this workflow and send back its `version`. A \
+             restore replaces the current graph, so doing it without the version you read from \
+             could silently overwrite a change made since."
+                .to_string(),
+        )));
+    };
     let file = rollback_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -1134,7 +1151,7 @@ async fn restore_workflow_revision(
         Some(company.runtime.events()),
         &wid,
         &rev,
-        expected.as_deref(),
+        Some(expected.as_str()),
     )
     .await
     .map_err(ApiError)?;
@@ -5788,7 +5805,9 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
-            create_then_edit_greeter(&state).await;
+            // The token of the now-current (edited) graph — the one the restore
+            // replaces, and which it must carry (required since #1013).
+            let current = create_then_edit_greeter(&state).await;
 
             // Discover the revision id from the list.
             let list = json_body(
@@ -5804,12 +5823,12 @@ mod tests {
             .await;
             let rev_id = list["revisions"][0]["id"].as_str().unwrap().to_string();
 
-            // Restore it (unconditionally — no expectedVersion).
+            // Restore it, carrying the current graph's token.
             let response = router(state.clone())
                 .oneshot(request(
                     "POST",
                     &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
-                    Some(serde_json::json!({})),
+                    Some(serde_json::json!({ "expectedVersion": current })),
                 ))
                 .await
                 .unwrap();
@@ -5860,17 +5879,62 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
-            create_then_edit_greeter(&state).await;
+            // A token is required (issue #1013), so send one; the unknown revision
+            // is resolved before the token is ever compared, so this stays a 404.
+            let current = create_then_edit_greeter(&state).await;
 
             let response = router(state)
                 .oneshot(request(
                     "POST",
                     "/api/v1/company/workflows/greeter/revisions/no-such-rev/restore",
-                    Some(serde_json::json!({})),
+                    Some(serde_json::json!({ "expectedVersion": current })),
                 ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// **The silent-clobber guard on restore (issue #1013).** A restore with
+        /// no token — like an omitted body — used to overwrite unconditionally,
+        /// so a stale editor could clobber a concurrent save. It is now a `400`
+        /// that tells the operator to re-read and send the `version`.
+        #[tokio::test]
+        async fn a_restore_without_a_token_is_rejected() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_then_edit_greeter(&state).await;
+
+            // Discover a real revision id so the 400 is about the missing token,
+            // not the revision.
+            let list = json_body(
+                router(state.clone())
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/greeter/revisions",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let rev_id = list["revisions"][0]["id"].as_str().unwrap().to_string();
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
+                    Some(serde_json::json!({})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(
+                message.contains("version") && message.contains("read"),
+                "the 400 must tell the operator to re-read and send the version: {body}"
+            );
         }
 
         /// A workflow that was never edited has an empty history — `200 []`, not
