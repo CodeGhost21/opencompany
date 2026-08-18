@@ -1545,7 +1545,13 @@ function isAgentsFolder(folder: FsNode | undefined): boolean {
 function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
   return [...items].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
-    return rosterDisplayName(a.name, names).localeCompare(rosterDisplayName(b.name, names));
+    // Only a roster folder's name is an id worth resolving. A direct file
+    // under `Agents/` is unusual but not impossible, and its raw name could
+    // coincidentally collide with a roster id — that must not reorder it by
+    // a display name it was never given one for.
+    return a.kind === "folder"
+      ? rosterDisplayName(a.name, names).localeCompare(rosterDisplayName(b.name, names))
+      : a.name.localeCompare(b.name);
   });
 }
 

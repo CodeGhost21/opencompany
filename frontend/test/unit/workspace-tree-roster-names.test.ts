@@ -132,6 +132,29 @@ describe("the workspace tree", () => {
     expect(container.textContent).not.toContain("Backend Engineer");
   });
 
+  it("sorts a direct Agents/ file by its raw name, not a roster id it happens to match", async () => {
+    // Only a roster *folder*'s name is an id worth resolving into a display
+    // name for sorting. A file living directly under `Agents/` is unusual but
+    // legal, and its raw name could coincidentally collide with a roster id —
+    // that collision must not reorder it by a display name it was never given
+    // one for (it still renders under its raw name either way; only the sort
+    // key is at stake here).
+    const tree = [
+      node({ id: "agents-root", name: "Agents", kind: "folder" }),
+      node({ id: "f-alpha", name: "alpha-id", kind: "file", parentId: "agents-root" }),
+      node({ id: "f-zeta", name: "zeta-id", kind: "file", parentId: "agents-root" }),
+    ];
+    // Display-name order (if files were wrongly resolved) is reversed:
+    // zeta-id -> "Alex" sorts before alpha-id -> "Zoe".
+    const team = [member("alpha-id", "Zoe"), member("zeta-id", "Alex")];
+
+    await render(client(tree, team));
+
+    const text = container.textContent ?? "";
+    expect(text.indexOf("alpha-id")).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf("zeta-id")).toBeGreaterThan(text.indexOf("alpha-id"));
+  });
+
   it("falls back to the raw id when the roster has no name for it", async () => {
     // An id the roster does not carry (not loaded, deleted, or a host with no
     // `/team` route at all) must still render something — never a blank row.
