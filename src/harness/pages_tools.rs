@@ -254,7 +254,7 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
 
     for item in &module.body {
         if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
-            let spec = import.src.value.as_str();
+            let spec = import.src.value.as_str().unwrap_or_default();
             if !ALLOWED_IMPORTS.contains(&spec) {
                 return Err(format!(
                     "import \"{spec}\" is not allowed in a dashboard page. Only {allowed} may be \
