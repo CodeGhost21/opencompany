@@ -194,17 +194,23 @@ export function destinationTargetProblem(
   if (kind === "channel" && !value) {
     return "A channel destination needs a channel id — name the channel to post the report to.";
   }
-  // #813: when the host told us which channels are wired, a target that is not
-  // one of them would only fail at delivery (`ChannelNotWired`) — catch it at
-  // author time instead. Skipped when the list is empty (host offered none), so
-  // a degraded free-text box is never wrongly rejected.
+  // #813: when the host told us which channels it can deliver to, a target that
+  // is not one of them is refused when the workflow is saved (#981) and, for a
+  // graph saved before a desk went away, fails at delivery (`ChannelNotWired`) —
+  // catch it at author time instead. Skipped when the list is empty (host
+  // offered none), so a degraded free-text box is never wrongly rejected.
+  //
+  // #981: the same sentence the host's save-time rejection carries, so an author
+  // who trips the pre-flight and an author who trips the 400 are told the same
+  // thing. `operator` is no longer in the list the host serves — it never was a
+  // delivery target — so this is what now catches it.
   if (
     kind === "channel" &&
     value &&
     wiredChannels.length > 0 &&
     !wiredChannels.includes(value)
   ) {
-    return `\`${value}\` is not a wired channel — this deployment has: ${wiredChannels.join(", ")}.`;
+    return `\`${value}\` is not a workflow delivery channel — this runtime has: ${wiredChannels.join(", ")}.`;
   }
   return null;
 }
@@ -1686,8 +1692,12 @@ function NodeRow({
             </Select>
             {node.destinationKind === "channel" && wiredChannels.length > 0 && (
               <>
-                {/* #813: pick from the channels actually wired for this company,
-                    instead of a free-text box that only fails at delivery time. */}
+                {/* #813: pick from the channels this company can actually
+                    deliver to, instead of a free-text box that only fails at
+                    delivery time. #981: the host no longer includes `operator`
+                    in that list — it is an in-memory response surface with no
+                    durable reader, and delivery refuses it by name — so the
+                    picker can no longer offer it. */}
                 <Select
                   value={node.destinationTarget || ""}
                   onValueChange={(v) => {
@@ -1732,6 +1742,17 @@ function NodeRow({
               <p className="text-2xs leading-snug text-muted-foreground">
                 Only sends if this company grants email and the recipient has
                 already written in.
+              </p>
+            )}
+            {/* #981: an empty list is now a legitimate answer — a company with
+                no desks and no connected channels has nowhere to post a report,
+                so the free-text box above is the honest fallback rather than a
+                picker of one bad option. Say why it is empty; without this the
+                author sees a blank box and no reason. */}
+            {node.destinationKind === "channel" && wiredChannels.length === 0 && (
+              <p className="text-2xs leading-snug text-muted-foreground">
+                No delivery channels are wired for this company — add a desk, or
+                connect a channel, before a report can be posted to one.
               </p>
             )}
           </>

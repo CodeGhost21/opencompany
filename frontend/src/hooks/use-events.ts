@@ -148,6 +148,22 @@ export type CompanyStreamEvent =
       atMillis: number;
       approvalId: string;
       verdict: string;
+      /**
+       * The **host** resolved this, not a person (#971) — an approval that sat
+       * past its deadline and was declined on its own.
+       *
+       * A bit derived from the event's actor, never the actor itself: this feed
+       * is deny-by-default and carries no `by` and no user id, which is a
+       * property the host asserts. It answers the only question the console has
+       * — "did somebody decide this?" — and answering it matters because
+       * without it an expiry toasted "Approval denied", telling an operator
+       * they had declined a request they never saw.
+       *
+       * Absent on a person's own decision and against a host that predates the
+       * field. Both mean the same thing to a reader: treat it as a decision
+       * somebody made, exactly as before.
+       */
+      automatic?: boolean;
     }
   | {
       type: "lifecycle_changed";
@@ -693,12 +709,26 @@ export function handleEvent(
       // Refresh first, then say so. The refresh is what settles an inline card
       // whose decision was made on the Approvals page (or in another tab).
       onApprovalEvent?.(event);
-      toast(
-        event.verdict === "approve" ? "Approval granted" : "Approval denied",
-        {
-          description: "An approval was just resolved.",
-        },
-      );
+      // #971: an expiry is a resolution — a default-deny on silence — but it is
+      // not a decision anybody made. Saying "Approval denied" for one told the
+      // operator they had declined something they never saw, and shortening the
+      // deadline to 24 hours turns that from rare into routine. So the
+      // host-resolved case gets its own words, and only that case: `automatic`
+      // is set solely on the System arm, so a person's own decision reads
+      // exactly as it did before.
+      if (event.automatic) {
+        toast("Approval expired", {
+          description:
+            "It passed its deadline with no decision, so it was declined.",
+        });
+      } else {
+        toast(
+          event.verdict === "approve" ? "Approval granted" : "Approval denied",
+          {
+            description: "An approval was just resolved.",
+          },
+        );
+      }
       break;
     case "lifecycle_changed":
       toast(`Company is now ${event.to}`, {

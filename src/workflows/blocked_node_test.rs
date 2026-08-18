@@ -585,3 +585,85 @@ mod pure {
         assert!(run.approvals.is_empty());
     }
 }
+
+// ── a graph with nothing to run (issue #976) ────────────────────────────────
+
+/// The `campaign` / `QA Test Pipeline` shape from staging: a graph whose only
+/// node is the trigger that starts it.
+fn stageless_graph() -> String {
+    r#"
+id = "campaign"
+name = "Campaign"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+"#
+    .to_string()
+}
+
+/// A run of a stage-less graph says so.
+///
+/// This is the half of #976 that is about honesty rather than prevention.
+/// `QA Test Pipeline` had **six recorded runs** that could not have done
+/// anything: the engine runs such a graph happily, no stage fails because there
+/// is no stage, and it settles as an ordinary finished run. A run row that says
+/// nothing is its own small lie — from the run list it is indistinguishable
+/// from a run that did work.
+#[tokio::test]
+async fn a_run_of_a_stageless_graph_says_it_had_nothing_to_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (run, _journal, _transcript) =
+        run_pipeline_over(dir.path(), &stageless_graph(), Vec::new()).await;
+
+    assert!(
+        run.notices
+            .iter()
+            .any(|n| n.contains("no stage to run") && n.contains("Add at least one node")),
+        "the operator is told the run had nothing to do, and what to do about it: {:?}",
+        run.notices
+    );
+}
+
+/// ...and it is a **notice**, not a failure. An empty graph is not a broken
+/// one: nothing was attempted and nothing went wrong, so putting a
+/// half-authored stub in the failure count beside runs that genuinely failed
+/// would trade one misreading for another. The same call `#638` made for the
+/// approval-overflow notice this rides alongside, and `#925` made one level
+/// down for `NoDestinationConfigured`.
+#[tokio::test]
+async fn a_stageless_run_is_not_recorded_as_a_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let (run, _journal, _transcript) =
+        run_pipeline_over(dir.path(), &stageless_graph(), Vec::new()).await;
+
+    assert!(
+        run.blocked_nodes.is_empty(),
+        "nothing was blocked: {:?}",
+        run.blocked_nodes
+    );
+    assert!(
+        run.pending_approvals.is_empty(),
+        "nothing is waiting on a person: {:?}",
+        run.pending_approvals
+    );
+}
+
+/// An ordinary graph raises no such notice. Without this the assertion above
+/// would pass against a build that notices on every run, which would train an
+/// operator to skip the one that matters.
+#[tokio::test]
+async fn a_graph_with_a_stage_raises_no_stageless_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let (run, _journal, _transcript) = run_pipeline(
+        dir.path(),
+        vec![Turn::Say("Wrote the spec."), Turn::Say("Reviewed it.")],
+    )
+    .await;
+
+    assert!(
+        !run.notices.iter().any(|n| n.contains("no stage to run")),
+        "a graph that can run must stay quiet: {:?}",
+        run.notices
+    );
+}

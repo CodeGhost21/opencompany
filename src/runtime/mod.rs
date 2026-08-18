@@ -75,6 +75,10 @@ pub mod grants;
 pub mod handover;
 pub mod journal;
 pub mod mailbox_poller;
+/// Issue #971: [`MaintenanceTicker`] — the process-wide minute loop that retires
+/// expired approvals, expired grants and stale fire claims for EVERY registered
+/// company, not only those with a manifest `[[schedule]]`. See [`maintenance`].
+pub mod maintenance;
 /// Issue #290: replacing a registered company's runtime in place, so first-time
 /// BYOK setup takes effect without a process restart. See [`rebuild`].
 pub mod rebuild;
@@ -128,11 +132,15 @@ pub mod workspace_quota;
 pub use advance::{SYSTEM_ATTRIBUTION, advance_settled_card, append_result};
 pub use board_events::{BoardAnnouncer, CHANGE_OPENED, CHANGE_REMOVED, CHANGE_UPDATED};
 pub use builder::{RuntimeBuilder, company_id_from_name};
-pub use channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
+pub use channel::{
+    DeskChannel, OPERATOR_CHANNEL, OperatorChannel, is_deliverable_channel,
+    undeliverable_channel_message,
+};
 pub use cron::{CivilTime, CronExpr};
 pub use cycle::CycleRunner;
 pub use derived_guard::DerivedGuardWorkspace;
 pub use handover::RuntimeHandover;
+pub use maintenance::MaintenanceTicker;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;
 #[cfg(feature = "github")]
