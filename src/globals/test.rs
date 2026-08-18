@@ -26,6 +26,39 @@ fn the_baseline_is_not_empty() {
 }
 
 #[test]
+fn one_malformed_global_agent_does_not_drop_the_rest() {
+    // `build_agents` must keep every global that parsed even when a sibling
+    // file is broken — the fault-isolation contract this module's docs
+    // promise ("a company must still reach the rest of its baseline when one
+    // global is broken"). Exercised against `agents_from` directly, with a
+    // fake reader, so this does not depend on the shipped baseline actually
+    // containing a bad file.
+    let names = vec!["broken.toml".to_string(), "ok.toml".to_string()];
+    let mut faults = Vec::new();
+
+    let agents = agents_from(
+        &names,
+        &|rel| match rel {
+            "broken.toml" => Ok("not valid toml {{{".to_string()),
+            "ok.toml" => Ok("role = \"Fine\"\n".to_string()),
+            _ => Err(std::io::ErrorKind::NotFound),
+        },
+        &mut faults,
+    );
+
+    assert_eq!(
+        agents.len(),
+        1,
+        "the valid global still loads despite its malformed sibling: {agents:?}"
+    );
+    assert_eq!(agents[0].id, "ok");
+    assert!(
+        faults.iter().any(|f| f.contains("broken")),
+        "the malformed file is reported rather than silently dropped: {faults:?}"
+    );
+}
+
+#[test]
 fn no_global_agent_orchestrates() {
     for agent in agents() {
         assert_ne!(
