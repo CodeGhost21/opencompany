@@ -2116,8 +2116,7 @@ impl CompanyRuntime {
                 // resolution of it is a second thing that can disagree — the
                 // card would then promise a deadline the gate does not enforce.
                 expires_at_millis: Some(
-                    p.at_millis
-                        .saturating_add(self.approval_gate.ttl_millis()),
+                    p.at_millis.saturating_add(self.approval_gate.ttl_millis()),
                 ),
                 task: p.task,
                 agent: p.effect.agent.clone(),
