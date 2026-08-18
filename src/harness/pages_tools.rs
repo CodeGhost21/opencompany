@@ -153,6 +153,7 @@ pub const ALLOWED_IMPORTS: &[&str] = &[
 ];
 
 /// The result of compiling one `Page.tsx`.
+#[derive(Debug)]
 pub struct CompiledPage {
     /// The rendered ES module, ready to serve as `Page.compiled.mjs`.
     pub code: String,
