@@ -150,6 +150,12 @@ pub struct PruneReport {
 /// the journal, has no sequence, and says only that a live receiver fell behind.
 /// Consumers must discard incremental assumptions and re-read durable state.
 #[derive(Clone, Debug, PartialEq)]
+// `Event` is deliberately stored by value rather than boxed: these items are
+// produced one at a time by a live event stream and consumed immediately —
+// never collected into an owning container — so the large_enum_variant
+// optimization (boxing the larger arm to shrink the enum) would only add a
+// heap allocation to the per-event hot path without any size benefit.
+#[allow(clippy::large_enum_variant)]
 pub enum EventStreamItem {
     /// One durable event appended after the subscription opened.
     Event(StoredEvent),
