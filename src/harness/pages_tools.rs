@@ -257,28 +257,92 @@ pub fn compile_page(source: &str) -> Result<CompiledPage, String> {
     Ok(CompiledPage { code })
 }
 
-/// Refuses `module` if any `import` names a specifier outside
+/// Refuses `module` if any import/re-export names a specifier outside
 /// [`ALLOWED_IMPORTS`]. Runs on the freshly parsed AST, before any transform.
+///
+/// This is a full AST walk, not just the top-level `ImportDecl`s: it also
+/// rejects `export * from "…"`, `export { x } from "…"`, and dynamic
+/// `import("…")` — all of which carry a specifier the browser would otherwise
+/// fetch outside the served import map, so the allow-list would be a lie if it
+/// only looked at static top-level imports.
 fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(), String> {
-    use swc_core::ecma::ast::{ModuleDecl, ModuleItem};
+    use swc_core::ecma::ast::{CallExpr, Callee, ExportAll, ImportDecl, NamedExport, Str};
+    use swc_core::ecma::visit::{Visit, VisitWith};
 
-    for item in &module.body {
-        if let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item {
-            let spec = import.src.value.as_str().unwrap_or_default();
-            if !ALLOWED_IMPORTS.contains(&spec) {
-                return Err(format!(
-                    "import \"{spec}\" is not allowed in a dashboard page. Only {allowed} may be \
-                     imported.",
-                    allowed = ALLOWED_IMPORTS
-                        .iter()
-                        .map(|s| format!("\"{s}\""))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ));
+    struct PageImportCheck<'a> {
+        allowed: &'a [&'a str],
+        disallowed: Option<String>,
+    }
+
+    impl Visit for PageImportCheck<'_> {
+        fn visit_import_decl(&mut self, n: &ImportDecl) {
+            Self::note(&mut self.disallowed, self.allowed, n.src.value.as_str(), None);
+        }
+
+        fn visit_export_all(&mut self, n: &ExportAll) {
+            Self::note(
+                &mut self.disallowed,
+                self.allowed,
+                n.src.value.as_str(),
+                Some("via `export * from`"),
+            );
+        }
+
+        fn visit_named_export(&mut self, n: &NamedExport) {
+            if let Some(src) = &n.src {
+                Self::note(
+                    &mut self.disallowed,
+                    self.allowed,
+                    src.value.as_str(),
+                    Some("via `export … from`"),
+                );
             }
         }
+
+        fn visit_call_expr(&mut self, n: &CallExpr) {
+            if matches!(n.callee, Callee::Import(_)) {
+                if self.disallowed.is_none() {
+                    let spec = match n.args.first().map(|a| &a.expr) {
+                        Some(swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(Str {
+                            value,
+                            ..
+                        }))) => value.as_str().to_string(),
+                        _ => "a dynamic `import(…)`".to_string(),
+                    };
+                    self.disallowed = Some(spec);
+                }
+            }
+            n.visit_children_with(self);
+        }
     }
-    Ok(())
+
+    impl PageImportCheck<'_> {
+        fn note(disallowed: &mut Option<String>, allowed: &[&str], spec: &str, how: Option<&str>) {
+            if disallowed.is_some() || allowed.contains(&spec) {
+                return;
+            }
+            let how = how.map(|h| format!(" {h}")).unwrap_or_default();
+            disallowed = Some(format!("\"{spec}\"{how}"));
+        }
+    }
+
+    let mut check = PageImportCheck {
+        allowed: ALLOWED_IMPORTS,
+        disallowed: None,
+    };
+    module.visit_with(&mut check);
+
+    match check.disallowed {
+        None => Ok(()),
+        Some(spec) => Err(format!(
+            "{spec} is not allowed in a dashboard page. Only {allowed} may be imported.",
+            allowed = ALLOWED_IMPORTS
+                .iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
