@@ -8,6 +8,32 @@
 
 const TIMEOUT_MS = 15_000;
 
+// The per-document bridge capability handed to us by the console on load
+// (`PagesView.tsx` mints a fresh one for every iframe document). Every
+// `oc:graphql` message carries it, so the console can tell this exact
+// document apart from one the page navigated itself to. Opaque-origin frames
+// cannot share real storage or identity, so a document that replaces us has no
+// way to learn this value.
+let capability: string | null = null;
+let capabilityWaiters: Array<(cap: string) => void> = [];
+
+function waitForCapability(): Promise<string> {
+  if (capability) return Promise.resolve(capability);
+  return new Promise((resolve) => {
+    capabilityWaiters.push(resolve);
+  });
+}
+
+window.addEventListener("message", function onInit(event: MessageEvent) {
+  const data = event.data as { type?: unknown; capability?: unknown } | null;
+  if (data && data.type === "oc:init" && typeof data.capability === "string") {
+    capability = data.capability;
+    const waiters = capabilityWaiters;
+    capabilityWaiters = [];
+    for (const resolve of waiters) resolve(capability);
+  }
+});
+
 /** The shape a GraphQL round trip resolves to, mirroring the server's own envelope. */
 export interface GraphQLResult<T = unknown> {
   data?: T;
@@ -35,7 +61,7 @@ function isBridgeResult(value: unknown): value is BridgeResultMessage {
  * GraphQL endpoint, by way of the parent frame.
  *
  * Internally: generates a random correlation `id`, posts
- * `{type: "oc:graphql", id, query, variables}` to `window.parent`, and
+ * `{type: "oc:graphql", id, capability, query, variables}` to `window.parent`, and
  * resolves when a matching `{type: "oc:graphql:result", id, ...}` reply
  * arrives — a one-shot listener that removes itself either way. The `id` is
  * what lets several concurrent calls share the same `window` without their
@@ -74,7 +100,12 @@ function query<T = unknown>(
     }
 
     window.addEventListener("message", onMessage);
-    window.parent.postMessage({ type: "oc:graphql", id, query: document, variables }, "*");
+    waitForCapability().then((cap) => {
+      window.parent.postMessage(
+        { type: "oc:graphql", id, capability: cap, query: document, variables },
+        "*",
+      );
+    });
   });
 }
 

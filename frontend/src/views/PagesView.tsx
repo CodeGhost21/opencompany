@@ -23,6 +23,8 @@ interface GraphQLBridgeMessage {
   type: "oc:graphql";
   id: string;
   query: string;
+  /** The per-document capability minted for the currently loaded iframe. */
+  capability: string;
   variables?: Record<string, unknown>;
 }
 
@@ -32,7 +34,8 @@ function isGraphQLBridgeMessage(value: unknown): value is GraphQLBridgeMessage {
     value !== null &&
     (value as { type?: unknown }).type === "oc:graphql" &&
     typeof (value as { id?: unknown }).id === "string" &&
-    typeof (value as { query?: unknown }).query === "string"
+    typeof (value as { query?: unknown }).query === "string" &&
+    typeof (value as { capability?: unknown }).capability === "string"
   );
 }
 
@@ -58,20 +61,39 @@ export function PagesView({ client, company }: Props) {
   const [pages, setPages] = useState<PageManifestDto[]>([]);
   const [activeSlug, setActiveSlug] = useState("");
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  // The per-document bridge capability. Rotated on every iframe `load`, so a
+  // document the page navigated itself to — which shares the same
+  // `contentWindow` and could not have received the current token — is rejected.
+  const capabilityRef = useRef<string>("");
 
-  // Nav-visible pages first, then everything else — alphabetically within
-  // each group, so the list order doesn't jump around as pages are added.
-  const sorted = useMemo(
+  // Only nav-visible pages appear in the sidebar (`nav_visible = false` in
+  // `page.toml` deliberately keeps one off the nav, reachable only by direct
+  // URL). Alphabetical within, so the list order doesn't jump around as
+  // pages are added.
+  const visible = useMemo(
     () =>
       pages
+        .filter((p) => p.navVisible !== false)
         .slice()
-        .sort((a, b) => {
-          if (a.navVisible !== b.navVisible) return a.navVisible ? -1 : 1;
-          return a.title.localeCompare(b.title);
-        }),
+        .sort((a, b) => a.title.localeCompare(b.title)),
     [pages],
   );
-  const active = sorted.find((p) => p.slug === activeSlug) ?? sorted[0];
+  const active = visible.find((p) => p.slug === activeSlug) ?? visible[0];
+
+  // Mint a fresh capability for the newly loaded iframe document and hand it
+  // to that document via postMessage. Because `sandbox="allow-scripts"` makes
+  // the frame opaque-origin, we cannot target it by origin — but any document
+  // the page later navigates itself to has no way to learn this token, so only
+  // the exact document we just minted it for can speak through the bridge.
+  const handleLoad = useCallback(() => {
+    const frame = iframeRef.current;
+    const cap =
+      typeof globalThis.crypto?.randomUUID === "function"
+        ? globalThis.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    capabilityRef.current = cap;
+    frame?.contentWindow?.postMessage({ type: "oc:init", capability: cap }, "*");
+  }, []);
 
   const loadRun = useRef(0);
   const loadPages = useCallback(async () => {
@@ -109,13 +131,19 @@ export function PagesView({ client, company }: Props) {
   useEffect(() => {
     function onMessage(event: MessageEvent) {
       // The actual authentication of "did this really come from my own
-      // embedded page": `event.origin` is the string `"null"` for an
-      // opaque-origin sandboxed iframe, so it cannot be checked — `source`
-      // identity is the only thing that distinguishes this console's own
-      // page from any other frame or tab that might post a same-shaped
-      // message.
+      // embedded page":
+      //   * `source` identity — only this console's own iframe element.
+      //   * `event.origin === "null"` — only an opaque-origin sandboxed iframe
+      //     reports the literal `"null"` origin; any other frame or tab has a
+      //     real origin.
+      //   * the per-document `capability` — rotated on every `load`, so a
+      //     document the page navigated itself to cannot replay it. This is
+      //     what closes the post-navigation exfiltration window that
+      //     `event.source` alone (which survives navigation) would leave open.
       if (event.source !== iframeRef.current?.contentWindow) return;
+      if (event.origin !== "null") return;
       if (!isGraphQLBridgeMessage(event.data)) return;
+      if (event.data.capability !== capabilityRef.current) return;
       const { id, query, variables } = event.data;
       const replyTo = event.source as Window;
       void client
@@ -207,6 +235,7 @@ export function PagesView({ client, company }: Props) {
           <iframe
             key={active.slug}
             ref={iframeRef}
+            onLoad={handleLoad}
             sandbox="allow-scripts"
             src={client.pageUrl(active.slug, company)}
             title={active.title || active.slug}

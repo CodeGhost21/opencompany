@@ -49,6 +49,20 @@ function iframe(): HTMLIFrameElement | null {
   return container.querySelector("iframe");
 }
 
+/** Fires the iframe `load` handler, minting the current document capability. */
+function loadFrame(frame: HTMLIFrameElement): void {
+  frame.dispatchEvent(new Event("load"));
+}
+
+/** Returns the capability the view hands to the loaded iframe document. */
+function mintedCapability(frame: HTMLIFrameElement): string {
+  const contentWindow = frame.contentWindow as Window;
+  const postMessage = vi.spyOn(contentWindow, "postMessage").mockImplementation(() => {});
+  loadFrame(frame);
+  const init = postMessage.mock.calls.find(([msg]) => (msg as { type?: string })?.type === "oc:init");
+  return (init?.[0] as { capability: string }).capability;
+}
+
 /** Lets any pending `.then`/`.catch` microtasks (the bridge's own reply) run. */
 async function flush() {
   await act(async () => {
@@ -83,7 +97,7 @@ describe("PagesView bridge", () => {
     // spoofing frame/tab would send.
     window.dispatchEvent(
       new MessageEvent("message", {
-        data: { type: "oc:graphql", id: "spoofed", query: "{ ping }" },
+        data: { type: "oc:graphql", id: "spoofed", capability: "cap", query: "{ ping }" },
         source: window,
       }),
     );
@@ -97,14 +111,17 @@ describe("PagesView bridge", () => {
     await show(clientWith(graphqlRequest));
 
     const frame = iframe();
-    const contentWindow = frame?.contentWindow;
+    expect(frame).not.toBeNull();
+    const contentWindow = frame!.contentWindow;
     expect(contentWindow).toBeTruthy();
     const postMessage = vi.spyOn(contentWindow as Window, "postMessage").mockImplementation(() => {});
+    const capability = mintedCapability(frame as HTMLIFrameElement);
 
     window.dispatchEvent(
       new MessageEvent("message", {
-        data: { type: "oc:graphql", id: "req-1", query: "{ ping }", variables: { a: 1 } },
+        data: { type: "oc:graphql", id: "req-1", capability, query: "{ ping }", variables: { a: 1 } },
         source: contentWindow,
+        origin: "null",
       }),
     );
     await flush();
@@ -125,10 +142,57 @@ describe("PagesView bridge", () => {
       new MessageEvent("message", {
         data: { type: "some-other-message" },
         source: contentWindow,
+        origin: "null",
       }),
     );
     await flush();
 
     expect(graphqlRequest).not.toHaveBeenCalled();
   });
+
+  it("rejects a same-source oc:graphql message carrying a stale capability", async () => {
+    const graphqlRequest = vi.fn();
+    await show(clientWith(graphqlRequest));
+
+    const frame = iframe();
+    expect(frame).not.toBeNull();
+    const contentWindow = frame!.contentWindow as Window;
+    // Mint a capability for the current document.
+    const current = mintedCapability(frame as HTMLIFrameElement);
+    // The page then navigates itself to a new document; the parent rotates the
+    // capability on the resulting load. The forged message replays the OLD one.
+    loadFrame(frame as HTMLIFrameElement);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "oc:graphql", id: "stale", capability: current, query: "{ secrets }" },
+        source: contentWindow,
+        origin: "null",
+      }),
+    );
+    await flush();
+
+    expect(graphqlRequest).not.toHaveBeenCalled();
+  });
+
+  it("mints a fresh capability and hands it to the loaded iframe document via oc:init", async () => {
+    const graphqlRequest = vi.fn();
+    await show(clientWith(graphqlRequest));
+    const frame = iframe();
+    expect(frame).not.toBeNull();
+
+    const cap = mintedCapability(frame as HTMLIFrameElement);
+    expect(cap).toBeTruthy();
+    // A second load must rotate the token — a stale one must not stay live.
+    postMessageSpyToContent(frame as HTMLIFrameElement);
+  });
 });
+
+function postMessageSpyToContent(frame: HTMLIFrameElement): void {
+  const contentWindow = frame.contentWindow as Window;
+  const first = mintedCapability(frame);
+  const second = mintedCapability(frame);
+  expect(first).toBeTruthy();
+  expect(second).toBeTruthy();
+  expect(first).not.toEqual(second);
+}
