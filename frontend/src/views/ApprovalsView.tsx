@@ -561,7 +561,7 @@ function ApprovalCard({
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
   return (
-    <Card>
+    <Card data-approval-id={a.id}>
       <CardContent className="flex flex-col gap-3 py-4">
         <ApprovalHeadline
           approval={a}

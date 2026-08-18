@@ -2587,7 +2587,11 @@ fn first_line(text: &str, max: usize) -> String {
 /// assignee is the addressed desk's lead — so a hand-off recorded against a desk
 /// id surfaces when the operator addresses that desk by id or name, and a card
 /// assigned to a person surfaces when that person is addressed.
-fn assignment_matches(record: &CompanyRecord, target: &str, assignee: &str) -> bool {
+///
+/// `pub(crate)` since issue #982 for a second caller — `chat_handler_card`'s
+/// adoption predicate, which has to ask the same question about the card the
+/// REST handler just wrote. One comparator, so the two cannot drift.
+pub(crate) fn assignment_matches(record: &CompanyRecord, target: &str, assignee: &str) -> bool {
     if assignee.eq_ignore_ascii_case(target) {
         return true;
     }
