@@ -181,8 +181,13 @@ pub async fn rebuild_company(state: &AppState, id: &CompanyId) -> Result<Arc<Com
         Ok(runtime) => runtime,
         Err(err) => {
             // The stale brain is a worse company; a permanently quiesced one is
-            // not a company at all.
-            outgoing.resume();
+            // not a company at all — unless the host is already draining. In that
+            // case the shutdown drain has gated this company against new cycles,
+            // and re-opening it would admit a turn nothing is waiting for in the
+            // seconds before the process exits (issue #986).
+            if !state.registry().is_shutting_down() {
+                outgoing.resume();
+            }
             return Err(err);
         }
     };
