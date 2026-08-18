@@ -3806,6 +3806,10 @@ async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() 
     let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
     assert_eq!(status, StatusCode::OK);
     // The company's own graphs; the baseline is listed in every company.
+    // Id heuristic, not provenance — `greet` never collides with a global id
+    // here, so this is safe; see
+    // `workflow_create_of_an_id_matching_a_global_wins_by_content` for the
+    // colliding case, asserted by content rather than this filter.
     let rows: Vec<&serde_json::Value> = list
         .as_array()
         .unwrap()
