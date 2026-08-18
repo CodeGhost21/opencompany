@@ -1,12 +1,14 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * Issue #300 — an OAuth connection started from inside the onboarding tour.
+ * Issue #300 — a legacy OAuth connection query from inside the onboarding tour.
  *
  * The redirect back from the provider is a **full-page navigation**, so neither
  * half of this can be proven by a unit test: the tour's step state lives in
  * react-joyride's memory and dies with the document, and the failure arms of the
- * host callback used to render a JSON body *as the page*.
+ * host callback used to render a JSON body *as the page*. #838's callback now
+ * has a terminal explanatory page; these cover the console's compatibility
+ * handling for an older callback URL.
  *
  * These specs drive a running host (see `playwright.config.ts` — the harness
  * brings it up, there is no `webServer`). CI does not run Playwright.
@@ -35,9 +37,9 @@ async function tourKey(page: Page): Promise<string> {
   return key!;
 }
 
-test("a cancelled handshake lands back in the console, not on a dead page", async ({ page }) => {
-  // Exactly what the host now redirects to when the operator cancels at the
-  // provider's consent screen. Before the fix this route answered with
+test("a legacy cancelled-handshake query lands in the console, not on a dead page", async ({ page }) => {
+  // This is the query the former callback used after an operator cancelled at
+  // the provider consent screen. Before the original fix it answered with
   // `{"error":"provider returned: access_denied"}` as the document body.
   await page.goto("/connections?connect_error=denied&provider=slack");
 
