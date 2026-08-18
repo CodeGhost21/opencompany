@@ -68,6 +68,83 @@ export const SETUP_STEPS: SetupStepSpec[] = [
   },
 ];
 
+/**
+ * Clickable examples under the automation question.
+ *
+ * Not a picker, and deliberately not exhaustive: they sit *beside* the free-text
+ * field and append to it. A blank box after two questions is where people stall —
+ * these give a shape to copy without narrowing what can be said, and someone who
+ * ignores them entirely loses nothing.
+ */
+export const AUTOMATE_EXAMPLES: readonly string[] = [
+  "social posts",
+  "paid ads",
+  "order dispatch",
+  "daily reports",
+  "customer support",
+  "invoices",
+  "content calendar",
+  "lead follow-up",
+];
+
+/** Adds an example to whatever the operator has already typed. */
+export function appendExample(current: string, example: string): string {
+  const trimmed = current.trim();
+  if (!trimmed) return example;
+  // Already mentioned — clicking twice should not stutter the list.
+  if (new RegExp(`(^|,\\s*)${example.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(,|$)`, "i").test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed.replace(/,\s*$/, "")}, ${example}`;
+}
+
+/**
+ * What we heard in the industry answer, as chips the operator can drop.
+ *
+ * Two jobs, and the second is the important one. It sharpens the prompt, yes —
+ * but mostly it *proves they were heard* immediately after the one question they
+ * put effort into. A flow that swallows a sentence and moves on feels like a
+ * form; one that repeats it back feels like a conversation.
+ *
+ * Inferred with the same vocabulary the host matches templates on, so a chip can
+ * never claim a reading the host would not make.
+ */
+export const INDUSTRY_SIGNALS: readonly { chip: string; any: readonly string[] }[] = [
+  {
+    chip: "e-commerce",
+    // Mirrors the host's own ECOMMERCE keywords (`src/company/setup.rs`), goods
+    // included: it matches `homeware` as e-commerce, so a chip that read the
+    // same sentence as "physical products" only would under-report what the
+    // host is about to do with it.
+    any: [
+      "ecommerce",
+      "e-commerce",
+      "online store",
+      "shopify",
+      "etsy",
+      "storefront",
+      "dropship",
+      "retail",
+      "homeware",
+      "apparel",
+      "merch",
+    ],
+  },
+  { chip: "physical products", any: ["homeware", "apparel", "merch", "stock", "inventory", "shipping", "dispatch"] },
+  { chip: "content", any: ["content", "creator", "youtube", "instagram", "tiktok", "newsletter", "podcast", "blog"] },
+  { chip: "clients", any: ["agency", "client", "clients", "retainer", "consulting", "consultancy"] },
+  { chip: "software", any: ["software", "saas", "app", "platform", "api", "developer"] },
+  { chip: "services", any: ["studio", "salon", "clinic", "practice", "bookings", "appointments"] },
+];
+
+/** The signals present in an answer, in declaration order, de-duplicated. */
+export function inferSignals(industry: string): string[] {
+  const hay = industry.toLowerCase();
+  const hit = (needle: string) =>
+    new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay);
+  return INDUSTRY_SIGNALS.filter((s) => s.any.some(hit)).map((s) => s.chip);
+}
+
 /** The three answers, as the form holds them. */
 export type SetupDraft = Record<SetupFieldKey, string>;
 

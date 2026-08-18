@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { TeamMemberDto } from "@/api/types";
 import {
   SETUP_STEPS,
+  appendExample,
+  inferSignals,
   buildOutLabel,
   draftIsSubmittable,
   emptySetupDraft,
@@ -151,5 +153,59 @@ describe("buildOutLabel", () => {
 
   it("says nothing when there is nothing to count", () => {
     expect(buildOutLabel(0, 0)).toBe("");
+  });
+});
+
+describe("industry signals", () => {
+  /**
+   * The chips exist to prove the operator was heard, so they must actually
+   * reflect what was typed rather than fire on everything.
+   */
+  it("reads the obvious signals out of a sentence", () => {
+    expect(inferSignals("E-commerce — I sell homeware online")).toEqual([
+      "e-commerce",
+      "physical products",
+    ]);
+    expect(inferSignals("I run a YouTube channel and a newsletter")).toEqual(["content"]);
+    expect(inferSignals("a small marketing agency with retainer clients")).toEqual(["clients"]);
+  });
+
+  /** A blended business should surface both, not pick a winner. */
+  it("keeps every signal in a blended answer", () => {
+    const signals = inferSignals("I sell homeware online and run a YouTube channel");
+    expect(signals).toContain("e-commerce");
+    expect(signals).toContain("content");
+  });
+
+  /** Silence is better than a wrong chip: claiming to have heard something
+   * that was never said is worse than showing nothing. */
+  it("says nothing when it recognises nothing", () => {
+    expect(inferSignals("zzzz qqqq")).toEqual([]);
+    expect(inferSignals("")).toEqual([]);
+  });
+
+  /** The regression the host has too: a chip must not fire on a substring of
+   * an unrelated word. */
+  it("matches on word starts, not substrings", () => {
+    expect(inferSignals("research into materials")).not.toContain("e-commerce");
+  });
+});
+
+describe("appendExample", () => {
+  it("starts the list, then extends it", () => {
+    expect(appendExample("", "paid ads")).toBe("paid ads");
+    expect(appendExample("paid ads", "order dispatch")).toBe("paid ads, order dispatch");
+  });
+
+  /** Clicking a chip twice should not stutter the list — the operator gets no
+   * feedback that it was already there, so the guard has to be here. */
+  it("does not repeat an example already mentioned", () => {
+    expect(appendExample("paid ads, order dispatch", "paid ads")).toBe(
+      "paid ads, order dispatch",
+    );
+  });
+
+  it("tidies a trailing comma rather than doubling it", () => {
+    expect(appendExample("paid ads, ", "invoices")).toBe("paid ads, invoices");
   });
 });

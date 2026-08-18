@@ -104,6 +104,79 @@ export interface SetupInput {
   fields: Record<string, string | null>;
   /** Ignored by the host when a company already exists. */
   template?: string | null;
+  /**
+   * A company the wizard designed, from the answers and the reviewed roster.
+   *
+   * Wins over {@link SetupInput.template} when both are present: someone who
+   * answered three questions and edited a roster has expressed a preference a
+   * preset cannot override.
+   */
+  company?: DesignedCompany | null;
+}
+
+/** The company the wizard designed, as the review step hands it over. */
+export interface DesignedCompany {
+  industry: string;
+  teamHint: string;
+  automate: string;
+  /**
+   * The roster **as reviewed** — renamed, removed and reordered by the operator.
+   * Sent back rather than regenerated, so what they approved is exactly what
+   * gets built; a second pass could return a different team.
+   */
+  agents: DesignedAgent[];
+  /**
+   * The address that will be able to sign in, written into `[users].admins`.
+   *
+   * Not optional in spirit: no shipped template invites anybody, so without it
+   * an operator who chose email sign-in finishes setup and can then sign in as
+   * nobody. Omitted only on a host that needs no sign-in at all.
+   */
+  adminEmail?: string | null;
+}
+
+export interface DesignedAgent {
+  name: string;
+  role: string;
+  description: string;
+}
+
+/** One agent the host proposes for a company that does not exist yet. */
+export interface SetupRosterAgent {
+  name: string;
+  role: string;
+  description: string;
+}
+
+/** What `POST /api/v1/setup/roster` answers. */
+export interface SetupRoster {
+  agents: SetupRosterAgent[];
+  /** Which curated roster framed the proposal, e.g. `ecommerce`. */
+  template: string;
+  /** `model` — designed from the answers. `fallback` — the curated team. */
+  source: "model" | "fallback";
+}
+
+/**
+ * Ask the host to design a starting team, before any company exists.
+ *
+ * The company-scoped twin (`api/company-setup.ts`) cannot serve the wizard: it
+ * resolves a company, and during first-run setup there is none.
+ *
+ * `inferenceKey` is the credential the operator has just typed into this wizard,
+ * passed so the design can run on it before anything is written. The host uses
+ * it and discards it — the apply that persists it is still a single atomic step.
+ */
+export function proposeSetupRoster(
+  client: OpenCompanyClient,
+  body: {
+    industry: string;
+    teamHint: string;
+    automate: string;
+    inferenceKey?: string | null;
+  },
+): Promise<SetupRoster> {
+  return client.post<SetupRoster>("/api/v1/setup/roster", body);
 }
 
 /** What an apply reports back. */
