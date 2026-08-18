@@ -96,6 +96,11 @@ pub mod scheduler;
 pub mod telegram_poller;
 pub mod tools;
 pub mod types;
+/// Issue #978: which gate node each parked workflow approval is deciding, and
+/// the trigger input its run paused with — the two facts a run-scoped
+/// continuation needs and the journal cannot give back once an approval has
+/// resolved. See [`workflow_gates`].
+pub mod workflow_gates;
 /// Issue #228: the single place a finished workflow run is journaled, shared by
 /// the console's run route and the cron [`WorkflowScheduler`] so a run's history
 /// is uniform no matter what started it. See [`workflow_outcome`].

@@ -1697,6 +1697,27 @@ impl RuntimeBuilder {
             }
         };
 
+        // Issue #978: the run-scoped half of the same fact, on exactly the same
+        // terms. A boot rebuilds it from the gates the replay left parked — the
+        // journal keeps their whole effect while they are parked, which is what
+        // makes a rehydrated batch re-dispatchable — and a rebuild inherits the
+        // live one, because that one also knows the verdicts taken since the
+        // replay and a fresh copy would re-ask about them.
+        let workflow_gates = match handover.as_ref() {
+            Some(h) => h.workflow_gates.clone(),
+            None => {
+                let gates = crate::runtime::workflow_gates::WorkflowGateQueue::default();
+                let parked = journal.pending();
+                gates.rearm(parked.iter().filter_map(|entry| {
+                    entry
+                        .batch
+                        .clone()
+                        .map(|turn| (turn, entry.id.clone(), &entry.effect))
+                }));
+                gates
+            }
+        };
+
         // Brain selection, in precedence order:
         //   1. an explicit brain (test injection) always wins;
         //   2. under the `openhuman` feature, an attached harness pool + a
@@ -2445,6 +2466,13 @@ impl RuntimeBuilder {
                                     parking: Some(crate::workflows::DeliveryParking {
                                         approvals: gate.clone(),
                                         journal: journal.clone(),
+                                        // Issue #978: the SAME two queues the
+                                        // runtime gets below. A gate parked by a
+                                        // run has to arm the counters the
+                                        // resolve path releases, or the run is
+                                        // never continued at all.
+                                        continuations: continuations.clone(),
+                                        gates: workflow_gates.clone(),
                                     }),
                                     // Issue #529: the same journal the runner
                                     // writes its start/per-node trail to, so a
@@ -2702,6 +2730,7 @@ impl RuntimeBuilder {
             runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
         }
         runtime.adopt_continuations(continuations);
+        runtime.adopt_workflow_gates(workflow_gates);
 
         // MCP uses OpenHuman's process-global live connection registry. Keep a
         // runtime-owned config for this OpenCompany home so REST and agents see
