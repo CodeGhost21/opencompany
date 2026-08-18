@@ -1095,6 +1095,8 @@ export interface UsagePointDto {
 export interface AgentTokensDto {
   name: string;
   tokens: number;
+  /** Source-currency USD, absent when role-redacted. */
+  costUsd?: number;
 }
 
 /** OAuth-connected calls counted for one provider over the window. */
@@ -1108,7 +1110,7 @@ export interface UsageTotalsDto {
   inputTokens: number;
   outputTokens: number;
   tokens: number;
-  costUsd: number;
+  costUsd?: number;
   oauthCalls: number;
   connections: number;
   /**
@@ -1135,6 +1137,8 @@ export interface UsageDto {
   /** OAuth calls per provider, highest first (empty until Phase 2 emit). */
   byProvider: ProviderCallsDto[];
   totals: UsageTotalsDto;
+  /** Positive cost exists but is hidden from this role. */
+  costHidden?: boolean;
 }
 
 /** Spend rolled up by prosumer category (`GET .../finances`). */
