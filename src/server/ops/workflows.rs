@@ -4044,6 +4044,118 @@ mod tests {
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
 
+        /// A **global-only** workflow — no seed file, no overlay body, just the
+        /// baseline every company gets — must still be toggleable: it has a
+        /// schedule to pause exactly like a company-authored one, and
+        /// `disabled_workflows` (what this route writes) is a separate
+        /// mechanism from `[globals].disable` (what drops the global outright).
+        /// Before this, `set_company_workflow_enabled`'s "does this company
+        /// have a body for `wid`" check only looked at seed files and overlays,
+        /// so a global-only id read as a bodiless manifest-`enabled` id and the
+        /// route answered 409 for a graph that plainly exists and runs.
+        #[tokio::test]
+        async fn the_enabled_route_toggles_a_global_only_workflow() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            let global_id = crate::globals::workflows()[0].id.clone();
+
+            let paused = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
+                    Some(serde_json::json!({ "enabled": false })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(paused.status(), StatusCode::OK);
+            assert_eq!(json_body(paused).await["enabled"], serde_json::json!(false));
+
+            let list = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let body = json_body(list).await;
+            let row = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["id"] == global_id.as_str())
+                .expect("still listed");
+            assert_eq!(row["enabled"], serde_json::json!(false));
+
+            // Back on, and still resolvable through `GET …/workflows/{wid}`
+            // throughout — pausing a global must not make it unreadable.
+            let armed = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
+                    Some(serde_json::json!({ "enabled": true })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(armed.status(), StatusCode::OK);
+            assert_eq!(json_body(armed).await["enabled"], serde_json::json!(true));
+
+            let read = router(state)
+                .oneshot(request(
+                    "GET",
+                    &format!("/api/v1/company/workflows/{global_id}"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(read.status(), StatusCode::OK);
+        }
+
+        /// A workflow this company has explicitly dropped via
+        /// `[globals].disable` no longer exists as far as this company is
+        /// concerned, so toggling it is the same 404 an unknown id gets — the
+        /// global-only arm above must not treat a disabled global as having a
+        /// body.
+        #[tokio::test]
+        async fn toggling_a_company_disabled_global_is_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            let global_id = crate::globals::workflows()[0].id.clone();
+            let manifest: CompanyManifest = toml::from_str(&format!(
+                "[company]\nname = \"Acme\"\n\n[globals]\ndisable = [\"workflow:{global_id}\"]\n"
+            ))
+            .unwrap();
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest,
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+            let state = state_over(&home, &id, true).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/v1/company/workflows/{global_id}/enabled"),
+                    Some(serde_json::json!({ "enabled": false })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
         /// Restart survival: a workflow created through the API is still listed
         /// by a completely fresh `AppState` rebuilt over the same store — proving
         /// the body is durable, not process-local.
