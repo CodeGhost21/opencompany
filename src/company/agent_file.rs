@@ -139,15 +139,7 @@ pub(crate) fn load_agents_from(
     names: &[String],
     read: &dyn Fn(&str) -> std::result::Result<String, std::io::ErrorKind>,
 ) -> Result<Vec<Agent>> {
-    let mut agents = Vec::new();
-    let mut problems = Vec::new();
-
-    for name in names {
-        match parse_agent_file(name, read) {
-            Ok(agent) => agents.push(agent),
-            Err(mut file_problems) => problems.append(&mut file_problems),
-        }
-    }
+    let (agents, problems) = parse_agents(names, read);
 
     // Duplicate ids cannot arise from distinct filenames, but an `id` key that
     // disagrees with its stem is rejected above, so by here every id *is* its
@@ -161,6 +153,32 @@ pub(crate) fn load_agents_from(
             problems,
         })
     }
+}
+
+/// Parses every named file independently, returning every agent that parsed
+/// alongside every problem from the ones that did not.
+///
+/// [`load_agents_from`] turns this into an all-or-nothing [`Result`] for a
+/// company's own roster, where one malformed file should fail the whole
+/// bundle rather than silently ship a company short a teammate. The global
+/// baseline (`crate::globals`) wants the opposite: a malformed *global* must
+/// not cost every other global, so it calls this directly and keeps the
+/// agents that parsed.
+pub(crate) fn parse_agents(
+    names: &[String],
+    read: &dyn Fn(&str) -> std::result::Result<String, std::io::ErrorKind>,
+) -> (Vec<Agent>, Vec<String>) {
+    let mut agents = Vec::new();
+    let mut problems = Vec::new();
+
+    for name in names {
+        match parse_agent_file(name, read) {
+            Ok(agent) => agents.push(agent),
+            Err(mut file_problems) => problems.append(&mut file_problems),
+        }
+    }
+
+    (agents, problems)
 }
 
 /// The roster files of an embedded bundle, in the order `build.rs` recorded.
@@ -243,6 +261,9 @@ fn parse_agent_file(
         classes: file.classes,
         ledgers: file.ledgers,
         can_declare_ledgers: file.can_declare_ledgers.unwrap_or(true),
+        // Provenance is set by whoever merges the baseline in, never by a file:
+        // this same parser reads both a company's `agents/` and `globals/`.
+        global: false,
     })
 }
 

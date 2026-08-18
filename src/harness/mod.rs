@@ -1188,10 +1188,18 @@ impl HarnessPool {
         // surfaces until a restart (the regression). `build_roster`/`build_agent`
         // stay synchronous and fold these deltas into each agent's effective
         // skill set; the same Vec is reused for the rebuild below (no re-fetch).
-        let skill_deltas = match &deps.skills {
+        let mut skill_deltas = match &deps.skills {
             Some(store) => store.list(&company.id).await?,
             None => Vec::new(),
         };
+        // `[globals].disable = ["skill:…"]` reaches the effective set as a
+        // synthesized disabling delta rather than a second opt-out mechanism
+        // inside `EffectiveSkills`: the manifest and the console are then saying
+        // the same thing in the same vocabulary, and a disable always beats an
+        // enable there, so the company's own declaration wins over a console
+        // re-enable of a skill it opted out of.
+        skill_deltas.extend(globals_skill_disables(&company.manifest.globals.disable));
+        let skill_deltas = skill_deltas;
         let skill_fp = skill_delta_fingerprint(&skill_deltas);
 
         // Resolve the routed workspace documents (context routing) before the
@@ -2555,6 +2563,28 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
 /// (and drop live agent conversation state) whenever the store returned the
 /// same skills in a different row order. The full `custom_doc` body is hashed so
 /// an *edited* skill (same slug, new content) also triggers a rebuild. No
+/// The disabling [`SkillState`] deltas a company's `[globals].disable` implies.
+///
+/// One per `skill:<slug>` entry, and nothing else: an entry naming another kind
+/// is that kind's business, and manifest validation has already refused an entry
+/// naming nothing at all.
+pub(crate) fn globals_skill_disables(disable: &[String]) -> Vec<SkillState> {
+    disable
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("skill:"))
+        .map(|slug| SkillState {
+            slug: slug.to_string(),
+            enabled: false,
+            // The shared library is where these skills are authored, so that is
+            // what they are a delta over. The value is inert here in any case:
+            // this delta is synthesized per rebuild, never stored, and only its
+            // `enabled = false` is read.
+            source: crate::ports::SkillSource::Registry,
+            custom_doc: None,
+        })
+        .collect()
+}
+
 /// secrets are involved — a skill delta is operator-authored content.
 fn skill_delta_fingerprint(deltas: &[SkillState]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -2777,6 +2807,7 @@ pub(crate) fn build_roster(
 /// ([`build::persona_prompt`]).
 fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
     ManifestAgent {
+        global: false,
         id: overlay.id.clone(),
         role: overlay.role.clone(),
         description: overlay.description.clone(),
@@ -6121,6 +6152,7 @@ budget_usd_daily = 0.0
             }];
         }
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -6239,6 +6271,7 @@ budget_usd_daily = 0.0
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,

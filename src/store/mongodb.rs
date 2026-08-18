@@ -537,7 +537,9 @@ impl CompanyStore for MongoStore {
         else {
             return Ok(None);
         };
-        let manifest: CompanyManifest = toml::from_str(&get_str(&company, "manifest_toml")?)
+        // `from_stored_toml` applies the global baseline — see
+        // `CompanyManifest::apply_globals`.
+        let manifest = CompanyManifest::from_stored_toml(&get_str(&company, "manifest_toml")?)
             .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
 
         let mut cursor = self

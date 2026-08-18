@@ -1857,12 +1857,21 @@ fn roster_entry(id: &str, role: &str, name: Option<&str>) -> RosterEntry {
         role: role.to_string(),
         name: name.map(str::to_string),
         description: None,
+        global: false,
     }
 }
 
 /// A `WorkflowGraphSpec` from a JSON literal.
 fn spec_from(value: serde_json::Value) -> WorkflowGraphSpec {
     serde_json::from_value(value).expect("the spec parses")
+}
+
+/// A global-baseline roster teammate for the local-vs-global precedence tests.
+fn global_roster_entry(id: &str, role: &str, name: Option<&str>) -> RosterEntry {
+    RosterEntry {
+        global: true,
+        ..roster_entry(id, role, name)
+    }
 }
 
 /// The normalizer collapses `-`, `_` and whitespace runs so a role, an id and a
@@ -1939,6 +1948,83 @@ fn the_resolver_names_the_roster_on_an_unknown_agent() {
     );
     // The already-valid `ceo` node is untouched.
     assert_eq!(spec.nodes[1].agent.as_deref(), Some("ceo"));
+}
+
+/// (a) A company's own teammate wins a label collision against a global of the
+/// same normalized role — the baseline ships a `writer`/`researcher`, and a
+/// vertical that names its own "Writer" must still resolve to its own, not the
+/// global one, or "the writer" would become unaddressable in every company
+/// that has its own.
+#[test]
+fn the_resolver_prefers_the_local_agent_over_a_same_label_global() {
+    let roster = vec![
+        global_roster_entry("writer", "Writer", None),
+        roster_entry("copy_lead", "Writer", None),
+    ];
+    let mut spec = spec_from(json!({
+        "nodes": [
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "Writer" }
+        ],
+        "edges": []
+    }));
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    resolve_agent_ids(&mut spec, &roster, &mut notes, &mut errors);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(
+        spec.nodes[0].agent.as_deref(),
+        Some("copy_lead"),
+        "the company's own teammate must win, not the global"
+    );
+}
+
+/// (a) Two LOCAL teammates sharing a label stays a genuine, reported ambiguity
+/// — the local-over-global tie-break only resolves a local-vs-global
+/// collision, never a local-vs-local one, since there is no meaningful
+/// precedence between two teammates the company itself declared.
+#[test]
+fn two_local_agents_sharing_a_label_stay_ambiguous() {
+    let roster = vec![
+        roster_entry("writer_a", "Writer", None),
+        roster_entry("writer_b", "Writer", None),
+    ];
+    let mut spec = spec_from(json!({
+        "nodes": [
+            { "id": "a", "kind": "agent", "name": "Draft", "agent": "Writer" }
+        ],
+        "edges": []
+    }));
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    resolve_agent_ids(&mut spec, &roster, &mut notes, &mut errors);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("matches more than one teammate"),
+        "{errors:?}"
+    );
+    assert_eq!(spec.nodes[0].agent.as_deref(), Some("Writer"), "unresolved");
+}
+
+/// (a) A label that only a global teammate answers to still resolves — the
+/// local-preference tie-break only narrows a multi-hit collision, it never
+/// drops a global-only match down to zero hits.
+#[test]
+fn a_global_only_label_still_resolves() {
+    let roster = vec![
+        global_roster_entry("researcher", "Researcher", None),
+        roster_entry("ceo", "Chief Executive", None),
+    ];
+    let mut spec = spec_from(json!({
+        "nodes": [
+            { "id": "a", "kind": "agent", "name": "Dig in", "agent": "Researcher" }
+        ],
+        "edges": []
+    }));
+    let mut notes = Vec::new();
+    let mut errors = Vec::new();
+    resolve_agent_ids(&mut spec, &roster, &mut notes, &mut errors);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(spec.nodes[0].agent.as_deref(), Some("researcher"));
 }
 
 /// (b) The delivery gate fires when a delivery is asked for and no `output` node

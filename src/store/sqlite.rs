@@ -496,7 +496,9 @@ impl CompanyStore for SqliteStore {
         let Some((manifest_toml, lifecycle, overlay_json)) = row else {
             return Ok(None);
         };
-        let manifest: CompanyManifest = toml::from_str(&manifest_toml)
+        // `from_stored_toml` applies the global baseline — see
+        // `CompanyManifest::apply_globals`.
+        let manifest = CompanyManifest::from_stored_toml(&manifest_toml)
             .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
         let overlay = OverlayBlob::parse(&overlay_json)?;
 

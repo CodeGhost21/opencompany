@@ -788,21 +788,43 @@ pub fn build_agent(
     // harness is wired to a skills source; otherwise the agent stays skill-less
     // and the default path is untouched. The catalogue is folded into the
     // persona body because `omit_skills_catalog` is inert upstream.
-    if deps.skills_source_dir.is_some() || !skill_deltas.is_empty() {
+    // The global baseline installs skills in every company, including one with
+    // no source dir and no deltas — a platform-provisioned tenant is exactly
+    // that — so its presence arms this branch too. Without that clause the
+    // baseline would reach every company except the hosted ones.
+    if deps.skills_source_dir.is_some()
+        || !skill_deltas.is_empty()
+        || !crate::globals::skills().is_empty()
+    {
         let skill_ws = deps
             .workspace_root
             .join(company.as_ref())
             .join(&manifest_agent.id)
             .join("skill-catalog");
-        let effective = EffectiveSkills::materialize(
+        // Best-effort, not fatal. This ran only for a company with a skills
+        // source or an operator delta until the global baseline made it run for
+        // every company — including one whose workspace root is unusable, where
+        // failing here would turn "this agent has no skill catalogue" into "this
+        // company cannot build an agent at all". The agent still answers; it
+        // just answers without the catalogue, and the reason is logged.
+        match EffectiveSkills::materialize(
             skill_ws,
             deps.skills_source_dir.as_deref(),
             &deps.skills_registry,
             skill_deltas,
-        )?;
-        if !effective.is_empty() {
-            tools.extend(effective.read_tools());
-            persona.push_str(&effective.catalogue());
+        ) {
+            Ok(effective) => {
+                if !effective.is_empty() {
+                    tools.extend(effective.read_tools());
+                    persona.push_str(&effective.catalogue());
+                }
+            }
+            Err(err) => tracing::warn!(
+                company = %company.as_ref(),
+                agent = %manifest_agent.id,
+                error = %err,
+                "skill catalogue unavailable for this agent",
+            ),
         }
     }
 
@@ -1425,6 +1447,7 @@ mod tests {
 
     fn manifest_agent(role: &str, description: Option<&str>) -> ManifestAgent {
         ManifestAgent {
+            global: false,
             id: "ceo".to_string(),
             role: role.to_string(),
             description: description.map(str::to_string),
@@ -1620,6 +1643,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = pin_deps(dir.path().to_path_buf());
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1667,6 +1691,7 @@ mod tests {
             crate::company::DEFAULT_SEARCH_DAILY_CALLS,
         ));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1710,6 +1735,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.workspace = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1751,6 +1777,7 @@ mod tests {
         let mut deps = pin_deps(dir.path().to_path_buf());
         deps.artifacts = Some(Arc::new(crate::store::FsOps::new(dir.path())));
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -1951,6 +1978,7 @@ mod tests {
             })
             .collect();
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -2363,6 +2391,11 @@ mod tests {
             "shell",
             "web_fetch",
         ];
+        // The global baseline installs skills in every company (issue: global
+        // agents/skills/workflows), so the three skill read tools are on every
+        // belt now — including a company with no skills source of its own.
+        expected.extend(["describe_skill", "list_skills", "read_skill_resource"]);
+        expected.sort();
         // Mirrors the unconditional `#[cfg(feature = "mcp")]` push in
         // `build_agent`. These two are intrinsic (unmapped by `namespace_of`),
         // so no grant gates them — enabling the feature is the whole condition.
@@ -2588,6 +2621,7 @@ mod tests {
         let deps = enabled_git_deps(dir.path().to_path_buf());
         let company = CompanyId::new("acme");
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,

@@ -655,6 +655,7 @@ mod tests {
 
     fn agent(grants: &[&str]) -> ManifestAgent {
         ManifestAgent {
+            global: false,
             id: "ceo".into(),
             role: "Chief".into(),
             description: None,

@@ -132,7 +132,8 @@ pub use types::{
 pub use workflow_file::{
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
     WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef, list_source_workflows,
-    list_workflows_union, load_company_workflows, load_workflow_union, parse_workflow,
+    list_workflows_union, list_workflows_with_globals, load_company_workflows, load_workflow_union,
+    load_workflow_with_globals, parse_workflow,
 };
 // Crate-internal only: the workflow creator (issue #69) builds a `RawWorkflow`
 // from its request body, renders it to TOML, and re-parses it through

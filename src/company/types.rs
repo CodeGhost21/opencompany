@@ -382,6 +382,33 @@ pub struct CompanyManifest {
     /// Cron-driven prompts. Renamed from the `[[schedule]]` array-of-tables.
     #[serde(default, rename = "schedule")]
     pub schedules: Vec<Schedule>,
+    /// How this company relates to the global baseline ([`crate::globals`]).
+    #[serde(default)]
+    pub globals: Globals,
+}
+
+/// `[globals]` — this company's relationship to the global baseline.
+///
+/// The roster, workflows and skills are a floor every company gets whichever
+/// vertical it started from, so the only thing left to configure for those is
+/// what this company does *not* want. Replacing a global needs no entry here:
+/// a company definition of the same id supersedes the global one on its own.
+///
+/// The tool belt (`[tools].default_allow`) is the one part of the baseline
+/// that is a *default*, not a floor: it is what a company with no `[tools]`
+/// section of its own starts with, never a minimum re-granted underneath one
+/// — see [`crate::globals`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Globals {
+    /// Globals this company drops outright, as `<kind>:<id>` keys — e.g.
+    /// `agent:researcher`, `workflow:weekly_review`, `skill:meeting-brief`.
+    ///
+    /// Validated against what the baseline actually carries: an entry naming
+    /// nothing is a manifest error, because the alternative is an opt-out the
+    /// operator wrote, believed, and silently never got. The kinds are
+    /// [`crate::globals::DISABLE_KINDS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disable: Vec<String>,
 }
 
 /// `[company]` — the seed of the Charter.
@@ -567,6 +594,27 @@ pub struct Agent {
     /// growing the company's ledger registry.
     #[serde(default = "default_true")]
     pub can_declare_ledgers: bool,
+    /// Whether this teammate came from the global baseline ([`crate::globals`])
+    /// rather than the company's own roster.
+    ///
+    /// Provenance, not configuration: no author writes it, and the merge sets it
+    /// on every teammate it appends. It exists because a manifest is serialized
+    /// back into the store with the merged roster in it, so without a marker a
+    /// global teammate becomes indistinguishable from one the company wrote —
+    /// and the baseline could then never be updated, retired, or opted out of
+    /// for that company again. With it,
+    /// [`apply_globals`](CompanyManifest::apply_globals) is idempotent: it drops
+    /// every previously-merged global and re-appends the current baseline, so a
+    /// company picks up baseline changes and honours `[globals].disable` on the
+    /// very next read.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub global: bool,
+}
+
+/// `#[serde(skip_serializing_if)]` predicate: keeps `global = false` — which is
+/// every hand-authored teammate — out of the serialized manifest.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// One [`Agent::context`] entry.
@@ -1122,7 +1170,7 @@ impl Default for Tools {
             // `media`/`composio`: the #188 sign-off admitted it **opt-in**, so a
             // company that never asked for web search never spends on it.
             // Making it default-on is a one-word change here.
-            allow: vec!["*".into(), "media".into(), "composio".into()],
+            allow: crate::globals::default_tool_allow(),
             web_allowed_domains: Vec::new(),
             composio: ComposioTools::default(),
             search_daily_calls: None,
