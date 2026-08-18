@@ -1051,6 +1051,44 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["elapsedMs"] = json!(elapsed_ms);
             o
         }
+        // Issue #983: a turn was accepted, so a console watching the
+        // conversation can show it as under way instead of showing the
+        // operator's question with nothing after it. Three keys, all
+        // structural, and every one already reachable by the same operator
+        // through `GET {scope}/runs`.
+        //
+        // Deliberately **no message text and no actor**: the text is on the
+        // `OperatorMessage` this brackets — which stays dropped, see the
+        // module note above — and `by` is a user id, dropped here exactly as
+        // every other attributed arm drops it. The console reacts by reading
+        // the row it already knows how to read.
+        CompanyEvent::TurnStarted {
+            turn_id,
+            chat_id,
+            parent,
+            ..
+        } => {
+            let mut o = envelope("turn_started");
+            o["turnId"] = json!(turn_id);
+            o["chatId"] = json!(chat_id);
+            // Omitted rather than null for a turn answering the channel
+            // itself, so "is this in a thread?" is a presence check — the same
+            // discipline `agent_reply` above uses for the same field.
+            if let Some(parent) = parent {
+                o["parentId"] = json!(parent.value().to_string());
+            }
+            o
+        }
+        // The closing bracket. Structural for a sharper reason than its
+        // sibling: the event's `error` is a failure reason in our own words
+        // that can name internals, and this stream is the one place it must
+        // not be forwarded to. A console learns *that* the turn is over here
+        // and reads *why* from the run row, which is tenant-scoped.
+        CompanyEvent::TurnFailed { turn_id, .. } => {
+            let mut o = envelope("turn_settled");
+            o["turnId"] = json!(turn_id);
+            o
+        }
         // Not an attention signal, or carries a raw payload we never put on the
         // wire — dropped.
         _ => return None,
@@ -1172,11 +1210,14 @@ struct ChatResponse {
 /// Runs one operator-chat cycle, returning the report and, when a complaint
 /// intent captured feedback, the note that was captured (so the caller can emit
 /// the `feedback.created` webhook).
+///
+/// Takes the [`AcceptedTurn`] rather than a thread parent since issue #983: the
+/// message this cycle runs is already journaled, so the parent it carries is a
+/// fact about the event rather than something this function decides.
 async fn run_chat(
     runtime: Arc<CompanyRuntime>,
     message: ChatMessage,
     by: Option<Actor>,
-    parent: Option<EventSeq>,
     accepted: &AcceptedTurn,
 ) -> Result<(CycleReport, Option<String>), ApiError> {
     // Re-checked here rather than only at accept: this is also reachable
@@ -1651,7 +1692,7 @@ fn spawn_chat_turn(turn: ChatTurn) -> JoinHandle<Result<(CycleReport, Option<Str
         // a row claiming to be live. Both outcomes settle: an error here is a
         // turn that was accepted and produced no answer, which is precisely the
         // state that used to be indistinguishable from silence.
-        let outcome = run_chat(Arc::clone(&runtime), message, by, parent, &accepted).await;
+        let outcome = run_chat(Arc::clone(&runtime), message, by, &accepted).await;
         let (mut report, feedback_note) = match outcome {
             Ok(both) => both,
             Err(err) => {
@@ -2976,7 +3017,7 @@ mod test {
             )
             .await
             .expect("the turn is accepted");
-            run_chat(runtime.clone(), message, by, None, &accepted)
+            run_chat(runtime.clone(), message, by, &accepted)
                 .await
                 .expect("the chat cycle runs");
 
@@ -5809,6 +5850,94 @@ mod test {
         }))
         .expect("agent_reply is an attention signal");
         assert_eq!(v["parentId"], "4");
+    }
+
+    /// Issue #983: the accept frame carries the turn, the desk and the thread —
+    /// and **nothing else**.
+    ///
+    /// The negative half is what this test is for. `TurnStarted` is the first
+    /// frame on this stream that brackets an operator's own message, so it is
+    /// the obvious place for somebody to "helpfully" add the text or the asker
+    /// — which is exactly the payload the deny-by-default projection exists to
+    /// keep off the wire, and which `OperatorMessage` is dropped to avoid.
+    #[test]
+    fn projects_turn_started_with_structural_keys_only() {
+        use crate::ports::types::{Actor, ActorKind};
+        let v = super::project_event(&stored(CompanyEvent::TurnStarted {
+            turn_id: "turn-1".into(),
+            chat_id: "General".into(),
+            parent: Some(EventSeq::new(4)),
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "u-1".into(),
+            }),
+        }))
+        .expect("an accepted turn is an attention signal");
+        assert_eq!(v["type"], "turn_started");
+        assert_eq!(v["turnId"], "turn-1");
+        assert_eq!(v["chatId"], "General");
+        assert_eq!(v["parentId"], "4");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["type", "seq", "atMillis", "turnId", "chatId", "parentId"],
+            "the accept frame grew a key: {v}"
+        );
+
+        // A turn answering the channel itself omits the thread rather than
+        // sending null, so the console's check is a presence check.
+        let v = super::project_event(&stored(CompanyEvent::TurnStarted {
+            turn_id: "turn-2".into(),
+            chat_id: "General".into(),
+            parent: None,
+            by: None,
+        }))
+        .expect("an accepted turn is an attention signal");
+        assert!(v.get("parentId").is_none(), "unexpected parentId: {v}");
+    }
+
+    /// The settle frame says a turn is over and **not why**.
+    ///
+    /// `TurnFailed::error` is a reason in our own words that can name
+    /// internals; the console learns the reason from the tenant-scoped run row.
+    #[test]
+    fn projects_turn_settled_without_the_failure_reason() {
+        let v = super::project_event(&stored(CompanyEvent::TurnFailed {
+            turn_id: "turn-1".into(),
+            error: "connection to db-primary.internal refused".into(),
+        }))
+        .expect("a settled turn is an attention signal");
+        assert_eq!(v["type"], "turn_settled");
+        assert_eq!(v["turnId"], "turn-1");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["type", "seq", "atMillis", "turnId"],
+            "the settle frame grew a key: {v}"
+        );
+    }
+
+    /// The operator's own message is **still** dropped (issue #983).
+    ///
+    /// Pinned because #983 added the two arms above right beside it, and the
+    /// natural next step — "the console needs the message too, project it" —
+    /// would put operator-authored free text onto this stream for the first
+    /// time. It does not need it: the message is already in the POST's own
+    /// response and in `chat/history`, which is the point of journaling it at
+    /// accept time. If somebody later decides otherwise, they say so here.
+    #[test]
+    fn projects_nothing_for_the_operators_own_message() {
+        assert!(
+            super::project_event(&stored(CompanyEvent::OperatorMessage {
+                text: "the operator's own words".into(),
+                by: None,
+                chat: Some("General".into()),
+                parent: None,
+                deliverable: None,
+            }))
+            .is_none(),
+            "the operator's own message must not reach the console over SSE"
+        );
     }
 
     /// A reaction is deliberately NOT on the attention stream (issue #364).
