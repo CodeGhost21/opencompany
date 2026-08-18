@@ -1154,6 +1154,23 @@ jobs:
         run: npx --yes pnpm@11 install --frozen-lockfile --lockfile-only --trust-lockfile
         working-directory: frontend
 
+      # ...and again on the floor `engines.pnpm` declares. pnpm 11 is what a
+      # contributor who types `npx pnpm` gets today; 10 is what the manifest
+      # and `frontend/README.md` promise still works, and a floor nothing
+      # exercises is a claim rather than a contract — the same gap this change
+      # exists to close for Node. It is not hypothetical in the other
+      # direction: pnpm 9 does fail, on `pnpm-workspace.yaml`.
+      #
+      # A STEP, not a job. 147ms, and a separate job would mint a check name
+      # for something that cannot fail independently of the step above it.
+      #
+      # No `--trust-lockfile`: that flag is pnpm 11's, and 10 exits with
+      # `Unknown option`. Nothing is lost — `--lockfile-only` never reaches the
+      # registry pass the flag exists to skip.
+      - name: Validate pnpm-lock.yaml on the declared pnpm floor
+        run: npx --yes pnpm@10 install --frozen-lockfile --lockfile-only
+        working-directory: frontend
+
       # No lint step: the package declares no lint script. Adding one is a
       # separate decision, not something to smuggle in here.
 
