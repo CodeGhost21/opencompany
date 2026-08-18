@@ -531,6 +531,24 @@ impl AttributionAudit {
 /// a continuation failed, not an agent speaking. It is indistinguishable from a
 /// #885 row on disk, so it is counted here. The count is therefore an upper
 /// bound; in practice that notice is rare enough not to move it.
+/// Whether a stored `agent_id` names an author we can actually resolve.
+///
+/// The roster, **plus the confined copilot** (issue #966). `CONFINED_AGENT_ID`
+/// is deliberately not a roster id — it names no teammate, carries no manifest
+/// grants and cannot be addressed — but a copilot turn genuinely authored its
+/// reply, so the id is a truthful author rather than a destination that leaked
+/// into the field. Counting it would swap one wrong answer for a permanent
+/// false positive, and would make the audit's number drift upward on a company
+/// doing nothing wrong.
+///
+/// This is the single predicate the audit and any presentation of its result
+/// must share; two copies would let the count and the rendering disagree about
+/// which rows are unknown.
+pub fn is_known_author(agent_id: &str, record: &CompanyRecord) -> bool {
+    agent_id == crate::ports::CONFINED_AGENT_ID
+        || record.resolve_roster_agent_id(agent_id).is_some()
+}
+
 pub async fn channel_attributed_replies(
     runtime: &CompanyRuntime,
     record: &CompanyRecord,
@@ -547,9 +565,7 @@ pub async fn channel_attributed_replies(
             break;
         }
         let last = page[page.len() - 1].seq;
-        audit.fold(&page, |agent_id| {
-            record.resolve_roster_agent_id(agent_id).is_some()
-        });
+        audit.fold(&page, |agent_id| is_known_author(agent_id, record));
         cursor = EventSeq::new(last.value() + 1);
     }
     Ok(audit)
@@ -1208,8 +1224,81 @@ mod test {
         }
 
         /// The roster for these: two real teammates and nothing else.
+        ///
+        /// Deliberately *excludes* the confined copilot, because that is the
+        /// point of `is_known_author` — the copilot is a real author that no
+        /// roster will ever resolve.
         fn on_roster(agent_id: &str) -> bool {
             matches!(agent_id, "engineer" | "product_manager")
+        }
+
+        /// A record whose roster is exactly `on_roster`'s two teammates.
+        ///
+        /// Built so the tests below call the **real** `is_known_author` rather
+        /// than a local restatement of it. The first version of these tests
+        /// re-implemented the predicate in the test module, which meant
+        /// reverting the production function changed nothing and the tests
+        /// passed either way — proving only that the test agreed with itself.
+        fn record() -> CompanyRecord {
+            let src = "[company]\nname = \"Acme\"\n\n[policy]\nmode = \"full\"\n\
+                       \n[[agent]]\nid = \"engineer\"\nrole = \"Worker\"\ntier = \"orchestrator\"\n\
+                       \n[[agent]]\nid = \"product_manager\"\nrole = \"Worker\"\ntier = \"orchestrator\"\n";
+            let manifest: crate::company::CompanyManifest =
+                toml::from_str(src).expect("manifest parses");
+            CompanyRecord {
+                id: crate::ports::types::CompanyId::new("acme"),
+                manifest,
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            }
+        }
+
+        /// Issue #966. A copilot turn genuinely authored its reply, so the id it
+        /// stores is a truthful author — not a destination that leaked into the
+        /// field. Counting it would swap one wrong answer for a permanent false
+        /// positive that climbs on a company doing nothing wrong.
+        #[test]
+        fn the_confined_copilot_is_a_known_author_not_an_affected_row() {
+            let record = record();
+            let mut audit = AttributionAudit::default();
+            audit.fold(
+                &[
+                    reply(1, crate::ports::CONFINED_AGENT_ID),
+                    reply(2, "engineer"),
+                ],
+                |agent_id| is_known_author(agent_id, &record),
+            );
+            assert_eq!(audit.replies, 2);
+            assert_eq!(audit.affected, 0);
+        }
+
+        /// …and it is still not on the roster, which is what makes the widening
+        /// necessary rather than incidental. If `resolve_roster_agent_id` ever
+        /// started answering for it, this says so before the extra arm quietly
+        /// becomes dead code.
+        #[test]
+        fn the_confined_copilot_is_not_reachable_through_the_roster_alone() {
+            let record = record();
+            assert!(
+                record
+                    .resolve_roster_agent_id(crate::ports::CONFINED_AGENT_ID)
+                    .is_none(),
+                "the confined id resolved on the roster; `is_known_author`'s extra arm is now \
+                 unnecessary and this test should be deleted deliberately, not left passing"
+            );
+            assert!(is_known_author(crate::ports::CONFINED_AGENT_ID, &record));
+            assert!(is_known_author("engineer", &record));
+            assert!(!is_known_author("operator", &record));
         }
 
         #[test]

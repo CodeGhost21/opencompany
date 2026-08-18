@@ -80,6 +80,7 @@ import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
 import { useAskerNames } from "@/components/approval-card";
 import type { DecidedApproval } from "@/views/chat/model";
 import { cn } from "@/lib/utils";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import type { NodeRunState } from "@/lib/workflow-sample";
 // Issue #303: the canvas arithmetic, the run-state folds and the three drawers
 // moved out when this file passed 1800 lines and was about to grow an index and
@@ -1386,8 +1387,15 @@ export function WorkflowsView({
   const watchingRun = Boolean(activeRunId) || Boolean(liveRun?.active);
   useEffect(() => {
     if (!watchingRun || !historySupported) return;
-    const timer = window.setInterval(() => setRunsTick((n) => n + 1), 2_000);
-    return () => window.clearInterval(timer);
+    // Issue #1009: a bare `setInterval` kept firing in a hidden tab, so a run
+    // wedged "running" (a finish that never journaled) had a background console
+    // re-reading history every 2s forever. `startVisiblePolling` pauses the
+    // cadence while the tab is hidden and resumes — with one immediate read — on
+    // the visible edge, so a backgrounded console stops asking. Foreground
+    // behaviour is unchanged: the same 2s tick, and the backend's #1009
+    // cross-check now settles the row so the next read clears `activeRunId`
+    // (see the effect above) and this poll unmounts on its own.
+    return startVisiblePolling(() => setRunsTick((n) => n + 1), 2_000);
   }, [watchingRun, historySupported]);
 
   // Switching workflow (or company) clears the canvas: another graph's node ids
@@ -1556,7 +1564,14 @@ export function WorkflowsView({
       if (!overlayOutput.record) return { state: "unavailable" };
       const value = nodeOutputFor(overlayOutput.record.nodes, selectedNode.id);
       if (value === undefined) return { state: "unavailable" };
-      return { state: "present", value, truncated: overlayOutput.record.truncated };
+      // Issue #1008: a failed/blocked run's snapshot is flagged partial; carry it
+      // so the inspector badges the capture. A live run (below) is never partial.
+      return {
+        state: "present",
+        value,
+        truncated: overlayOutput.record.truncated,
+        partial: overlayOutput.record.partial,
+      };
     }
     if (result) {
       const value = nodeOutputFor(result.output, selectedNode.id);

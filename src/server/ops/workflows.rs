@@ -2593,6 +2593,71 @@ async fn list_runs(
         }
     }
 
+    // Issue #1009: cross-check the still-`running` rows against the live run set
+    // and settle the ones nobody is running.
+    //
+    // The fold above marks a start with no finish `running: true`, which is only
+    // ever settled by the boot sweep ([`sweep_interrupted_runs`]). Three ways a
+    // finish never lands — a task that panicked, an append that failed, a host
+    // that died — therefore all read as an eternal spinner *until the next host
+    // restart*, with a Stop button that cannot help and a 2s console poll that
+    // never stops. This closes the gap between restarts: any run the fold thinks
+    // is in flight whose id is **absent** from the supervisor's live set has no
+    // task behind it here and now, so it is journaled a synthetic finish (the
+    // same `INTERRUPTED_BY_RESTART` the boot sweep uses) and flipped in the
+    // in-memory row, so this very response is already self-consistent.
+    //
+    // Keyed strictly on `live()` membership. A run the current process is
+    // genuinely running is registered there and is left untouched — the watchdog
+    // (issue #1009, path A) is what guarantees a *panicking* run never reaches
+    // this predicate, because it journals its own finish before its guard drops.
+    //
+    // The one accepted false positive: a run that survived a live
+    // `rebuild_company` swap is registered on the *old* supervisor and so is
+    // absent from the successor's `live()`, so this could settle a run that is
+    // still walking its graph. Accepted because (i) the watchdog keeps panics out
+    // of this path entirely, (ii) that run's real finish lands later in journal
+    // order and wins the read's last-writer-wins display, and (iii) it is the
+    // same class the boot sweep already accepts — which is why that sweep gates
+    // on the handover being absent (see the runtime builder call site). It never
+    // corrupts the journal: a second, truthful finish simply supersedes it.
+    let live_ids: HashSet<String> = company
+        .runtime
+        .run_supervisor()
+        .live()
+        .into_iter()
+        .map(|(run_id, _workflow_id)| run_id)
+        .collect();
+    for entry in runs.iter_mut() {
+        if !entry.running {
+            continue;
+        }
+        let Some(run_id) = entry.run_id.clone() else {
+            continue;
+        };
+        if live_ids.contains(&run_id) {
+            continue;
+        }
+        // Durable half: append the finish so it survives this response, folds
+        // settled on the next `GET …/workflows/runs`, and stops the boot sweep
+        // from having to. Best-effort by construction — a failed append leaves
+        // the row as the in-memory flip below still makes it, and the next read
+        // simply retries.
+        crate::runtime::record_run_finished(
+            company.runtime.events(),
+            company.id(),
+            &entry.workflow_id,
+            entry.scheduled,
+            &run_id,
+            Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART),
+        )
+        .await;
+        // In-memory half: flip the row this response returns, so the console does
+        // not have to wait for the next poll to stop the spinner.
+        entry.running = false;
+        entry.error = Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
+    }
+
     // Newest first: a history panel leads with the run that just happened. The
     // `limit` now cuts *runs* rather than journal rows, which is the number the
     // caller was asking about all along.
@@ -4825,6 +4890,7 @@ mod tests {
                     "writer": { "items": [{ "json": { "text": "the draft" } }] }
                 }),
                 truncated: false,
+                partial: false,
             };
             runtime
                 .workflow_run_outputs()
@@ -5112,27 +5178,35 @@ mod tests {
             );
         }
 
-        /// A run whose host died leaves a start with no finish, and it folds as
-        /// `running: true` with the nodes it did complete. Honest only because
-        /// the boot sweep settles such runs — see `sweep_interrupted_runs`.
+        /// A run the process is genuinely executing — registered on the
+        /// supervisor, so its id is in `live()` — folds as `running: true` with
+        /// the nodes it has completed so far. Since #1009 a start with no finish
+        /// whose id is NOT live is settled on the read instead
+        /// ([`a_run_absent_from_the_live_set_is_settled_by_the_read`]); this pins
+        /// the still-running half of that split, with the guard held across the
+        /// request so the registration stays live for the whole read.
         #[tokio::test]
         async fn run_history_reports_an_unsettled_run_as_running() {
             let home_dir = home();
-            let home = home_dir.path().to_path_buf();
-            let (state, _store, id) = hosted_state(&home).await;
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
 
-            journal_start(&state, &id, "digest", "run-live", false).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", false)
+                .expect("under the default cap");
+            journal_start(&state, &id, "digest", &ctx.run_id, false).await;
             journal_node(
                 &state,
                 &id,
                 "digest",
-                "run-live",
+                &ctx.run_id,
                 "ceo",
                 WorkflowNodeStatus::Ok,
             )
             .await;
 
-            let response = router(state)
+            let response = router(state.clone())
                 .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
                 .await
                 .unwrap();
@@ -6124,6 +6198,119 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+
+        // ── Issue #1009: settle eternal-`running` rows on the read ─────────
+
+        /// Every `WorkflowRunFinished` the company journaled carrying `run_id`.
+        async fn finishes_for(
+            state: &AppState,
+            id: &CompanyId,
+            run_id: &str,
+        ) -> Vec<(Option<String>, bool)> {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .read_from(id, crate::ports::types::EventSeq::new(0), usize::MAX)
+                .await
+                .expect("read")
+                .into_iter()
+                .filter_map(|s| match s.event {
+                    CompanyEvent::WorkflowRunFinished {
+                        run_id: Some(rid),
+                        error,
+                        cancelled,
+                        ..
+                    } if rid == run_id => Some((error, cancelled)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// **The decisive case (issue #1009, path B).** A run whose start was
+        /// journaled but whose finish never landed — and whose id is absent from
+        /// the live run set — is settled by `list_runs` itself, between boots.
+        ///
+        /// Two halves, both asserted: the returned row is `running: false` +
+        /// `INTERRUPTED_BY_RESTART` (so this very response is self-consistent),
+        /// AND a synthetic finish is **durably appended** so the next read folds
+        /// it settled and the boot sweep has nothing left to do. Before the fix
+        /// the row read `running: true` and nothing was appended.
+        #[tokio::test]
+        async fn a_run_absent_from_the_live_set_is_settled_by_the_read() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            // A start with no finish. Nothing is registered on the supervisor,
+            // so this id is absent from `live()`: the process that owned it went
+            // away without journaling a finish.
+            journal_start(&state, &id, "digest", "run-dead", true).await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body.as_array().unwrap().len(), 1);
+            // `running` is skip-serialized when false, so a settled row simply
+            // omits it — assert it is not `true` rather than equal to `false`.
+            assert_ne!(
+                body[0]["running"], true,
+                "an absent run is settled on the read, not left spinning: {body}"
+            );
+            assert_eq!(
+                body[0]["error"],
+                crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART
+            );
+
+            // Durable half: exactly one synthetic finish is now in the journal.
+            let finishes = finishes_for(&state, &id, "run-dead").await;
+            assert_eq!(finishes.len(), 1, "exactly one synthetic finish appended");
+            assert_eq!(
+                finishes[0].0.as_deref(),
+                Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART)
+            );
+            assert!(!finishes[0].1, "a host-restart settle is not a cancel");
+        }
+
+        /// **The mandatory negative (issue #1009, rebuild/clean guard).** A run
+        /// the current process is genuinely running is registered on the
+        /// supervisor, so its id is in `live()` — and `list_runs` must leave it
+        /// alone: the row stays `running: true` and **nothing** is appended.
+        ///
+        /// This is what keeps the cross-check keyed strictly on `live()`
+        /// membership rather than on "has no finish yet", which would stamp
+        /// `INTERRUPTED_BY_RESTART` on a run still walking its graph and then
+        /// contradict its real finish. The guard is held across the read so the
+        /// registration stays live for the whole request.
+        #[tokio::test]
+        async fn a_run_in_the_live_set_is_left_running() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            let runtime = state.registry().get(&id).expect("registered");
+            // Register a live run and HOLD its guard: its id is now in `live()`.
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", true)
+                .expect("under the default cap");
+            journal_start(&state, &id, "digest", &ctx.run_id, true).await;
+
+            let response = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(body.as_array().unwrap().len(), 1);
+            assert_eq!(
+                body[0]["running"], true,
+                "a run the process is running must not be settled from under it"
+            );
+
+            assert!(
+                finishes_for(&state, &id, &ctx.run_id).await.is_empty(),
+                "a live run gets no synthetic finish appended"
+            );
         }
     }
 

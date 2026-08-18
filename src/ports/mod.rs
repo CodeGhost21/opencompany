@@ -50,7 +50,7 @@ pub use context::ContextStore;
 pub use economy::AgentEconomy;
 pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
-pub use ids::{AGENT_SLUG_FALLBACK, agent_slug, generate_id, now_millis};
+pub use ids::{AGENT_SLUG_FALLBACK, CONFINED_AGENT_ID, agent_slug, generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
 pub use journal::{Durability, JournalStore};
 pub use ledgers::LedgerStore;

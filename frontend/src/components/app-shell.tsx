@@ -343,6 +343,17 @@ export function AppShell({
   // React batch still means "re-read" — the frame-loss the workflow canvas had
   // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
+  // sees an attempt move rather than waiting up to four seconds for its poll —
+  // and sees it at all while the tab is hidden, which the poll deliberately does
+  // not do. Its own counter rather than a share of `taskEventTick`: this fires
+  // several times per attempt, and folding it in would make the whole board
+  // refetch on every transition of every run.
+  //
+  // A counter, not the payload, for the same reason the tick above is one: the
+  // screen re-reads its own detail, so two frames collapsing inside one React
+  // batch still mean "re-read".
+  const [attemptEventTick, setAttemptEventTick] = useState(0);
   // Issue #327: the latest workspace write, as the Workspace view needs it.
   //
   // The payload-carrying variant of the `taskEventTick` pattern above, and the
@@ -1095,6 +1106,7 @@ export function AppShell({
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
+    onRunEvent: useCallback(() => setAttemptEventTick((n) => n + 1), []),
     // Issue #377. Beside the board tick above, not instead of it: a settle both
     // moves a card between columns and needs saying in the conversation the
     // card came from.
@@ -1304,6 +1316,7 @@ export function AppShell({
               // counter the chat's in-flight strip reads, so a card opened from
               // chat lands on the board without a reload.
               taskEventTick={taskEventTick}
+              attemptEventTick={attemptEventTick}
               // Issue #883: a paused card is blocked until every approval its
               // turn parked is decided, and the board's own read carries none
               // of them. This is the feed the sidebar badge already polls, so
