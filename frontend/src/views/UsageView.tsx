@@ -61,7 +61,7 @@ const RANGE_LABELS: Record<string, string> = { "7d": "Last 7 days", "30d": "Last
  * token deletes the duplication and the drift: a palette change now reaches
  * this chart without anyone remembering it exists.
  *
- * Slot order is the system's: indigo leads, cyan follows. See
+ * Slot order is the system's: violet leads, cyan follows. See
  * docs/design-system/color.md.
  */
 const chartConfig = {
