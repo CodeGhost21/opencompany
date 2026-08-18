@@ -868,3 +868,133 @@ async fn spec_reports_setup_complete_once_a_company_is_registered() {
          companies authorizes through its admin rather than anonymously"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The roster proposal, before any company exists
+// ---------------------------------------------------------------------------
+
+async fn post_roster(state: AppState, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/setup/roster")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, body_json(response).await)
+}
+
+/// The wizard's whole reason for a second route: it needs a roster *before*
+/// there is a company to scope one to. The company-scoped twin resolves a
+/// `CompanyRuntime` and would 404 here.
+#[tokio::test]
+async fn a_roster_is_proposed_before_any_company_exists() {
+    let home = home();
+    let state = fresh_state(home.path());
+    assert!(state.registry().is_empty(), "the premise: no company yet");
+
+    let (status, body) = post_roster(
+        state,
+        serde_json::json!({
+            "industry": "E-commerce — I sell homeware online",
+            "automate": "Meta ads, order dispatch, daily reports",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "ecommerce", "{body}");
+    let agents = body["agents"].as_array().expect("agents");
+    assert!(
+        (4..=6).contains(&agents.len()),
+        "a proposal must be a workable team, got {}: {body}",
+        agents.len()
+    );
+    // Every row has to be directly usable as an apply's roster, so a missing
+    // field would surface as a half-built company rather than as a 400 here.
+    for agent in agents {
+        for key in ["name", "role", "description"] {
+            assert!(
+                agent[key].as_str().is_some_and(|v| !v.trim().is_empty()),
+                "agent is missing `{key}`: {agent}"
+            );
+        }
+    }
+}
+
+/// The default build links no harness, so the curated team is the whole answer.
+/// It must still be a real team and must say where it came from — an operator
+/// shown a canned roster with no indication judges the product on a team it
+/// never designed.
+#[tokio::test]
+async fn with_no_model_the_curated_team_ships_and_says_so() {
+    let home = home();
+    let (status, body) = post_roster(
+        fresh_state(home.path()),
+        serde_json::json!({ "industry": "zzzz qqqq" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["template"], "generic", "{body}");
+    assert_eq!(
+        body["source"], "fallback",
+        "the default build has no harness, so nothing designed this: {body}"
+    );
+}
+
+/// An operator who types nothing still gets a team. The last two questions are
+/// skippable by design, and stranding someone on the wizard is worse than a
+/// generic roster.
+#[tokio::test]
+async fn an_empty_body_still_yields_a_team() {
+    let home = home();
+    let (status, body) = post_roster(fresh_state(home.path()), serde_json::json!({})).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body["agents"].as_array().expect("agents").len() >= 4,
+        "{body}"
+    );
+}
+
+/// The proposal creates nothing. The wizard shows it for review first, and the
+/// company is built by the apply — so a wizard abandoned at the review step
+/// leaves the host exactly as it was.
+#[tokio::test]
+async fn proposing_creates_no_company() {
+    let home = home();
+    let state = fresh_state(home.path());
+    let (status, _) =
+        post_roster(state.clone(), serde_json::json!({ "industry": "software" })).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        state.registry().is_empty(),
+        "the proposal route must not register a company"
+    );
+}
+
+/// The same gate the rest of this flow uses: open while unconfigured on
+/// loopback, closed on a routable host where it would let whoever reached a
+/// fresh deployment first drive it.
+#[tokio::test]
+async fn a_routable_host_refuses_an_anonymous_proposal() {
+    let home = home();
+    let (status, _) = post_roster(
+        routable_state(home.path()),
+        serde_json::json!({ "industry": "software" }),
+    )
+    .await;
+
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "an unauthenticated caller must not reach this on a routable host"
+    );
+}

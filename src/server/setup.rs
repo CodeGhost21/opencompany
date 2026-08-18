@@ -72,7 +72,7 @@
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +87,9 @@ use crate::server::users::admin::require_admin;
 
 /// Builds the setup route fragment.
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/v1/setup", get(read).post(apply))
+    Router::new()
+        .route("/api/v1/setup", get(read).post(apply))
+        .route("/api/v1/setup/roster", post(propose_roster))
 }
 
 // ---------------------------------------------------------------------------
@@ -768,3 +770,118 @@ fn parse_value(spec: &FieldSpec, raw: Option<&str>) -> Result<ConfigValue, OpenC
 
 #[cfg(test)]
 mod test;
+
+// ---------------------------------------------------------------------------
+// The roster proposal, before any company exists
+// ---------------------------------------------------------------------------
+
+/// What `POST /api/v1/setup/roster` accepts.
+///
+/// The same three answers the company-scoped route takes, plus the credential
+/// the operator is typing into this very wizard. The credential is **used and
+/// discarded**: it is not written anywhere by this route, so the apply that
+/// writes `config.toml` stays one atomic step rather than a write-then-generate
+/// sequence that can half-land.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SetupRosterRequest {
+    industry: String,
+    team_hint: String,
+    automate: String,
+    /// The inference credential from the wizard's own field, when the operator
+    /// has just supplied one. Absent falls back to whatever the host already
+    /// has; neither yielding one ships the curated team.
+    inference_key: Option<String>,
+}
+
+/// One proposed teammate, shaped for the wizard's review step.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupAgentDto {
+    name: String,
+    role: String,
+    description: String,
+}
+
+/// The proposal.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupRosterDto {
+    agents: Vec<SetupAgentDto>,
+    /// Which curated roster framed the proposal, e.g. `ecommerce`.
+    template: String,
+    /// `model` or `fallback` — the review step says which, in a sentence.
+    source: String,
+}
+
+/// `POST /api/v1/setup/roster` — propose a starting team for a company that
+/// does not exist yet.
+///
+/// The company-scoped `POST {scope}/setup/roster` cannot serve the wizard: it
+/// resolves a `CompanyRuntime`, and during first-run setup there is none. Same
+/// pass underneath, same validation, same fallback — only the scope differs.
+///
+/// Authorized by the same [`authorize`] the rest of this flow uses, so an
+/// unconfigured loopback host can reach it before anyone can sign in, and a
+/// configured one demands an admin.
+async fn propose_roster(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(req): Json<SetupRosterRequest>,
+) -> Result<Json<SetupRosterDto>, Response> {
+    authorize(&state, &headers, peer).await?;
+
+    let answers = crate::company::setup::SetupAnswers {
+        industry: req.industry,
+        team_hint: req.team_hint,
+        automate: req.automate,
+    };
+    let proposal = propose_for_setup(&answers, req.inference_key.as_deref()).await;
+
+    tracing::info!(
+        template = proposal.template_key,
+        source = proposal.source.as_str(),
+        agents = proposal.agents.len(),
+        "[setup] proposed a starting roster for a company that does not exist yet"
+    );
+
+    Ok(Json(SetupRosterDto {
+        agents: proposal
+            .agents
+            .into_iter()
+            .map(|a| SetupAgentDto {
+                name: a.name,
+                role: a.role,
+                description: a.description,
+            })
+            .collect(),
+        template: proposal.template_key.to_string(),
+        source: proposal.source.as_str().to_string(),
+    }))
+}
+
+/// Designs the roster when a model is reachable, and hands back the curated
+/// team when one is not.
+#[cfg(feature = "openhuman")]
+async fn propose_for_setup(
+    answers: &crate::company::setup::SetupAnswers,
+    credential: Option<&str>,
+) -> crate::company::setup::RosterProposal {
+    match crate::harness::roster_build::RosterBuilder::for_setup(&ProcessEnv, credential) {
+        // Unmetered on purpose — there is no company to charge yet. See
+        // `RosterBuilder::for_setup`.
+        Some(builder) => builder.propose(answers).await.0,
+        None => crate::company::setup::template_proposal(answers),
+    }
+}
+
+/// The default build links no harness, so the curated team is the whole answer —
+/// and it is a real one.
+#[cfg(not(feature = "openhuman"))]
+async fn propose_for_setup(
+    answers: &crate::company::setup::SetupAnswers,
+    _credential: Option<&str>,
+) -> crate::company::setup::RosterProposal {
+    crate::company::setup::template_proposal(answers)
+}

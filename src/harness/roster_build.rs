@@ -97,6 +97,63 @@ impl RosterBuilder {
         Self::new(deps.provider.clone(), model_name)
     }
 
+    /// Builds a pass with **no company behind it**, for first-run setup.
+    ///
+    /// The merged wizard runs before any company exists, so there is no
+    /// `CompanyRuntime` to hang a builder off and no `HarnessDeps` to build one
+    /// from. The credential is resolved in the order the operator would expect:
+    ///
+    /// 1. `credential` — what they just typed into the wizard. It is used
+    ///    without being persisted, so the apply that writes `config.toml` stays
+    ///    a single atomic step rather than a write-then-generate sequence that
+    ///    can half-land.
+    /// 2. otherwise whatever the host already has
+    ///    ([`harness_inference_from_env`]), which covers a laptop that was
+    ///    already configured and a hosted tenant whose control plane injected
+    ///    one.
+    ///
+    /// `None` when neither yields a credential — the caller then ships the
+    /// curated team, which is a supported answer rather than a failure.
+    ///
+    /// ## Deliberately unmetered
+    ///
+    /// [`crate::metering::roster_build`] charges the company bucket, and here
+    /// there is no company to charge: the call happens before the thing that
+    /// would be billed exists. Inventing an attribution — a placeholder id, the
+    /// company that is *about* to be created — would put a row in a Usage view
+    /// for a period the company did not exist. One unbilled call per install is
+    /// the honest trade.
+    pub fn for_setup(
+        env: &dyn crate::app::config::EnvSource,
+        credential: Option<&str>,
+    ) -> Option<Self> {
+        use crate::harness::provider::{
+            DEFAULT_HOSTED_MODEL, DEFAULT_TINYHUMANS_INFERENCE_URL, HostedProvider,
+            HostedProviderConfig, harness_inference_from_env,
+        };
+
+        let typed = credential
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(|key| {
+                let base_url = env
+                    .get("OPENCOMPANY_INFERENCE_URL")
+                    .unwrap_or_else(|| DEFAULT_TINYHUMANS_INFERENCE_URL.to_string());
+                (
+                    HostedProviderConfig {
+                        base_url,
+                        credential: crate::company::Credential::from_value(key.to_string()),
+                        extra_headers: Vec::new(),
+                    },
+                    env.get("OPENCOMPANY_INFERENCE_MODEL"),
+                )
+            });
+
+        let (config, model_override) = typed.or_else(|| harness_inference_from_env(env))?;
+        let model_name = model_override.unwrap_or_else(|| DEFAULT_HOSTED_MODEL.to_string());
+        Some(Self::new(Arc::new(HostedProvider::new(config)), model_name))
+    }
+
     /// The provider slug this pass's usage is metered under, read live so a BYOK
     /// switch re-attributes the next pass.
     pub fn provider_slug(&self) -> String {
