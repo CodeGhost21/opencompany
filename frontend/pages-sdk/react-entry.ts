@@ -1,0 +1,19 @@
+// Built standalone to `dist/pages-sdk/react.mjs` — the one ESM module a
+// page's served import map resolves BOTH bare specifiers "react" and
+// "react-dom/client" to (docs/spec/runtime/pages.md §5). Because both
+// specifiers point at this same file, its exports have to satisfy both
+// import shapes at once: `import React from "react"` (a default export) and
+// `import { createRoot } from "react-dom/client"` (a named export) both
+// resolve here, which is why this module re-exports React's own named
+// exports, hands back React itself as the default export, and adds
+// react-dom/client's exports alongside them.
+//
+// Bundles this app's own pinned React/ReactDOM versions rather than the
+// console's own chunk, so a page's module graph is self-contained and never
+// depends on the console build's internal chunk hashes.
+import * as React from "react";
+import { createRoot, hydrateRoot } from "react-dom/client";
+
+export * from "react";
+export default React;
+export { createRoot, hydrateRoot };
