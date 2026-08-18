@@ -1291,24 +1291,20 @@ async fn post_to_channel(
     // The built-in operator adapter is an in-memory response spy, not a
     // durable delivery surface. Interactive chat journals its own replies
     // after the cycle; workflow delivery has no such reader, so naming
-    // `operator` must fail rather than report a successful discard.
-    if channel_id == crate::runtime::channel::OPERATOR_CHANNEL {
-        let wired: Vec<&str> = delivery
+    // `operator` must fail rather than report a successful discard. The rule
+    // and this sentence both live beside the operator-channel constant (issue
+    // #981) — the save-time guard on the write routes reads the same two, so a
+    // destination this refuses is one the author was never offered.
+    if !crate::runtime::channel::is_deliverable_channel(channel_id) {
+        let deliverable: Vec<&str> = delivery
             .channels
             .iter()
-            .filter(|channel| channel.channel_id() != crate::runtime::channel::OPERATOR_CHANNEL)
             .map(|channel| channel.channel_id())
+            .filter(|id| crate::runtime::channel::is_deliverable_channel(id))
             .collect();
         return Err((
             DeliveryReason::ChannelNotWired,
-            format!(
-                "`{channel_id}` is not a workflow delivery channel — this runtime has: {}",
-                if wired.is_empty() {
-                    "no durable channels".to_string()
-                } else {
-                    wired.join(", ")
-                }
-            ),
+            crate::runtime::channel::undeliverable_channel_message(channel_id, &deliverable),
         ));
     }
     let Some(adapter) = delivery

@@ -19,6 +19,42 @@ use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, InboundMessage, Out
 /// The channel id of the always-present operator surface.
 pub const OPERATOR_CHANNEL: &str = "operator";
 
+/// Whether a channel with this id may be named as the target of an `output`
+/// node's `channel` delivery destination.
+///
+/// The operator channel is the single exclusion, and it is deliberate:
+/// [`OperatorChannel`] is an in-memory response spy with no durable reader.
+/// Interactive chat journals its own replies after the cycle, but a workflow
+/// report posted here reaches nobody — accepting it would report a successful
+/// discard. Everything else that is wired (desk channels, provider channels) is
+/// a real write path.
+///
+/// Issue #981: this is the one place the rule is stated. It previously lived as
+/// an inline `!=` where the builder assembles the delivery deps, as a `by name`
+/// refusal in [`crate::workflows::delivery`], and as a prose sentence in the
+/// accessor the console's destination picker reads — and that third copy said
+/// the opposite, so the picker offered authors the one target guaranteed to
+/// fail. Call this instead of re-deciding.
+pub fn is_deliverable_channel(channel_id: &str) -> bool {
+    channel_id != OPERATOR_CHANNEL
+}
+
+/// The operator-readable sentence for a `channel` destination that names
+/// something outside the deliverable set, built from the set that is live right
+/// now so the fix is legible without a second lookup.
+///
+/// Shared by the delivery-time refusal and the save-time rejection (issue
+/// #981), so an author who trips the guard at save and an author who reads a
+/// failed delivery row are told the same thing about the same runtime.
+pub fn undeliverable_channel_message(target: &str, deliverable: &[&str]) -> String {
+    let has = if deliverable.is_empty() {
+        "no durable channels".to_string()
+    } else {
+        deliverable.join(", ")
+    };
+    format!("`{target}` is not a workflow delivery channel — this runtime has: {has}")
+}
+
 /// A desk-backed [`ChannelAdapter`]. Sending appends an agent reply to the
 /// company's durable event log, which is the existing read path for desk chat
 /// history. The adapter is deliberately one-per-desk so channel lookup and
@@ -184,6 +220,35 @@ impl ChannelAdapter for RecordingChannel {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// The operator channel is excluded from workflow delivery, and every other
+    /// wired id is not. The rule reads the same for a desk, a provider channel
+    /// and an id nobody wired — deliverability is about `operator`, not about
+    /// whether the caller has already checked the adapter exists.
+    #[test]
+    fn only_the_operator_channel_is_undeliverable() {
+        assert!(!is_deliverable_channel(OPERATOR_CHANNEL));
+        assert!(is_deliverable_channel("engineering"));
+        assert!(is_deliverable_channel("email"));
+        assert!(is_deliverable_channel("Operator"));
+    }
+
+    /// The shared refusal sentence names what IS deliverable, and says so
+    /// plainly when the answer is nothing — a desk-less company is a legitimate
+    /// state (issue #963), not a malformed one, so the empty case gets a
+    /// sentence rather than a dangling `has: `.
+    #[test]
+    fn the_refusal_sentence_names_the_live_set() {
+        let message = undeliverable_channel_message("operator", &["engineering", "product"]);
+        assert!(message.contains("`operator` is not a workflow delivery channel"));
+        assert!(message.ends_with("this runtime has: engineering, product"));
+
+        let empty = undeliverable_channel_message("engineering", &[]);
+        assert!(
+            empty.ends_with("this runtime has: no durable channels"),
+            "{empty}"
+        );
+    }
 
     #[tokio::test]
     async fn buffers_sent_messages() {
