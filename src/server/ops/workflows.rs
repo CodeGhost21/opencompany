@@ -2481,6 +2481,15 @@ mod tests {
     /// The listed rows this company itself has, with the global baseline
     /// filtered out. Every company lists the baseline graphs; these tests are
     /// about what this one created, deleted, or declared.
+    ///
+    /// This is an **id heuristic**, not provenance: `WorkflowSummary` carries
+    /// no `global` flag, so a row is classified as "the baseline's" purely by
+    /// id membership in `crate::globals::workflows()`. A company definition of
+    /// the *same* id supersedes the global one and would be wrongly excluded
+    /// here — none of the fixtures below give a company workflow a colliding
+    /// id, so the gap does not fire in this suite; see
+    /// `write_test::workflow_create_of_an_id_matching_a_global_wins_by_content`
+    /// for that case asserted directly, without this helper.
     fn own_rows(listed: &serde_json::Value) -> Vec<&serde_json::Value> {
         listed
             .as_array()
