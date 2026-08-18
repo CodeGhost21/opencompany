@@ -587,8 +587,31 @@ export function WorkflowCreateDialog({
     };
   }, [open, editing, client, company]);
 
+  /**
+   * Retires the submit-time banner because the draft it described is gone
+   * (issue #1005).
+   *
+   * `error` is the verdict on ONE graph — the client checks' first complaint or
+   * the host's rejection — so it stops being true the moment the author changes
+   * that graph. Left up it reads as the verdict on the graph now on screen, and
+   * the next failed Create is indistinguishable from the last one: same text,
+   * no new event.
+   *
+   * Every handler that mutates the draft calls this, structural ones included.
+   * The banner routinely names something an add or a remove fixes ("Add at
+   * least one node.", a duplicate node id, an edge pointing at nothing), so a
+   * split where only the field edits clear it leaves the complaint up through
+   * exactly the action that answers it. Field-level `fieldErrors` are NOT
+   * touched here — those are scoped to their own control and each clears on its
+   * own edit.
+   */
+  function clearSubmitError() {
+    setError(null);
+  }
+
   function addNode() {
     setNodes((rows) => [...rows, blankNode()]);
+    clearSubmitError();
   }
 
   /** Edits the name and drops the stale submit banner with it — `validate()`
@@ -596,16 +619,25 @@ export function WorkflowCreateDialog({
    * looking straight at a complaint they have already addressed (#1005). */
   function changeName(value: string) {
     setName(value);
-    setError(null);
+    clearSubmitError();
+  }
+
+  /** Same for the id, which is what `validate()` complains about FIRST (missing,
+   * or not a safe id) and the most common 409 from the host — so it is the
+   * banner an author is most often looking at while fixing its cause. */
+  function changeId(value: string) {
+    setId(value);
+    clearSubmitError();
+  }
+
+  function changeDescription(value: string) {
+    setDescription(value);
+    clearSubmitError();
   }
 
   function updateNode(key: string, fields: Partial<DraftNode>) {
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
-    // The submit banner described the graph as it was before this edit — from
-    // the client checks or from the host — so it goes the moment the author
-    // starts changing that graph (issue #1005). Leaving it up means the next
-    // failed Create is indistinguishable from the last one.
-    setError(null);
+    clearSubmitError();
     // Clear whatever the edit invalidated. This MUST stay in step with
     // `changeKind`: that reset exists so the draft never holds a value whose
     // control is off screen, and an error is a value too — leaving one behind
@@ -656,6 +688,7 @@ export function WorkflowCreateDialog({
         r.key === nodeKey ? { ...r, configDraft: { ...r.configDraft, [key]: value } } : r,
       ),
     );
+    clearSubmitError();
     setFieldErrors((prev) => {
       const k = errorKey(nodeKey, `config:${key}`);
       if (!(k in prev)) return prev;
@@ -694,6 +727,7 @@ export function WorkflowCreateDialog({
   function removeNode(key: string) {
     const removed = nodes.find((n) => n.key === key);
     setNodes((rows) => rows.filter((r) => r.key !== key));
+    clearSubmitError();
     // The row is gone, so its errors have nothing left to point at.
     setFieldErrors((prev) => {
       const next = Object.fromEntries(
@@ -710,17 +744,17 @@ export function WorkflowCreateDialog({
 
   function addEdge() {
     setEdges((rows) => [...rows, { key: nextKey(), from: "", to: "", label: "" }]);
+    clearSubmitError();
   }
 
   function updateEdge(key: string, fields: Partial<DraftEdge>) {
     setEdges((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
-    // Same reasoning as `updateNode`: the banner belongs to the graph the
-    // author has just stopped having.
-    setError(null);
+    clearSubmitError();
   }
 
   function removeEdge(key: string) {
     setEdges((rows) => rows.filter((r) => r.key !== key));
+    clearSubmitError();
   }
 
   /** Client-side validation, mirroring the host's checks so most mistakes
@@ -904,9 +938,10 @@ export function WorkflowCreateDialog({
         setDescription(graph.description ?? "");
         setNodes(draftNodes(graph));
         setEdges(draftEdges(graph));
-        // A fresh draft clears both the submit banner and the per-field blur
-        // errors — they belonged to whatever was on screen before.
-        setError(null);
+        // A fresh draft replaces the whole graph, so it clears both the submit
+        // banner and the per-field blur errors — they belonged to whatever was
+        // on screen before.
+        clearSubmitError();
         setFieldErrors({});
         setDraftSummary(banners.summary);
         // Any host corrections (issue #813) — e.g. a role→id rewrite — so the
@@ -1200,131 +1235,147 @@ export function WorkflowCreateDialog({
           </div>
         )}
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="grid gap-2">
-            <Label htmlFor={`${formId}-id`}>Id</Label>
-            {/* Read-only in edit mode, not merely rejected on save: the id keys
-                the saved graph, the scheduler and every past run, so the host
-                answers 400 to a rename. Letting an author type a new one and
-                then refusing it would be a trap. */}
-            <Input
-              id={`${formId}-id`}
-              value={id}
-              onChange={(e) => setId(e.target.value)}
-              readOnly={editing}
-              aria-readonly={editing || undefined}
-              className={editing ? "text-muted-foreground" : undefined}
-              placeholder="e.g. campaign_pipeline"
-            />
-            {editing && (
-              <p className="text-2xs leading-snug text-muted-foreground">
-                A workflow&apos;s id can&apos;t change. It keys the saved graph, its
-                schedule and its run history.
-              </p>
-            )}
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor={`${formId}-name`}>Name</Label>
-            <Input
-              id={`${formId}-name`}
-              value={name}
-              onChange={(e) => changeName(e.target.value)}
-              placeholder="e.g. Campaign pipeline"
-            />
-          </div>
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor={`${formId}-desc`}>Description</Label>
-          <Textarea
-            id={`${formId}-desc`}
-            rows={2}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="What does this workflow do?"
-          />
-        </div>
+        {/*
+          Every control that can change the draft goes dead while a save is in
+          flight (issue #1005). `submit()` snapshots the graph before it awaits,
+          so an edit landing during the round trip is in neither the request nor
+          the result — and on success the dialog closes, taking that edit with
+          it. The operator would have watched themselves type it.
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label>Nodes</Label>
-            {/* Off while a save is in flight (issue #1005): the graph being
-                posted is the one on screen, and a row added mid-write is in
-                neither the request nor the result. */}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={addNode}
-              disabled={submitting}
-            >
-              <Plus className="size-3.5" /> Add node
-            </Button>
-          </div>
-          <div className="space-y-2">
-            {nodes.map((n) => (
-              <NodeRow
-                key={n.key}
-                node={n}
-                client={client}
-                company={company}
-                roster={roster}
-                wiredChannels={wiredChannels}
-                workflows={workflows}
-                createMode={!editing}
-                errors={{
-                  schedule: fieldErrors[errorKey(n.key, "schedule")],
-                  destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
-                }}
-                configErrors={Object.fromEntries(
-                  configFieldSpecs(n.kind).map((s) => [
-                    s.key,
-                    fieldErrors[errorKey(n.key, `config:${s.key}`)],
-                  ]),
-                )}
-                onValidateField={(field, value) => validateField(n.key, field, value)}
-                onConfigChange={(key, value) => updateConfigField(n.key, key, value)}
-                onChange={(fields) => updateNode(n.key, fields)}
-                onRemove={() => removeNode(n.key)}
+          A `fieldset` rather than a `disabled` prop threaded through `NodeRow`,
+          `EdgeRow`, `ScheduleField` and `NodeConfigFields`: `disabled`
+          propagates natively to every form control underneath, so a control
+          added later is covered by construction rather than by remembering.
+          `display: contents` keeps it out of the layout — the grids below still
+          see their own children.
+        */}
+        <fieldset disabled={submitting} className="contents">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-2">
+              <Label htmlFor={`${formId}-id`}>Id</Label>
+              {/* Read-only in edit mode, not merely rejected on save: the id keys
+                  the saved graph, the scheduler and every past run, so the host
+                  answers 400 to a rename. Letting an author type a new one and
+                  then refusing it would be a trap. */}
+              <Input
+                id={`${formId}-id`}
+                value={id}
+                onChange={(e) => changeId(e.target.value)}
+                readOnly={editing}
+                aria-readonly={editing || undefined}
+                className={editing ? "text-muted-foreground" : undefined}
+                placeholder="e.g. campaign_pipeline"
               />
-            ))}
-            {nodes.length === 0 && (
-              <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
-                No nodes yet.
-              </p>
-            )}
+              {editing && (
+                <p className="text-2xs leading-snug text-muted-foreground">
+                  A workflow&apos;s id can&apos;t change. It keys the saved graph, its
+                  schedule and its run history.
+                </p>
+              )}
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={`${formId}-name`}>Name</Label>
+              <Input
+                id={`${formId}-name`}
+                value={name}
+                onChange={(e) => changeName(e.target.value)}
+                placeholder="e.g. Campaign pipeline"
+              />
+            </div>
           </div>
-        </div>
+          <div className="grid gap-2">
+            <Label htmlFor={`${formId}-desc`}>Description</Label>
+            <Textarea
+              id={`${formId}-desc`}
+              rows={2}
+              value={description}
+              onChange={(e) => changeDescription(e.target.value)}
+              placeholder="What does this workflow do?"
+            />
+          </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label>Edges</Label>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={addEdge}
-              disabled={nodes.length < 2 || submitting}
-            >
-              <Plus className="size-3.5" /> Add edge
-            </Button>
-          </div>
           <div className="space-y-2">
-            {edges.map((e) => (
-              <EdgeRow
-                key={e.key}
-                edge={e}
-                nodeIds={nodes.map((n) => n.id.trim()).filter(Boolean)}
-                onChange={(fields) => updateEdge(e.key, fields)}
-                onRemove={() => removeEdge(e.key)}
-              />
-            ))}
-            {edges.length === 0 && (
-              <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
-                No edges yet — nodes won&apos;t be connected.
-              </p>
-            )}
+            <div className="flex items-center justify-between">
+              <Label>Nodes</Label>
+              {/* Off while a save is in flight (issue #1005): the graph being
+                  posted is the one on screen, and a row added mid-write is in
+                  neither the request nor the result. */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={addNode}
+                disabled={submitting}
+              >
+                <Plus className="size-3.5" /> Add node
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {nodes.map((n) => (
+                <NodeRow
+                  key={n.key}
+                  node={n}
+                  client={client}
+                  company={company}
+                  roster={roster}
+                  wiredChannels={wiredChannels}
+                  workflows={workflows}
+                  createMode={!editing}
+                  errors={{
+                    schedule: fieldErrors[errorKey(n.key, "schedule")],
+                    destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
+                  }}
+                  configErrors={Object.fromEntries(
+                    configFieldSpecs(n.kind).map((s) => [
+                      s.key,
+                      fieldErrors[errorKey(n.key, `config:${s.key}`)],
+                    ]),
+                  )}
+                  onValidateField={(field, value) => validateField(n.key, field, value)}
+                  onConfigChange={(key, value) => updateConfigField(n.key, key, value)}
+                  onChange={(fields) => updateNode(n.key, fields)}
+                  onRemove={() => removeNode(n.key)}
+                />
+              ))}
+              {nodes.length === 0 && (
+                <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+                  No nodes yet.
+                </p>
+              )}
+            </div>
           </div>
-        </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Edges</Label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={addEdge}
+                disabled={nodes.length < 2 || submitting}
+              >
+                <Plus className="size-3.5" /> Add edge
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {edges.map((e) => (
+                <EdgeRow
+                  key={e.key}
+                  edge={e}
+                  nodeIds={nodes.map((n) => n.id.trim()).filter(Boolean)}
+                  onChange={(fields) => updateEdge(e.key, fields)}
+                  onRemove={() => removeEdge(e.key)}
+                />
+              ))}
+              {edges.length === 0 && (
+                <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+                  No edges yet — nodes won&apos;t be connected.
+                </p>
+              )}
+            </div>
+          </div>
+        </fieldset>
 
         {error && (
           // Wrapper carries the ref/focus target so it works regardless of

@@ -70,15 +70,17 @@ function submitButton(): HTMLButtonElement {
 
 /** Sets a controlled input the way a keystroke would: through the native value
  * setter, so React's own descriptor sees the change and `onChange` fires. */
-function type(selector: string, value: string) {
-  const input = inDialog<HTMLInputElement>(selector);
-  expect(input, `no input matching ${selector}`).toBeTruthy();
+function type(selector: string, value: string, nth = 0) {
+  const input = Array.from(
+    document.querySelectorAll<HTMLInputElement>(`[data-slot="dialog-content"] ${selector}`),
+  )[nth];
+  expect(input, `no input matching ${selector} at index ${nth}`).toBeTruthy();
   const setter = Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
     "value",
   )!.set!;
   setter.call(input, value);
-  input!.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 async function open(client: OpenCompanyClient) {
@@ -151,6 +153,33 @@ describe("the create dialog while a create is in flight", () => {
     expect(inDialog<HTMLButtonElement>('[data-testid="workflow-copilot-draft"]')!.disabled).toBe(
       true,
     );
+    // ...including the fields themselves, which the `fieldset` covers. Matched
+    // with `:disabled` rather than `.disabled`, deliberately: a control inside a
+    // disabled fieldset IS disabled — it matches the pseudo-class and receives
+    // no events — but its own IDL property stays false, because the `disabled`
+    // content attribute is on the ancestor. Asserting `.disabled` here would
+    // read false and hide a working lock.
+    for (const [what, selector] of [
+      ["the workflow id", '[placeholder="e.g. campaign_pipeline"]'],
+      ["the workflow name", '[placeholder="e.g. Campaign pipeline"]'],
+      ["the description", '[placeholder="What does this workflow do?"]'],
+      ["a node id", '[aria-label="Node id"]'],
+      ["a node name", '[placeholder="display name"]'],
+      ["the node kind select", '[aria-label="Node kind"]'],
+      ["the remove-node button", '[aria-label="Remove node"]'],
+    ] as const) {
+      const el = inDialog<HTMLElement>(selector);
+      expect(el, `no control matching ${selector}`).toBeTruthy();
+      expect(el!.matches(":disabled"), `${what} stayed live under the request`).toBe(true);
+    }
+
+    // Not merely styled: the row really cannot be removed from the graph being
+    // posted. A disabled fieldset swallows the event rather than dispatching it.
+    const rowsBefore = document.querySelectorAll('[aria-label="Remove node"]').length;
+    await act(async () => {
+      inDialog<HTMLButtonElement>('[aria-label="Remove node"]')!.click();
+    });
+    expect(document.querySelectorAll('[aria-label="Remove node"]').length).toBe(rowsBefore);
   });
 
   it("posts once when the operator clicks Create twice in one tick", async () => {
@@ -220,33 +249,91 @@ describe("the create dialog when the host refuses", () => {
     expect(submitButton().disabled).toBe(false);
   });
 
+  /** Rejects, so the banner is up and the form is live again to edit. */
+  async function submitAndGetRefused() {
+    await open(
+      stubClient(() =>
+        Promise.reject(new ApiError(400, "bad_request", "that id is taken", true)),
+      ),
+    );
+    await fillValidDraft();
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(inDialog('[data-testid="create-error"]')).toBeTruthy();
+  }
+
   // The complaint was about the graph as it was, so any edit to that graph
   // retires it; leaving it up would make the next failure indistinguishable
-  // from this one. Both entry points are covered because they are separate
-  // code paths — the name is top-level state, a node row goes through
-  // `updateNode`.
+  // from this one. Each case below is a separate handler in the component —
+  // the id and the name are top-level state, a node row goes through
+  // `updateNode` — so they are covered separately rather than assumed.
   for (const [what, selector] of [
+    ["the id", '[placeholder="e.g. campaign_pipeline"]'],
     ["the name", '[placeholder="e.g. Campaign pipeline"]'],
     ["a node", '[placeholder="display name"]'],
   ] as const) {
     it(`drops the stale banner as soon as the operator edits ${what}`, async () => {
-      await open(
-        stubClient(() =>
-          Promise.reject(new ApiError(400, "bad_request", "that id is taken", true)),
-        ),
-      );
-      await fillValidDraft();
+      await submitAndGetRefused();
 
       await act(async () => {
-        submitButton().click();
-      });
-      expect(inDialog('[data-testid="create-error"]')).toBeTruthy();
-
-      await act(async () => {
-        type(selector, "Something else");
+        type(selector, "something_else");
       });
 
       expect(inDialog('[data-testid="create-error"]')).toBeNull();
     });
   }
+
+  // Structural edits too, which is the case that actually bites: the banner
+  // routinely names something an add or a remove is the fix for ("Add at least
+  // one node.", a duplicate id, an edge pointing at nothing), so leaving it up
+  // through exactly the action that answers it is the worst version of a stale
+  // message — the operator fixes the problem and the complaint does not move.
+  it("drops the stale banner as soon as the operator adds a node", async () => {
+    await submitAndGetRefused();
+
+    await act(async () => {
+      button("Add node").click();
+    });
+
+    expect(inDialog('[data-testid="create-error"]')).toBeNull();
+  });
+
+  it("drops the stale banner as soon as the operator adds an edge", async () => {
+    await submitAndGetRefused();
+
+    // Add edge is `disabled` until the graph has two nodes to connect, so the
+    // second node is authored first — and that add clears the banner on its
+    // own, hence the fresh refusal below to put it back.
+    await act(async () => {
+      button("Add node").click();
+    });
+    await act(async () => {
+      type('[aria-label="Node id"]', "second_node", 1);
+    });
+    await act(async () => {
+      type('[placeholder="display name"]', "Second node", 1);
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+    expect(inDialog('[data-testid="create-error"]')).toBeTruthy();
+    expect(button("Add edge").disabled).toBe(false);
+
+    await act(async () => {
+      button("Add edge").click();
+    });
+
+    expect(inDialog('[data-testid="create-error"]')).toBeNull();
+  });
+
+  it("drops the stale banner as soon as the operator removes a node", async () => {
+    await submitAndGetRefused();
+
+    await act(async () => {
+      inDialog<HTMLButtonElement>('[aria-label="Remove node"]')!.click();
+    });
+
+    expect(inDialog('[data-testid="create-error"]')).toBeNull();
+  });
 });
