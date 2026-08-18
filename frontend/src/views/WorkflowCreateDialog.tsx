@@ -14,7 +14,7 @@
 // second one would drift the moment either side grew a field.
 
 import { useEffect, useId, useRef, useState } from "react";
-import { History, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
+import { History, Loader2, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
   CREATABLE_NODE_KINDS,
@@ -584,8 +584,21 @@ export function WorkflowCreateDialog({
     setNodes((rows) => [...rows, blankNode()]);
   }
 
+  /** Edits the name and drops the stale submit banner with it — `validate()`
+   * and the host both complain about the name, so an author fixing one is
+   * looking straight at a complaint they have already addressed (#1005). */
+  function changeName(value: string) {
+    setName(value);
+    setError(null);
+  }
+
   function updateNode(key: string, fields: Partial<DraftNode>) {
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    // The submit banner described the graph as it was before this edit — from
+    // the client checks or from the host — so it goes the moment the author
+    // starts changing that graph (issue #1005). Leaving it up means the next
+    // failed Create is indistinguishable from the last one.
+    setError(null);
     // Clear whatever the edit invalidated. This MUST stay in step with
     // `changeKind`: that reset exists so the draft never holds a value whose
     // control is off screen, and an error is a value too — leaving one behind
@@ -694,6 +707,9 @@ export function WorkflowCreateDialog({
 
   function updateEdge(key: string, fields: Partial<DraftEdge>) {
     setEdges((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    // Same reasoning as `updateNode`: the banner belongs to the graph the
+    // author has just stopped having.
+    setError(null);
   }
 
   function removeEdge(key: string) {
@@ -902,18 +918,36 @@ export function WorkflowCreateDialog({
     }
   }
 
+  /**
+   * Raise the submit-time banner and take the operator to it (issue #1005).
+   *
+   * Issue #813 gave the CLIENT-validation failure this treatment: the banner
+   * sits inline in a scrollable dialog with the Create button below it, so on a
+   * long graph the message lands off-screen and the button just looks dead.
+   * A host rejection has exactly the same geometry and was getting none of it,
+   * so both branches go through here rather than one of them setting `error`
+   * on its own — the version that skips this is the one that reads as nothing
+   * happening. The scroll/focus runs the frame AFTER the state change, because
+   * `errorRef` points at a node that does not exist until the banner renders.
+   */
+  function showError(message: string) {
+    setError(message);
+    requestAnimationFrame(() => {
+      errorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+      errorRef.current?.focus();
+    });
+  }
+
   async function submit() {
+    // Re-entrancy guard (issue #1005). The Create button disables while a write
+    // is in flight, but `disabled` is a property of one DOM node: a second click
+    // landing in the same tick as the first, an Enter keypress, or any future
+    // caller would otherwise post the graph twice — and for create that means
+    // two workflows, or a 409 the operator did nothing to earn.
+    if (submitting) return;
     const problem = validate();
     if (problem) {
-      setError(problem);
-      // Issue #813: the banner sits inline in a scrollable dialog and the Create
-      // button is below it, so on a long graph the message can land off-screen —
-      // the button then looks dead. Bring it into view and focus it (announced,
-      // deterministic — no timer) the frame after it renders.
-      requestAnimationFrame(() => {
-        errorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
-        errorRef.current?.focus();
-      });
+      showError(problem);
       return;
     }
     setSubmitting(true);
@@ -989,7 +1023,7 @@ export function WorkflowCreateDialog({
       }
       onOpenChange(false);
     } catch (e) {
-      setError(
+      showError(
         e instanceof Error
           ? e.message
           : workflow
@@ -1010,7 +1044,13 @@ export function WorkflowCreateDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !submitting && onOpenChange(o)}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+      {/* `aria-busy` while a save is in flight (issue #1005): the dialog stays
+          on screen and mostly interactive during the round trip, so without it
+          a screen reader has nothing to say the form is mid-write. */}
+      <DialogContent
+        className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
+        aria-busy={submitting}
+      >
         <DialogHeader>
           <DialogTitle>{editing ? "Edit workflow" : "New workflow"}</DialogTitle>
           <DialogDescription>
@@ -1087,7 +1127,11 @@ export function WorkflowCreateDialog({
               value={copilotPrompt}
               onChange={(e) => setCopilotPrompt(e.target.value)}
               placeholder="e.g. Every Monday morning, have the writer draft the weekly digest and email it to the team."
-              disabled={drafting || echoing}
+              // Also dead while a create is in flight (issue #1005): drafting
+              // replaces the whole form, and the graph being posted is the one
+              // on screen — so a draft landing mid-write would leave the
+              // operator looking at a graph that is not the one they created.
+              disabled={drafting || echoing || submitting}
             />
             <div className="flex items-center justify-between gap-2">
               <p className="text-2xs leading-snug text-muted-foreground">
@@ -1100,10 +1144,14 @@ export function WorkflowCreateDialog({
                 variant="outline"
                 size="sm"
                 onClick={() => void runDraft()}
-                disabled={drafting || echoing || !copilotPrompt.trim()}
+                disabled={drafting || echoing || submitting || !copilotPrompt.trim()}
                 data-testid="workflow-copilot-draft"
               >
-                <Sparkles className="mr-1 size-3.5" />
+                {drafting ? (
+                  <Loader2 className="mr-1 size-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="mr-1 size-3.5" />
+                )}
                 {drafting ? "Drafting…" : "Draft it"}
               </Button>
             </div>
@@ -1164,7 +1212,7 @@ export function WorkflowCreateDialog({
             <Input
               id={`${formId}-name`}
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => changeName(e.target.value)}
               placeholder="e.g. Campaign pipeline"
             />
           </div>
@@ -1183,7 +1231,16 @@ export function WorkflowCreateDialog({
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <Label>Nodes</Label>
-            <Button type="button" variant="outline" size="sm" onClick={addNode}>
+            {/* Off while a save is in flight (issue #1005): the graph being
+                posted is the one on screen, and a row added mid-write is in
+                neither the request nor the result. */}
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={addNode}
+              disabled={submitting}
+            >
               <Plus className="size-3.5" /> Add node
             </Button>
           </div>
@@ -1230,7 +1287,7 @@ export function WorkflowCreateDialog({
               variant="outline"
               size="sm"
               onClick={addEdge}
-              disabled={nodes.length < 2}
+              disabled={nodes.length < 2 || submitting}
             >
               <Plus className="size-3.5" /> Add edge
             </Button>
@@ -1259,6 +1316,14 @@ export function WorkflowCreateDialog({
           <div
             ref={errorRef}
             tabIndex={-1}
+            // Announced, not merely rendered (issue #1005): `assertive`
+            // because the write the operator just asked for did not happen,
+            // and `showError`'s focus move is the only other thing that
+            // reports it. `role="alert"` already implies the live region;
+            // both are stated so a later refactor of one does not silently
+            // take the other with it.
+            role="alert"
+            aria-live="assertive"
             data-testid="create-error"
             className="outline-none"
           >
@@ -1324,7 +1389,11 @@ export function WorkflowCreateDialog({
                         disabled={restoringId !== null || submitting}
                         aria-label={`Restore ${rev.name}`}
                       >
-                        <RotateCcw className="mr-1 size-3.5" />
+                        {restoringId === rev.id ? (
+                          <Loader2 className="mr-1 size-3.5 animate-spin" />
+                        ) : (
+                          <RotateCcw className="mr-1 size-3.5" />
+                        )}
                         {restoringId === rev.id ? "Restoring…" : "Restore"}
                       </Button>
                     </li>
@@ -1344,6 +1413,7 @@ export function WorkflowCreateDialog({
             disabled={submitting}
             data-testid="workflow-dialog-submit"
           >
+            {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
             {editing
               ? submitting
                 ? "Saving…"
