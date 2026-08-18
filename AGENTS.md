@@ -42,6 +42,24 @@ dedicated `test.rs` file when they grow.
 Run commands from the repository root unless a future workspace layout changes
 the module location.
 
+`.cargo/config.toml` sets `RUST_MIN_STACK = 8388608` for every cargo-invoked
+process (issue #895). Do not drop it. The gated suite exceeds libtest's 2 MiB
+default thread stack, and when it does the failure is a `SIGABRT` that aborts
+the **whole test binary** — so every test after it is skipped, and the symptom
+reads as "I broke the harness" rather than "this needs a bigger stack".
+
+8 MiB is 2.7x the measured floor: the whole gated suite aborts at 2 MiB and
+passes 4182/4182 at 3 MiB (aarch64-darwin, default parallelism). The margin
+covers x86-64 CI frame layout, higher CI parallelism, and growth. The depth is
+cumulative `async fn` composition in the vendored OpenHuman turn chain (~117 KiB
+for its largest single future, against ~32 KiB for the largest OpenCompany-owned
+one), so it is not bounded from this repo — `Box::pin` at our own seam was tried
+and moved it by nothing. Full evidence is in `.cargo/config.toml`.
+
+If you change the value, say what you measured; an unexplained ceiling is the
+ratchet #895 exists to complain about. Export `RUST_MIN_STACK` yourself to
+override it — the file does not use `force`.
+
 ## Coding Style & Naming Conventions
 
 Use standard `rustfmt` output and Rust 2024 idioms. Module and file names should
