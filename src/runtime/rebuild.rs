@@ -398,12 +398,12 @@ mod test {
             .expect_err("the rebuilder fails");
         assert!(matches!(err, OpenCompanyError::Config(_)), "{err}");
 
-        assert!(outgoing.is_quiesced(), "a failed rebuild during shutdown must keep the company gated");
         assert!(
-            outgoing
-                .run_cycle(vec![tick()])
-                .await
-                .is_err(),
+            outgoing.is_quiesced(),
+            "a failed rebuild during shutdown must keep the company gated"
+        );
+        assert!(
+            outgoing.run_cycle(vec![tick()]).await.is_err(),
             "a company gated by shutdown must refuse a cycle"
         );
     }
