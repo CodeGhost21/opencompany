@@ -40,8 +40,10 @@ required-features = ["openhuman"]
 # automatic `"react/jsx-runtime"` import, `ecma_visit` walks the parsed
 # `ImportDecl`s for the import allow-list check, and `ecma_codegen` renders the
 # transformed AST back to JS text. None of swc's bundler, minifier, CSS, or
-# plugin-host surfaces are enabled.
-swc_core = { version = "77", features = [
+# plugin-host surfaces are enabled. Optional: `src/harness/pages_tools.rs` only
+# compiles under the `openhuman` feature (all of `src/harness/` does), so this
+# links only there — the default build stays offline and unaffected.
+swc_core = { version = "77", optional = true, features = [
     "ecma_ast",
     "ecma_parser",
     "ecma_parser_typescript",
