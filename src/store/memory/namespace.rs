@@ -31,9 +31,19 @@ const ROOT: &str = "oc";
 
 /// The namespace segment holding provisional working-out.
 ///
-/// Named here rather than inline because the scratch firewall
-/// (`super::BoundMemory::recall`) filters recall hits against it, and a
-/// firewall whose two halves can drift apart is not a firewall.
+/// The scratch firewall is not an exclusion rule written against this constant —
+/// nothing anywhere matches on it. Each durable facade narrows recall to *its
+/// own* namespace and drops any hit reported outside it
+/// (`super::facades::Bound::recall`), and scratch is a sibling of all of them,
+/// so it is unreachable by construction rather than by being filtered out.
+///
+/// That is the stronger arrangement: an exclusion list fails open when a new
+/// provisional scope is added and nobody updates the list, whereas positive
+/// containment fails closed — an unrecognised namespace simply is not contained.
+/// It does depend on no scope being nested inside another, which is what
+/// [`Scope`] being a closed enum makes checkable.
+///
+/// Named rather than inlined only so the segment is spelled once.
 pub(super) const SCRATCH_SEGMENT: &str = "scratch";
 
 /// Which partition of a company's memory a namespace addresses.
