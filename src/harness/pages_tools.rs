@@ -240,10 +240,6 @@ pub fn compile_page(source: &str) -> Result<CompiledPage, String> {
     }
     let code = String::from_utf8(buf).map_err(|e| format!("compiled output was not UTF-8: {e}"))?;
 
-    // Silence an "unused import" warning when `ModuleItem`/`ModuleDecl` are
-    // only referenced from the helper below in some feature combinations.
-    let _ = (ModuleItem::Stmt, ModuleDecl::Import);
-
     Ok(CompiledPage { code })
 }
 
