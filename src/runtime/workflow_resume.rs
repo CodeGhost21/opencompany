@@ -741,8 +741,128 @@ pub fn already_parked(journal: &crate::runtime::journal::RuntimeJournal, effect:
 /// watching for a run that will never appear. Same stance the `email.send` arm
 /// beside it takes.
 pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Result<()> {
-    let workflow_id = required_str(effect, PAYLOAD_WORKFLOW_ID)?;
     let node_id = required_str(effect, PAYLOAD_NODE_ID)?;
+    // The legacy single-gate shape: one approval, one continuation. Issue #978's
+    // run-scoped path goes through [`resume_run`] and carries the whole batch;
+    // this arm stays exactly as it was for a card with no run turn key.
+    let approved = [node_id.to_string()];
+    spawn_continuation(runtime, effect, &approved, &[]).await
+}
+
+/// Re-dispatches a workflow run **once**, for every gate its batch approved
+/// (issue #978).
+///
+/// The run-scoped replacement for [`resume_from_effect`], and the half of the
+/// fix that stops the amplification rather than merely reporting it correctly.
+/// It is reached from `continue_turn` when the released turn key names a run
+/// (see [`run_id_from_turn`]), which happens exactly once per run — the
+/// continuation queue's counting decides who releases, under one lock.
+///
+/// Three things it does that N independent re-dispatches could not:
+///
+/// * **one run, not N.** The paused run is replayed once, so the run table stops
+///   growing by N per approval round.
+/// * **every approval, not one.** The trigger input carries the whole approved
+///   set, so a sibling gate does not pause the replay and park itself again.
+/// * **refusals are final.** Denied and expired nodes ride the denial ledger, so
+///   the replay neither runs them nor asks about them a second time. Without it
+///   a mixed verdict would still net new cards, which is the invariant this
+///   issue is about.
+///
+/// # Nothing approved
+///
+/// A batch whose every gate was denied or expired starts **no run**, and that is
+/// the complete outcome rather than a gap: the paused run settled long ago, so
+/// there is nothing to cancel, and replaying it would only pause at the first
+/// refused node. The approved work of a *mixed* verdict is not discarded — that
+/// case has a non-empty approved set and runs.
+pub async fn resume_run(runtime: &CompanyRuntime, turn: &str) -> Result<()> {
+    let Some(released) = runtime.workflow_gates().release(turn) else {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "the decisions on `{turn}` are all in, but this host is no longer holding that run's \
+             parked gates, so there is nothing to continue — re-run the workflow"
+        )));
+    };
+    if released.approved.is_empty() {
+        tracing::info!(
+            company = %runtime.id(),
+            %turn,
+            denied = released.denied.len(),
+            "workflow: every gate on this run was refused, so no continuation runs"
+        );
+        return Ok(());
+    }
+    tracing::info!(
+        company = %runtime.id(),
+        %turn,
+        approved = released.approved.len(),
+        denied = released.denied.len(),
+        "workflow: the run's gates are all decided; starting ONE continuation for the batch"
+    );
+    spawn_continuation(
+        runtime,
+        &released.effect,
+        &released.approved,
+        &released.denied,
+    )
+    .await
+}
+
+/// What an approved workflow gate does at the moment its effect is performed
+/// (issue #978).
+///
+/// This is the seam the amplification lived on. `perform_effect` fires once per
+/// approved effect, so spawning here spawned **per approval** — three approvals
+/// on one run meant three runs, each replaying the graph with one usable
+/// approval and re-parking the rest. The spawn therefore moves to the batch
+/// release, and this arm only decides which of the two paths a card is on:
+///
+/// * **run-scoped** — the card's run has a batch armed, so the decision is
+///   banked and the continuation is owed by whichever decision turns out to be
+///   the last. Nothing runs now, and the operator is told so by the
+///   still-waiting receipt.
+/// * **unarmed** — a card parked by a build from before this issue (its journal
+///   line carries no turn key), or one whose batch this process no longer holds.
+///   It re-dispatches immediately, exactly as it always did, because there is no
+///   batch coming to release it and deferring would strand the run forever.
+pub async fn on_gate_approved(runtime: &CompanyRuntime, effect: &Effect) -> Result<()> {
+    if let Some(run_id) = effect.run_id.as_deref() {
+        let turn = workflow_turn_key(run_id);
+        if runtime.workflow_gates().is_armed(&turn) {
+            tracing::debug!(
+                company = %runtime.id(),
+                %run_id,
+                undecided = runtime.workflow_gates().undecided(&turn),
+                "workflow: gate approved; the run continues once its remaining gates are decided"
+            );
+            return Ok(());
+        }
+    }
+    resume_from_effect(runtime, effect).await
+}
+
+/// Starts one continuation run for `effect`'s workflow, with `approved` cleared
+/// and `denied` recorded.
+///
+/// Shared by the legacy per-card path and issue #978's run-scoped one so the two
+/// cannot drift on how a continuation is loaded, spawned or logged.
+///
+/// # Errors
+///
+/// Propagated rather than swallowed, and that is a deliberate choice about who
+/// hears about the failure. `execute_effect_once` has already committed the
+/// approval by the time this runs, so the runtime will never retry it — if the
+/// graph has since been deleted, or this build has no workflow execution, the
+/// operator must be told at the moment they click Approve rather than left
+/// watching for a run that will never appear. Same stance the `email.send` arm
+/// beside it takes.
+async fn spawn_continuation(
+    runtime: &CompanyRuntime,
+    effect: &Effect,
+    approved: &[String],
+    denied: &[String],
+) -> Result<()> {
+    let workflow_id = required_str(effect, PAYLOAD_WORKFLOW_ID)?;
 
     // Through the runtime's own accessor so a build without workflow execution
     // gives an honest error instead of a compile-time edge — this module is in
@@ -770,7 +890,7 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
             ))
         })?;
 
-    let input = continuation_input(effect)?;
+    let input = continuation_input(effect, approved, denied)?;
     // The handle is dropped on purpose. The task holds its own guard, journals
     // its own outcome and deregisters itself; awaiting it here would hold the
     // approvals request open for the length of a whole workflow run, which is
@@ -778,12 +898,16 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
     // Issue #542: resuming an approved gate is always a real run — `false`.
     // Issue #401: `spawn` refuses at the concurrency ceiling; propagate it so
     // the approval-resume caller surfaces the same `WorkflowRunLimit` refusal.
+    // Issue #978 sharpens why that must be surfaced rather than logged: a batch
+    // gets ONE spawn attempt, and every card that would have retried it is
+    // already consumed, so a swallowed refusal loses the run with no way back.
     let (run_id, _handle) =
         WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false)?;
     tracing::info!(
         company = %runtime.id(),
         workflow = %workflow_id,
-        node = %node_id,
+        approved = ?approved,
+        denied = ?denied,
         %run_id,
         "workflow: an approved gate started a continuation run; upstream nodes re-execute"
     );
@@ -799,8 +923,18 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
 /// `pub(crate)` so the run-level regression test can build a continuation
 /// exactly the way the approvals path does, rather than reconstructing it and
 /// proving only that the reconstruction works.
-pub(crate) fn continuation_input(effect: &Effect) -> Result<Value> {
-    let node_id = required_str(effect, PAYLOAD_NODE_ID)?;
+pub(crate) fn continuation_input(
+    effect: &Effect,
+    approved: &[String],
+    newly_denied: &[String],
+) -> Result<Value> {
+    if approved.is_empty() {
+        return Err(OpenCompanyError::InvalidRequest(
+            "a workflow continuation was asked for with no approved gate, so the run would \
+             pause again at the node it started for"
+                .to_string(),
+        ));
+    }
     let input = effect
         .payload
         .get(PAYLOAD_INPUT)
@@ -829,10 +963,57 @@ pub(crate) fn continuation_input(effect: &Effect) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(with_performed(
-        with_delivered(with_approval(input, node_id), &delivered),
-        &performed,
+    // Issue #978: the refusals this lineage has accumulated, plus the ones this
+    // batch just made. Unioned rather than replaced, on `delivery_ledger`'s
+    // reasoning exactly — a two-gate graph must not forget the first gate's
+    // denial when the second is decided.
+    let mut denied: Vec<String> = effect
+        .payload
+        .get(PAYLOAD_DENIED)
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    for node in newly_denied {
+        if !denied.contains(node) {
+            denied.push(node.clone());
+        }
+    }
+    Ok(with_denied(
+        with_performed(
+            with_delivered(with_approvals(input, approved), &delivered),
+            &performed,
+        ),
+        &denied,
     ))
+}
+
+/// Writes `denied` onto the trigger input under [`CONTINUATION_DENIED_KEY`],
+/// replacing whatever was there (issue #978).
+///
+/// Replace rather than merge, on [`with_delivered`]'s reasoning: the union was
+/// already taken in [`continuation_input`], so this is the superset and merging
+/// again would be a second place for the rule to drift. An empty ledger writes
+/// nothing, keeping a first run's input shape untouched.
+fn with_denied(input: Value, denied: &[String]) -> Value {
+    if denied.is_empty() {
+        return input;
+    }
+    match input {
+        Value::Object(mut map) => {
+            map.insert(
+                CONTINUATION_DENIED_KEY.to_string(),
+                serde_json::json!(denied),
+            );
+            Value::Object(map)
+        }
+        // `with_approvals` always yields an object, so this is unreachable
+        // through `continuation_input`. Kept total rather than panicking.
+        other => other,
+    }
 }
 
 /// Writes `performed` onto the trigger input under
@@ -893,7 +1074,7 @@ fn with_delivered(input: Value, delivered: &[DeliveredReport]) -> Value {
     }
 }
 
-/// Unions `node_id` into the trigger input's `approvals` array.
+/// Unions `node_ids` into the trigger input's `approvals` array.
 ///
 /// Mirrors `engine::resume`'s own merge, including its tolerances: a non-object
 /// input is replaced by a fresh object carrying just the approvals (there is
@@ -904,7 +1085,7 @@ fn with_delivered(input: Value, delivered: &[DeliveredReport]) -> Value {
 /// Preserving prior approvals is what makes a graph with **two** gates work:
 /// approving the second must not un-approve the first, or the re-run pauses at
 /// the gate the operator already cleared and the workflow can never finish.
-fn with_approval(input: Value, node_id: &str) -> Value {
+fn with_approvals(input: Value, node_ids: &[String]) -> Value {
     let mut approvals: Vec<String> = input
         .get("approvals")
         .and_then(Value::as_array)
@@ -914,8 +1095,13 @@ fn with_approval(input: Value, node_id: &str) -> Value {
                 .collect()
         })
         .unwrap_or_default();
-    if !approvals.iter().any(|id| id == node_id) {
-        approvals.push(node_id.to_string());
+    // Issue #978: **every** gate the run's batch approved, not just the one
+    // whose card happened to be clicked last. Carrying one is what made a
+    // three-way fan-out re-park its two siblings on every continuation.
+    for node_id in node_ids {
+        if !approvals.iter().any(|id| id == node_id) {
+            approvals.push(node_id.clone());
+        }
     }
 
     match input {
@@ -951,6 +1137,15 @@ fn required_str<'e>(effect: &'e Effect, key: &str) -> Result<&'e str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A continuation for a card's own single gate — the pre-#978 shape these
+    /// tests were written against, kept so they keep asserting what they were
+    /// written to assert. The run-scoped multi-gate form is exercised in
+    /// `crate::workflows::parallel_gate_fanout_test`.
+    fn single_continuation_input(effect: &Effect) -> Result<Value> {
+        let node_id = required_str(effect, PAYLOAD_NODE_ID)?.to_string();
+        continuation_input(effect, std::slice::from_ref(&node_id), &[])
+    }
 
     fn effect(workflow: &str, node: &str, input: Value) -> Effect {
         gate_effect(workflow, node, &input, "run-1", &[], &[], None)
@@ -1019,7 +1214,10 @@ mod tests {
 
     #[test]
     fn approving_a_gate_adds_it_to_the_trigger_inputs_approvals() {
-        let out = with_approval(serde_json::json!({ "request": "topic" }), "gate");
+        let out = with_approvals(
+            serde_json::json!({ "request": "topic" }),
+            &["gate".to_string()],
+        );
         assert_eq!(out["request"], "topic", "the original input is preserved");
         assert_eq!(out["approvals"], serde_json::json!(["gate"]));
     }
@@ -1028,15 +1226,18 @@ mod tests {
     fn a_second_gate_does_not_un_approve_the_first() {
         // The two-gate graph. Without the union the re-run pauses at the gate
         // the operator already cleared and the workflow can never finish.
-        let first = with_approval(serde_json::json!({ "request": "topic" }), "gate-a");
-        let second = with_approval(first, "gate-b");
+        let first = with_approvals(
+            serde_json::json!({ "request": "topic" }),
+            &["gate-a".to_string()],
+        );
+        let second = with_approvals(first, &["gate-b".to_string()]);
         assert_eq!(second["approvals"], serde_json::json!(["gate-a", "gate-b"]));
     }
 
     #[test]
     fn approving_the_same_gate_twice_does_not_duplicate_it() {
-        let once = with_approval(serde_json::json!({}), "gate");
-        let twice = with_approval(once, "gate");
+        let once = with_approvals(serde_json::json!({}), &["gate".to_string()]);
+        let twice = with_approvals(once, &["gate".to_string()]);
         assert_eq!(twice["approvals"], serde_json::json!(["gate"]));
     }
 
@@ -1053,7 +1254,7 @@ mod tests {
             // A malformed `approvals` starts an empty set rather than erroring.
             serde_json::json!({ "approvals": "gate" }),
         ] {
-            let out = with_approval(input.clone(), "gate");
+            let out = with_approvals(input.clone(), &["gate".to_string()]);
             assert_eq!(
                 out["approvals"],
                 serde_json::json!(["gate"]),
@@ -1064,7 +1265,10 @@ mod tests {
 
     #[test]
     fn non_string_entries_in_a_prior_approvals_array_are_dropped() {
-        let out = with_approval(serde_json::json!({ "approvals": ["a", 7, null] }), "b");
+        let out = with_approvals(
+            serde_json::json!({ "approvals": ["a", 7, null] }),
+            &["b".to_string()],
+        );
         assert_eq!(out["approvals"], serde_json::json!(["a", "b"]));
     }
 
@@ -1162,7 +1366,7 @@ mod tests {
             None,
         );
 
-        let input = continuation_input(&card).expect("a well-formed card continues");
+        let input = single_continuation_input(&card).expect("a well-formed card continues");
 
         assert_eq!(input["approvals"], serde_json::json!(["gate"]));
         assert_eq!(
@@ -1195,7 +1399,7 @@ mod tests {
             &[],
             None,
         );
-        let continuation = continuation_input(&first).expect("continues");
+        let continuation = single_continuation_input(&first).expect("continues");
 
         // Run 2 skips the summary (delivering nothing) and pauses on gate-b.
         let second = gate_effect("digest", "gate-b", &continuation, "run-2", &[], &[], None);
@@ -1209,7 +1413,7 @@ mod tests {
         );
 
         // And approving THAT still suppresses it, with both gates approved.
-        let next = continuation_input(&second).expect("continues");
+        let next = single_continuation_input(&second).expect("continues");
         assert_eq!(next["approvals"], serde_json::json!(["gate-a", "gate-b"]));
         assert_eq!(delivered_in_input(&next).len(), 1);
     }
@@ -1247,7 +1451,7 @@ mod tests {
             std::slice::from_ref(&posted),
             None,
         );
-        let continuation = continuation_input(&first).expect("continues");
+        let continuation = single_continuation_input(&first).expect("continues");
         assert_eq!(
             performed_in_input(&continuation),
             vec![posted.clone()],
@@ -1278,7 +1482,7 @@ mod tests {
             std::slice::from_ref(&also_posted),
             None,
         );
-        let next = continuation_input(&second).expect("continues");
+        let next = single_continuation_input(&second).expect("continues");
 
         assert_eq!(
             performed_in_input(&next),
@@ -1339,7 +1543,7 @@ mod tests {
             &[],
             None,
         );
-        let input = continuation_input(&card).expect("continues");
+        let input = single_continuation_input(&card).expect("continues");
         assert!(
             input.get(CONTINUATION_PERFORMED_KEY).is_none(),
             "nothing to suppress must write nothing: {input}"
@@ -1381,7 +1585,7 @@ mod tests {
     #[test]
     fn a_lineage_that_delivered_nothing_threads_no_reserved_key() {
         let card = effect("digest", "gate", serde_json::json!({ "request": "x" }));
-        let input = continuation_input(&card).expect("continues");
+        let input = single_continuation_input(&card).expect("continues");
         assert!(input.get(CONTINUATION_DELIVERED_KEY).is_none(), "{input}");
         assert!(delivered_in_input(&input).is_empty());
     }
@@ -1403,7 +1607,7 @@ mod tests {
         // The same gate, re-reached by the continuation the card started: same
         // input plus the approval… minus the approval, which the gate node
         // consumed. What differs is the ledger key alone.
-        let mut continuation = continuation_input(&paused).expect("continues");
+        let mut continuation = single_continuation_input(&paused).expect("continues");
         continuation
             .as_object_mut()
             .expect("object")

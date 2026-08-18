@@ -3569,8 +3569,17 @@ to = "gate"
             .find(|p| p.effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND)
             .expect("the paused gate is waiting on the operator")
             .effect;
-        let continuation = crate::runtime::workflow_resume::continuation_input(&card)
-            .expect("a well-formed card continues");
+        let continuation = crate::runtime::workflow_resume::continuation_input(
+            &card,
+            &[
+                card.payload[crate::runtime::workflow_resume::PAYLOAD_NODE_ID]
+                    .as_str()
+                    .expect("the card names its gate")
+                    .to_string(),
+            ],
+            &[],
+        )
+        .expect("a well-formed card continues");
 
         // --- run 2: the same graph, from the trigger, with the gate approved.
         let second = run_workflow(
