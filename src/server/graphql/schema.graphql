@@ -35,6 +35,16 @@ type Approval {
 	"""
 	atMillis: Float!
 	"""
+	Epoch-millis this approval default-denies if nobody decides it
+	(issue #971). `Float` for the same reason as `atMillis`.
+	
+	Carried here rather than left to the REST summary alone so the two
+	projections of one approval cannot drift into disagreeing about when it
+	dies — which is the sort of divergence a reader discovers by acting on
+	the wrong one. Null against a host that does not report a deadline.
+	"""
+	expiresAtMillis: Float
+	"""
 	Whether `amountUsd` was withheld from this reader by their role (#618).
 	
 	Carried for the same reason it is on the REST summary: a `null` amount

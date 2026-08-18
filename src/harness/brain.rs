@@ -6621,6 +6621,7 @@ members = ["eng1", "eng2"]
                 mode: "supervised".to_string(),
                 always_approve: Vec::new(),
                 auto_approve_under_usd: None,
+                approval_ttl_hours: None,
             },
             None,
         )
