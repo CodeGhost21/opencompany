@@ -678,6 +678,54 @@ impl TryFrom<CreateWorkflowBody> for RawWorkflow {
     }
 }
 
+/// Rejects a draft whose `output` node routes its report to a channel this
+/// runtime cannot deliver to (issue #981).
+///
+/// The delivery layer already refuses such a target at run time with a
+/// `ChannelNotWired` row, and that row stays — desks come and go, so a graph
+/// valid at save can be invalid at run, and this is a guard rather than a
+/// guarantee. What it removes is the case the QA pass found: a workflow saved
+/// against `operator`, which delivery refuses **by name** on every runtime and
+/// so can never succeed, discovered only after a scheduled run nobody watched
+/// silently dropped its report.
+///
+/// Both write routes run it, from the same set the destination picker is served
+/// from and with the same sentence the failed delivery would have carried, so
+/// an author who trips it is told what a run would have told them.
+///
+/// Deliberately narrow. A missing target, a `destination` on a non-`output`
+/// node and an unknown `kind` are [`parse_workflow`](crate::company::parse_workflow)'s
+/// to report — it says something more specific about each, and reporting the
+/// wrong problem first is worse than reporting it second. This is also NOT run
+/// at TOML parse time: seed templates are parsed with no runtime in hand, and
+/// checking there would refuse to boot a template on a company whose desks are
+/// not resolved yet.
+fn reject_undeliverable_channel_destinations(
+    company: &ScopedCompany,
+    draft: &RawWorkflow,
+) -> Result<(), ApiError> {
+    let deliverable = company.runtime.deliverable_channel_ids();
+    for node in &draft.nodes {
+        let Some(destination) = &node.destination else {
+            continue;
+        };
+        if destination.kind.trim() != "channel" || node.kind.trim() != "output" {
+            continue;
+        }
+        let target = destination.target.as_deref().map(str::trim).unwrap_or("");
+        if target.is_empty() || deliverable.iter().any(|id| id == target) {
+            continue;
+        }
+        let live: Vec<&str> = deliverable.iter().map(String::as_str).collect();
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "node `{}`: {}",
+            node.id,
+            crate::runtime::undeliverable_channel_message(target, &live)
+        ))));
+    }
+    Ok(())
+}
+
 /// `POST …/workflows` — authors a new workflow graph (issues #69, #112, #168):
 /// the console's form creator, or any direct API caller, posts the graph shape
 /// and it is persisted on the company record.
@@ -697,6 +745,7 @@ async fn create_workflow(
     Json(body): Json<CreateWorkflowBody>,
 ) -> Result<Json<WorkflowGraph>, ApiError> {
     let draft = RawWorkflow::try_from(body)?;
+    reject_undeliverable_channel_destinations(&company, &draft)?;
     let file = create_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -789,6 +838,7 @@ async fn update_workflow(
 
     let expected = body.expected_version.clone();
     let draft = RawWorkflow::try_from(body.graph)?;
+    reject_undeliverable_channel_destinations(&company, &draft)?;
     let file = update_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -2082,22 +2132,29 @@ async fn workflow_tool_slugs(
 }
 
 /// The `GET …/workflows/wired-channels` answer (issue #813): the chat channel
-/// ids this running company can deliver to, so the output-node destination
-/// editor offers a picker of real targets. `operator` is always present. Not
-/// feature-gated — the wired-channel set exists on every build.
+/// ids this running company can actually deliver to, so the output-node
+/// destination editor offers a picker of real targets. Not feature-gated — the
+/// channel set exists on every build.
+///
+/// **`operator` is not among them** (issue #981). This used to say the opposite
+/// and serve the unfiltered adapter list, which offered authors the one target
+/// workflow delivery refuses by name. An empty list is a truthful answer for a
+/// company with no desks and no provider channels: there is nowhere to deliver.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WiredChannelsResponse {
-    /// The channel ids an `output` node's `channel` destination may target;
-    /// anything else fails at delivery with `ChannelNotWired`.
+    /// The channel ids an `output` node's `channel` destination may target.
+    /// Anything else is rejected when the workflow is saved, and — for a graph
+    /// saved before the desk went away — fails at delivery with
+    /// `ChannelNotWired`.
     channels: Vec<String>,
 }
 
 /// `GET …/workflows/wired-channels` (both scope forms). Reads the running
-/// company's wired channels directly — infallible, no record load needed.
+/// company's deliverable channels directly — infallible, no record load needed.
 async fn workflow_wired_channels(company: ScopedCompany) -> Json<WiredChannelsResponse> {
     Json(WiredChannelsResponse {
-        channels: company.runtime.wired_channel_ids(),
+        channels: company.runtime.deliverable_channel_ids(),
     })
 }
 
@@ -3538,6 +3595,252 @@ mod tests {
             let graph = json_body(response).await;
             assert_eq!(graph["id"], "greeter");
             assert_eq!(graph["edges"][0]["label"], "ok");
+        }
+
+        // --- Save-time channel-destination guard (issue #981) ---------------
+
+        /// A hosted tenant WITH a desk, so it has one real delivery channel.
+        /// `hosted_state`'s manifest declares none, which makes its deliverable
+        /// set empty — fine for the nowhere-to-deliver case below, useless for
+        /// telling an accepted target from a refused one.
+        fn desk_manifest() -> CompanyManifest {
+            toml::from_str(
+                "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+                 [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+                 [[group_chat]]\nid = \"engineering\"\nname = \"Engineering\"\nmembers = [\"ceo\"]\n",
+            )
+            .unwrap()
+        }
+
+        /// `hosted_state` over [`desk_manifest`] — a running company whose
+        /// deliverable set is exactly `["engineering"]`.
+        async fn desk_state(home: &std::path::Path) -> AppState {
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: desk_manifest(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), desk_manifest())
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            assert_eq!(
+                runtime.deliverable_channel_ids(),
+                vec!["engineering".to_string()],
+                "the fixture must have exactly one delivery channel, or these tests prove nothing"
+            );
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            state
+        }
+
+        /// [`create_body`] with the output node routing its report to `target`
+        /// on `kind`.
+        fn body_with_destination(kind: &str, target: Option<&str>) -> serde_json::Value {
+            let mut destination = serde_json::json!({ "kind": kind });
+            if let Some(target) = target {
+                destination["target"] = serde_json::Value::String(target.to_string());
+            }
+            let mut body = create_body();
+            body["nodes"][1]["destination"] = destination;
+            body
+        }
+
+        async fn post_create(state: AppState, body: serde_json::Value) -> axum::response::Response {
+            router(state)
+                .oneshot(request("POST", "/api/v1/company/workflows", Some(body)))
+                .await
+                .unwrap()
+        }
+
+        /// **The #981 regression.** `operator` was in the picker the console
+        /// showed the author, and delivery refuses it by name on every runtime —
+        /// so the graph saved, ran green, and dropped its report. It is now
+        /// refused at save, naming the channels that would work.
+        #[tokio::test]
+        async fn a_report_routed_to_operator_is_refused_at_save() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response =
+                post_create(state, body_with_destination("channel", Some("operator"))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+            // The live set, so the fix is legible from the refusal alone.
+            assert!(message.contains("engineering"), "{message}");
+            assert!(
+                message.contains("done"),
+                "the refusal must name the node: {message}"
+            );
+        }
+
+        /// A channel nobody wired is refused the same way. The author's typo and
+        /// the author's `operator` are the same mistake — a destination this
+        /// company cannot deliver to — and get one answer.
+        #[tokio::test]
+        async fn a_report_routed_to_an_unwired_channel_is_refused_at_save() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response =
+                post_create(state, body_with_destination("channel", Some("enginering"))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+            assert!(message.contains("engineering"), "{message}");
+        }
+
+        /// The guard refuses what delivery would refuse and nothing more: a real
+        /// desk saves, and reads back with its destination intact.
+        #[tokio::test]
+        async fn a_report_routed_to_a_real_desk_saves() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            let response = post_create(
+                state.clone(),
+                body_with_destination("channel", Some("engineering")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            let graph = json_body(response).await;
+            assert_eq!(graph["nodes"][1]["destination"]["kind"], "channel");
+            assert_eq!(graph["nodes"][1]["destination"]["target"], "engineering");
+        }
+
+        /// An edit is a save too. The create route was never the only way in —
+        /// `PUT` replaces the graph wholesale, so a destination refused on
+        /// create must not be reachable by saving a clean graph and then
+        /// editing it.
+        #[tokio::test]
+        async fn an_edit_cannot_introduce_an_undeliverable_destination() {
+            let home_dir = home();
+            let state = desk_state(home_dir.path()).await;
+
+            assert_eq!(
+                post_create(state.clone(), create_body()).await.status(),
+                StatusCode::OK
+            );
+
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(body_with_destination("channel", Some("operator"))),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("is not a workflow delivery channel"),
+                "{message}"
+            );
+        }
+
+        /// A company with no desks and no provider channels has nowhere to
+        /// deliver (#963), and says so in its own words rather than trailing off
+        /// after `has: `. The destinations that do NOT depend on a channel still
+        /// save — the guard is about channels, and a company with no desks can
+        /// still mail its owner.
+        #[tokio::test]
+        async fn a_company_with_no_delivery_channel_says_so_and_still_saves_an_owner_report() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = post_create(
+                state.clone(),
+                body_with_destination("channel", Some("engineering")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(message.contains("no durable channels"), "{message}");
+
+            // …and the picker it was offered is empty, not `["operator"]`.
+            let response = router(state.clone())
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/wired-channels",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(json_body(response).await["channels"], serde_json::json!([]));
+
+            let response = post_create(state, body_with_destination("owner", None)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "an `owner` report needs no channel"
+            );
+        }
+
+        /// The guard stays out of everything that is not a channel destination
+        /// on an `output` node: a graph that routes nowhere saves, and a
+        /// `destination` on a non-`output` node is still `parse_workflow`'s
+        /// refusal to report — reporting the wrong problem first would send an
+        /// author looking for a channel that was never their mistake (#947).
+        #[tokio::test]
+        async fn the_guard_leaves_non_channel_graphs_alone() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            // No destination at all: unchanged, saves.
+            assert_eq!(
+                post_create(state.clone(), create_body()).await.status(),
+                StatusCode::OK
+            );
+
+            // A channel destination on the TRIGGER node, on a company with no
+            // delivery channels at all: still rejected for being on the wrong
+            // kind of node, not for the channel.
+            let mut body = create_body();
+            body["id"] = serde_json::Value::String("second".into());
+            body["name"] = serde_json::Value::String("Second".into());
+            body["nodes"][0]["destination"] =
+                serde_json::json!({ "kind": "channel", "target": "engineering" });
+            let response = post_create(state, body).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let message = json_body(response).await.to_string();
+            assert!(
+                message.contains("only `output` nodes route a report"),
+                "the structural problem must be the one reported: {message}"
+            );
         }
 
         /// A duplicate id is a clean 409, not a 500 — the id-uniqueness check
