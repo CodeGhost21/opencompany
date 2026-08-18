@@ -250,6 +250,36 @@ row carries no `tool`).
 the operator decides the card and runs the workflow again. See
 [`workflow-vocabulary.md`](../../spec/runtime/workflow-vocabulary.md) for why.
 
+### The node a run is executing right now (issue #1010)
+
+`GET …/workflows/runs` folds **both** node brackets, not just the finish. A run
+still in flight carries `startedNodes` — the ids it has begun, in start order —
+beside the `nodes` rows it has finished:
+
+```jsonc
+{
+  "runId": "run-live",
+  "running": true,
+  "startedNodes": ["collect", "draft"],
+  "nodes": [ { "nodeId": "collect", "status": "ok", "elapsedMs": 12000 } ]
+}
+```
+
+Started minus finished is the node executing right now — here, `draft`. Before
+this the fold read `WorkflowNodeStarted` (issue #382) nowhere, so the only
+per-node facts the history carried were finishes, and every console that learned
+about a run from the journal rather than from a live SSE start frame — a reload,
+a cron fire, an `EventSource` reconnect, a workflow switch and back — painted the
+graph with a hole exactly where the work was happening.
+
+`startedNodes` is a **receipt of what started** and deliberately survives the
+finish: an id in it with no matching `nodes` row on a settled run is the node the
+run was standing on when it was cancelled or lost, which neither list says on its
+own. Readers must therefore pair it with `running` before painting anything as
+in flight, or a settled run overlays a spinner nothing can clear. Omitted
+entirely when empty, like `nodes`, so a run journaled before #382 is
+byte-unchanged.
+
 Swap `{ "kind": "owner" }` for `{ "kind": "email", "target": "ada@example.com" }`
 and a recipient who has never written in comes back as
 `"status": "skipped"` with the reason, having sent nothing:

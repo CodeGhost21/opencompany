@@ -363,6 +363,10 @@ export function AppShell({
   // alongside so two frames naming the same node in one React batch are still
   // two events rather than a state update React coalesces away.
   const [workspaceEvent, setWorkspaceEvent] = useState<WorkspaceEvent | null>(null);
+  // A recovery does not name one node, so it cannot reuse `workspaceEvent`'s
+  // payload contract. The workspace re-reads its whole canonical tree on this
+  // tick, just as the task and workflow surfaces do below.
+  const [workspaceRefreshTick, setWorkspaceRefreshTick] = useState(0);
   // Issue #228: bumped on every `workflow_run_finished` so the Workflows view
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
@@ -394,6 +398,27 @@ export function AppShell({
   // of magnitude above a run's ~N+2 frames; if it ever did cut a run's start,
   // the view simply shows no live state and the run history still has it.
   const [workflowRunEvents, setWorkflowRunEvents] = useState<CompanyStreamEvent[]>([]);
+  // Issue #1010: and emptied when the company changes.
+  //
+  // The window is the one company-scoped buffer that was never reset. Every
+  // fold that reads it matches frames on `workflowId`/`runId` alone — the
+  // frames carry no company — and provisioned companies are built from the same
+  // manifests, so two of them routinely hold a workflow of the *same id*.
+  // Switching company therefore painted the previous company's run onto an
+  // identically-named workflow, with a live-looking node and a Cancel button
+  // pointed at a run in a company the operator had left.
+  //
+  // Emptying is right rather than filtering: the frames that matter after a
+  // switch are the ones that arrive after it. The new company's own in-flight
+  // runs come back through the history seed (issue #863), which is scoped by
+  // the request, so nothing is lost by starting from nothing.
+  //
+  // The updater returns the SAME array when there is nothing to drop, so React
+  // bails out rather than re-rendering the whole shell for a no-op — this
+  // effect also fires on mount, when the window is empty by construction.
+  useEffect(() => {
+    setWorkflowRunEvents((prev) => (prev.length === 0 ? prev : []));
+  }, [company]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -1098,6 +1123,17 @@ export function AppShell({
     }
   };
 
+  // One recovery path for a signalled gap, a healthy connection, and the hosted
+  // proxy's failed-to-open case (#23). These surfaces own their data, so every
+  // one re-reads rather than attempting to reconstruct lost payloads here.
+  const resyncDurableState = useCallback(async () => {
+    setTaskEventTick((n) => n + 1);
+    setWorkspaceRefreshTick((n) => n + 1);
+    setWorkflowRunTick((n) => n + 1);
+    setWorkflowListTick((n) => n + 1);
+    await feed.refresh();
+  }, [feed.refresh]);
+
   // The active push half of the attention surface: SSE-driven toasts + chat
   // injection, plus a rising-edge "needs a sign-off" toast off the poll's
   // pending count. Degrades silently to the `useCompany` poll when the host has
@@ -1172,6 +1208,12 @@ export function AppShell({
       }
       void feed.refresh();
     },
+    onResync: resyncDurableState,
+    onRecoveryError: useCallback(() => {
+      toast.error("Live updates couldn't be recovered", {
+        description: "We couldn't refresh the latest company state. Check your connection and try again.",
+      });
+    }, []),
   });
 
   return (
@@ -1381,6 +1423,7 @@ export function AppShell({
                 // deliverable the publish drain lands shows up without a
                 // refresh.
                 event={workspaceEvent}
+                refreshTick={workspaceRefreshTick}
                 // Issue #552: the Artifacts tab's "Open in workspace" link
                 // sets `#/workspace/<nodeId>`, and `useHashView` hands the
                 // second segment back unvalidated — only this view knows
