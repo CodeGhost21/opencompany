@@ -716,7 +716,7 @@ impl Tool for PagesWriteTool {
         // that already exists is being replaced, so a page edited since the
         // agent last read it is refused rather than clobbered. A brand-new
         // page (no existing `Page.tsx`) has no revision to guard against.
-        if let Some(source) = source
+        if source.is_some()
             && let Some(existing_source) = existing.as_ref().and_then(|b| b.source.as_ref())
         {
             let expected = args.get("expected_updated_at").and_then(|value| {
