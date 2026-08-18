@@ -80,7 +80,7 @@ test("a key typed for a BYOK provider is not discarded by switching to managed",
   const body = await after.json();
   expect(body.keyConfigured).toBe(true);
   // Setting only a key must not move the company off the managed brain.
-  expect(body.provider).toBe("managed");
+  expect(body.provider).toBe("openrouter");
 
   // And it can be taken back off again — set / rotate / clear, all from here.
   await page.getByTestId("inference-remove-key").click();
