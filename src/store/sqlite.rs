@@ -807,15 +807,15 @@ impl EventLog for SqliteStore {
 
     fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
         let rx = self.sender_for(id).subscribe();
-        let stream = futures::stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => return Some((EventStreamItem::Event(event), rx)),
-                    Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        return Some((EventStreamItem::Gap { missed }, rx));
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return None,
+        let stream = futures::stream::unfold(rx, |rx| async move {
+            // Each call to this closure produces exactly one item and hands the
+            // receiver back as continuation state, so there is no loop here.
+            match rx.recv().await {
+                Ok(event) => Some((EventStreamItem::Event(event), rx)),
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    Some((EventStreamItem::Gap { missed }, rx))
                 }
+                Err(broadcast::error::RecvError::Closed) => None,
             }
         });
         Box::pin(stream)
