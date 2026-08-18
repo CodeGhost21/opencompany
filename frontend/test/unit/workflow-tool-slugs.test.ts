@@ -8,6 +8,7 @@ import { listWorkflowToolSlugs, type WorkflowGraph } from "@/api/workflows";
 const graph: WorkflowGraph = {
   id: "weekly_report",
   name: "Weekly report",
+  version: null,
   nodes: [{ id: "collect", kind: "agent", name: "Collect", agent: "analyst" }],
   edges: [],
 };
