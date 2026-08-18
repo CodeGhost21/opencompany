@@ -258,15 +258,18 @@ struct WorkflowGraph {
     /// Whether this graph can be replaced or removed through the API — see
     /// [`is_editable`].
     editable: bool,
-    /// The opaque optimistic-concurrency token for this graph (issue #259),
-    /// present only when `editable` (a source-defined graph has nothing to
-    /// version, and a token for an overlay body the read path does not even
-    /// serve would be actively misleading).
+    /// The opaque optimistic-concurrency token for this graph (issue #259).
+    /// Always serialized: a string when the graph is `editable`, and explicit
+    /// `null` when it is not (a source-defined or body-less graph has nothing to
+    /// version). It is deliberately NOT omitted — a client that read `version`
+    /// off a graph whose key was absent got `undefined` and sent nothing,
+    /// silently overwriting a concurrent save (issue #1013). An explicit `null`
+    /// says "no token here" instead of hiding the field.
     ///
     /// The contract is **echo it back**: hand it to `PUT` in the body or to
     /// `DELETE` as `?expectedVersion=`, and the write is refused with a `409` if
-    /// the graph moved in between. Never parse or derive it.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// the graph moved in between — and refused with a `400` if you omit it
+    /// entirely (issue #1013). Never parse or derive it.
     version: Option<String>,
     /// Whether this workflow's schedule is armed (issue #276) — see
     /// [`WorkflowSummary::enabled`]. Carried on the graph read as well as the
@@ -2856,6 +2859,27 @@ mod tests {
         assert!(done.get("agent").is_none());
         assert!(done.get("summary").is_none());
         assert_eq!(done["kind"], "output");
+    }
+
+    /// A non-editable graph serializes `version` as an explicit `null` rather
+    /// than omitting the key (issue #1013). Omitting it made a client read
+    /// `version` as `undefined` and send nothing, silently overwriting a
+    /// concurrent save; an explicit `null` is the honest "no token here".
+    #[test]
+    fn a_non_editable_graph_serializes_version_as_null() {
+        let dir = seed_demo();
+        let file = load_workflow_union(Some(dir.path()), &[], "demo")
+            .unwrap()
+            .unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, false)).unwrap();
+        assert!(
+            json.get("version").is_some(),
+            "version key must be present, not omitted: {json}"
+        );
+        assert!(
+            json["version"].is_null(),
+            "no token serializes as null: {json}"
+        );
     }
 
     #[test]
