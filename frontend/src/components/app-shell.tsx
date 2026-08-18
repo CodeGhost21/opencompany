@@ -383,6 +383,23 @@ export function AppShell({
   // of magnitude above a run's ~N+2 frames; if it ever did cut a run's start,
   // the view simply shows no live state and the run history still has it.
   const [workflowRunEvents, setWorkflowRunEvents] = useState<CompanyStreamEvent[]>([]);
+  // Issue #1010: and emptied when the company changes.
+  //
+  // The window is the one company-scoped buffer that was never reset. Every
+  // fold that reads it matches frames on `workflowId`/`runId` alone — the
+  // frames carry no company — and provisioned companies are built from the same
+  // manifests, so two of them routinely hold a workflow of the *same id*.
+  // Switching company therefore painted the previous company's run onto an
+  // identically-named workflow, with a live-looking node and a Cancel button
+  // pointed at a run in a company the operator had left.
+  //
+  // Emptying is right rather than filtering: the frames that matter after a
+  // switch are the ones that arrive after it. The new company's own in-flight
+  // runs come back through the history seed (issue #863), which is scoped by
+  // the request, so nothing is lost by starting from nothing.
+  useEffect(() => {
+    setWorkflowRunEvents([]);
+  }, [company]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative

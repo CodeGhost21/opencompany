@@ -400,6 +400,26 @@ export interface WorkflowRunOutcome {
    * trail", never "the run did nothing".
    */
   nodes?: WorkflowRunNode[];
+  /**
+   * The nodes this run has *begun* executing, in start order (issue #1010).
+   *
+   * The other half of {@link nodes}, which is written by the finish bracket
+   * only — so before this a run in flight came back listing what was already
+   * over and nothing about the node working right now. Every console that
+   * learns about a run from the history rather than from a live start frame (a
+   * reload, a cron fire, an `EventSource` reconnect, a workflow switch and
+   * back) reads the graph through this.
+   *
+   * A **receipt of what started**, kept once the run settles: an id here with
+   * no matching {@link nodes} row on a settled run is the node the run was
+   * standing on when it was cancelled or lost. So it must ALWAYS be paired
+   * with {@link running} before anything is painted as in flight — see
+   * `statesFromRun`.
+   *
+   * Absent on a host predating #1010 and on a run journaled before #382, so
+   * absent must read as "no start trail", never as "nothing started".
+   */
+  startedNodes?: string[];
   /** When the run started. Absent on a pre-#371 row, whose only time is the finish. */
   startedAtMillis?: number;
   /**

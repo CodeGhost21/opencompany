@@ -2300,6 +2300,27 @@ struct WorkflowRunOutcome {
     /// "the run did nothing".
     #[serde(skip_serializing_if = "Vec::is_empty")]
     nodes: Vec<WorkflowRunNode>,
+    /// The nodes this run has *begun* executing, in start order (issue #1010),
+    /// folded from `WorkflowNodeStarted` (issue #382).
+    ///
+    /// The half of the trail the fold never carried. `nodes` is written by the
+    /// *finish* bracket, so a run in flight came back listing only what was
+    /// already over — and a console joining mid-run (a reload, a cron fire, an
+    /// `EventSource` reconnect, or simply switching workflow and back) could
+    /// render the graph's past but never the node executing right now. The
+    /// engine has reported the opening bracket since #382; nothing read it.
+    ///
+    /// A **receipt of what started**, kept once the run settles rather than
+    /// cleared: an id here with no matching `nodes` row on a settled run is the
+    /// node the run was standing on when it was cancelled or lost, which is the
+    /// one thing neither list says on its own. Consumers must therefore pair it
+    /// with [`running`](Self::running) before painting anything as in-flight —
+    /// see `statesFromRun` in the console.
+    ///
+    /// Omitted when empty, like `nodes` — which is every run journaled before
+    /// #382 and every run whose nodes all failed to journal a start.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    started_nodes: Vec<String>,
     /// When the run *started*, from its `WorkflowRunStarted` row (issue #371).
     /// Absent on a pre-#371 row, whose only timestamp is the finish.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2474,6 +2495,9 @@ async fn list_runs(
                     pending_approvals: Vec::new(),
                     error: None,
                     nodes: Vec::new(),
+                    // Issue #1010: filled by the `WorkflowNodeStarted` arm
+                    // below, as the engine walks the graph.
+                    started_nodes: Vec::new(),
                     started_at_millis: Some(at_millis),
                     // Flipped off by the finish. A start that never gets one is
                     // a run in flight — or one the boot sweep has yet to settle.
@@ -2494,6 +2518,33 @@ async fn list_runs(
                     blocked_nodes: Vec::new(),
                     approvals: Vec::new(),
                 });
+            }
+            // Issue #1010: the opening bracket, folded at last. The engine has
+            // emitted this since #382 and this fold ignored it, so the only
+            // per-node fact the history carried was "finished" — and a console
+            // that had to read the history to learn about a run (every console
+            // that joined mid-run) could not paint the node executing right
+            // now, because nothing on the wire said which one it was.
+            //
+            // Recorded in start order, and deliberately NOT paired against the
+            // finishes here: the subtraction belongs to the reader, which is
+            // the only side that knows whether it is drawing a live canvas or a
+            // settled run's overlay. See `started_nodes`.
+            CompanyEvent::WorkflowNodeStarted {
+                workflow_id,
+                run_id,
+                node_id,
+            } => {
+                if !matches(&workflow_id) {
+                    continue;
+                }
+                // Same rule the finish arm follows one arm down: a node whose
+                // run has no entry — a journal truncated below the start, or a
+                // `?workflow=` filter that cannot match — is dropped rather
+                // than synthesising a headless run.
+                if let Some(entry) = index.get(&run_id).and_then(|i| runs.get_mut(*i)) {
+                    entry.started_nodes.push(node_id);
+                }
             }
             CompanyEvent::WorkflowNodeFinished {
                 workflow_id,
@@ -2576,6 +2627,9 @@ async fn list_runs(
                     pending_approvals,
                     error,
                     nodes: Vec::new(),
+                    // No start row means no node rows either — of either
+                    // bracket (issue #1010).
+                    started_nodes: Vec::new(),
                     started_at_millis: None,
                     running: false,
                     cancelled,
@@ -4945,6 +4999,30 @@ mod tests {
                 .expect("append");
         }
 
+        /// Journals one `WorkflowNodeStarted`, the way the run observer does
+        /// immediately before a node's first attempt (issue #382).
+        async fn journal_node_started(
+            state: &AppState,
+            id: &CompanyId,
+            workflow_id: &str,
+            run_id: &str,
+            node_id: &str,
+        ) {
+            let runtime = state.registry().get(id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    id,
+                    CompanyEvent::WorkflowNodeStarted {
+                        workflow_id: workflow_id.to_string(),
+                        run_id: run_id.to_string(),
+                        node_id: node_id.to_string(),
+                    },
+                )
+                .await
+                .expect("append");
+        }
+
         /// Journals a finished outcome carrying a run id, the way every entry
         /// point does post-#371.
         async fn journal_finish(
@@ -5030,6 +5108,171 @@ mod tests {
             assert_eq!(nodes[0]["elapsedMs"], 42);
             assert_eq!(nodes[1]["nodeId"], "send");
             assert_eq!(nodes[1]["status"], "error");
+        }
+
+        // ── Issue #1010: the node executing RIGHT NOW ──────────────────────
+
+        /// **The issue.** A run still in flight comes back naming the node it
+        /// is standing on, not just the ones it is done with.
+        ///
+        /// Before this the fold read `WorkflowNodeStarted` nowhere, so an
+        /// in-flight run's only per-node facts were its finishes — and every
+        /// console that learned about a run from the history rather than from a
+        /// start frame (a reload, a cron fire, a reconnect, a workflow switch
+        /// and back) painted a graph with a gap where the working node was.
+        #[tokio::test]
+        async fn run_history_names_the_node_a_running_run_is_executing() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-live", true).await;
+            journal_node_started(&state, &id, "digest", "run-live", "ceo").await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-live",
+                "ceo",
+                WorkflowNodeStatus::Ok,
+            )
+            .await;
+            // Started and NOT finished — the node the run is on. No finish is
+            // journaled for it, which is the whole shape under test.
+            journal_node_started(&state, &id, "digest", "run-live", "draft").await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1, "one run: {body}");
+            assert_eq!(rows[0]["running"], true, "still in flight: {body}");
+
+            // In start order, both brackets — the reader subtracts.
+            let started = rows[0]["startedNodes"].as_array().expect("startedNodes");
+            assert_eq!(
+                started.len(),
+                2,
+                "both starts are recorded, finished or not: {body}"
+            );
+            assert_eq!(started[0], "ceo");
+            assert_eq!(started[1], "draft");
+
+            // Only the finished one has a node row, so "started minus finished"
+            // is exactly the node executing now.
+            let nodes = rows[0]["nodes"].as_array().expect("nodes");
+            assert_eq!(nodes.len(), 1, "one node has finished: {body}");
+            assert_eq!(nodes[0]["nodeId"], "ceo");
+        }
+
+        /// A start whose run has no entry is dropped, not turned into a run of
+        /// its own — the same rule the finish arm follows.
+        ///
+        /// The `?workflow=` filter is the reachable way to produce this: the
+        /// start row for another workflow's run never opened an entry, so its
+        /// node brackets have nothing to attach to.
+        #[tokio::test]
+        async fn a_started_node_of_a_filtered_out_run_is_dropped() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "other", "run-other", false).await;
+            journal_node_started(&state, &id, "other", "run-other", "ceo").await;
+            journal_start(&state, &id, "digest", "run-mine", false).await;
+            journal_node_started(&state, &id, "digest", "run-mine", "draft").await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs?workflow=digest",
+                    None,
+                ))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1, "only the asked-for workflow: {body}");
+            assert_eq!(rows[0]["runId"], "run-mine");
+            let started = rows[0]["startedNodes"].as_array().expect("startedNodes");
+            assert_eq!(started.len(), 1, "{body}");
+            assert_eq!(started[0], "draft");
+        }
+
+        /// A run journaled before #382 — no starts at all — keeps the wire shape
+        /// it had: `startedNodes` is omitted entirely rather than sent empty.
+        #[tokio::test]
+        async fn a_run_with_no_started_rows_omits_the_field() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-old", false).await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-old",
+                "ceo",
+                WorkflowNodeStatus::Ok,
+            )
+            .await;
+            journal_finish(&state, &id, "digest", "run-old", false, None).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body[0].get("startedNodes").is_none(),
+                "an empty trail is absent, not `[]`: {body}"
+            );
+        }
+
+        /// The receipt SURVIVES the finish, so a run that was cancelled or lost
+        /// mid-node still says which node it was standing on.
+        ///
+        /// That id is the one fact neither list carries alone: `nodes` never
+        /// gets a row for a node that did not finish, and a cleared
+        /// `startedNodes` would throw away the only record that it began. The
+        /// console pairs this with `running` before painting anything live —
+        /// see `statesFromRun` — so keeping it cannot leave a settled run
+        /// spinning.
+        #[tokio::test]
+        async fn a_settled_run_keeps_the_node_it_was_standing_on() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-cut", false).await;
+            journal_node_started(&state, &id, "digest", "run-cut", "ceo").await;
+            journal_node(
+                &state,
+                &id,
+                "digest",
+                "run-cut",
+                "ceo",
+                WorkflowNodeStatus::Ok,
+            )
+            .await;
+            // Begun, and then the run ended without it ever finishing.
+            journal_node_started(&state, &id, "digest", "run-cut", "draft").await;
+            journal_finish(&state, &id, "digest", "run-cut", false, Some("cancelled")).await;
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(body[0].get("running").is_none(), "settled: {body}");
+            let started = body[0]["startedNodes"].as_array().expect("startedNodes");
+            assert_eq!(started.len(), 2, "{body}");
+            assert_eq!(started[1], "draft");
+            let nodes = body[0]["nodes"].as_array().expect("nodes");
+            assert_eq!(nodes.len(), 1, "`draft` never finished: {body}");
         }
 
         /// Issues #881 / #880 at the HTTP boundary: a blocked run reads as
