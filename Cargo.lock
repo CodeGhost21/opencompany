@@ -3161,6 +3161,9 @@ dependencies = [
  "tinyagents",
  "tinycortex",
  "tinyflows",
+ "tinymemory",
+ "tinymemory-api",
+ "tinymemory-remote",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -4947,6 +4950,20 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "tinymemory-remote"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tinymemory",
+ "tinymemory-api",
 ]
 
 [[package]]

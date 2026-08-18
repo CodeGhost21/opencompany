@@ -196,6 +196,31 @@ An empty or whitespace-only document is dropped rather than rendered as a bare
 heading. An empty section reads to the model as a source that exists and says
 nothing, which is worse than its absence.
 
+## The step budget, and what a paused turn looks like
+
+A single turn may make at most a fixed number of tool iterations — the
+`max_tool_iterations` an agent is built with, which today is the vendored
+runtime's default of 10. Reaching it is **a pause, not a failure**: the runtime
+stops the tool loop, asks the model once more (with tools withheld) for a
+resumable "Done so far / Next steps" checkpoint, and returns that as an ordinary
+successful reply. There is no error to catch and no error to match on, which is
+precisely why a capped turn used to be invisible — the operator read a tidy plan
+with no deliverable behind it and no way to tell the agent had been cut off
+mid-task. So the harness now reads the runtime's cap flag while the turn's agent
+lock is still held and carries it out on the turn's outcome, OR'd across every
+turn behind one operator bubble (the responder, any desk lead it handed work to,
+and the relay turn that folds their answers back together). When any of them
+paused, the operator gets a **second, unauthored bubble** after the reply saying
+the turn stopped at its step limit, that nothing errored, and that replying
+"continue" asks the agent to pick up from there. It is a separate bubble rather
+than an addition to the reply because the reply — and only the reply — is
+written back to the context store as memory; appending would file the platform's
+notice as something the agent said and recall it into later turns. The cap
+itself is unchanged by this: the turn stops in the same place, it just says so.
+See `src/harness/mod.rs` (`TurnOutcome::hit_iteration_cap`),
+`src/runtime/delegation.rs` for the fold, and `src/harness/brain.rs` for the
+notice.
+
 ## `classes`
 
 The explicit epistemic classification

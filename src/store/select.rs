@@ -150,20 +150,58 @@ pub enum MemoryBackend {
     /// substring recall, or the sqlite/mongodb store).
     #[default]
     Store,
-    /// TinyCortex backs memory + context: ranked token-overlap recall over a
-    /// compounding chunk store, on top of whatever base backend is selected
-    /// (`tinycortex` feature).
+    /// The embedded engine, in-pod: ranked token-overlap recall over a
+    /// compounding chunk store on top of whatever base backend is selected
+    /// (`tinycortex` feature). Spelled `embedded` or `tinycortex`.
     Tinycortex,
+    /// A hosted memory service behind a URL and a credential, bound through the
+    /// `MemoryProvider` contract (`tinymemory` feature).
+    ///
+    /// Missing credentials refuse at boot. There is deliberately no fall back to
+    /// the embedded engine: a company that believes it is writing to its hosted
+    /// memory and is not is worse off than one that fails to start, because
+    /// nothing surfaces the mistake until the memory is needed.
+    Remote,
+    /// Writes accepted and discarded, reads empty (`tinymemory` feature).
+    Null,
+}
+
+impl MemoryBackend {
+    /// The stable wire string for status output.
+    ///
+    /// [`Self::Tinycortex`] reports `embedded`, the vocabulary issue #914
+    /// introduces. The legacy spelling stays accepted on the way *in* — see
+    /// [`FromStr`](std::str::FromStr) — but only one name is reported out, so a
+    /// client never has to know both.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Store => "store",
+            Self::Tinycortex => "embedded",
+            Self::Remote => "remote",
+            Self::Null => "null",
+        }
+    }
 }
 
 impl std::str::FromStr for MemoryBackend {
     type Err = OpenCompanyError;
+    /// Parses `OPENCOMPANY_MEMORY`.
+    ///
+    /// `embedded` is a synonym for `tinycortex`, not a replacement: the older
+    /// spelling keeps parsing forever. Renaming it would break every deployment
+    /// that already sets it — including hosted tenants whose environment is
+    /// injected by the control plane — for a cosmetic gain. The same reasoning
+    /// already applies to `cortex` and to `mongo` on
+    /// [`StorageKind`](StorageKind::from_str).
     fn from_str(value: &str) -> Result<Self> {
         match value.to_ascii_lowercase().as_str() {
             "store" | "" => Ok(Self::Store),
-            "tinycortex" | "cortex" => Ok(Self::Tinycortex),
+            "tinycortex" | "cortex" | "embedded" => Ok(Self::Tinycortex),
+            "remote" => Ok(Self::Remote),
+            "null" => Ok(Self::Null),
             other => Err(OpenCompanyError::Config(format!(
-                "OPENCOMPANY_MEMORY must be 'store' or 'tinycortex', got '{other}'"
+                "OPENCOMPANY_MEMORY must be 'store', 'embedded' (or its older spelling \
+                 'tinycortex'), 'remote', or 'null', got '{other}'"
             ))),
         }
     }
@@ -176,12 +214,40 @@ impl std::str::FromStr for MemoryBackend {
 pub struct MemoryOverlay {
     pub memory: Arc<dyn MemoryStore>,
     pub context: Arc<dyn ContextStore>,
+    /// The operator's facts, when the selected engine serves them too.
+    ///
+    /// `None` for the embedded overlay, which implements memory + context only
+    /// and leaves facts on the base backend. A provider-backed engine covers all
+    /// three ports, so it fills this in rather than splitting one company's
+    /// memory across two engines.
+    pub facts: Option<Arc<dyn FactStore>>,
+    /// What is bound, for status output.
+    pub descriptor: MemoryDescriptor,
 }
 
 impl std::fmt::Debug for MemoryOverlay {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MemoryOverlay").finish_non_exhaustive()
+        f.debug_struct("MemoryOverlay")
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
     }
+}
+
+/// What memory engine is live, in terms safe to show an operator.
+///
+/// Deliberately carries no endpoint and no credential. `driver_id` is safe to
+/// surface — the contract's own docs treat it as an identity, not a secret —
+/// while the URL and the key are not, and this type is what reaches `/spec`,
+/// which is unauthenticated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryDescriptor {
+    /// The selected mode (`store`, `embedded`, `remote`, `null`).
+    pub backend: MemoryBackend,
+    /// The bound engine's own name, when one is bound.
+    pub driver_id: String,
+    /// The capability families the bound driver negotiated, so an operator can
+    /// see what the engine does *not* support before a cycle finds out.
+    pub capabilities: Vec<String>,
 }
 
 /// Durable company → tenant ownership, for shared-database platform mode.
@@ -252,7 +318,7 @@ impl std::fmt::Debug for StorageHandles {
 /// Connection settings for [`open_storage`]. `fs` needs nothing beyond the
 /// runtime's home directory (handled by the builder's defaults), so it yields
 /// `None` handles.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct StorageSettings {
     pub kind: StorageKind,
     /// MongoDB connection string (`OPENCOMPANY_MONGODB_URI`).
@@ -284,6 +350,71 @@ pub struct StorageSettings {
     /// lifts the refusal for the mongodb+tinycortex combination. `false` (the
     /// [`Default`], and the safe default) keeps the silent-memory-loss guard.
     pub allow_ephemeral_memory: bool,
+    /// Which engine to bind for `OPENCOMPANY_MEMORY=remote`
+    /// (`OPENCOMPANY_MEMORY_DRIVER`): `supermemory`, `mem0`, `cognee`.
+    ///
+    /// A manifest `[memory].provider` outranks this, on the same principle as
+    /// `[inference].provider` — the manifest travels with the company, the
+    /// environment describes the host.
+    pub memory_driver: Option<String>,
+    /// Operator's explicit acceptance that the hosted memory adapters are not
+    /// yet conformance-proven (`OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE`).
+    ///
+    /// `OPENCOMPANY_MEMORY=remote` routes a company's entire memory at a
+    /// third-party HTTP service through an adapter that upstream covers with a
+    /// handful of happy-path tests — no error mapping, no pagination, no taint
+    /// preservation, no `Unsupported` behaviour. tinymemory#18 §E1 names a
+    /// driver conformance suite as the gate for turning this on at all, and
+    /// until that suite runs against those adapters, "it compiled" is the
+    /// strongest thing anyone can say about them.
+    ///
+    /// So the mode exists, refuses by default, and lifts on an explicit
+    /// assertion — the same shape as
+    /// [`allow_ephemeral_memory`](Self::allow_ephemeral_memory), and for the
+    /// same reason: the failure is silent and lands on a tenant's memory.
+    /// `false` (the [`Default`]) keeps the guard.
+    ///
+    /// This is a gate on *confidence*, not on configuration, so it is expected
+    /// to be deleted rather than lived with. Once the conformance suite covers
+    /// the adapters, this field and its refusal go.
+    pub allow_unproven_remote: bool,
+    /// The hosted engine's endpoint (`OPENCOMPANY_MEMORY_URL`).
+    pub memory_url: Option<String>,
+    /// The hosted engine's credential (`OPENCOMPANY_MEMORY_API_KEY`).
+    ///
+    /// A raw credential, so it is kept out of [`Debug`] — see the impl below.
+    /// The manifest form, `[memory].api_key_secret`, names a
+    /// [`SecretStore`](crate::ports::SecretStore) key instead and is preferred:
+    /// it is the convention every other integration follows, and it keeps the
+    /// credential out of the process environment. This env var exists because
+    /// the hosted manager injects environment, not manifests.
+    pub memory_api_key: Option<String>,
+}
+
+impl std::fmt::Debug for StorageSettings {
+    /// Renders everything except the two credentials.
+    ///
+    /// `StorageSettings` is printed at boot (`src/bin/opencompany.rs`), so a
+    /// derived `Debug` would put a memory credential and a MongoDB connection
+    /// string into the startup log of every tenant container.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StorageSettings")
+            .field("kind", &self.kind)
+            .field("mongodb_uri", &self.mongodb_uri.as_ref().map(|_| "<set>"))
+            .field("mongodb_db", &self.mongodb_db)
+            .field("tenant_id", &self.tenant_id)
+            .field("memory_backend", &self.memory_backend)
+            .field("data_dir", &self.data_dir)
+            .field("allow_ephemeral_memory", &self.allow_ephemeral_memory)
+            .field("allow_unproven_remote", &self.allow_unproven_remote)
+            .field("memory_driver", &self.memory_driver)
+            .field("memory_url", &self.memory_url.as_ref().map(|_| "<set>"))
+            .field(
+                "memory_api_key",
+                &self.memory_api_key.as_ref().map(|_| "<set>"),
+            )
+            .finish()
+    }
 }
 
 /// Parses env var `key` into `T`. Absent → `Ok(None)` (the caller applies its
@@ -319,7 +450,8 @@ impl StorageSettings {
     /// Reads the CLI-surface storage env vars (`OPENCOMPANY_STORAGE`,
     /// `OPENCOMPANY_MONGODB_URI`, `OPENCOMPANY_MONGODB_DB`,
     /// `OPENCOMPANY_TENANT_ID`, `OPENCOMPANY_MEMORY`, `OPENCOMPANY_DATA_DIR`,
-    /// `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`).
+    /// `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`,
+    /// `OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE`).
     pub fn from_env() -> Result<Self> {
         let kind: StorageKind = parse_env("OPENCOMPANY_STORAGE")?.unwrap_or_default();
         let memory_backend: MemoryBackend = parse_env("OPENCOMPANY_MEMORY")?.unwrap_or_default();
@@ -332,6 +464,10 @@ impl StorageSettings {
             memory_backend,
             data_dir: Some(crate::app::config::data_dir_from_env()),
             allow_ephemeral_memory: env_flag("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"),
+            allow_unproven_remote: env_flag("OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE"),
+            memory_driver: non_empty("OPENCOMPANY_MEMORY_DRIVER"),
+            memory_url: non_empty("OPENCOMPANY_MEMORY_URL"),
+            memory_api_key: non_empty("OPENCOMPANY_MEMORY_API_KEY"),
         })
     }
 }
@@ -359,7 +495,94 @@ pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOv
     match settings.memory_backend {
         MemoryBackend::Store => Ok(None),
         MemoryBackend::Tinycortex => open_tinycortex(settings),
+        MemoryBackend::Remote | MemoryBackend::Null => open_provider(settings),
     }
+}
+
+/// Opens a [`MemoryProvider`](tinymemory_api::provider::MemoryProvider)-backed
+/// overlay for the `remote` and `null` modes.
+///
+/// Unlike [`open_tinycortex`], this one also carries a `FactStore`: the provider
+/// contract covers all three memory ports, so there is no reason to leave the
+/// operator's facts on the base backend and split a company's memory across two
+/// engines.
+#[cfg(feature = "tinymemory")]
+fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
+    use crate::store::memory::{BoundMemory, MemoryDriverConfig, MemoryMode, open_driver};
+
+    if settings.memory_backend == MemoryBackend::Remote && !settings.allow_unproven_remote {
+        return Err(OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY=remote routes this company's entire memory at a hosted service \
+             through an adapter that is not yet covered by a driver conformance suite \
+             (tinymemory#18 §E1): its error mapping, pagination, and provenance preservation are \
+             untested, and a memory engine that loses provenance or silently drops a page fails \
+             in ways nothing surfaces until the memory is needed. If you accept that for this \
+             deployment, set OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE=1 to assert it. Otherwise \
+             use OPENCOMPANY_MEMORY=embedded for the durable in-pod engine, or the default \
+             OPENCOMPANY_MEMORY=store."
+                .to_string(),
+        ));
+    }
+    let mode = match settings.memory_backend {
+        MemoryBackend::Remote => MemoryMode::Remote,
+        MemoryBackend::Null => MemoryMode::Null,
+        // Unreachable: the caller matched these two arms.
+        MemoryBackend::Store | MemoryBackend::Tinycortex => return Ok(None),
+    };
+    let config = MemoryDriverConfig {
+        mode,
+        driver_id: settings.memory_driver.clone(),
+        url: settings.memory_url.clone(),
+        api_key: settings.memory_api_key.clone(),
+    };
+    let Some((provider, class)) = open_driver(&config)? else {
+        return Ok(None);
+    };
+    let bound = BoundMemory::bind(provider, class)?;
+    // Announce the bind: which engine, and — the part an operator cannot infer —
+    // the class the *host* assigned it, since that is what decides whether the
+    // egress and external-trust checks apply. Names the engine and its
+    // capabilities, never the endpoint or the credential.
+    tracing::info!(
+        driver_id = bound.driver_id(),
+        class = bound.class().as_str(),
+        capabilities = ?bound.capability_names(),
+        "memory engine bound"
+    );
+    if settings.memory_backend == MemoryBackend::Null {
+        // Loud, once, at open: `null` is a legitimate choice but a surprising
+        // one to inherit from a stale environment, and every read returning
+        // empty is indistinguishable from a company that has not learned
+        // anything yet.
+        tracing::warn!(
+            "OPENCOMPANY_MEMORY=null is bound: memory writes are accepted and discarded, and \
+             every read is empty. Nothing this company is told will be remembered."
+        );
+    }
+    Ok(Some(MemoryOverlay {
+        memory: bound.memory(),
+        context: bound.context(),
+        facts: Some(bound.facts()),
+        descriptor: MemoryDescriptor {
+            backend: settings.memory_backend,
+            driver_id: bound.driver_id().to_string(),
+            capabilities: bound
+                .capability_names()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+    }))
+}
+
+/// Without the `tinymemory` feature the two provider-backed modes cannot be
+/// served, so they refuse rather than silently resolving to something else.
+#[cfg(not(feature = "tinymemory"))]
+fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
+    Err(OpenCompanyError::Config(format!(
+        "OPENCOMPANY_MEMORY={} requires a build with the `tinymemory` feature",
+        settings.memory_backend.as_str()
+    )))
 }
 
 /// Opens the TinyCortex overlay. With a `data_dir` present it is the persistent,
@@ -440,7 +663,26 @@ fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> 
         }
         None => crate::store::tinycortex::in_memory(),
     };
-    Ok(Some(MemoryOverlay { memory, context }))
+    Ok(Some(MemoryOverlay {
+        memory,
+        context,
+        // The embedded engine implements memory + context only; facts stay on
+        // the base backend, as they always have.
+        facts: None,
+        descriptor: MemoryDescriptor {
+            backend: MemoryBackend::Tinycortex,
+            // The literal rather than `tinymemory::registry::TINYCORTEX_DRIVER_ID`:
+            // this arm compiles under `tinycortex` alone, which does not pull the
+            // registry in. It is the same reserved id, and `tinymemory`'s own
+            // constant is pinned to this string by its builtin table.
+            driver_id: "tinycortex".to_string(),
+            // The in-pod engine is driven directly rather than through a bound
+            // provider, so there is no negotiated capability set to report. An
+            // empty list says "not negotiated", which is the truth; claiming the
+            // mandatory three here would be reporting a bind that did not happen.
+            capabilities: Vec::new(),
+        },
+    }))
 }
 
 /// Resolves the hosted embeddings backend for the memory meaning tier from the
@@ -639,6 +881,174 @@ mod test {
     }
 
     #[test]
+    fn the_legacy_spellings_keep_parsing_alongside_the_new_ones() {
+        // Issue #914 introduces `embedded`/`remote`/`null`. Renaming would break
+        // every deployment already setting `OPENCOMPANY_MEMORY=tinycortex`,
+        // including hosted tenants whose environment the control plane injects,
+        // so the older spelling is a synonym rather than a casualty.
+        assert_eq!(
+            "embedded".parse::<MemoryBackend>().unwrap(),
+            MemoryBackend::Tinycortex
+        );
+        assert_eq!(
+            "tinycortex".parse::<MemoryBackend>().unwrap(),
+            MemoryBackend::Tinycortex
+        );
+        assert_eq!(
+            "remote".parse::<MemoryBackend>().unwrap(),
+            MemoryBackend::Remote
+        );
+        assert_eq!(
+            "null".parse::<MemoryBackend>().unwrap(),
+            MemoryBackend::Null
+        );
+        assert_eq!(
+            "NULL".parse::<MemoryBackend>().unwrap(),
+            MemoryBackend::Null
+        );
+    }
+
+    #[test]
+    fn one_spelling_is_reported_out_even_though_two_parse_in() {
+        // A client reading status should never have to know both names.
+        assert_eq!(MemoryBackend::Tinycortex.as_str(), "embedded");
+        assert_eq!(MemoryBackend::Store.as_str(), "store");
+        assert_eq!(MemoryBackend::Remote.as_str(), "remote");
+        assert_eq!(MemoryBackend::Null.as_str(), "null");
+    }
+
+    #[test]
+    fn the_parse_refusal_names_every_accepted_value() {
+        let error = "redis".parse::<MemoryBackend>().err().unwrap().to_string();
+        for value in ["store", "embedded", "tinycortex", "remote", "null"] {
+            assert!(error.contains(value), "{value} missing from: {error}");
+        }
+    }
+
+    #[test]
+    fn settings_debug_never_renders_a_credential() {
+        // `StorageSettings` is printed at boot, so a derived `Debug` would put a
+        // memory credential and a MongoDB connection string in the startup log
+        // of every tenant container.
+        let settings = StorageSettings {
+            mongodb_uri: Some("mongodb://user:hunter2@cluster.example/db".into()),
+            memory_url: Some("https://memory.internal.example".into()),
+            memory_api_key: Some("sk-memory-super-secret".into()),
+            ..StorageSettings::default()
+        };
+        let rendered = format!("{settings:?}");
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains("sk-memory-super-secret"), "{rendered}");
+        assert!(!rendered.contains("memory.internal.example"), "{rendered}");
+        // Still useful: it says the values are configured.
+        assert!(rendered.contains("<set>"), "{rendered}");
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn remote_without_a_url_or_key_refuses_at_open() {
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Remote,
+            memory_driver: Some("supermemory".into()),
+            // Past the confidence gate, so this asserts the *configuration*
+            // refusal rather than tripping over the one before it.
+            allow_unproven_remote: true,
+            ..StorageSettings::default()
+        };
+        let error = open_memory_overlay(&settings)
+            .expect_err("remote without an endpoint must refuse")
+            .to_string();
+        assert!(error.contains("OPENCOMPANY_MEMORY_URL"), "{error}");
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn remote_refuses_until_the_operator_accepts_an_unproven_adapter() {
+        // The hosted adapters have no conformance coverage yet
+        // (tinymemory#18 §E1). Routing a tenant's whole memory at one is a
+        // decision an operator makes deliberately, not one they arrive at by
+        // setting a single variable.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Remote,
+            memory_driver: Some("supermemory".into()),
+            memory_url: Some("https://memory.example".into()),
+            memory_api_key: Some("k".into()),
+            ..StorageSettings::default()
+        };
+        let error = open_memory_overlay(&settings)
+            .expect_err("a fully configured remote engine still needs the assertion")
+            .to_string();
+        assert!(
+            error.contains("OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE"),
+            "the refusal must name the knob: {error}"
+        );
+        // And it must name a way forward that is not "give up".
+        assert!(error.contains("OPENCOMPANY_MEMORY=embedded"), "{error}");
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn remote_opens_once_the_operator_has_accepted_it() {
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Remote,
+            memory_driver: Some("supermemory".into()),
+            memory_url: Some("https://memory.example".into()),
+            memory_api_key: Some("k".into()),
+            allow_unproven_remote: true,
+            ..StorageSettings::default()
+        };
+        let overlay = open_memory_overlay(&settings)
+            .expect("an accepted, fully configured remote engine binds")
+            .expect("remote yields an overlay");
+        assert_eq!(overlay.descriptor.backend, MemoryBackend::Remote);
+        assert_eq!(overlay.descriptor.driver_id, "supermemory");
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn the_gate_applies_only_to_remote() {
+        // `null` retains nothing by design, and `embedded` is the incumbent
+        // durable path — neither is routing memory at an unproven third party,
+        // so neither is behind this gate.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Null,
+            ..StorageSettings::default()
+        };
+        assert!(
+            open_memory_overlay(&settings).is_ok(),
+            "null must not be gated on the remote-adapter assertion"
+        );
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn null_opens_and_reports_itself() {
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Null,
+            ..StorageSettings::default()
+        };
+        let overlay = open_memory_overlay(&settings)
+            .unwrap()
+            .expect("null binds an overlay");
+        assert_eq!(overlay.descriptor.backend, MemoryBackend::Null);
+        assert_eq!(overlay.descriptor.driver_id, "null");
+        assert!(overlay.facts.is_some(), "a provider serves facts too");
+    }
+
+    #[cfg(not(feature = "tinymemory"))]
+    #[test]
+    fn the_provider_modes_require_the_feature() {
+        for backend in [MemoryBackend::Remote, MemoryBackend::Null] {
+            let settings = StorageSettings {
+                memory_backend: backend,
+                ..StorageSettings::default()
+            };
+            let error = open_memory_overlay(&settings).err().unwrap().to_string();
+            assert!(error.contains("`tinymemory` feature"), "{error}");
+        }
+    }
+
+    #[test]
     fn default_memory_backend_is_store() {
         assert_eq!(
             StorageSettings::default().memory_backend,
@@ -650,6 +1060,66 @@ mod test {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn from_env_reads_the_remote_memory_knobs() {
+        // The four knobs `remote` needs. Without this, a rename in `from_env`
+        // would surface as "the engine refuses and names a variable you did
+        // set", which reads as a broken deployment rather than a broken parse.
+        const KEYS: [&str; 4] = [
+            "OPENCOMPANY_MEMORY_ALLOW_UNPROVEN_REMOTE",
+            "OPENCOMPANY_MEMORY_DRIVER",
+            "OPENCOMPANY_MEMORY_URL",
+            "OPENCOMPANY_MEMORY_API_KEY",
+        ];
+        // SAFETY: single-threaded test; restores prior state.
+        let prev: Vec<_> = KEYS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+
+        unsafe {
+            std::env::set_var(KEYS[0], "1");
+            std::env::set_var(KEYS[1], "supermemory");
+            std::env::set_var(KEYS[2], "https://memory.example");
+            std::env::set_var(KEYS[3], "sk-test");
+        }
+        let settings = StorageSettings::from_env().unwrap();
+        assert!(settings.allow_unproven_remote);
+        assert_eq!(settings.memory_driver.as_deref(), Some("supermemory"));
+        assert_eq!(
+            settings.memory_url.as_deref(),
+            Some("https://memory.example")
+        );
+        assert_eq!(settings.memory_api_key.as_deref(), Some("sk-test"));
+
+        // Empty is absent, not an empty credential: `require` would otherwise
+        // accept a blank key and defer the failure to the first call.
+        unsafe {
+            std::env::set_var(KEYS[1], "");
+            std::env::set_var(KEYS[3], "");
+        }
+        let blank = StorageSettings::from_env().unwrap();
+        assert_eq!(blank.memory_driver, None);
+        assert_eq!(blank.memory_api_key, None);
+
+        unsafe {
+            for key in KEYS {
+                std::env::remove_var(key);
+            }
+        }
+        let unset = StorageSettings::from_env().unwrap();
+        assert!(!unset.allow_unproven_remote);
+        assert_eq!(unset.memory_driver, None);
+        assert_eq!(unset.memory_url, None);
+        assert_eq!(unset.memory_api_key, None);
+
+        unsafe {
+            for (key, value) in prev {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]

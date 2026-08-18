@@ -114,6 +114,7 @@ use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantId, GrantScope, GrantSet, StandingGrant};
 use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, RuntimeJournal};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
+use crate::runtime::workflow_gates::WorkflowGateQueue;
 use crate::server::ops::mailer::MailSender;
 use crate::server::ops::smtp::SmtpCredentials;
 
@@ -274,6 +275,16 @@ pub struct CompanyRuntime {
     /// not forget that the turn is blocked, or the next decision continues it as
     /// though the others had never been owed.
     pub(crate) continuations: ContinuationQueue,
+    /// Issue #978: which gate node each parked **workflow** approval is
+    /// deciding, and the trigger input its run paused with.
+    ///
+    /// The run-scoped companion to [`continuations`](Self::continuations): that
+    /// queue counts a run's outstanding decisions, and this one holds the facts
+    /// the release needs to actually re-dispatch it. Live per-instance state and
+    /// inherited across a rebuild for the same reason both its neighbours are —
+    /// a swap mid-decision that forgot a run's parked gates would re-ask about
+    /// every one of them.
+    pub(crate) workflow_gates: WorkflowGateQueue,
     /// Held for the duration of a cycle so cycles never interleave per company.
     ///
     /// `Arc`-shared rather than owned so a rebuilt runtime can inherit the *same*
@@ -390,6 +401,7 @@ impl CompanyRuntime {
             repos: None,
             grants,
             continuations: ContinuationQueue::default(),
+            workflow_gates: WorkflowGateQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
@@ -605,6 +617,13 @@ impl CompanyRuntime {
     /// successor: a second `RuntimeJournal` over one path is the corruption
     /// hazard [`RuntimeHandover`](crate::runtime::RuntimeHandover) exists to
     /// prevent, and "we passed it along" is only checkable if it is readable.
+    /// The run-scoped workflow gate batches this runtime is holding (issue
+    /// #978). Delegated to rather than exposed as a field so the approve path in
+    /// `workflow_resume` can fork on whether a card's run is armed.
+    pub fn workflow_gates(&self) -> &WorkflowGateQueue {
+        &self.workflow_gates
+    }
+
     pub fn journal(&self) -> &Arc<RuntimeJournal> {
         &self.journal
     }
@@ -903,11 +922,11 @@ impl CompanyRuntime {
     /// [`RunStatus::Pending`]: crate::ports::runs::RunStatus::Pending
     #[cfg(feature = "openhuman")]
     async fn open_run(&self, task: &TaskRecord) -> Option<String> {
-        let spec = crate::ports::runs::NewRun {
-            id: crate::ports::generate_id(),
-            task_id: task.id.clone(),
-            agent_id: task.assignee.clone(),
-        };
+        let spec = crate::ports::runs::NewRun::for_task(
+            crate::ports::generate_id(),
+            task.id.clone(),
+            task.assignee.clone(),
+        );
         match self.ops.runs.create_run(&self.id, spec).await {
             Ok(run) => {
                 tracing::debug!(
@@ -1088,13 +1107,32 @@ impl CompanyRuntime {
         self.continuations = continuations;
     }
 
+    /// Installs the run-scoped workflow gate batches the builder prepared
+    /// (issue #978) — rehydrated from the journal's still-parked gates on a
+    /// boot, inherited live on a rebuild.
+    ///
+    /// Set through the builder for exactly
+    /// [`adopt_continuations`](Self::adopt_continuations)' reason, and always
+    /// alongside it: the two describe one run's decisions from opposite sides,
+    /// and a runtime holding a fresh copy of one and an inherited copy of the
+    /// other would release a batch it cannot re-dispatch.
+    pub fn adopt_workflow_gates(&mut self, gates: WorkflowGateQueue) {
+        self.workflow_gates = gates;
+    }
+
     /// Rejects a cycle on a runtime that is being replaced.
     ///
     /// Separate from [`ensure_running`](Self::ensure_running): that one reads a
     /// durable lifecycle an operator chose (paused, archived) and renders `409`;
     /// this one is a process-local window that clears itself within a turn and
     /// renders `503`.
-    fn ensure_accepting(&self) -> Result<()> {
+    /// `pub(crate)` since issue #983 rather than private: a caller that journals
+    /// its own input has to be able to ask this **before** it writes, since a
+    /// refusal ordered after the append would leave a message in the transcript
+    /// that no turn will ever answer. Every in-tree caller still goes through
+    /// one of the cycle entry points below; this exists so the chat route can
+    /// run the same check one step earlier.
+    pub(crate) fn ensure_accepting(&self) -> Result<()> {
         if self.is_quiesced() {
             return Err(OpenCompanyError::Quiescing(self.id.as_ref().to_string()));
         }
@@ -1105,6 +1143,31 @@ impl CompanyRuntime {
     pub async fn run_cycle(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
         self.ensure_accepting()?;
         CycleRunner::new(self).run(events).await
+    }
+
+    /// [`run_cycle`](Self::run_cycle), for inputs the caller has **already**
+    /// appended to the journal (issue #983).
+    ///
+    /// The chat route journals the operator's message the instant the request
+    /// is accepted, so the transcript is correct from acceptance rather than
+    /// from whenever the cycle wins the per-company serial lock — behind a busy
+    /// company, an unbounded time later. Handing the seq over here is what stops
+    /// the same message being appended a second time.
+    ///
+    /// `run_id` is a run row moved `Pending` → `Running` once that lock is
+    /// actually held; see [`CycleRunner::run_journaled`].
+    ///
+    /// Deliberately a second entry point rather than a parameter on the first:
+    /// every other trigger — scheduler, cron, webhooks, telegram, delegation,
+    /// approval follow-ups — keeps `run_cycle` byte-unchanged, so the append
+    /// they rely on cannot be turned off by a mistake at a call site.
+    pub async fn run_journaled_cycle(
+        &self,
+        events: Vec<(EventSeq, CompanyEvent)>,
+        run_id: Option<String>,
+    ) -> Result<CycleReport> {
+        self.ensure_accepting()?;
+        CycleRunner::new(self).run_journaled(events, run_id).await
     }
 
     /// Resolves a parked approval and runs a follow-up cycle so the brain learns
@@ -1290,10 +1353,24 @@ impl CompanyRuntime {
             return CycleRunner::new(self).run(vec![event]).await;
         };
         let approval_id = approval_id.clone();
+        let verdict = match &event {
+            CompanyEvent::ApprovalResolved { verdict, .. } => *verdict,
+            _ => unreachable!("matched ApprovalResolved above"),
+        };
 
         // `Some(None)` is a park recorded before the turn key existed; `None` is
         // an id this journal never parked. Neither is gated.
         let turn = self.journal.approval_cycle(&approval_id).flatten();
+        // Issue #978: bank the verdict against the run's gate batch BEFORE the
+        // continuation queue is told, so that whichever decision turns out to be
+        // the last finds every sibling's verdict already recorded. Ordering is
+        // what makes that safe rather than lucky: each caller banks then counts,
+        // and the release is handed to the caller whose count reaches zero — by
+        // which time the other N-1 have necessarily banked. A no-op for a turn
+        // that is not a workflow run.
+        if let Some(turn) = turn.as_deref() {
+            self.workflow_gates.decide(turn, &approval_id, verdict);
+        }
         let batch = match &turn {
             Some(turn) => match self.continuations.decide(turn, Some(event)) {
                 Some(batch) => batch,
@@ -1310,6 +1387,15 @@ impl CompanyRuntime {
             },
             None => vec![event],
         };
+        // Issue #978: a workflow run is not a brain turn, so it is not continued
+        // like one. The fork is read off the turn key itself — see
+        // `continuation_target` — rather than from a side lookup that could
+        // disagree with the key the park wrote.
+        if let Some(turn) = turn.as_deref()
+            && crate::runtime::workflow_resume::run_id_from_turn(turn).is_some()
+        {
+            return self.resume_workflow_run(&approval_id, turn, batch).await;
+        }
         if batch.is_empty() {
             // Every approval the turn raised expired rather than being decided.
             // The sweep already appended each `ApprovalResolved` itself, so
@@ -1317,6 +1403,61 @@ impl CompanyRuntime {
             return Ok(CycleRunner::new(self).already_resolved_report());
         }
         self.run_continuation(&approval_id, batch).await
+    }
+
+    /// Re-dispatches the workflow run a released batch belongs to — **once**
+    /// (issue #978).
+    ///
+    /// The workflow arm of [`continue_turn`](Self::continue_turn), and the
+    /// counterpart to [`run_continuation`](Self::run_continuation): a run has no
+    /// agent turn to resume, so there is no cycle to run. What it owes is one
+    /// replay of the graph carrying every gate the batch approved.
+    ///
+    /// The decisions are still appended to the event log, because they happened
+    /// and the timeline should say so; what is deliberately **not** run is a
+    /// brain cycle per decision. Before this, every workflow gate approval spent
+    /// a full agent turn telling the brain about a resolution it can do nothing
+    /// with, on top of the duplicate run it started.
+    ///
+    /// A refused spawn is announced rather than only logged. Issue #401's
+    /// concurrency ceiling was survivable when each approval had its own spawn
+    /// attempt — one refusal left the other cards to retry with. A batch gets one
+    /// attempt and consumes every card, so a silent refusal loses the run with
+    /// nothing left to click; the operator has to be told to re-run it. Same
+    /// stance as issue #469 defect 4.
+    async fn resume_workflow_run(
+        &self,
+        approval_id: &ApprovalId,
+        turn: &str,
+        batch: Vec<CompanyEvent>,
+    ) -> Result<CycleReport> {
+        for event in batch {
+            if let Err(error) = self.events.append(&self.id, event).await {
+                tracing::warn!(
+                    company = %self.id,
+                    %approval_id,
+                    %error,
+                    "[approval] a workflow gate's resolution could not be appended to the event \
+                     log; the journal remains the binding record"
+                );
+            }
+        }
+        if let Err(error) = crate::runtime::workflow_resume::resume_run(self, turn).await {
+            tracing::error!(
+                company = %self.id,
+                %turn,
+                %error,
+                "[approval] the workflow run released by this decision could not be continued"
+            );
+            self.announce_to_operator(&format!(
+                "Every sign-off on that workflow step is in, but the run could not be \
+                 restarted: {error}. Nothing else is waiting on you — re-run the workflow to \
+                 pick it back up."
+            ))
+            .await;
+            return Err(error);
+        }
+        Ok(CycleRunner::new(self).already_resolved_report())
     }
 
     /// Runs one turn's continuation over the decisions it was blocked on, and
@@ -1620,21 +1761,42 @@ impl CompanyRuntime {
             // waited on. Spawned rather than awaited: the continuation is a full
             // agent turn behind the per-company cycle lock, and the maintenance
             // tick this runs on fires on a minute boundary for every company.
-            if let Some(turn) = self.journal.approval_cycle(id).flatten()
-                && let Some(batch) = self.continuations.decide(&turn, None)
-                && !batch.is_empty()
-            {
-                let rt = Arc::clone(self);
-                let released = id.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = rt.run_continuation(&released, batch).await {
-                        tracing::error!(
-                            company = %rt.id,
-                            %error,
-                            "[approval] the continuation released by an expiry failed"
-                        );
+            if let Some(turn) = self.journal.approval_cycle(id).flatten() {
+                // Issue #978: an expiry is a default-DENY, and the run's batch
+                // has to hear it as one. Banked before the count is decremented,
+                // exactly as an operator's verdict is in `continue_turn` — an
+                // expired gate left in neither ledger would be replayed into,
+                // pause the continuation, and park a brand-new card for a
+                // decision that has already been made.
+                self.workflow_gates.decide(&turn, id, Verdict::Deny);
+                if let Some(batch) = self.continuations.decide(&turn, None) {
+                    let workflow_run =
+                        crate::runtime::workflow_resume::run_id_from_turn(&turn).is_some();
+                    // A workflow run releases even on an empty batch: every
+                    // decision may have been an expiry (which appends its own
+                    // event), and the run still has to be told so its approved
+                    // siblings are not stranded. A brain turn with nothing to
+                    // report owes no cycle, exactly as before.
+                    if workflow_run || !batch.is_empty() {
+                        let rt = Arc::clone(self);
+                        let released = id.clone();
+                        let turn = turn.clone();
+                        tokio::spawn(async move {
+                            let outcome = if workflow_run {
+                                rt.resume_workflow_run(&released, &turn, batch).await
+                            } else {
+                                rt.run_continuation(&released, batch).await
+                            };
+                            if let Err(error) = outcome {
+                                tracing::error!(
+                                    company = %rt.id,
+                                    %error,
+                                    "[approval] the continuation released by an expiry failed"
+                                );
+                            }
+                        });
                     }
-                });
+                }
             }
             if let Err(e) = self
                 .events

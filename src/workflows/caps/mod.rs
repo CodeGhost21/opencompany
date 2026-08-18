@@ -1002,6 +1002,13 @@ impl HarnessAgentRunner {
                     request.effect,
                     crate::runtime::journal::TaskLink::Unlinked,
                     None,
+                    // Issue #978: no run turn key, deliberately. These cards are
+                    // tool-call-shaped — `ApprovalPolicy::effect_for` stamps an
+                    // `agent` on them — so approving mints a grant and
+                    // re-dispatches the agent; it never re-dispatches the run.
+                    // Batching them under the run would owe a continuation
+                    // nothing performs.
+                    None,
                 )
                 .await
             {

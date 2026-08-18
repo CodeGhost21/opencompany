@@ -1158,7 +1158,28 @@ async fn park_pending_gates(
         return;
     };
 
+    // Issue #978: the gates this lineage has already refused. A denied node is
+    // decided and final — replaying into it must not raise the question a second
+    // time, or a mixed verdict still nets new cards and "approving never
+    // increases pending approvals" is false again.
+    let denied = crate::runtime::workflow_resume::denied_in_input(trigger_input);
+
+    // Issue #978: every gate this run parks shares ONE turn key, so the N of a
+    // fan-out are one decision batch owed exactly one continuation. Keyed on the
+    // run because the run is what gets re-dispatched.
+    let turn = crate::runtime::workflow_resume::workflow_turn_key(run_id);
+
     for node_id in pending {
+        if denied.iter().any(|refused| refused == node_id) {
+            tracing::info!(
+                company = %record.id,
+                workflow = %workflow_id,
+                node = %node_id,
+                %run_id,
+                "workflow: this gate was already refused, so it is not asked about again"
+            );
+            continue;
+        }
         // Issue #460: when the policy is what stopped this node, the card says
         // which tool and why.
         //
@@ -1224,6 +1245,7 @@ async fn park_pending_gates(
                 effect,
                 crate::runtime::journal::TaskLink::Unlinked,
                 None,
+                Some(turn.clone()),
             )
             .await
         {
@@ -3185,6 +3207,12 @@ to = "done"
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: gate,
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
@@ -3478,6 +3506,12 @@ to = "gate"
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: Arc::new(crate::policy::ManifestApprovalGate::new(policy)),
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
@@ -3535,8 +3569,17 @@ to = "gate"
             .find(|p| p.effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND)
             .expect("the paused gate is waiting on the operator")
             .effect;
-        let continuation = crate::runtime::workflow_resume::continuation_input(&card)
-            .expect("a well-formed card continues");
+        let continuation = crate::runtime::workflow_resume::continuation_input(
+            &card,
+            &[
+                card.payload[crate::runtime::workflow_resume::PAYLOAD_NODE_ID]
+                    .as_str()
+                    .expect("the card names its gate")
+                    .to_string(),
+            ],
+            &[],
+        )
+        .expect("a well-formed card continues");
 
         // --- run 2: the same graph, from the trigger, with the gate approved.
         let second = run_workflow(
