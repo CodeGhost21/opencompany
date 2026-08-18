@@ -88,6 +88,11 @@ function items(): HTMLElement[] {
   return [...container.querySelectorAll<HTMLElement>("[data-approval-item]")];
 }
 
+/** The one compact transcript row a fully settled turn leaves behind (#970). */
+function receipts(): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>("[data-approval-receipt]")];
+}
+
 function button(label: string): HTMLButtonElement {
   const match = [...container.querySelectorAll("button")].find((b) =>
     (b.textContent ?? "").includes(label),
@@ -270,14 +275,59 @@ describe("the consolidated approval card", () => {
     expect(decisions.map((d) => d.id)).toEqual(["a3"]);
   });
 
-  it("settles rather than vanishing once every item is decided", async () => {
+  it("leaves one expandable release receipt for a fully approved turn", async () => {
+    await render([ESPN, BBC, GUARDIAN], { a1: "approve", a2: "approve", a3: "approve" });
+
+    // Three decisions from one parked turn do not become three permanent
+    // transcript rows. The receipt is about the one release, not the clicks.
+    expect(receipts()).toHaveLength(1);
+    expect(receipts()[0].textContent).toContain(
+      "Approved 3 actions — the agent is picking it up now",
+    );
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+
+    // The individual verdicts remain inspectable, but do not flood the channel
+    // until the operator asks for them.
+    const disclosure = receipts()[0].querySelector("details");
+    expect(disclosure?.open).toBe(false);
+    expect(disclosure?.textContent).toContain("Show individual decisions");
+    expect(items()).toHaveLength(3);
+    expect(items().map((item) => item.textContent)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("https://espn.com/nba"),
+        expect.stringContaining("https://bbc.com/sport"),
+        expect.stringContaining("https://theguardian.com/uk"),
+      ]),
+    );
+  });
+
+  it("summarizes mixed verdicts honestly once the turn releases", async () => {
     await render([ESPN, BBC], { a1: "approve", a2: "deny" });
 
-    const text = container.textContent ?? "";
-    expect(text).toContain("All 2 decided");
-    expect(text).toContain("Declined");
+    expect(receipts()).toHaveLength(1);
+    expect(receipts()[0].textContent).toContain(
+      "Approved 1 action and declined 1 action — the agent is picking it up now",
+    );
     // Nothing left to decide, so nothing left to press.
     expect(container.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("says plainly when every action in a settled turn was declined", async () => {
+    await render([ESPN, BBC], { a1: "deny", a2: "deny" });
+
+    expect(receipts()).toHaveLength(1);
+    expect(receipts()[0].textContent).toContain(
+      "Declined 2 actions — the agent will not take them",
+    );
+    expect(receipts()[0].querySelector("details")?.open).toBe(false);
+  });
+
+  it("keeps a settled single approval natural", async () => {
+    await render([ESPN], { a1: "approve" });
+
+    expect(receipts()).toHaveLength(1);
+    expect(receipts()[0].textContent).toBe("Approved — the agent is picking it up now");
+    expect(receipts()[0].querySelector("details")).toBeNull();
   });
 
   it("renders a single-call turn exactly as it did before batching", async () => {
