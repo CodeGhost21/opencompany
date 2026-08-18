@@ -397,8 +397,12 @@ export function AppShell({
   // switch are the ones that arrive after it. The new company's own in-flight
   // runs come back through the history seed (issue #863), which is scoped by
   // the request, so nothing is lost by starting from nothing.
+  //
+  // The updater returns the SAME array when there is nothing to drop, so React
+  // bails out rather than re-rendering the whole shell for a no-op — this
+  // effect also fires on mount, when the window is empty by construction.
   useEffect(() => {
-    setWorkflowRunEvents([]);
+    setWorkflowRunEvents((prev) => (prev.length === 0 ? prev : []));
   }, [company]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
