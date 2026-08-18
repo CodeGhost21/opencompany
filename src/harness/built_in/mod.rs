@@ -816,8 +816,8 @@ impl CompanyAgent {
         // Detach the sink (drops the only remaining `Sender`, closing the
         // channel), release the agent lock, then drain + fold. A `Hard` error
         // still runs this cleanup before propagating, so the collector never
-       // leaks.
-       agent.set_on_progress(None);
+        // leaks.
+        agent.set_on_progress(None);
         // Issue #926: read the cap flag while the lock is still held, the same
         // under-lock idiom `read_turn_usage` uses above. Not draining, so the
         // retry path's second attempt simply overwrites the first's value —
