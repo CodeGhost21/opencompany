@@ -579,6 +579,26 @@ pub struct CompanyAgent {
     agent: Mutex<Agent>,
 }
 
+/// The absolute ceiling, in USD, on what a **single turn** may spend before the
+/// in-turn brake halts it (issue #988).
+///
+/// OpenCompany's two spend controls — the plan-level token ceiling and a
+/// teammate's `budget_usd_daily` — are both **pre-dispatch**: they decide whether
+/// to start a turn, and neither can see inside one. So a turn that starts one
+/// cent under a cap may finish arbitrarily far over it, and the overshoot is
+/// bounded only by whatever that turn happened to cost. Raising the tool-call
+/// ceiling ([`MAX_TOOL_ITERATIONS`](crate::harness::build::MAX_TOOL_ITERATIONS))
+/// widens that window proportionally, which is why the two ship together: the
+/// vendored policy note for a raised cap says "the repeated-failure circuit
+/// breaker and cost budget still apply", and in this crate only the first half
+/// of that was ever true.
+///
+/// $5.00 is several times the estimated cost of a legitimate turn that spends
+/// the whole 25-iteration ceiling on the managed tiers, so it does not ration
+/// ordinary work; it exists to stop a pathological loop, and to put a *number*
+/// on the worst case where there previously was none.
+pub const MAX_TURN_SPEND_USD: f64 = 5.00;
+
 /// The graceful reply returned when a turn yields the transient empty-response
 /// class twice — so chat never shows a bare "Couldn't send" for a model hiccup.
 const GRACEFUL_EMPTY_REPLY: &str = "Sorry — I hit a temporary model hiccup and couldn't produce a reply. Please resend your message.";
@@ -743,14 +763,29 @@ impl CompanyAgent {
         let mut agent = self.agent.lock().await;
         agent.set_on_progress(Some(tx));
 
-        // Install the steer hook only when a control is provided; an empty hook
-        // list is exactly the pre-#111 behaviour.
-        let hooks: Vec<Arc<dyn oh::agent::stop_hooks::StopHook>> = match steer {
-            Some(control) => vec![Arc::new(crate::harness::steer::SteerStopHook::new(
+        // Two hooks, both fired by openhuman between tool-loop iterations:
+        //
+        // * the **steer** hook, only when an operator control is provided (#111);
+        // * the **budget** hook, always (#988) — the in-turn spend brake. Every
+        //   other budget in this crate is pre-dispatch, so before this the only
+        //   thing that could stop a running turn was the iteration cap itself.
+        //   Raising that cap without this would have removed the last brake.
+        //
+        // A budget halt and an iteration-cap pause are **different outcomes**, not
+        // two spellings of one: openhuman reports the cap through
+        // `Agent::last_turn_hit_cap`, which stays `false` for a hook-driven stop
+        // (the run paused below `max_tool_iterations`, so its cap predicate does
+        // not hold). Part 1 of #926 makes the cap pause operator-visible; it must
+        // not inherit budget halts.
+        let mut hooks: Vec<Arc<dyn oh::agent::stop_hooks::StopHook>> = Vec::new();
+        if let Some(control) = steer {
+            hooks.push(Arc::new(crate::harness::steer::SteerStopHook::new(
                 control.clone(),
-            ))],
-            None => Vec::new(),
-        };
+            )));
+        }
+        hooks.push(Arc::new(oh::agent::stop_hooks::BudgetStopHook::new(
+            self.turn_spend_cap_usd(),
+        )));
 
         // `Box::pin` at the task-local scope boundary (the nested-scope
         // stack-overflow trap). The turn body owns the retry classification and
@@ -801,6 +836,30 @@ impl CompanyAgent {
 
         let reply = reply?;
         Ok((TurnOutcome { reply, steps }, usages))
+    }
+
+    /// This turn's in-turn spend ceiling, in USD — what
+    /// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts the turn
+    /// at (issue #988).
+    ///
+    /// The lower of [`MAX_TURN_SPEND_USD`] and this teammate's manifest
+    /// `budget_usd_daily`. Taking the **minimum** is the point: a teammate capped
+    /// at $2/day must not be able to spend $5 inside the one turn that slipped
+    /// past the pre-dispatch gate, so its daily cap also bounds any single turn
+    /// and the worst-case overshoot becomes "one cap" instead of "one turn, of
+    /// unknown size". A generous daily cap does not *raise* the per-turn
+    /// ceiling — that is what the absolute constant is for.
+    ///
+    /// A non-finite or non-positive manifest value is ignored rather than
+    /// forwarded: the hook fails closed on a malformed cap and would halt every
+    /// turn at iteration one. Such a teammate is already refused before dispatch
+    /// (`spent >= cap` holds at zero spend), so this only guards the path where
+    /// no meter was available to make that call.
+    fn turn_spend_cap_usd(&self) -> f64 {
+        match self.budget_usd_daily {
+            Some(daily) if daily.is_finite() && daily > 0.0 => daily.min(MAX_TURN_SPEND_USD),
+            _ => MAX_TURN_SPEND_USD,
+        }
     }
 
     /// Classify one `agent.turn` result for the retry wrapper.
