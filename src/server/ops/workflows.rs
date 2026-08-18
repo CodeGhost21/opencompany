@@ -2063,8 +2063,11 @@ struct WorkflowToolSlugsResponse {
 #[serde(rename_all = "camelCase")]
 struct UnwiredWorkflowTool {
     slug: String,
-    /// A stable machine token — `searchBackendNotConfigured` or
-    /// `capabilityTierFiltered` — for a client that wants to branch.
+    /// A stable machine token for a client that wants to branch:
+    /// `searchBackendNotConfigured`, `capabilityTierFiltered`, or the
+    /// cause-less `unwired`. Treat it as open — a new deployment-wiring cause
+    /// adds a token here, so match the ones you handle and fall back to
+    /// [`detail`](Self::detail) rather than assuming the set is closed.
     reason: &'static str,
     /// The same sentence in prose, for a client that just wants to show it.
     detail: &'static str,
@@ -2113,21 +2116,34 @@ async fn workflow_tool_slugs(
         .map(|slug| {
             // Every slug here came out of `WORKFLOW_TOOL_CATALOG`, whose entries
             // are pinned to `namespace_of`, and it is unwired precisely because
-            // its namespace is in `missing` — so both lookups resolve. The
-            // fallback is a defensive default, not an expected branch.
-            let reason = crate::workflows::caps::workflow_tool_info(&slug)
+            // its namespace is in `missing` — so both lookups resolve and `None`
+            // is unreachable in practice.
+            //
+            // Matched EXHAUSTIVELY rather than with a catch-all: the whole point
+            // of this field is letting an operator tell one cause from another,
+            // so a third `MissingReason` must break the build here instead of
+            // compiling into "raise your capability tier" — advice that would be
+            // actively wrong for a cause that is not tier filtering. It also
+            // keeps the defensive `None` from being conflated with the tier case.
+            let missing = crate::workflows::caps::workflow_tool_info(&slug)
                 .map(|info| info.namespace)
                 .and_then(|ns| wiring.as_ref().and_then(|w| w.missing.get(ns)).copied());
-            let (reason, detail) = match reason {
+            let (reason, detail) = match missing {
                 Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured) => (
                     "searchBackendNotConfigured",
                     "granted, but no managed search backend is configured on this deployment; \
                      ask the platform operator to configure search",
                 ),
-                _ => (
+                Some(crate::workflows::caps::MissingReason::CapabilityTierFiltered) => (
                     "capabilityTierFiltered",
                     "granted, but the deployment's capability tier filtered it; ask the platform \
                      operator to raise the capability tier",
+                ),
+                // Unreachable given the pairing above; answered honestly rather
+                // than guessing a cause we do not have.
+                None => (
+                    "unwired",
+                    "granted, but not wired on this deployment; ask the platform operator why",
                 ),
             };
             UnwiredWorkflowTool {

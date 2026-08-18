@@ -309,7 +309,7 @@ export function composeCopilotMessage(
   );
   if (!toolSlugsKnown || toolSlugs === undefined) {
     lines.push(
-      `(The granted tools could not be listed here. Do not invent a tool slug.)`,
+      `(The tools that can run here could not be listed. Do not invent a tool slug.)`,
     );
   } else if (toolSlugs.length === 0) {
     lines.push(
@@ -328,8 +328,8 @@ export function composeCopilotMessage(
   // Gated on `toolSlugsKnown` as well, so the pairing cannot come apart: the
   // advisory is a NARROWING of the list above, and there is nothing to narrow
   // when that list could not be read. Emitting it anyway would say "these are
-  // off-limits" directly under "the granted tools could not be listed here",
-  // which is self-contradictory on its face — and, since the caller holds the
+  // off-limits" directly under "the tools that can run here could not be
+  // listed", which is self-contradictory on its face — and, since the caller holds the
   // two in separate state, the tools named would be whichever company was on
   // screen last. The condition closes that by construction rather than by the
   // caller remembering to clear one when it clears the other.

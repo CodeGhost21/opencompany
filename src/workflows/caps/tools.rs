@@ -77,6 +77,32 @@ fn capability_filtered(filter: &CapabilityFilter, namespace: &'static str) -> bo
     }
 }
 
+/// Whether `[tools].allow` grants a **workflow-tool namespace** (issue #874).
+///
+/// The one grant rule every workflow-tool decision keys off: the priced `search`
+/// family needs an EXPLICIT `search` grant — a `*` wildcard never confers it,
+/// because each call is a priced managed request — while every other namespace
+/// uses the ordinary grant-glob intersection.
+///
+/// Three places used to spell this split out by hand, and they must agree or the
+/// system contradicts itself: author-time validation
+/// (`company::validate_tool_call_node`), the grounding lists
+/// (`workflow_effective_tool_slugs` / `workflow_granted_but_unwired_tool_slugs`,
+/// via `grants_workflow_tool`), and [`refusal_for`] below. A slug offered for
+/// grounding that validation would reject, or accepted at save and refused at
+/// run for a *grant* reason, is a bug in the seam rather than in any one of
+/// them — so the split lives here once, beside the wiring rule it pairs with.
+///
+/// It cannot live with its siblings in the always-compiled `company::types`:
+/// `grants_cover` is behind the `openhuman` feature, as is every caller.
+pub(crate) fn grants_workflow_namespace(grants: &[String], namespace: &str) -> bool {
+    if namespace == "search" {
+        crate::company::grants_search_explicit(grants)
+    } else {
+        crate::harness::build::grants_cover(grants, namespace)
+    }
+}
+
 pub(crate) fn workflow_tool_wiring(deps: &crate::harness::HarnessDeps) -> WorkflowToolWiring {
     let mut wiring = WorkflowToolWiring::default();
     for namespace in WORKFLOW_TOOL_NAMESPACES {
@@ -104,12 +130,7 @@ pub(crate) fn refusal_for(
     let Some(namespace) = toolbelt::namespace_of(slug) else {
         return Some(format!("tool_call '{slug}' is not a wired workflow tool"));
     };
-    let granted = if namespace == "search" {
-        crate::company::grants_search_explicit(grants)
-    } else {
-        crate::harness::build::grants_cover(grants, namespace)
-    };
-    if !granted {
+    if !grants_workflow_namespace(grants, namespace) {
         return Some(format!(
             "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's [tools].allow"
         ));

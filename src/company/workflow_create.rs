@@ -879,12 +879,7 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
         // confers it — while every other namespace uses the ordinary grant-glob
         // intersection, exactly the split `WorkflowToolInvoker::invoke` enforces.
         let grants = &record.manifest.tools.allow;
-        let granted = if namespace == "search" {
-            crate::company::grants_search_explicit(grants)
-        } else {
-            crate::harness::build::grants_cover(grants, namespace)
-        };
-        if !granted {
+        if !crate::workflows::caps::grants_workflow_namespace(grants, namespace) {
             return Err(OpenCompanyError::InvalidRequest(format!(
                 "node `{}` calls tool `{slug}` (namespace `{namespace}`), which this company's \
                  `[tools].allow` does not grant — grant it in `[tools].allow`.",
@@ -942,26 +937,24 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
     Ok(())
 }
 
-/// Whether `[tools].allow` grants the namespace `info` belongs to.
+/// Whether `[tools].allow` grants the namespace `info` belongs to — a catalogue
+/// -shaped wrapper over
+/// [`grants_workflow_namespace`](crate::workflows::caps::grants_workflow_namespace),
+/// which is the rule itself and is shared with
+/// [`validate_tool_call_node`] and the run-time
+/// [`refusal_for`](crate::workflows::caps).
 ///
-/// The exact companion of [`validate_tool_call_node`]'s grant half: a slug
-/// passes here iff that gate would accept it — its namespace covered by
-/// `[tools].allow`, with the priced `search` family requiring an **explicit**
-/// `search` grant (a `*` wildcard never confers it). Both read
-/// [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) (itself pinned to
-/// `namespace_of`) and apply this one rule, so the tools a caller is shown and
-/// the ones a proposed `tool_call` node clears at courtesy validation cannot
-/// drift.
+/// Exists only so the two grounding lists can filter
+/// [`WORKFLOW_TOOL_CATALOG`](crate::workflows::caps) rows directly. Because the
+/// catalogue is itself pinned to `namespace_of`, a slug passes here iff
+/// validation would accept it — so what a caller is shown and what a proposed
+/// `tool_call` node clears at courtesy validation cannot drift.
 #[cfg(feature = "openhuman")]
 fn grants_workflow_tool(
     grants: &[String],
     info: &crate::workflows::caps::WorkflowToolInfo,
 ) -> bool {
-    if info.namespace == "search" {
-        crate::company::grants_search_explicit(grants)
-    } else {
-        crate::harness::build::grants_cover(grants, info.namespace)
-    }
+    crate::workflows::caps::grants_workflow_namespace(grants, info.namespace)
 }
 
 /// The tools a caller may ground a proposal on: catalogue, company grant, and

@@ -79,7 +79,7 @@ use self::state::{CompanyStateStore, NoopState};
 use self::tools::WorkflowToolInvoker;
 pub(crate) use self::tools::{
     MissingReason, WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, WorkflowToolInfo,
-    WorkflowToolWiring, workflow_tool_info, workflow_tool_wiring,
+    WorkflowToolWiring, grants_workflow_namespace, workflow_tool_info, workflow_tool_wiring,
 };
 /// Issue #849: the ceiling on what one agent node's turn carries from upstream.
 /// Re-exported so the end-to-end fan-in proof

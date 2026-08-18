@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
-import { listWorkflowToolSlugs } from "@/api/workflows";
+import { composeCopilotMessage } from "@/api/workflow-copilot";
+import { listWorkflowToolSlugs, type WorkflowGraph } from "@/api/workflows";
+
+/** A minimal graph; this suite is about the tool lists, not the graph render. */
+const graph: WorkflowGraph = {
+  id: "weekly_report",
+  name: "Weekly report",
+  nodes: [{ id: "collect", kind: "agent", name: "Collect", agent: "analyst" }],
+  edges: [],
+};
 
 /**
  * `GET …/workflows/tool-slugs` on the client (issues #783, #874).
@@ -56,20 +65,52 @@ describe("listWorkflowToolSlugs", () => {
   });
 
   /**
-   * The point of the split: a granted-but-unwired tool must never appear in the
-   * list a prompt is grounded on. That is issue #874 — `web_search` was offered,
-   * the copilot authored a node on it, and the run died at the first node.
+   * The two lists stay apart end to end: what the route separated must still be
+   * separated in the prompt the model reads.
+   *
+   * Asserted against `composeCopilotMessage`, not against this client's return
+   * value. The client is a pass-through, so a test that fed it a split body and
+   * checked the halves came back split would be asserting a property of its own
+   * fixture — it would pass with the whole of #874 reverted. The narrowing that
+   * can actually regress on this side is the prompt's: an unwired slug must land
+   * under the "do NOT author" heading and never in the groundable list above it.
    */
-  it("keeps an unwired tool out of the groundable set", async () => {
-    const result = await listWorkflowToolSlugs(
+  it("keeps an unwired tool out of the groundable list in the composed prompt", async () => {
+    const tools = await listWorkflowToolSlugs(
       readingClient({
         slugs: ["shell"],
-        unwired: [{ slug: "web_search", reason: "x", detail: "y" }],
+        // Not `web_search`: the prompt's config-schema example names that slug
+        // verbatim, so it appears either way and could not witness the split.
+        unwired: [
+          {
+            slug: "deep_research",
+            reason: "searchBackendNotConfigured",
+            detail: "granted, but no managed search backend is configured",
+          },
+        ],
       }),
       null,
     );
-    expect(result.slugs).not.toContain("web_search");
-    expect(result.unwired.map((t) => t.slug)).toContain("web_search");
+
+    const message = composeCopilotMessage(
+      {
+        graph,
+        runs: [],
+        runsKnown: true,
+        toolSlugs: tools.slugs,
+        toolSlugsKnown: true,
+        unwiredTools: tools.unwired,
+      },
+      "add a research step",
+    );
+
+    const groundable = message.slice(
+      message.indexOf("### Tools"),
+      message.indexOf("### Granted but NOT wired"),
+    );
+    expect(groundable).toContain("shell");
+    expect(groundable).not.toContain("deep_research");
+    expect(message).toMatch(/granted but NOT wired[\s\S]*deep_research/i);
   });
 
   it("defaults `unwired` to an empty list on a host predating issue #874", async () => {
