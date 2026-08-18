@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AppWindow,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
