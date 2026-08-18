@@ -174,9 +174,13 @@ describe("live-reply suppression", () => {
  * shape is known, and a fast enough turn's frame can land before
  * `onSendDetached` ever fires to lift it. The old boolean dropped that frame
  * outright — a silent, permanent loss of the only reply the operator was going
- * to get. `capture` holds it instead, and `detached`/`ended` resolve it for
- * good once the POST's shape is known — dedupe by identity (which thread, what
- * the POST turned out to be), never by how long the frame waited.
+ * to get. `capture` holds it instead, and `detached`/`ended`/`failed` resolve
+ * it for good once the POST's shape is known — dedupe by identity (which
+ * thread, what the POST turned out to be), never by how long the frame waited.
+ *
+ * Three outcomes, not two: `ended` may discard because the awaited body already
+ * rendered that reply, while `detached` and `failed` must release because
+ * nothing did. See `PendingSyncPosts`' own doc for the table.
  */
 describe("live-reply capture — the frame that beats the 202 home", () => {
   it("holds a frame that arrives before the POST's shape is known", () => {
@@ -214,6 +218,95 @@ describe("live-reply capture — the frame that beats the 202 home", () => {
     // Nothing left to leak into a later turn on the same thread.
     pending.started("main");
     expect(pending.detached("main")).toEqual([]);
+  });
+
+  /**
+   * The outcome the two-way split got wrong, and the one this whole change is
+   * for. A POST that *threw* rendered nothing, so a held frame is not a
+   * duplicate of anything — and the turn behind it is very likely still
+   * running, because the request dying is not the work dying. That is the
+   * premise of issue #983 in one sentence, so routing the throw through `ended`
+   * put the original silent-loss bug back on the exact path the feature exists
+   * to serve.
+   */
+  it("hands back held frames when the post threw, because nothing rendered them", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    const frame = { chatId: "main" };
+    pending.capture(frame);
+
+    // The gateway cut the response at 120s; the host is still running the turn
+    // and its reply is on the stream. This frame is the only copy the console
+    // will ever be handed.
+    expect(pending.failed("main")).toEqual([frame]);
+  });
+
+  it("hands back a failed post's held frames in arrival order", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    const first = { chatId: "main", seq: 1 };
+    const second = { chatId: "main", seq: 2 };
+    pending.capture(first);
+    pending.capture(second);
+
+    expect(pending.failed("main")).toEqual([first, second]);
+  });
+
+  it("lifts suppression when the post threw, so the stream takes over", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    pending.failed("main");
+
+    // Same reason `detached` lifts it: from here the POST is not going to
+    // deliver anything, so a live frame is the answer rather than an echo of
+    // one. A thread left suppressed after a throw swallows every later frame
+    // of a turn that is still running.
+    expect(pending.suppressesLiveReply("main")).toBe(false);
+  });
+
+  it("leaves nothing behind for the next post on a thread that failed", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    pending.capture({ chatId: "main" });
+    pending.failed("main");
+
+    // Released, not merely handed out: the operator retries, and the previous
+    // turn's frame must not surface inside the retry's window.
+    pending.started("main");
+    expect(pending.detached("main")).toEqual([]);
+  });
+
+  it("fails one thread without disturbing a sibling still in flight", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    pending.started("design");
+    const mainFrame = { chatId: "main" };
+    const designFrame = { chatId: "design" };
+    pending.capture(mainFrame);
+    pending.capture(designFrame);
+
+    expect(pending.failed("main")).toEqual([mainFrame]);
+    expect(pending.suppressesLiveReply("design")).toBe(true);
+    expect(pending.detached("design")).toEqual([designFrame]);
+  });
+
+  /**
+   * The three outcomes side by side, which is the assertion that would have
+   * failed on the code this replaces: `ended` and `failed` were the same call.
+   */
+  it("discards on a resolved post and releases on a failed one, from the same state", () => {
+    const resolved = new PendingSyncPosts();
+    resolved.started("main");
+    resolved.capture({ chatId: "main" });
+    resolved.ended("main");
+    resolved.started("main");
+    expect(resolved.detached("main")).toEqual([]);
+
+    const threw = new PendingSyncPosts();
+    threw.started("main");
+    const frame = { chatId: "main" };
+    threw.capture(frame);
+    expect(threw.failed("main")).toEqual([frame]);
   });
 
   it("captures nothing for a thread with no post in flight", () => {
