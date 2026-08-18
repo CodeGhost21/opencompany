@@ -95,6 +95,9 @@ pub mod scheduler;
 /// path that needs no public URL, mirroring OpenHuman. See [`telegram_poller`].
 pub mod telegram_poller;
 pub mod tools;
+/// Issue #983: settling chat turns a previous host process left open, the
+/// transcript-side twin of the run reaper. See [`turn_sweep`].
+pub mod turn_sweep;
 pub mod types;
 /// Issue #228: the single place a finished workflow run is journaled, shared by
 /// the console's run route and the cron [`WorkflowScheduler`] so a run's history
@@ -136,6 +139,7 @@ pub use scheduler::{
     missed_instant,
 };
 pub use tools::StubToolProvider;
+pub use turn_sweep::{TURN_INTERRUPTED_BY_RESTART, sweep_interrupted_turns};
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
 pub use workflow_outcome::{
     delivered_by_unsettled_runs, record_run_finished, sweep_interrupted_runs,
