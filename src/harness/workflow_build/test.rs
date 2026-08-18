@@ -781,6 +781,7 @@ fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan,
+        planning_attempts: Vec::new(),
         deliverable: TaskDeliverable::Workflow,
         workflow_proposal: None,
         origin_run_id: None,

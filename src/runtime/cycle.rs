@@ -2449,6 +2449,7 @@ impl<'a> CycleHostImpl<'a> {
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2545,6 +2546,7 @@ impl<'a> CycleHostImpl<'a> {
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2832,6 +2834,7 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -3253,6 +3256,7 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -3314,6 +3318,7 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -6458,6 +6463,7 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
@@ -6532,6 +6538,7 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    planning_attempts: Vec::new(),
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
                     origin_run_id: None,
