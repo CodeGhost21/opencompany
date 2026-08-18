@@ -139,11 +139,14 @@ fn labels() -> ConfigLabels<'static> {
 pub fn open_driver(
     config: &MemoryDriverConfig,
 ) -> Result<Option<(Arc<dyn MemoryProvider>, DriverClass)>> {
-    match config.mode {
-        MemoryMode::Embedded => Ok(None),
+    let bound: (Arc<dyn MemoryProvider>, DriverClass) = match config.mode {
+        MemoryMode::Embedded => return Ok(None),
         MemoryMode::Null => {
             let admission = admit(NULL_DRIVER_ID, DriverClass::Null)?;
-            Ok(Some((Arc::new(NullMemoryProvider::new()), admission)))
+            (
+                Arc::new(NullMemoryProvider::new()) as Arc<dyn MemoryProvider>,
+                admission,
+            )
         }
         MemoryMode::Remote => {
             let driver_id = config
@@ -171,9 +174,72 @@ pub fn open_driver(
                  or name a SecretStore key with [memory].api_key_secret",
             )?;
             let class = admit(driver_id, DriverClass::External)?;
-            Ok(Some((remote_provider(driver_id, url, key)?, class)))
+            (remote_provider(driver_id, url, key)?, class)
         }
+    };
+    audit_capabilities(bound.0.as_ref())?;
+    Ok(Some(bound))
+}
+
+/// Refuses a driver that over-claims what it implements, and reports one that
+/// under-claims.
+///
+/// `capabilities()` is a hand-written claim; `provides()` is derived from the
+/// accessors and cannot drift. Comparing them is the contract's own honesty
+/// check, and `tinymemory_api::provider::audit` says explicitly to run it "at
+/// bind time" — which nothing here was doing.
+///
+/// The two directions are not the same failure, so they are not treated the
+/// same:
+///
+/// - **Advertised but absent** refuses the bind. The host registers RPC methods
+///   and assembles agent tools from the *claim* and never re-checks, so an
+///   over-claim becomes a surface that exists, is offered to an agent, and fails
+///   on first call — inside a tenant, at the moment the memory is needed.
+/// - **Present but unadvertised** only warns. The family works; nothing routes
+///   to it, because routing follows the claim. Upstream calls that dead surface
+///   from a forgotten `capabilities()` entry. Refusing a boot over it would turn
+///   an upstream oversight into a tenant outage, which is a worse trade than
+///   running with one family unreachable.
+///
+/// Structurally neither should fire: every adapter reachable from here is
+/// composed through `MemoryTraitProvider`, which derives the advertisement from
+/// the accessors. It runs anyway because that guarantee lives upstream, in a
+/// submodule this repo pins by gitlink, and a gitlink bump is exactly when it
+/// would quietly stop holding.
+fn audit_capabilities(provider: &dyn MemoryProvider) -> Result<()> {
+    let Err(mismatch) = tinymemory_api::provider::audit_provider(provider) else {
+        return Ok(());
+    };
+    if !mismatch.present_but_unadvertised.is_empty() {
+        tracing::warn!(
+            driver_id = provider.driver_id(),
+            families = %families(&mismatch.present_but_unadvertised),
+            "the bound memory driver implements capability families it does not advertise; they \
+             are unreachable, because the host routes from the advertised set",
+        );
     }
+    if !mismatch.advertised_but_absent.is_empty() {
+        return Err(MemoryDriverError(format!(
+            "the memory driver `{}` advertises capability families it does not implement: {}. \
+             Every one of those becomes an agent tool that fails on first call, so the bind is \
+             refused here rather than left to surface mid-cycle. This is an adapter bug rather \
+             than a configuration mistake — no environment variable lifts it.",
+            provider.driver_id(),
+            families(&mismatch.advertised_but_absent)
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Formats capability families for an operator-facing message.
+fn families(families: &[tinymemory_api::capabilities::Capability]) -> String {
+    families
+        .iter()
+        .map(|family| family.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Returns `value`, or the refusal text when it is absent or blank.
@@ -287,6 +353,136 @@ mod test {
             url: None,
             api_key: None,
         }
+    }
+
+    /// A driver that claims a family it does not implement.
+    ///
+    /// Delegates every mandatory method to the null driver and changes exactly
+    /// one thing: `capabilities()` adds `Graph`, while `as_graph()` keeps the
+    /// contract's `None` default. That is the shape `audit_capabilities` exists
+    /// to catch — an adapter whose hand-written claim outran its accessors.
+    struct OverClaimer(NullMemoryProvider);
+
+    #[async_trait::async_trait]
+    impl tinymemory_api::provider::MemoryCore for OverClaimer {
+        async fn store(
+            &self,
+            namespace: &str,
+            key: &str,
+            content: &str,
+            category: tinymemory_api::types::MemoryCategory,
+            session_id: Option<&str>,
+            taint: tinymemory_api::types::MemoryTaint,
+        ) -> std::result::Result<(), tinymemory_api::error::MemoryError> {
+            self.0
+                .store(namespace, key, content, category, session_id, taint)
+                .await
+        }
+        async fn get(
+            &self,
+            namespace: &str,
+            key: &str,
+        ) -> std::result::Result<
+            Option<tinymemory_api::types::MemoryEntry>,
+            tinymemory_api::error::MemoryError,
+        > {
+            self.0.get(namespace, key).await
+        }
+        async fn forget(
+            &self,
+            namespace: &str,
+            key: &str,
+        ) -> std::result::Result<bool, tinymemory_api::error::MemoryError> {
+            self.0.forget(namespace, key).await
+        }
+        async fn list(
+            &self,
+            namespace: Option<&str>,
+            category: Option<&tinymemory_api::types::MemoryCategory>,
+            session_id: Option<&str>,
+        ) -> std::result::Result<
+            Vec<tinymemory_api::types::MemoryEntry>,
+            tinymemory_api::error::MemoryError,
+        > {
+            self.0.list(namespace, category, session_id).await
+        }
+        async fn namespaces(
+            &self,
+        ) -> std::result::Result<
+            Vec<tinymemory_api::types::NamespaceSummary>,
+            tinymemory_api::error::MemoryError,
+        > {
+            self.0.namespaces().await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl tinymemory_api::provider::MemoryRecall for OverClaimer {
+        async fn recall(
+            &self,
+            query: &str,
+            limit: usize,
+            opts: &tinymemory_api::recall::OwnedRecallOpts,
+            scope: Option<&tinymemory_api::provider::SourceScope>,
+        ) -> std::result::Result<
+            Vec<tinymemory_api::types::MemoryEntry>,
+            tinymemory_api::error::MemoryError,
+        > {
+            self.0.recall(query, limit, opts, scope).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl tinymemory_api::provider::MemoryPortability for OverClaimer {
+        async fn export_page(
+            &self,
+            cursor: Option<&str>,
+            limit: usize,
+        ) -> std::result::Result<
+            tinymemory_api::provider::ExportPage,
+            tinymemory_api::error::MemoryError,
+        > {
+            self.0.export_page(cursor, limit).await
+        }
+        async fn import_records(
+            &self,
+            records: Vec<tinymemory_api::provider::ExportRecord>,
+        ) -> std::result::Result<
+            tinymemory_api::provider::ImportOutcome,
+            tinymemory_api::error::MemoryError,
+        > {
+            self.0.import_records(records).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryProvider for OverClaimer {
+        fn driver_id(&self) -> &str {
+            "over-claimer"
+        }
+        fn capabilities(&self) -> tinymemory_api::capabilities::Capabilities {
+            let mut claimed = self.0.capabilities();
+            claimed.insert(tinymemory_api::capabilities::Capability::Graph);
+            claimed
+        }
+        async fn health(&self) -> tinymemory_api::health::MemoryHealth {
+            self.0.health().await
+        }
+    }
+
+    #[test]
+    fn an_over_claiming_driver_is_refused_and_names_the_family() {
+        let error = audit_capabilities(&OverClaimer(NullMemoryProvider::new()))
+            .expect_err("a driver advertising Graph without implementing it must be refused")
+            .to_string();
+        assert!(error.contains("over-claimer"), "{error}");
+        assert!(error.contains("graph"), "{error}");
+    }
+
+    #[test]
+    fn an_honest_driver_passes_the_audit() {
+        // The other half of the gate: it must not refuse the drivers we ship.
+        audit_capabilities(&NullMemoryProvider::new()).expect("the null driver is honest");
     }
 
     #[test]

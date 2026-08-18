@@ -87,6 +87,33 @@ the remote mode is refused rather than quietly resolved. The contract crate
 excludes driver class on purpose: a driver that self-reported it could claim to
 be embedded and skip the egress and trust checks that class gates.
 
+### A driver that over-claims its capabilities is refused at bind
+
+`capabilities()` is a claim the driver writes by hand; `provides()` is derived
+from the accessors it actually returns. The host compares the two once, at bind
+(`audit_capabilities` in `src/store/memory/driver.rs`), because it registers RPC
+methods and assembles agent tools from the *claim* and never re-checks. A driver
+advertising a family it does not implement would otherwise produce a surface
+that exists, is offered to an agent, and fails on its first call — inside a
+tenant, at the moment the memory is needed.
+
+The two directions of mismatch are not the same failure and are not treated
+alike:
+
+- **Advertised but absent** refuses the bind, naming the families. There is no
+  opt-in flag: this is an adapter bug, not a deployment choice, so no
+  environment variable lifts it.
+- **Present but unadvertised** logs a warning and boots. The family works but
+  nothing routes to it, because routing follows the claim. That is dead surface
+  from a forgotten `capabilities()` entry — refusing a boot over it would turn
+  an upstream oversight into a tenant outage.
+
+Structurally neither should fire: every adapter reachable from here is composed
+through `MemoryTraitProvider`, which derives its advertisement from its
+accessors. The check runs anyway because that guarantee lives upstream, in a
+submodule this repository pins by gitlink, and a gitlink bump is exactly when it
+would quietly stop holding.
+
 ## Which contract this binds
 
 `tinymemory-api`, at `vendor/openhuman/vendor/tinymemory/api` — the same path
