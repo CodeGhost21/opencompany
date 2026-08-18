@@ -27,6 +27,10 @@ export default defineConfig({
     // this same directory; each must leave the other's output alone.
     emptyOutDir: false,
     cssMinify: true,
+    // Library mode defaults `minify` to `false` (unlike a regular app
+    // build) — explicit here so what ships to a sandboxed page isn't an
+    // unminified dev-sized bundle.
+    minify: "esbuild",
     lib: {
       entry: path.resolve(__dirname, "index.ts"),
       formats: ["es"],
@@ -34,6 +38,12 @@ export default defineConfig({
     },
     rollupOptions: {
       external: ["react", "react-dom", "react-dom/client", "react/jsx-runtime"],
+      output: {
+        // Vite's library CSS output otherwise names itself after the
+        // package (`style.css`) — pin it to what the served import map and
+        // Docker COPY expect.
+        assetFileNames: "index[extname]",
+      },
     },
   },
 });
