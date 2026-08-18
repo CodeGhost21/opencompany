@@ -124,14 +124,34 @@ const DELETE = "workflow-delete";
 const EDIT = "workflow-edit";
 const SUBMIT = "workflow-dialog-submit";
 
-/** Opens the edit dialog for the currently selected workflow. */
-async function openEditDialog(page: Page) {
+/**
+ * Opens the edit dialog for the currently selected workflow, which must be the
+ * one called `name`.
+ *
+ * The title used to read a bare "Edit workflow" from every call site. It now
+ * names the graph it is editing (issue #1006), because the dialog is reachable
+ * from a canvas, a card and a run, and an operator whose selection moved
+ * underneath them had nothing on screen to notice it with. Asserting the name
+ * here is therefore not a cosmetic check: it is what proves the dialog opened
+ * on the graph the caller selected.
+ */
+async function openEditDialog(page: Page, name: string) {
   const button = page.getByTestId(EDIT);
   await expect(button, "an overlay-backed workflow must be editable").toBeEnabled();
   await button.click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Edit workflow", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(`Edit “${name}”`, { exact: true })).toBeVisible();
   return dialog;
+}
+
+/**
+ * Accepts the one discard confirmation an edited dialog raises on the next
+ * close (issue #1006). Cancel out of a touched form now asks before throwing
+ * the work away, and Playwright dismisses an unhandled `confirm` — which reads
+ * as "no, keep editing" and leaves the dialog open.
+ */
+function acceptDiscard(page: Page) {
+  page.once("dialog", (d) => void d.accept());
 }
 
 /** Reads a workflow's stored graph back from the host. */
@@ -338,7 +358,7 @@ test("an author can change a saved workflow's schedule, and the id is read-only"
     await dismissTour(page);
     await selectWorkflow(page, name);
 
-    const dialog = await openEditDialog(page);
+    const dialog = await openEditDialog(page, name);
 
     // Hydrated from the saved graph, not blank — the whole point of edit mode.
     await expect(dialog.getByLabel("Id", { exact: true })).toHaveValue(id);
@@ -392,7 +412,7 @@ test("a stale save surfaces the conflict banner and writes nothing", async ({
     await dismissTour(page);
     await selectWorkflow(page, name);
 
-    const dialog = await openEditDialog(page);
+    const dialog = await openEditDialog(page, name);
 
     // Someone else saves while this dialog holds the token it loaded a moment
     // ago. Forced for real, as with the delete conflict above.
@@ -415,6 +435,7 @@ test("a stale save surfaces the conflict banner and writes nothing", async ({
 
     // And the way out is the banner Delete already had, waiting behind the
     // dialog rather than vanishing with it.
+    acceptDiscard(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
     const banner = page.getByTestId("workflow-conflict");
     await expect(banner).toBeVisible();
@@ -422,7 +443,7 @@ test("a stale save surfaces the conflict banner and writes nothing", async ({
     await expect(banner).toBeHidden({ timeout: 15_000 });
 
     // Reloaded, the same edit goes through — so the loop terminates.
-    const reopened = await openEditDialog(page);
+    const reopened = await openEditDialog(page, name);
     await reopened.getByRole("combobox", { name: "Schedule" }).click();
     await page.getByRole("option", { name: /Weekly/ }).click();
     await reopened.getByTestId(SUBMIT).click();
@@ -453,7 +474,7 @@ test("a field error raised on one graph never appears on another", async ({
     await selectWorkflow(page, first.name);
 
     // Raise a real blur-time error on the first graph's trigger row.
-    const dialog = await openEditDialog(page);
+    const dialog = await openEditDialog(page, first.name);
     await dialog.getByRole("combobox", { name: "Schedule" }).click();
     await page.getByRole("option", { name: /Custom cron/ }).click();
     const cron = dialog.getByRole("textbox", { name: "Custom cron schedule" });
@@ -462,6 +483,7 @@ test("a field error raised on one graph never appears on another", async ({
     // The rule, not the standing hint under the field (which also says
     // "5-field cron") — those are different strings for a reason.
     await expect(dialog).toContainText(/A schedule is a 5-field cron/);
+    acceptDiscard(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
     // Both graphs have a trigger node whose id is `start`, so an error map keyed
@@ -469,7 +491,7 @@ test("a field error raised on one graph never appears on another", async ({
     // this complaint straight over to the second graph, attached to a field the
     // author never touched.
     await selectWorkflow(page, second.name);
-    const other = await openEditDialog(page);
+    const other = await openEditDialog(page, second.name);
     await expect(
       other,
       "a stale field error must not follow the author to another graph",
