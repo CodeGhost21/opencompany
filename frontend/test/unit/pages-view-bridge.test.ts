@@ -57,9 +57,10 @@ function loadFrame(frame: HTMLIFrameElement): void {
 /** Returns the capability the view hands to the loaded iframe document. */
 function mintedCapability(frame: HTMLIFrameElement): string {
   const contentWindow = frame.contentWindow as Window;
-  const postMessage = vi.spyOn(contentWindow, "postMessage").mockImplementation(() => {});
+  // Spy is expected to be set up by the caller (see the forwarding test).
   loadFrame(frame);
-  const init = postMessage.mock.calls.find(([msg]) => (msg as { type?: string })?.type === "oc:init");
+  const calls = vi.mocked(contentWindow.postMessage).mock.calls;
+  const init = calls.find(([msg]) => (msg as { type?: string })?.type === "oc:init");
   return (init?.[0] as { capability: string }).capability;
 }
 
