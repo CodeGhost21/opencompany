@@ -66,6 +66,14 @@ interface Props {
    * live reply frame, which in this mode is the delivery path.
    */
   onSendDetached?: (threadId: string, turnId?: string) => void;
+  /**
+   * The chat POST **threw** (issue #1000). The third outcome, and not
+   * `onSendEnd`: that one promises the parent the reply is already on screen,
+   * which licenses it to drop the live frame it was holding. A throw rendered
+   * nothing and the turn usually outlives the request, so that frame is the
+   * only copy of the answer.
+   */
+  onSendFailed?: (threadId: string) => void;
   /** Turns accepted but not settled, by thread id — survives a reload (#983). */
   openTurns?: Record<string, OpenTurn>;
 }
@@ -74,7 +82,7 @@ interface Props {
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
 /** WhatsApp-style two-pane chat: a thread list on the left, transcript right. */
-export function Conversation({ client, company, threads, activeId, onSelect, setMessages, onReply, taskEventTick, liveStepsByThread, onSendStart, onSendEnd, onSendDetached, openTurns }: Props) {
+export function Conversation({ client, company, threads, activeId, onSelect, setMessages, onReply, taskEventTick, liveStepsByThread, onSendStart, onSendEnd, onSendDetached, onSendFailed, openTurns }: Props) {
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
   // On mobile, the list and the chat share the pane — track which is showing.
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("chat");
@@ -102,6 +110,7 @@ export function Conversation({ client, company, threads, activeId, onSelect, set
         onSendStart={onSendStart}
         onSendEnd={onSendEnd}
         onSendDetached={onSendDetached}
+        onSendFailed={onSendFailed}
         openTurn={openTurns?.[active.id]}
         onOpenList={() => setMobilePane("list")}
         className={cn("md:flex", mobilePane === "chat" ? "flex" : "hidden")}
@@ -177,6 +186,7 @@ function ChatPane({
   onSendStart,
   onSendEnd,
   onSendDetached,
+  onSendFailed,
   openTurn,
   onOpenList,
   className,
@@ -191,6 +201,7 @@ function ChatPane({
   onSendStart?: (threadId: string) => void;
   onSendEnd?: (threadId: string) => void;
   onSendDetached?: (threadId: string, turnId?: string) => void;
+  onSendFailed?: (threadId: string) => void;
   /** This thread's turn, when one is accepted but not settled (#983). */
   openTurn?: OpenTurn;
   onOpenList: () => void;
@@ -216,8 +227,10 @@ function ChatPane({
     setMessages(thread.id, (m) => [...m, makeMessage("you", text)]);
     setSending(true);
     onSendStart?.(thread.id);
-    // Set when the host answers 202: the turn outlives this POST (issue #983).
-    let detached = false;
+    // Which of the POST's three outcomes happened, reported once in the
+    // `finally`. Only `"resolved"` means the reply reached the screen — the
+    // other two leave a turn running with the stream as its delivery path.
+    let outcome: "resolved" | "detached" | "failed" = "resolved";
     try {
       // Address the active desk thread (issue #53). "main" and any id the
       // company doesn't define fall to the orchestrator on the backend.
@@ -226,7 +239,7 @@ function ChatPane({
       // the full synchronous body, so the branch below reads what came back.
       const answer = await client.chat(text, company, thread.id, undefined, undefined, true);
       if (isDetachedChat(answer)) {
-        detached = true;
+        outcome = "detached";
         // The reply arrives on the stream, and durably in `chat/history` when
         // the turn settles. Nothing to render here — but the id IS known now,
         // at accept time rather than at settle, which is the improvement.
@@ -249,13 +262,23 @@ function ChatPane({
       setMessages(thread.id, (m) => [...m, ...replies]);
       onReply?.();
     } catch (err) {
+      outcome = "failed";
+      // Still said even when the reply lands on the stream a moment later: the
+      // request did fail, and the operator has no other way to know whether
+      // their message was taken.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       setMessages(thread.id, (m) => [...m, makeMessage("system", `Couldn't send — ${msg}`)]);
     } finally {
       setSending(false);
       // A detached turn is not over when its POST is: ending the send here would
       // clear the live timeline and drop the working row mid-turn.
-      if (!detached) onSendEnd?.(thread.id);
+      //
+      // Nor is a *failed* one, which is the easier miss. `onSendEnd` tells the
+      // parent the reply is on screen and so licenses it to drop the live frame
+      // it held; a throw rendered nothing and the turn carries on regardless, so
+      // that frame is the only copy of the answer this console will be handed.
+      if (outcome === "resolved") onSendEnd?.(thread.id);
+      else if (outcome === "failed") onSendFailed?.(thread.id);
     }
   }
 

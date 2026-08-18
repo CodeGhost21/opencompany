@@ -441,13 +441,18 @@ export function AppShell({
    * live `agent_reply` frames must be held back rather than rendered
    * immediately (see `injectAgentReply`).
    *
-   * A thread joins on `onSendStart` and leaves on `onSendEnd`, or *early* on
-   * `onSendDetached` when the host answers `202`: from that moment the POST is
-   * never going to deliver the reply, so the live frame is the answer. A frame
-   * that arrives before either of those fires is not dropped — `capture` queues
-   * it, and `onSendDetached`/`onSendEnd` resolve the queue once the POST's
-   * shape is known (issue #1000). That is what makes this safe against a
-   * detached turn's reply beating the `202` itself back to the browser.
+   * A thread joins on `onSendStart` and leaves on whichever of three outcomes
+   * its POST reaches: `onSendEnd` when it resolved with a body, `onSendDetached`
+   * when it answered `202`, `onSendFailed` when it threw. The last two leave the
+   * turn running, so from either the POST has stopped being the delivery path
+   * and the live frame is the answer rather than an echo of one.
+   *
+   * A frame that arrives before any of them fires is not dropped — `capture`
+   * queues it, and the outcome resolves the queue once the POST's shape is known
+   * (issue #1000). Only `onSendEnd` discards what was queued, because only there
+   * has the reply already been rendered. That is what makes this safe against a
+   * detached turn's reply beating the `202` itself back to the browser, and
+   * against a cut connection taking a still-running turn's reply with it.
    */
   const pendingPostThreadsRef = useRef<PendingSyncPosts>(new PendingSyncPosts());
   /**
@@ -1075,11 +1080,11 @@ export function AppShell({
    * resolve before the network does. Earlier code suppressed by a boolean and
    * threw the frame away for the whole window, which is exactly the bug (issue
    * #1000) — a fast enough reply vanished with nothing left to render. Holding
-   * it instead means `onSendDetached` (or `onSendEnd`, for a host that ignored
-   * `detach`) always has something correct to do with it: replay it once the
-   * shape turns out to be detached, discard it once it turns out to be a
-   * synchronous echo. Dedupe by *what the POST turned out to be*, never by how
-   * long the frame waited.
+   * it instead means the POST's outcome always has something correct to do with
+   * it: replay it once the shape turns out to be detached, replay it once the
+   * request turns out to have died with the turn still running, discard it only
+   * once it turns out to be the echo of a reply already rendered. Dedupe by
+   * *what the POST turned out to be*, never by how long the frame waited.
    */
   const injectAgentReply = useCallback(
     (event: AgentReplyEvent) => {
@@ -1182,6 +1187,35 @@ export function AppShell({
     (threadId: string, turnId?: string) => {
       const held = pendingPostThreadsRef.current.detached(threadId);
       setOpenTurns((prev) => ({ ...prev, [threadId]: { turnId, queued: true } }));
+      held.forEach((frame) => renderAgentReply(frame as AgentReplyEvent));
+    },
+    [renderAgentReply],
+  );
+  /**
+   * The chat POST **threw** — no body, nothing rendered by the view (#1000).
+   *
+   * Also deliberately not `onSendEnd`, and for a sharper reason than
+   * `onSendDetached` has. `onSendEnd` means "the awaited reply is on screen",
+   * which licenses `PendingSyncPosts.ended` to discard whatever was held; a
+   * throw put nothing on screen, so that call would delete the operator's only
+   * copy of a reply that is still coming. The request is what died — the host
+   * keeps running the turn and journals its reply onto the stream, which is
+   * precisely the property issue #983 bought.
+   *
+   * So it releases the held frames and renders them, exactly as the detached
+   * path does, and leaves the live timeline alone for the same reason: those
+   * rows are a running turn's only visible trace, and `onSendStart` cleared
+   * them at the top of this POST, so anything still there arrived during it.
+   *
+   * What it pointedly does **not** do is arm an open turn. A throw carries no
+   * turn id, so there would be no row for the poll to read and the working
+   * indicator would spin with nothing able to take it down — a worse lie than
+   * the missing one. The view's `Couldn't send` line is what tells the operator
+   * where they stand; a reply landing afterwards does not make it untrue.
+   */
+  const onSendFailed = useCallback(
+    (threadId: string) => {
+      const held = pendingPostThreadsRef.current.failed(threadId);
       held.forEach((frame) => renderAgentReply(frame as AgentReplyEvent));
     },
     [renderAgentReply],
@@ -1508,6 +1542,7 @@ export function AppShell({
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
               onSendDetached={onSendDetached}
+              onSendFailed={onSendFailed}
               openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
               unread={unread}
@@ -1537,6 +1572,7 @@ export function AppShell({
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
               onSendDetached={onSendDetached}
+              onSendFailed={onSendFailed}
               openTurns={openTurns}
             />
           )}

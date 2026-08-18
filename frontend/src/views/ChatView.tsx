@@ -109,6 +109,17 @@ interface Props {
    */
   onSendDetached?: (threadId: string, turnId?: string) => void;
   /**
+   * The chat POST **threw** rather than answering (issue #1000).
+   *
+   * The third outcome, and distinct from `onSendEnd` in the way that matters:
+   * `onSendEnd` promises the shell that the reply is already on screen, so the
+   * shell may drop the live frame it was holding. A throw promises the
+   * opposite — nothing was rendered, and since #983 the turn usually outlives
+   * the request that started it, so that held frame is the only copy of the
+   * answer anyone is going to get.
+   */
+  onSendFailed?: (threadId: string) => void;
+  /**
    * Turns accepted but not settled, by host thread id — including ones this
    * console never POSTed, which is what makes the indicator survive a reload.
    */
@@ -187,6 +198,7 @@ export function ChatView({
   onSendStart,
   onSendEnd,
   onSendDetached,
+  onSendFailed,
   openTurns,
   liveStepsByThread,
   unread,
@@ -651,9 +663,13 @@ export function ChatView({
     // without this the shell injects that echo *and* the awaited reply lands
     // below — two bubbles for one turn.
     if (chatId) onSendStart?.(chatId);
-    // Set when the host answers 202: the `finally` must not end the send the way
-    // a settled turn does, because the turn has not ended (issue #983).
-    let detached = false;
+    // Which of the POST's three outcomes actually happened, decided here and
+    // reported once in the `finally`. Only `"resolved"` means the reply is on
+    // screen; the other two leave a turn running on the host and the stream as
+    // the delivery path, so telling the shell "ended" for either would take the
+    // working row down mid-turn (detached) or throw away the reply it was
+    // holding (failed). See `PendingSyncPosts` for the table.
+    let outcome: "resolved" | "detached" | "failed" = "resolved";
     try {
       const answer = await client.chat(
         text,
@@ -678,7 +694,7 @@ export function ChatView({
         }));
       }
       if (isDetachedChat(answer)) {
-        detached = true;
+        outcome = "detached";
         // Nothing to render: the reply arrives on the stream, and durably in
         // `chat/history` when the shell sees the turn go terminal. The working
         // row stays up, driven by the open turn rather than by this POST.
@@ -700,13 +716,30 @@ export function ChatView({
       append(target, ...replies);
       onReply?.();
     } catch (err) {
+      outcome = "failed";
+      // Still said, even when the reply arrives on the stream a moment later:
+      // the request did fail, and an operator not told that has no way to know
+      // whether their message was taken at all. The two facts are not in
+      // competition — this line reports the request, the shell renders whatever
+      // the turn goes on to produce.
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
     } finally {
       // A detached turn ends when its row settles, not when this POST resolves.
       // Calling `onSendEnd` here would clear the live step timeline and take the
       // working row down while the turn is still going.
-      if (chatId && !detached) onSendEnd?.(chatId);
+      //
+      // A *failed* POST must not reach `onSendEnd` either, and that one is
+      // easier to get wrong because the send really is over. `onSendEnd` tells
+      // the shell the reply is on screen, which lets it drop the live frame it
+      // was holding — but a throw rendered nothing, and since #983 the turn
+      // carries on regardless, so the frame it holds is the only copy of the
+      // answer. Routing the throw here is the drop this whole change removes,
+      // put back on the one path the feature exists for.
+      if (chatId) {
+        if (outcome === "resolved") onSendEnd?.(chatId);
+        else if (outcome === "failed") onSendFailed?.(chatId);
+      }
       setSending(false);
     }
   }
