@@ -787,9 +787,16 @@ pub fn list_workflows_with_globals(
     disable: &[String],
 ) -> Vec<WorkflowFile> {
     let mut files = list_company_workflows_union(source_dir, overlays);
-    let seen: std::collections::HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
+    // Reserved by *claim*, not by successful parse: a malformed seed file or
+    // overlay still names an id the company owns, and `load_workflow_with_globals`
+    // resolves that company definition first — parse error and all — before it
+    // would ever fall through to a global. Using only `files`' ids here (the ones
+    // that parsed) would let a same-id global slip into the list even though the
+    // loader can never actually return it, exposing an entry this list cannot
+    // back.
+    let reserved = reserved_company_workflow_ids(source_dir, overlays);
     for workflow in crate::globals::workflows() {
-        if seen.contains(&workflow.id)
+        if reserved.contains(&workflow.id)
             || crate::globals::disabled(disable, "workflow", &workflow.id)
         {
             continue;
@@ -799,6 +806,34 @@ pub fn list_workflows_with_globals(
         files.push(workflow);
     }
     files
+}
+
+/// Every workflow id a company's own two sources claim, whether or not the
+/// file actually parses: `workflows/*.toml` file stems plus every saved
+/// overlay's `id`. See [`list_workflows_with_globals`] for why a malformed
+/// source must still reserve its id.
+fn reserved_company_workflow_ids(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+) -> std::collections::HashSet<String> {
+    let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(dir) = source_dir
+        && let Ok(entries) = std::fs::read_dir(dir.join("workflows"))
+    {
+        ids.extend(
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+                .filter_map(|path| {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(str::to_string)
+                }),
+        );
+    }
+    ids.extend(overlays.iter().map(|overlay| overlay.id.clone()));
+    ids
 }
 
 /// The company's own two sources — seed files, then saved overlays — and no
