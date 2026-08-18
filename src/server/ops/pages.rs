@@ -244,6 +244,7 @@ async fn page_shell(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{slug}</title>
+<link rel="stylesheet" href="/pages-sdk/index.css">
 <script type="importmap">
 {{
   "imports": {{
@@ -336,6 +337,10 @@ fn apply_pages_headers(headers: &mut axum::http::HeaderMap) {
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(PAGES_CSP),
     );
+    // Authenticated, company-specific content: never let a browser or an
+    // intermediary cache reuse another company's (or another session's) page
+    // shell, manifest, or bundle.
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
