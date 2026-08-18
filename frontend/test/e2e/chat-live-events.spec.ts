@@ -252,3 +252,197 @@ test("a running turn shows its tool rows in the channel", async ({ page }) => {
   await openChannel(page, CONTENT.id);
   await expect(page.getByText("workspace_list")).toHaveCount(0);
 });
+
+/* -------------------------------------------------------------------------- *
+ * Detached turns (issue #983)
+ *
+ * The console now asks every chat POST to detach, so the host answers `202`
+ * with the turn's id instead of holding the request open for a turn whose
+ * duration is unbounded — the shape that produced five 504s out of five real
+ * persona tasks, with the work running on invisibly behind them.
+ *
+ * Two legs are worth proving here and nowhere else. The **live reply** leg
+ * exercises the highest-risk line in the console change: the echo suppression
+ * had to become conditional, and getting it wrong means the reply never appears
+ * at all rather than appearing twice — a failure no type and no unit test of the
+ * POST would catch, because the bubble is drawn by the *stream*. The **reload**
+ * leg is the one that was impossible before the turn became durable: there was
+ * nothing to ask about a turn in flight, so a console reloaded mid-turn showed a
+ * settled-looking transcript with an answer still on its way.
+ * -------------------------------------------------------------------------- */
+
+/** The working/queued row, however it is currently worded. */
+function workingRow(page: Page): Locator {
+  return page.getByTestId("working-indicator");
+}
+
+test("a detached turn's reply arrives over the stream, not on the POST", async ({ page }) => {
+  // The regression guard for the conditional suppression. Before #983 the
+  // shell dropped every live `agent_reply` for a thread with a POST in flight,
+  // because the awaited POST carried the authoritative copy. A detached POST
+  // carries nothing — so if that suppression had stayed unconditional, this
+  // reply would never be drawn and the operator would watch a spinner forever.
+  //
+  // Deliberately asserted with no reload and no mock: the bubble under test can
+  // only have come from the SSE frame.
+  test.skip(LIVE_BRAIN, ECHO_BRAIN_ONLY);
+
+  await openChannel(page, ENGINEERING.id);
+  const before = await settledBubbleCount(page);
+
+  const marker = `detached-${Date.now()}`;
+  await page.getByPlaceholder(/^Message /).fill(marker);
+  await page.keyboard.press("Enter");
+
+  await expect(reply(page, marker)).toBeVisible({ timeout: 60_000 });
+  // Still exactly one company bubble: lifting the suppression must not
+  // reintroduce the duplicate the bracket exists to prevent, since the durable
+  // re-read on the turn's terminal transition folds by message id.
+  await expect(reply(page, marker)).toHaveCount(1);
+  await page.waitForTimeout(3_000);
+  await expect(bubbles(page)).toHaveCount(before + 2);
+  await expect(reply(page, marker)).toHaveCount(1);
+});
+
+test("a detached turn survives a reload and rebuilds from the durable record", async ({ page }) => {
+  // The backstop, proved by throwing the live path away. Everything the stream
+  // delivered dies with the page; what comes back has to come from the journal.
+  // Before #983 the operator's own message was only appended *inside* the cycle
+  // lock, so this reload could show neither the question nor the answer.
+  test.skip(LIVE_BRAIN, ECHO_BRAIN_ONLY);
+
+  await openChannel(page, ENGINEERING.id);
+
+  const marker = `durable-${Date.now()}`;
+  await page.getByPlaceholder(/^Message /).fill(marker);
+  await page.keyboard.press("Enter");
+  await expect(reply(page, marker)).toBeVisible({ timeout: 60_000 });
+
+  await page.reload();
+  await openChannel(page, ENGINEERING.id);
+
+  // Both halves, rebuilt from `chat/history` alone.
+  await expect(reply(page, marker)).toBeVisible({ timeout: 30_000 });
+  await expect(bubbles(page).filter({ hasText: marker }).first()).toBeVisible();
+});
+
+test("a turn still open on reload re-arms the working row, and clears when it settles", async ({
+  page,
+}) => {
+  // The reload leg, and the only test here that stubs the run reads.
+  //
+  // Why it must: the offline echo brain answers in milliseconds, so there is no
+  // window to reload *into* — a real mid-turn reload against this host is a race
+  // that would pass by luck. The rows below are the exact shape
+  // `src/server/ops/runs.rs` serves, and what is under test is the console's
+  // re-arm → poll → settle machinery, not whether the host writes the row (the
+  // Rust suite pins that). Same reasoning the tool-rows test above states for
+  // writing its own stream.
+  let settled = false;
+  const openRun = {
+    id: "turn-e2e-1",
+    chatId: ENGINEERING.id,
+    agentId: "engineering",
+    attempt: 1,
+    status: "pending",
+    phase: "active",
+    createdAtMillis: Date.now(),
+  };
+
+  // The hydration read: which turns are open right now.
+  await page.route("**/runs?*", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(settled ? [] : [openRun]),
+    }),
+  );
+  // The per-turn poll, which is what carries the terminal transition.
+  await page.route("**/runs/turn-e2e-1", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        run: settled
+          ? { ...openRun, status: "succeeded", phase: "terminal", finishedAtMillis: Date.now() }
+          : { ...openRun, status: "running", phase: "active", startedAtMillis: Date.now() },
+        steps: [],
+      }),
+    }),
+  );
+
+  await openChannel(page, ENGINEERING.id);
+
+  // Re-armed from the open-turn read, on a page that never POSTed anything —
+  // which is precisely the mid-turn reload this design exists to make work.
+  await expect(workingRow(page)).toBeVisible({ timeout: 30_000 });
+  // And it says the truth: the row is `pending`, so the turn is queued behind
+  // the per-company serial lock rather than working. A spinner implying
+  // progress here would be the console inventing something.
+  await expect(workingRow(page)).toHaveAttribute("data-queued", "true");
+
+  // The poll picks up `running` and the wording follows the row.
+  await expect(workingRow(page)).toHaveAttribute("data-queued", "false", { timeout: 30_000 });
+
+  settled = true;
+
+  // On the terminal transition the row comes down — a turn that has finished
+  // must never leave a spinner behind, which is the failure mode the whole
+  // durable-record design is meant to remove.
+  await expect(workingRow(page)).toHaveCount(0, { timeout: 30_000 });
+});
+
+test("a failed turn leaves a durable line, not a spinner", async ({ page }) => {
+  // The other half of "a lost response is not lost work". A turn killed with
+  // the pod used to be permanent silence; since #983 it settles `Failed` and
+  // writes a transcript line, and the console's job is to stop claiming the
+  // turn is live and show what the journal says.
+  //
+  // Stubbed for the same reason as the test above — the echo brain cannot be
+  // made to fail on demand — and the failure line itself comes from
+  // `chat/history`, which is the point: the console renders the durable record
+  // rather than special-casing a status.
+  await page.route("**/runs?*", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify([
+        {
+          id: "turn-e2e-2",
+          chatId: ENGINEERING.id,
+          agentId: "engineering",
+          attempt: 1,
+          status: "running",
+          phase: "active",
+          createdAtMillis: Date.now(),
+        },
+      ]),
+    }),
+  );
+  await page.route("**/runs/turn-e2e-2", (route) =>
+    route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        run: {
+          id: "turn-e2e-2",
+          chatId: ENGINEERING.id,
+          agentId: "engineering",
+          attempt: 1,
+          status: "failed",
+          phase: "terminal",
+          createdAtMillis: Date.now(),
+          finishedAtMillis: Date.now(),
+          failureReason: "the turn did not finish",
+        },
+        steps: [],
+      }),
+    }),
+  );
+
+  await openChannel(page, ENGINEERING.id);
+
+  // It is allowed to show the row first — what it is not allowed to do is keep
+  // showing it once the turn is known to be over.
+  await expect(workingRow(page)).toHaveCount(0, { timeout: 30_000 });
+});

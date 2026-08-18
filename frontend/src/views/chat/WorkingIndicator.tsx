@@ -70,6 +70,12 @@ export function WorkingIndicator({
 
   return (
     <span
+      // Locatable from the E2E specs, which is how the reload leg proves the
+      // row was re-armed from the open-turn read (issue #983). The visible label
+      // is `aria-hidden` and its twin is `sr-only`, so matching on text alone
+      // resolves to two nodes and trips strict mode.
+      data-testid="working-indicator"
+      data-queued={queued ? "true" : "false"}
       className={cn(
         "flex items-center gap-2 rounded-full bg-muted px-3 py-2 text-sm text-muted-foreground",
         className,
