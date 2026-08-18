@@ -130,6 +130,51 @@ use crate::runtime::workflow_spawn::WorkflowSpawn;
 /// fail silently, which for this kind means an approval nobody acts on.
 pub const WORKFLOW_APPROVE_KIND: &str = "workflow.approve";
 
+/// The prefix a workflow run's continuation turn key carries (issue #978).
+///
+/// Namespaced rather than the bare run id because the turn key space is shared
+/// with the cycle ids a chat turn arms
+/// ([`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)), and
+/// the release side has to fork on which kind it is holding — a brain turn is
+/// continued, a workflow run is re-dispatched, and running the wrong one is
+/// silent. The prefix is what makes that question answerable from the key
+/// alone, with no side lookup that could disagree.
+pub const WORKFLOW_TURN_PREFIX: &str = "workflow-run:";
+
+/// The continuation turn key **every gate one workflow run parked** shares
+/// (issue #978).
+///
+/// This is the whole of the fix's accounting change. Before it,
+/// `park_and_journal` recorded no turn key for a workflow gate at all, so
+/// [`approval_cycle`](crate::runtime::journal::RuntimeJournal::approval_cycle)
+/// answered `Some(None)` and every branch of a fan-out believed it was the only
+/// decision outstanding: `decisions_still_awaited` read 0 on all three of three,
+/// and all three re-dispatched. Keying on the **run** rather than the node is
+/// what makes "approving never increases pending approvals" expressible — N
+/// gates of one run are one decision batch, released once.
+///
+/// The run id is already on every parked gate ([`gate_effect`] stamps
+/// `Effect::run_id`), so nothing new has to be threaded to mint this.
+pub fn workflow_turn_key(run_id: &str) -> String {
+    format!("{WORKFLOW_TURN_PREFIX}{run_id}")
+}
+
+/// The run behind a turn key minted by [`workflow_turn_key`], or `None` for a
+/// key that names a brain turn instead (issue #978).
+///
+/// Paired with its writer in one module, deliberately: a reader that rebuilt the
+/// prefix from a literal is a second place for the format to drift, and drift
+/// here does not fail loudly — it reads a workflow key as a brain turn and runs
+/// an agent cycle over a run that then never continues.
+///
+/// An empty remainder is rejected rather than returned: `workflow-run:` with no
+/// run behind it names nothing, and treating it as a run id would spawn a
+/// continuation for a graph that cannot be found.
+pub fn run_id_from_turn(turn: &str) -> Option<&str> {
+    turn.strip_prefix(WORKFLOW_TURN_PREFIX)
+        .filter(|run_id| !run_id.is_empty())
+}
+
 /// The payload key holding the workflow whose run paused.
 pub const PAYLOAD_WORKFLOW_ID: &str = "workflow_id";
 /// The payload key holding the gate node awaiting sign-off.
@@ -148,6 +193,22 @@ pub const PAYLOAD_DELIVERED: &str = "delivered";
 /// guarded a `send` / `publish` / `repo_publish` the graph made as a node of its
 /// own. See [`PerformedCall`].
 pub const PAYLOAD_PERFORMED: &str = "performed";
+/// The payload key holding this lineage's **denial** ledger (issue #978) — the
+/// gate nodes an operator has refused, so a continuation neither runs them nor
+/// asks about them again.
+///
+/// The third ledger, and the one that makes a *mixed* verdict safe. A run that
+/// fans out to three gates and is approved twice and denied once re-dispatches
+/// once, carrying two approvals; the denied node is not in that set, so without
+/// this the replay would reach it, pause on it, and park a **new** card — an
+/// approval round that cleared three and created one, which is the invariant
+/// this issue exists to restore. Listed here, `park_pending_gates` skips it: the
+/// refusal is final, and the branch below it simply never completes.
+///
+/// Accumulates down the lineage exactly as [`PAYLOAD_DELIVERED`] and
+/// [`PAYLOAD_PERFORMED`] do — a two-gate graph must not forget the first gate's
+/// denial when it parks the second.
+pub const PAYLOAD_DENIED: &str = "denied";
 /// The payload key holding the plain-prose statement of what approving costs.
 pub const PAYLOAD_NOTE: &str = "note";
 /// The payload key holding the verbatim output of the gate's upstream nodes —
@@ -228,6 +289,17 @@ pub const CONTINUATION_DELIVERED_KEY: &str = "__opencompany_delivered";
 /// already happened, not what is being decided, so counting it would make every
 /// continuation gate read as a new decision and stack a duplicate card.
 pub const CONTINUATION_PERFORMED_KEY: &str = "__opencompany_performed";
+
+/// The reserved trigger-input key the **denial** ledger rides into a
+/// continuation run under (issue #978).
+///
+/// Reserved on exactly [`CONTINUATION_DELIVERED_KEY`]'s terms: host-written,
+/// host-read, never authored and opaque to the engine. Stripped before two
+/// parked gates are compared ([`is_same_gate`]) for the same reason both its
+/// siblings are — it records what has already been decided, not what is being
+/// decided, so counting it would make every continuation's gate read as a new
+/// question and stack a duplicate card.
+pub const CONTINUATION_DENIED_KEY: &str = "__opencompany_denied";
 
 /// What approving a workflow gate actually does, in the operator's own terms.
 ///
@@ -342,6 +414,44 @@ pub fn delivered_in_input(input: &Value) -> Vec<DeliveredReport> {
         .unwrap_or_default()
 }
 
+/// The gate nodes this lineage has already refused, read off a trigger input
+/// (issue #978).
+///
+/// Tolerant on [`delivered_in_input`]'s terms and for its reason: a missing key,
+/// a non-array or a non-string row yields "nothing known to be denied", which is
+/// the pre-#978 behaviour (ask about it). Being wrong in the other direction —
+/// inventing a denial — would silently strand a branch the operator never
+/// refused.
+pub fn denied_in_input(input: &Value) -> Vec<String> {
+    input
+        .get(CONTINUATION_DENIED_KEY)
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The gate node a parked [`WORKFLOW_APPROVE_KIND`] effect is asking about, or
+/// `None` for any other effect (issue #978).
+///
+/// The kind is checked as well as the key, so a non-gate effect that happens to
+/// carry a `node_id` payload cannot be mistaken for one. This is what the
+/// run-scoped stash keys its batch on — see
+/// [`WorkflowGateQueue`](crate::runtime::workflow_gates::WorkflowGateQueue).
+pub fn gate_node_id(effect: &Effect) -> Option<&str> {
+    if effect.kind != WORKFLOW_APPROVE_KIND {
+        return None;
+    }
+    effect
+        .payload
+        .get(PAYLOAD_NODE_ID)
+        .and_then(Value::as_str)
+        .filter(|node| !node.trim().is_empty())
+}
+
 /// The ledger a gate parked on this run should carry: what the run just
 /// delivered, unioned with what its own trigger input already listed.
 ///
@@ -441,6 +551,11 @@ pub fn gate_effect(
         PAYLOAD_PERFORMED.to_string(),
         json!(performed_ledger(input, performed)),
     );
+    // Issue #978: what must NOT be *asked about* again when this card is
+    // approved. Purely inherited — a denial is made at resolve time, never at
+    // park time — but it has to ride the card, or a two-gate graph forgets the
+    // first gate's refusal the moment it parks the second.
+    payload.insert(PAYLOAD_DENIED.to_string(), json!(denied_in_input(input)));
     // What approving costs, in the operator's own terms.
     payload.insert(PAYLOAD_NOTE.to_string(), json!(CONTINUATION_NOTE));
     // Issue #460: which call the policy stopped, and why. The keys are ABSENT
@@ -591,6 +706,7 @@ fn without_ledger(mut input: Value) -> Value {
     if let Value::Object(map) = &mut input {
         map.remove(CONTINUATION_DELIVERED_KEY);
         map.remove(CONTINUATION_PERFORMED_KEY);
+        map.remove(CONTINUATION_DENIED_KEY);
     }
     input
 }
