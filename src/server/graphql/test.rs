@@ -169,6 +169,128 @@ async fn approvals_field_is_empty_before_any_park() {
 }
 
 // ---------------------------------------------------------------------------
+// The approval tier over GraphQL (issue #1070)
+// ---------------------------------------------------------------------------
+
+/// The tier is readable, and it is the one the manifest declares.
+///
+/// `Company` already resolved `approvals` and `pendingApprovals` and not the
+/// setting that decides whether anything ever enters that queue — so an empty
+/// queue read the same under `supervised` (nothing pending) and `full` (nothing
+/// will ever park).
+#[tokio::test]
+async fn policy_field_reports_the_tier_in_force() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let app = router(state_with_company(&home).await);
+    let value = query(
+        app,
+        r#"{"query":"{ company(id: \"acme\") { policy { mode manifestMode overridden } } }"}"#,
+    )
+    .await;
+    let policy = &value["data"]["company"]["policy"];
+    assert_eq!(policy["mode"], "full", "{value}");
+    assert_eq!(policy["manifestMode"], "full", "{value}");
+    assert_eq!(policy["overridden"], false, "{value}");
+}
+
+/// **The anti-drift assertion, and the reason this field maps `PolicyDto`
+/// rather than reading the record itself.**
+///
+/// With a console override in force, `mode` and `manifestMode` diverge — and a
+/// resolver that recomputed the tier from `manifest.policy.mode` would answer
+/// `full` here while `GET {scope}/policy` answered `readonly`, with no way for
+/// a caller to know which surface it had reached. That is the
+/// two-sources-of-truth defect issue #1027 nearly shipped by putting this value
+/// on `/capabilities` instead.
+///
+/// `overridden` is asserted separately from the two words on purpose: an
+/// override that happened to match the manifest would still be an override, and
+/// comparing `mode` with `manifestMode` cannot see one.
+#[tokio::test]
+async fn policy_field_reports_the_override_not_the_manifest() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let store = FsCompanyStore::new(home.clone());
+    let state = state_with_company(&home).await;
+
+    // Tighten the tier the way `PUT {scope}/policy` does — an overlay, never a
+    // manifest edit.
+    let mut record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
+    record.overlay_policy = Some(crate::ports::types::PolicyOverride {
+        mode: Some("readonly".to_string()),
+        always_approve: None,
+        set_by: crate::ports::types::Actor {
+            kind: crate::ports::types::ActorKind::Operator,
+            id: "ada@example.com".to_string(),
+        },
+        at_millis: 1_700_000_000_000,
+    });
+    store.save(&record).await.unwrap();
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id: \"acme\") { policy { mode manifestMode overridden setBy setAtMillis } } }"}"#,
+    )
+    .await;
+    let policy = &value["data"]["company"]["policy"];
+    assert_eq!(
+        policy["mode"], "readonly",
+        "the tier IN FORCE is the override, not the manifest: {value}"
+    );
+    assert_eq!(
+        policy["manifestMode"], "full",
+        "and the manifest's tier is still reported, so a client can see what a reset restores: {value}"
+    );
+    assert_eq!(policy["overridden"], true, "{value}");
+    assert_eq!(policy["setBy"], "ada@example.com", "{value}");
+    assert_eq!(
+        policy["setAtMillis"], 1_700_000_000_000_f64,
+        "epoch millis survive the f64 widening exactly: {value}"
+    );
+}
+
+/// **Auth parity with REST.** `GET {scope}/policy` answers 401 to an
+/// unauthenticated caller; this must not be the softer way in.
+///
+/// Tested rather than assumed. The gate lives in `graphql_handler` *before*
+/// `schema().execute()`, so no resolver runs at all — but "the framework covers
+/// it" is exactly the reasoning that ships a hole, and nothing in this suite
+/// exercised the refusal before now. The same query minus the session cookie
+/// every other test sends must return the error and no policy data.
+#[tokio::test]
+async fn policy_field_is_refused_without_a_session() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let app = router(state_with_company(&home).await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/graphql")
+                .header("content-type", "application/json")
+                // Deliberately no `cookie` header — the one difference from
+                // `query()`.
+                .body(Body::from(
+                    r#"{"query":"{ company(id: \"acme\") { policy { mode } } }"}"#.to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        value["data"]["company"].is_null(),
+        "an unauthenticated caller must get no policy data: {value}"
+    );
+    assert_eq!(
+        value["errors"][0]["message"], "unauthorized",
+        "and must be told why, the same as the REST 401: {value}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Manifest-derived + store-backed reads, over a fuller company.
 // ---------------------------------------------------------------------------
 
