@@ -33,6 +33,18 @@ pub mod router;
 
 pub use built_in::*;
 
+/// Issue #989 (Part 2a of #926): end-to-end proof that a **chat** turn which
+/// pauses at its tool-iteration cap runs the same #244 unpublished-work scan
+/// and nudge the task-dispatch path (`run_task`) already gets — and that a
+/// capped turn which wrote nothing is not nudged on top of it. Test-only.
+#[cfg(test)]
+mod cap_publish_test;
+/// Issue #926: end-to-end proof that a turn which exhausts its tool-iteration
+/// budget pauses **visibly** — the flag is read, the operator gets a second
+/// bubble saying so, and the notice never reaches memory. Test-only.
+#[cfg(test)]
+mod cap_turn_test;
+
 /// The ACP `RunTurn`, under the path it had before the split.
 ///
 /// Aliased rather than glob-re-exported because [`built_in`] has its own

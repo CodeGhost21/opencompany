@@ -30,6 +30,7 @@ import {
   SidebarInset,
   SidebarMenu,
   SidebarMenuBadge,
+  SidebarMenuDot,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -342,6 +343,17 @@ export function AppShell({
   // React batch still means "re-read" — the frame-loss the workflow canvas had
   // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
+  // sees an attempt move rather than waiting up to four seconds for its poll —
+  // and sees it at all while the tab is hidden, which the poll deliberately does
+  // not do. Its own counter rather than a share of `taskEventTick`: this fires
+  // several times per attempt, and folding it in would make the whole board
+  // refetch on every transition of every run.
+  //
+  // A counter, not the payload, for the same reason the tick above is one: the
+  // screen re-reads its own detail, so two frames collapsing inside one React
+  // batch still mean "re-read".
+  const [attemptEventTick, setAttemptEventTick] = useState(0);
   // Issue #327: the latest workspace write, as the Workspace view needs it.
   //
   // The payload-carrying variant of the `taskEventTick` pattern above, and the
@@ -1094,6 +1106,7 @@ export function AppShell({
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
+    onRunEvent: useCallback(() => setAttemptEventTick((n) => n + 1), []),
     // Issue #377. Beside the board tick above, not instead of it: a settle both
     // moves a card between columns and needs saying in the conversation the
     // card came from.
@@ -1192,7 +1205,20 @@ export function AppShell({
                     <span>{item.label}</span>
                   </SidebarMenuButton>
                   {item.view === "approvals" && pending > 0 && (
-                    <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                    <>
+                      <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                      {/* Issue #1018: the badge is the sidebar's only attention
+                          signal and `SidebarMenuBadge` hides itself on the
+                          collapsed rail, so a collapsed sidebar said nothing was
+                          waiting. The dot is the same `pending` value rendered
+                          so it survives 32px — not a second source, so it cannot
+                          disagree with the badge or fork the count contract
+                          #932 pins. Exactly one of the two is visible at a
+                          time. */}
+                      <SidebarMenuDot
+                        label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
+                      />
+                    </>
                   )}
                 </SidebarMenuItem>
               ))}
@@ -1290,6 +1316,7 @@ export function AppShell({
               // counter the chat's in-flight strip reads, so a card opened from
               // chat lands on the board without a reload.
               taskEventTick={taskEventTick}
+              attemptEventTick={attemptEventTick}
               // Issue #883: a paused card is blocked until every approval its
               // turn parked is decided, and the board's own read carries none
               // of them. This is the feed the sidebar badge already polls, so
@@ -1399,6 +1426,29 @@ export function AppShell({
                 runEventTick={workflowRunTick}
                 runEvents={workflowRunEvents}
                 listEventTick={workflowListTick}
+                // Issue #1002: a run that parked cards can be unblocked from
+                // the run drawer, without leaving the run to find the rows in a
+                // flat queue. The SAME feed the Approvals page and the sidebar
+                // badge read, handed over unfiltered — this is a second reader
+                // of one queue, so the page still lists every row and the badge
+                // still counts every row.
+                //
+                // The four maps below are the same console-local state the
+                // inline chat card is given, owned here for the same reason: an
+                // operator who decides in the drawer, steps over to Approvals
+                // and comes back must not find a card that forgot what they did.
+                // Their `decided` half is fed by the `approval_resolved` frame
+                // as well as by this console's own resolves, which is what makes
+                // a decision taken on the page settle in the drawer with no
+                // reload.
+                approvals={feed.approvals}
+                approvalsNow={feed.now}
+                decidingApprovals={decidingApprovals}
+                decidedApprovals={decidedApprovals}
+                failedApprovals={failedApprovals}
+                onDecideApproval={(approval, verdict, scope) =>
+                  void decideApproval(approval, verdict, scope)
+                }
               />
             </Suspense>
           )}

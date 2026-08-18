@@ -782,6 +782,7 @@ fn card(id: &str, plan: Option<crate::ports::tasks::TaskPlan>) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan,
+        planning_attempts: Vec::new(),
         deliverable: TaskDeliverable::Workflow,
         workflow_proposal: None,
         origin_run_id: None,
@@ -807,11 +808,7 @@ async fn open_run(runtime: &Arc<CompanyRuntime>, task_id: &str) -> String {
         .runs()
         .create_run(
             runtime.id(),
-            NewRun {
-                id: crate::ports::generate_id(),
-                task_id: task_id.to_string(),
-                agent_id: "maya".to_string(),
-            },
+            NewRun::for_task(crate::ports::generate_id(), task_id, "maya"),
         )
         .await
         .expect("mint the attempt row")
@@ -1854,7 +1851,9 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
     let (_home, runtime) = runtime_with(ScriptedModel::replying(DESC_GRAPH)).await;
     seed_workflow(&runtime, "existing-one", "Existing One").await;
     let company = gather_company_evidence(&runtime).await.unwrap();
-    let slugs = crate::company::workflow_callable_tool_slugs(&company.record);
+    // `None` wiring — this fixture asserts the rendering, so it wants the widest
+    // honest slug set (the grant filter alone), not a deployment-narrowed one.
+    let slugs = crate::company::workflow_effective_tool_slugs(&company.record, None);
 
     let description = "email the weekly digest every Monday morning";
     let prompt = description_evidence_prompt(&company, &slugs, &[], description);

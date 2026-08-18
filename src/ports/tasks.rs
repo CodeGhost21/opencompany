@@ -475,6 +475,20 @@ pub struct TaskPlan {
     pub planned_at_millis: u64,
 }
 
+/// One metered planning pass attributed to a task.
+///
+/// Planning runs outside the attempt machinery, so it has no `run_id`. Keeping
+/// each non-zero pass on the card preserves failed and superseded planning
+/// spend instead of making the latest successful brief stand in for history.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskPlanningUsage {
+    /// When the model call completed.
+    pub at_millis: u64,
+    /// Tokens and source-currency USD reported by that call.
+    pub usage: crate::ports::types::TokenUsage,
+}
+
 impl TaskPlan {
     /// Every prerequisite whose verdict blocks the dispatch.
     pub fn blockers(&self) -> Vec<&Prerequisite> {
@@ -938,6 +952,9 @@ pub struct TaskRecord {
     /// a structured field rather than an artifact or note prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<TaskPlan>,
+    /// Every non-zero planning pass, including failed and superseded passes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planning_attempts: Vec<TaskPlanningUsage>,
     /// Whether this card produces a one-off result or a reusable workflow
     /// (issue #580).
     ///
@@ -983,10 +1000,21 @@ pub struct TaskRecord {
     /// that path, and the only run row a console can navigate to. Pinned by test
     /// rather than left to be rediscovered.
     ///
-    /// `None` for every card opened from chat, from a dispatched card, straight
-    /// on the board, and for every card written before this field existed —
-    /// additive on the wire like [`Self::parent_task_id`], so no stored board
-    /// needs migrating.
+    /// # A card opened from chat stamps its **turn's** id (issue #983)
+    ///
+    /// A chat turn now mints a run row of its own, so the field's meaning is
+    /// "the machine act that opened this card" rather than "the workflow run
+    /// that did". A card raised from a DM used to be the only visible sign that
+    /// a long turn was under way and had nothing pointing back at it, so an
+    /// operator staring at a card in Planning could not reach the attempt
+    /// working it. [`origin_workflow_id`](Self::origin_workflow_id) stays `None`
+    /// on that path — there is no graph behind a chat turn — so the two fields
+    /// are no longer set together, and a reader wanting *the workflow* must
+    /// check that one rather than infer it from this.
+    ///
+    /// `None` for a dispatched card, a card opened straight on the board, and
+    /// for every card written before this field existed — additive on the wire
+    /// like [`Self::parent_task_id`], so no stored board needs migrating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_run_id: Option<String>,
     /// The workflow graph whose run opened this card (issue #661 / M5).
@@ -1415,6 +1443,7 @@ mod test {
             // #339's baseline fixture stays baseline: it exists to prove the
             // output stamp round-trips against a card carrying nothing else.
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -1702,6 +1731,7 @@ mod test {
 
         // A workflow card carrying a proposal round-trips whole.
         let proposed = TaskRecord {
+            planning_attempts: Vec::new(),
             deliverable: TaskDeliverable::Workflow,
             workflow_proposal: Some(TaskWorkflowProposal {
                 summary: "Email the weekly digest every Monday".to_string(),

@@ -197,6 +197,7 @@ mod tests {
             Ok(TurnOutcome {
                 reply: self.label.clone(),
                 steps: Vec::new(),
+                hit_iteration_cap: false,
             })
         }
 

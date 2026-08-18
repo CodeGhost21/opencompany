@@ -41,6 +41,11 @@ mod gated_tool_call_test;
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
 mod gated_tool_turn_test;
+/// Issue #978: a run that fans out to N gated nodes is cleared by approving,
+/// not multiplied by it — the composition of #395, #243 and #469 that each of
+/// their own suites is blind to.
+#[cfg(test)]
+mod parallel_gate_fanout_test;
 /// Issue #846: a continuation replays the outward calls its lineage already
 /// made, instead of making them a second time.
 pub mod replay;

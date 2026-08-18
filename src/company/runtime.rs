@@ -112,10 +112,27 @@ use crate::runtime::CycleRunner;
 use crate::runtime::continuation::ContinuationQueue;
 use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantId, GrantScope, GrantSet, StandingGrant};
-use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, RuntimeJournal};
+use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, ExpiryReason, RuntimeJournal};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
+use crate::runtime::workflow_gates::WorkflowGateQueue;
 use crate::server::ops::mailer::MailSender;
 use crate::server::ops::smtp::SmtpCredentials;
+
+/// The most parked approvals one maintenance tick retires (issue #971).
+///
+/// A cap, not a rate: the tick runs every minute for every company, so a
+/// backlog of a few hundred drains in a handful of minutes and one of a few
+/// thousand still drains the same day. What it buys is that the FIRST tick
+/// after a shortened deadline ships — the one that meets an entire accumulated
+/// queue at once — does not turn into one unbounded burst of journal appends,
+/// event appends and released agent turns on the minute boundary every other
+/// company in the process shares.
+///
+/// Deliberately generous rather than tuned. The failure this guards is a
+/// stampede, and 50 retirements is nowhere near one; a number small enough to
+/// need tuning would instead be a queue that visibly lags behind its own
+/// deadline, which is the symptom issue #971 is about.
+const MAX_RETIREMENTS_PER_TICK: usize = 50;
 
 /// The WS3 console ports, bundled so the runtime constructor stays legible.
 /// Each is an `Arc<dyn …>` keyed by [`CompanyId`], defaulting to the fs backend
@@ -274,6 +291,16 @@ pub struct CompanyRuntime {
     /// not forget that the turn is blocked, or the next decision continues it as
     /// though the others had never been owed.
     pub(crate) continuations: ContinuationQueue,
+    /// Issue #978: which gate node each parked **workflow** approval is
+    /// deciding, and the trigger input its run paused with.
+    ///
+    /// The run-scoped companion to [`continuations`](Self::continuations): that
+    /// queue counts a run's outstanding decisions, and this one holds the facts
+    /// the release needs to actually re-dispatch it. Live per-instance state and
+    /// inherited across a rebuild for the same reason both its neighbours are —
+    /// a swap mid-decision that forgot a run's parked gates would re-ask about
+    /// every one of them.
+    pub(crate) workflow_gates: WorkflowGateQueue,
     /// Held for the duration of a cycle so cycles never interleave per company.
     ///
     /// `Arc`-shared rather than owned so a rebuilt runtime can inherit the *same*
@@ -390,6 +417,7 @@ impl CompanyRuntime {
             repos: None,
             grants,
             continuations: ContinuationQueue::default(),
+            workflow_gates: WorkflowGateQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
@@ -508,11 +536,27 @@ impl CompanyRuntime {
         self.builder.as_ref()
     }
 
+    /// This deployment's workflow-tool wiring for `company`: the namespaces a
+    /// `tool_call` can actually reach here, **and** why each of the others
+    /// cannot — the same
+    /// [`WorkflowToolWiring`](crate::workflows::caps::WorkflowToolWiring) the
+    /// run-time gate reads, so what a caller is told is available and what
+    /// `refusal_for` says at run time come from one computation.
+    ///
+    /// `None` means the wiring is not knowable — no harness deps are attached,
+    /// so there is no deployment to ask. Callers must treat that as "cannot
+    /// say" and fall back to the grant-only answer rather than reporting
+    /// everything as unwired.
+    ///
+    /// The capability filter is resolved per call because a budget plan makes it
+    /// a function of *current* spend (issue #661): a tier that is open now can
+    /// be filtered an hour later, and a cached set would advertise a namespace
+    /// the run would refuse.
     #[cfg(feature = "openhuman")]
-    pub async fn wired_workflow_namespaces(
+    pub(crate) async fn workflow_tool_wiring(
         &self,
         company: &crate::ports::CompanyRecord,
-    ) -> Option<std::collections::BTreeSet<&'static str>> {
+    ) -> Option<crate::workflows::caps::WorkflowToolWiring> {
         let deps = self.workflow_harness_deps.as_ref()?;
         let mut resolved = deps.clone();
         if let Some(plan) = &resolved.plan {
@@ -524,7 +568,15 @@ impl CompanyRuntime {
             )
             .await;
         }
-        Some(crate::workflows::caps::wired_workflow_namespaces(&resolved))
+        Some(crate::workflows::caps::workflow_tool_wiring(&resolved))
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub async fn wired_workflow_namespaces(
+        &self,
+        company: &crate::ports::CompanyRecord,
+    ) -> Option<std::collections::BTreeSet<&'static str>> {
+        Some(self.workflow_tool_wiring(company).await?.wired_namespaces)
     }
 
     #[cfg(feature = "openhuman")]
@@ -605,6 +657,13 @@ impl CompanyRuntime {
     /// successor: a second `RuntimeJournal` over one path is the corruption
     /// hazard [`RuntimeHandover`](crate::runtime::RuntimeHandover) exists to
     /// prevent, and "we passed it along" is only checkable if it is readable.
+    /// The run-scoped workflow gate batches this runtime is holding (issue
+    /// #978). Delegated to rather than exposed as a field so the approve path in
+    /// `workflow_resume` can fork on whether a card's run is armed.
+    pub fn workflow_gates(&self) -> &WorkflowGateQueue {
+        &self.workflow_gates
+    }
+
     pub fn journal(&self) -> &Arc<RuntimeJournal> {
         &self.journal
     }
@@ -614,16 +673,33 @@ impl CompanyRuntime {
         &self.store
     }
 
-    /// The ids of the chat channels actually wired for this running company —
-    /// exactly what an `output` node's `channel` destination may target
-    /// (issue #813). `operator` is always present; the rest are the enabled
-    /// OpenHuman-provider manifest channels. The console reads this to offer a
-    /// picker of real targets instead of a free-text box that only fails at
-    /// delivery time with `ChannelNotWired`.
-    pub fn wired_channel_ids(&self) -> Vec<String> {
+    /// The ids of this running company's channels a workflow may actually
+    /// deliver to — exactly what an `output` node's `channel` destination may
+    /// target (issues #813, #981). Desk channels (one per `[[group_chat]]` and
+    /// per operator-created desk) and enabled OpenHuman-provider manifest
+    /// channels; **never `operator`**, whose adapter is an in-memory response
+    /// spy with no durable reader
+    /// ([`is_deliverable_channel`](crate::runtime::is_deliverable_channel)).
+    ///
+    /// The console reads this to offer a picker of real targets, and the
+    /// workflow write routes reject a channel destination outside it, instead
+    /// of a free-text box that only fails at delivery time with
+    /// `ChannelNotWired`.
+    ///
+    /// The set is empty when a company has no desks and no provider channels.
+    /// That is a legitimate state, not a degraded one: it means there is
+    /// nowhere to deliver, and the honest answer is to say so rather than to
+    /// name a target that would be discarded.
+    ///
+    /// This was `wired_channel_ids`, which returned every adapter and claimed
+    /// in its own doc comment that `operator` was always a valid target. The
+    /// rename is deliberate: it is what made the mistake plausible, and every
+    /// call site is worth re-reading against the delivery rule.
+    pub fn deliverable_channel_ids(&self) -> Vec<String> {
         self.channels
             .iter()
             .map(|channel| channel.channel_id().to_string())
+            .filter(|id| crate::runtime::channel::is_deliverable_channel(id))
             .collect()
     }
 
@@ -903,11 +979,11 @@ impl CompanyRuntime {
     /// [`RunStatus::Pending`]: crate::ports::runs::RunStatus::Pending
     #[cfg(feature = "openhuman")]
     async fn open_run(&self, task: &TaskRecord) -> Option<String> {
-        let spec = crate::ports::runs::NewRun {
-            id: crate::ports::generate_id(),
-            task_id: task.id.clone(),
-            agent_id: task.assignee.clone(),
-        };
+        let spec = crate::ports::runs::NewRun::for_task(
+            crate::ports::generate_id(),
+            task.id.clone(),
+            task.assignee.clone(),
+        );
         match self.ops.runs.create_run(&self.id, spec).await {
             Ok(run) => {
                 tracing::debug!(
@@ -1088,13 +1164,32 @@ impl CompanyRuntime {
         self.continuations = continuations;
     }
 
+    /// Installs the run-scoped workflow gate batches the builder prepared
+    /// (issue #978) — rehydrated from the journal's still-parked gates on a
+    /// boot, inherited live on a rebuild.
+    ///
+    /// Set through the builder for exactly
+    /// [`adopt_continuations`](Self::adopt_continuations)' reason, and always
+    /// alongside it: the two describe one run's decisions from opposite sides,
+    /// and a runtime holding a fresh copy of one and an inherited copy of the
+    /// other would release a batch it cannot re-dispatch.
+    pub fn adopt_workflow_gates(&mut self, gates: WorkflowGateQueue) {
+        self.workflow_gates = gates;
+    }
+
     /// Rejects a cycle on a runtime that is being replaced.
     ///
     /// Separate from [`ensure_running`](Self::ensure_running): that one reads a
     /// durable lifecycle an operator chose (paused, archived) and renders `409`;
     /// this one is a process-local window that clears itself within a turn and
     /// renders `503`.
-    fn ensure_accepting(&self) -> Result<()> {
+    /// `pub(crate)` since issue #983 rather than private: a caller that journals
+    /// its own input has to be able to ask this **before** it writes, since a
+    /// refusal ordered after the append would leave a message in the transcript
+    /// that no turn will ever answer. Every in-tree caller still goes through
+    /// one of the cycle entry points below; this exists so the chat route can
+    /// run the same check one step earlier.
+    pub(crate) fn ensure_accepting(&self) -> Result<()> {
         if self.is_quiesced() {
             return Err(OpenCompanyError::Quiescing(self.id.as_ref().to_string()));
         }
@@ -1105,6 +1200,31 @@ impl CompanyRuntime {
     pub async fn run_cycle(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
         self.ensure_accepting()?;
         CycleRunner::new(self).run(events).await
+    }
+
+    /// [`run_cycle`](Self::run_cycle), for inputs the caller has **already**
+    /// appended to the journal (issue #983).
+    ///
+    /// The chat route journals the operator's message the instant the request
+    /// is accepted, so the transcript is correct from acceptance rather than
+    /// from whenever the cycle wins the per-company serial lock — behind a busy
+    /// company, an unbounded time later. Handing the seq over here is what stops
+    /// the same message being appended a second time.
+    ///
+    /// `run_id` is a run row moved `Pending` → `Running` once that lock is
+    /// actually held; see [`CycleRunner::run_journaled`].
+    ///
+    /// Deliberately a second entry point rather than a parameter on the first:
+    /// every other trigger — scheduler, cron, webhooks, telegram, delegation,
+    /// approval follow-ups — keeps `run_cycle` byte-unchanged, so the append
+    /// they rely on cannot be turned off by a mistake at a call site.
+    pub async fn run_journaled_cycle(
+        &self,
+        events: Vec<(EventSeq, CompanyEvent)>,
+        run_id: Option<String>,
+    ) -> Result<CycleReport> {
+        self.ensure_accepting()?;
+        CycleRunner::new(self).run_journaled(events, run_id).await
     }
 
     /// Resolves a parked approval and runs a follow-up cycle so the brain learns
@@ -1290,10 +1410,24 @@ impl CompanyRuntime {
             return CycleRunner::new(self).run(vec![event]).await;
         };
         let approval_id = approval_id.clone();
+        let verdict = match &event {
+            CompanyEvent::ApprovalResolved { verdict, .. } => *verdict,
+            _ => unreachable!("matched ApprovalResolved above"),
+        };
 
         // `Some(None)` is a park recorded before the turn key existed; `None` is
         // an id this journal never parked. Neither is gated.
         let turn = self.journal.approval_cycle(&approval_id).flatten();
+        // Issue #978: bank the verdict against the run's gate batch BEFORE the
+        // continuation queue is told, so that whichever decision turns out to be
+        // the last finds every sibling's verdict already recorded. Ordering is
+        // what makes that safe rather than lucky: each caller banks then counts,
+        // and the release is handed to the caller whose count reaches zero — by
+        // which time the other N-1 have necessarily banked. A no-op for a turn
+        // that is not a workflow run.
+        if let Some(turn) = turn.as_deref() {
+            self.workflow_gates.decide(turn, &approval_id, verdict);
+        }
         let batch = match &turn {
             Some(turn) => match self.continuations.decide(turn, Some(event)) {
                 Some(batch) => batch,
@@ -1310,6 +1444,15 @@ impl CompanyRuntime {
             },
             None => vec![event],
         };
+        // Issue #978: a workflow run is not a brain turn, so it is not continued
+        // like one. The fork is read off the turn key itself — see
+        // `continuation_target` — rather than from a side lookup that could
+        // disagree with the key the park wrote.
+        if let Some(turn) = turn.as_deref()
+            && crate::runtime::workflow_resume::run_id_from_turn(turn).is_some()
+        {
+            return self.resume_workflow_run(&approval_id, turn, batch).await;
+        }
         if batch.is_empty() {
             // Every approval the turn raised expired rather than being decided.
             // The sweep already appended each `ApprovalResolved` itself, so
@@ -1317,6 +1460,61 @@ impl CompanyRuntime {
             return Ok(CycleRunner::new(self).already_resolved_report());
         }
         self.run_continuation(&approval_id, batch).await
+    }
+
+    /// Re-dispatches the workflow run a released batch belongs to — **once**
+    /// (issue #978).
+    ///
+    /// The workflow arm of [`continue_turn`](Self::continue_turn), and the
+    /// counterpart to [`run_continuation`](Self::run_continuation): a run has no
+    /// agent turn to resume, so there is no cycle to run. What it owes is one
+    /// replay of the graph carrying every gate the batch approved.
+    ///
+    /// The decisions are still appended to the event log, because they happened
+    /// and the timeline should say so; what is deliberately **not** run is a
+    /// brain cycle per decision. Before this, every workflow gate approval spent
+    /// a full agent turn telling the brain about a resolution it can do nothing
+    /// with, on top of the duplicate run it started.
+    ///
+    /// A refused spawn is announced rather than only logged. Issue #401's
+    /// concurrency ceiling was survivable when each approval had its own spawn
+    /// attempt — one refusal left the other cards to retry with. A batch gets one
+    /// attempt and consumes every card, so a silent refusal loses the run with
+    /// nothing left to click; the operator has to be told to re-run it. Same
+    /// stance as issue #469 defect 4.
+    async fn resume_workflow_run(
+        &self,
+        approval_id: &ApprovalId,
+        turn: &str,
+        batch: Vec<CompanyEvent>,
+    ) -> Result<CycleReport> {
+        for event in batch {
+            if let Err(error) = self.events.append(&self.id, event).await {
+                tracing::warn!(
+                    company = %self.id,
+                    %approval_id,
+                    %error,
+                    "[approval] a workflow gate's resolution could not be appended to the event \
+                     log; the journal remains the binding record"
+                );
+            }
+        }
+        if let Err(error) = crate::runtime::workflow_resume::resume_run(self, turn).await {
+            tracing::error!(
+                company = %self.id,
+                %turn,
+                %error,
+                "[approval] the workflow run released by this decision could not be continued"
+            );
+            self.announce_to_operator(&format!(
+                "Every sign-off on that workflow step is in, but the run could not be \
+                 restarted: {error}. Nothing else is waiting on you — re-run the workflow to \
+                 pick it back up."
+            ))
+            .await;
+            return Err(error);
+        }
+        Ok(CycleRunner::new(self).already_resolved_report())
     }
 
     /// Runs one turn's continuation over the decisions it was blocked on, and
@@ -1590,75 +1788,154 @@ impl CompanyRuntime {
 
     /// Sweeps every parked approval past its TTL, resolving each to a
     /// default-deny and writing an `ApprovalExpired` audit entry to the journal.
-    /// Returns the ids that expired. Driven by the runtime's maintenance timer.
+    /// Returns the ids that expired.
     ///
-    /// Each expiry also appends a `ApprovalResolved { verdict: Deny }` event
-    /// attributed to the system. Expiry *is* a resolution — a default-deny on
-    /// silence — but before this it wrote only the journal record, so a wait
-    /// that ended in a timeout produced no event at all and was invisible to
-    /// every event-log reader, including the task timeline (issue #305). The
-    /// append is best-effort for the same reason steer's audit is: a sweep that
-    /// already denied the effect must not be undone by a log write, and the
-    /// journal remains the binding audit trail either way.
+    /// **Driven by [`MaintenanceTicker`](crate::runtime::maintenance::MaintenanceTicker)**
+    /// — a process-wide ticker over the registry, not the per-company cron
+    /// scheduler. Until issue #971 the only production caller was
+    /// `CompanyScheduler::tick_maintenance`, and that scheduler is only spawned
+    /// for a company whose manifest declares a `[[schedule]]`. So a company with
+    /// no manifest cron — including one whose work is driven entirely by
+    /// *workflow* schedules, which run on a different loop — parked approvals
+    /// forever and swept none of them, at any age. Maximal minting, zero
+    /// sweeping, and a cold boot faithfully re-parked the backlog from the
+    /// journal with its original park instants.
     ///
-    /// An expiry is also a **decision** as far as issue #469's continuation gate
-    /// is concerned, and has to be, or a turn that raised four sign-offs and
-    /// only ever got three would wait for a fourth that is never coming. The
-    /// turn is released here; the `ApprovalResolved` this appends is the event
-    /// the brain gets, so the release contributes no second one.
+    /// Capped at [`MAX_RETIREMENTS_PER_TICK`] per call, oldest first — see
+    /// [`sweep_expired_capped`](crate::policy::ManifestApprovalGate::sweep_expired_capped).
+    /// A host that has been accumulating for days meets its whole backlog on
+    /// the first tick after this ships, and each retirement is a journal
+    /// append, a grant clear, an event append and possibly a released turn.
+    /// Uncapped, that is one burst on the minute tick every other company in
+    /// the process shares.
     pub async fn sweep_expired_approvals(self: &Arc<Self>) -> Result<Vec<ApprovalId>> {
         let now = now_millis();
-        let expired = self.approval_gate.sweep_expired(now);
+        let expired = self
+            .approval_gate
+            .sweep_expired_capped(now, MAX_RETIREMENTS_PER_TICK);
         for id in &expired {
-            self.journal.record_expired(id, now).await?;
-            // Issue #796: the parked approval is gone, so its work unit is no
-            // longer awaiting a resume — drop the pending mark so the checkout it
-            // was holding across the park becomes sweepable.
-            self.grants.clear_pending(id);
-            // Issue #469: releasing the turn this approval was blocking, and
-            // running its continuation when this expiry was the last thing it
-            // waited on. Spawned rather than awaited: the continuation is a full
-            // agent turn behind the per-company cycle lock, and the maintenance
-            // tick this runs on fires on a minute boundary for every company.
-            if let Some(turn) = self.journal.approval_cycle(id).flatten()
-                && let Some(batch) = self.continuations.decide(&turn, None)
-                && !batch.is_empty()
-            {
-                let rt = Arc::clone(self);
-                let released = id.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = rt.run_continuation(&released, batch).await {
-                        tracing::error!(
-                            company = %rt.id,
-                            %error,
-                            "[approval] the continuation released by an expiry failed"
-                        );
-                    }
-                });
-            }
-            if let Err(e) = self
-                .events
-                .append(
-                    &self.id,
-                    CompanyEvent::ApprovalResolved {
-                        approval_id: id.clone(),
-                        verdict: Verdict::Deny,
-                        by: Actor {
-                            kind: ActorKind::System,
-                            id: "expiry".into(),
-                        },
-                    },
-                )
-                .await
-            {
-                tracing::warn!(
-                    approval_id = %id,
-                    error = %e,
-                    "approval expiry journaled but its event-log entry failed",
-                );
-            }
+            self.retire_approval(id, ExpiryReason::Ttl, now).await?;
         }
         Ok(expired)
+    }
+
+    /// Retires one approval the operator never decided: the whole default-deny
+    /// transaction, in one place (issue #971).
+    ///
+    /// **The single retirement primitive.** The entry is already out of
+    /// [`ManifestApprovalGate`](crate::policy::ManifestApprovalGate)'s map by
+    /// the time this runs — removal happens inside the gate's own critical
+    /// section, in `sweep_expired_capped` or a `resolve_*`, and nothing else
+    /// may remove from it. That ordering is what makes an operator clicking
+    /// Approve as a sweep retires the same entry get either a real approval or
+    /// [`ResolveOutcome::NotParked`](crate::policy::ResolveOutcome::NotParked),
+    /// never a silent double execution. This function is everything that has to
+    /// happen *after* that removal, and it exists as one function so a second
+    /// retirement rule cannot ship with three of the four steps.
+    ///
+    /// The four steps, none of which is optional:
+    ///
+    /// 1. The **journal** record — the binding audit entry for a default-deny.
+    ///    This one propagates its error; the rest are best-effort, because a
+    ///    retirement that has already happened in memory must not be undone by
+    ///    a write that failed after it.
+    /// 2. **Clearing the pending mark** (issue #796): the parked approval is
+    ///    gone, so its work unit is no longer awaiting a resume and the
+    ///    checkout it held across the park becomes sweepable.
+    /// 3. **Releasing the #469 continuation.** A retirement is a *decision* as
+    ///    far as the continuation gate is concerned and has to be, or a turn
+    ///    that raised four sign-offs and only ever got three waits for a fourth
+    ///    that is never coming. Spawned rather than awaited: the continuation
+    ///    is a full agent turn behind the per-company cycle lock, and this runs
+    ///    on a minute boundary shared by every company.
+    /// 4. The **`ApprovalResolved` event**. Expiry *is* a resolution — a
+    ///    default-deny on silence — and before #305 it wrote only the journal
+    ///    record, so a wait that ended in a timeout produced no event at all
+    ///    and was invisible to every event-log reader including the task
+    ///    timeline. `by` is `System`, which is what lets the operator SSE feed
+    ///    say "expired" rather than attributing the deny to whoever is looking.
+    ///
+    /// **No grant is minted here, and none can be.** A
+    /// [`GrantedCall`](crate::runtime::grants::GrantedCall) exists only on
+    /// `resolve_outcome`'s `Approved` arm; this function takes no verdict and
+    /// records `Deny`. That is the safety property the whole change rests on:
+    /// an approval disappearing from the queue must never read as one that was
+    /// granted.
+    async fn retire_approval(
+        self: &Arc<Self>,
+        id: &ApprovalId,
+        reason: ExpiryReason,
+        at_millis: u64,
+    ) -> Result<()> {
+        self.journal.record_expired(id, at_millis, reason).await?;
+        // Issue #796: the parked approval is gone, so its work unit is no
+        // longer awaiting a resume — drop the pending mark so the checkout it
+        // was holding across the park becomes sweepable.
+        self.grants.clear_pending(id);
+        // Issue #469: releasing the turn this approval was blocking, and
+        // running its continuation when this expiry was the last thing it
+        // waited on. Spawned rather than awaited: the continuation is a full
+        // agent turn behind the per-company cycle lock, and the maintenance
+        // tick this runs on fires on a minute boundary for every company.
+        if let Some(turn) = self.journal.approval_cycle(id).flatten() {
+            // Issue #978: an expiry is a default-DENY, and the run's batch
+            // has to hear it as one. Banked before the count is decremented,
+            // exactly as an operator's verdict is in `continue_turn` — an
+            // expired gate left in neither ledger would be replayed into,
+            // pause the continuation, and park a brand-new card for a
+            // decision that has already been made.
+            self.workflow_gates.decide(&turn, id, Verdict::Deny);
+            if let Some(batch) = self.continuations.decide(&turn, None) {
+                let workflow_run =
+                    crate::runtime::workflow_resume::run_id_from_turn(&turn).is_some();
+                // A workflow run releases even on an empty batch: every
+                // decision may have been an expiry (which appends its own
+                // event), and the run still has to be told so its approved
+                // siblings are not stranded. A brain turn with nothing to
+                // report owes no cycle, exactly as before.
+                if workflow_run || !batch.is_empty() {
+                    let rt = Arc::clone(self);
+                    let released = id.clone();
+                    let turn = turn.clone();
+                    tokio::spawn(async move {
+                        let outcome = if workflow_run {
+                            rt.resume_workflow_run(&released, &turn, batch).await
+                        } else {
+                            rt.run_continuation(&released, batch).await
+                        };
+                        if let Err(error) = outcome {
+                            tracing::error!(
+                                company = %rt.id,
+                                %error,
+                                "[approval] the continuation released by an expiry failed"
+                            );
+                        }
+                    });
+                }
+            }
+        }
+        if let Err(e) = self
+            .events
+            .append(
+                &self.id,
+                CompanyEvent::ApprovalResolved {
+                    approval_id: id.clone(),
+                    verdict: Verdict::Deny,
+                    by: Actor {
+                        kind: ActorKind::System,
+                        id: "expiry".into(),
+                    },
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                approval_id = %id,
+                error = %e,
+                "approval expiry journaled but its event-log entry failed",
+            );
+        }
+        Ok(())
     }
 
     /// Expires every single-use grant the agent never redeemed, and tells the
@@ -1873,6 +2150,15 @@ impl CompanyRuntime {
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
                 at_millis: p.at_millis,
+                // Issue #971: the deadline, filled in at the single projection
+                // point so every reader gets the same one. Read off the gate
+                // rather than recomputed from `[policy]`, because the gate is
+                // where the `None`-means-default rule resolves and a second
+                // resolution of it is a second thing that can disagree — the
+                // card would then promise a deadline the gate does not enforce.
+                expires_at_millis: Some(
+                    p.at_millis.saturating_add(self.approval_gate.ttl_millis()),
+                ),
                 task: p.task,
                 agent: p.effect.agent.clone(),
                 payload: crate::runtime::approval_display::display_payload(&p.effect),
@@ -2311,66 +2597,10 @@ mod tests {
         (runtime, record, home)
     }
 
+    /// The shared workflow-wiring fixture, re-exported under the name these
+    /// tests already use.
     #[cfg(feature = "openhuman")]
-    fn wiring_deps(
-        runtime: &super::CompanyRuntime,
-        meter: Option<Arc<dyn crate::ports::UsageMeter>>,
-        capabilities: crate::harness::toolbelt::CapabilityFilter,
-        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
-    ) -> crate::harness::HarnessDeps {
-        crate::harness::HarnessDeps {
-            ledgers: None,
-            ledger_registry: Default::default(),
-            provider: Arc::new(crate::harness::provider::MockProvider::default()),
-            provider_slug: "mock".to_string(),
-            serves: None,
-            context: runtime.context.clone(),
-            store: runtime.store.clone(),
-            meter,
-            workspace_root: std::env::temp_dir(),
-            workspace_git_enabled: false,
-            audit_root: std::env::temp_dir(),
-            model_override: None,
-            tasks: None,
-            artifacts: None,
-            skills: None,
-            skills_source_dir: None,
-            skills_registry: Arc::from([]),
-            mcp_servers: Vec::new(),
-            default_mcp_servers: Vec::new(),
-            facts: None,
-            events: None,
-            delegations: crate::harness::orchestrator::DelegationQueue::default(),
-            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
-            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
-            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
-            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
-            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
-            run_output_store: None,
-            workflow_revisions: None,
-            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
-            secrets: None,
-            web_allowed_domains: Vec::new(),
-            capabilities,
-            workflow_source_dir: None,
-            plan,
-            media: None,
-            composio: None,
-            #[cfg(feature = "chargebee")]
-            chargebee: None,
-            #[cfg(feature = "paypal")]
-            paypal: None,
-            hosting: None,
-            search: None,
-            steer: crate::company::steer::InflightRegistry::default(),
-            run_supervisor: crate::runtime::RunSupervisor::default(),
-            delivery: None,
-            workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
-        }
-    }
+    use crate::harness::workflow_wiring_deps as wiring_deps;
 
     #[cfg(feature = "openhuman")]
     #[tokio::test]
@@ -2422,6 +2652,112 @@ mod tests {
         assert!(!namespaces.contains("web"));
         assert!(!namespaces.contains("code"));
         assert_eq!(*meter.queried_companies.lock().unwrap(), vec![record.id]);
+    }
+
+    /// Issue #874: the wiring carries **why** a namespace is out, not just that
+    /// it is — the two reasons `refusal_for` renders at run time, so a caller
+    /// (the `tool-slugs` route) can tell an operator "no provider configured"
+    /// apart from "your capability tier filtered it" before a run fails.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_names_why_each_namespace_is_unwired() {
+        let (mut runtime, record, _home) = runtime_and_record().await;
+        // `wiring_deps` leaves `search: None` — the staging shape in issue #874,
+        // where `searchCredentialConfigured` was false — and we deny `web` on top
+        // so both reasons appear in one map.
+        runtime.set_workflow_harness_deps(wiring_deps(
+            &runtime,
+            None,
+            crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(
+                ["web"].into_iter().collect(),
+            ),
+            None,
+        ));
+        let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
+        assert_eq!(
+            wiring.missing.get("search").copied(),
+            Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured),
+            "no search backend is configured: {:?}",
+            wiring.missing
+        );
+        assert_eq!(
+            wiring.missing.get("web").copied(),
+            Some(crate::workflows::caps::MissingReason::CapabilityTierFiltered),
+            "web is denied by the capability filter: {:?}",
+            wiring.missing
+        );
+        assert!(
+            !wiring.missing.contains_key("shell"),
+            "a wired namespace carries no reason: {:?}",
+            wiring.missing
+        );
+    }
+
+    /// Issue #874, the staging repro at the layer the route reads: a company that
+    /// explicitly grants `search` on a deployment with **no** search backend must
+    /// not be offered `web_search` for grounding — it must be reported as granted
+    /// but unwired instead, so the copilot cannot author a node that dies at the
+    /// first run.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_granted_but_unwired_tool_is_reported_not_offered() {
+        let (mut runtime, mut record, _home) = runtime_and_record().await;
+        record.manifest.tools.allow.push("search".to_string());
+        record.manifest.tools.allow.push("shell".to_string());
+        runtime.set_workflow_harness_deps(wiring_deps(
+            &runtime,
+            None,
+            crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            None,
+        ));
+        let wiring = runtime.workflow_tool_wiring(&record).await;
+        let wired = wiring.as_ref().map(|w| &w.wired_namespaces);
+
+        let effective = crate::company::workflow_effective_tool_slugs(&record, wired);
+        let unwired = crate::company::workflow_granted_but_unwired_tool_slugs(&record, wired);
+        assert!(
+            !effective.iter().any(|slug| slug == "web_search"),
+            "an unwired search tool is not offered for grounding: {effective:?}"
+        );
+        assert!(
+            unwired.iter().any(|slug| slug == "web_search"),
+            "…but it IS reported as granted-and-unwired: {unwired:?}"
+        );
+        assert!(
+            effective.iter().any(|slug| slug == "shell"),
+            "a granted AND wired tool is still offered: {effective:?}"
+        );
+        // The two lists partition the granted set: nothing may appear in both, or
+        // a caller grounding on one and warning from the other contradicts itself.
+        assert!(
+            !effective.iter().any(|slug| unwired.contains(slug)),
+            "effective {effective:?} and unwired {unwired:?} overlap"
+        );
+    }
+
+    /// The other half of the honesty split: with no harness deps the wiring is
+    /// *unknowable*, so every granted tool stays offered and nothing is claimed
+    /// to be unwired. Reporting "all granted tools are broken" on a host that
+    /// simply cannot say would be the worse failure.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn unknowable_wiring_offers_the_grant_only_set_and_reports_nothing_unwired() {
+        let (runtime, mut record, _home) = runtime_and_record().await;
+        record.manifest.tools.allow.push("search".to_string());
+        let wiring = runtime.workflow_tool_wiring(&record).await;
+        assert!(wiring.is_none(), "no harness deps means no wiring answer");
+        let wired = wiring.as_ref().map(|w| &w.wired_namespaces);
+
+        assert!(
+            crate::company::workflow_effective_tool_slugs(&record, wired)
+                .iter()
+                .any(|slug| slug == "web_search"),
+            "a granted tool is still offered when the deployment cannot be asked"
+        );
+        assert!(
+            crate::company::workflow_granted_but_unwired_tool_slugs(&record, wired).is_empty(),
+            "nothing is claimed unwired when the deployment cannot be asked"
+        );
     }
 
     /// Issue #86: the kill switch's boot decision, including the direction it
@@ -2649,6 +2985,7 @@ mod tests {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2741,6 +3078,7 @@ mod tests {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,

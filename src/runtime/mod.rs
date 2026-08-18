@@ -75,6 +75,10 @@ pub mod grants;
 pub mod handover;
 pub mod journal;
 pub mod mailbox_poller;
+/// Issue #971: [`MaintenanceTicker`] — the process-wide minute loop that retires
+/// expired approvals, expired grants and stale fire claims for EVERY registered
+/// company, not only those with a manifest `[[schedule]]`. See [`maintenance`].
+pub mod maintenance;
 /// Issue #290: replacing a registered company's runtime in place, so first-time
 /// BYOK setup takes effect without a process restart. See [`rebuild`].
 pub mod rebuild;
@@ -89,13 +93,22 @@ pub mod repo_manager;
 /// still stop, so `POST …/workflows/runs/{runId}/cancel` has something to reach.
 /// Compiled in every build: it is a plain map of stop signals and touches no
 /// engine. See [`run_supervisor`].
+pub mod run_events;
 pub mod run_supervisor;
 pub mod scheduler;
 /// Issue #203: the Telegram `getUpdates` long-polling listener — the inbound
 /// path that needs no public URL, mirroring OpenHuman. See [`telegram_poller`].
 pub mod telegram_poller;
 pub mod tools;
+/// Issue #983: settling chat turns a previous host process left open, the
+/// transcript-side twin of the run reaper. See [`turn_sweep`].
+pub mod turn_sweep;
 pub mod types;
+/// Issue #978: which gate node each parked workflow approval is deciding, and
+/// the trigger input its run paused with — the two facts a run-scoped
+/// continuation needs and the journal cannot give back once an approval has
+/// resolved. See [`workflow_gates`].
+pub mod workflow_gates;
 /// Issue #228: the single place a finished workflow run is journaled, shared by
 /// the console's run route and the cron [`WorkflowScheduler`] so a run's history
 /// is uniform no matter what started it. See [`workflow_outcome`].
@@ -120,11 +133,15 @@ pub mod workspace_quota;
 pub use advance::{SYSTEM_ATTRIBUTION, advance_settled_card, append_result};
 pub use board_events::{BoardAnnouncer, CHANGE_OPENED, CHANGE_REMOVED, CHANGE_UPDATED};
 pub use builder::{RuntimeBuilder, company_id_from_name};
-pub use channel::{DeskChannel, OPERATOR_CHANNEL, OperatorChannel};
+pub use channel::{
+    DeskChannel, OPERATOR_CHANNEL, OperatorChannel, is_deliverable_channel,
+    undeliverable_channel_message,
+};
 pub use cron::{CivilTime, CronExpr};
 pub use cycle::CycleRunner;
 pub use derived_guard::DerivedGuardWorkspace;
 pub use handover::RuntimeHandover;
+pub use maintenance::MaintenanceTicker;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;
 #[cfg(feature = "github")]
@@ -136,6 +153,7 @@ pub use scheduler::{
     missed_instant,
 };
 pub use tools::StubToolProvider;
+pub use turn_sweep::{TURN_INTERRUPTED_BY_RESTART, sweep_interrupted_turns};
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
 pub use workflow_outcome::{
     delivered_by_unsettled_runs, record_run_finished, sweep_interrupted_runs,

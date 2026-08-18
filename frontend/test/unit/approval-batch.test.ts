@@ -115,4 +115,26 @@ describe("buildTimelineItems — batching a turn's gated calls (#842)", () => {
 
     expect(items[0].decided).toEqual({ a1: "approve", a2: "deny" });
   });
+
+  it("keeps a fully settled turn as one transcript entry", () => {
+    const espn = approval({ id: "a1", batch: "turn-1" });
+    const bbc = approval({ id: "a2", batch: "turn-1", at_millis: T0 + 1 });
+    const guardian = approval({ id: "a3", batch: "turn-1", at_millis: T0 + 2 });
+
+    const items = cards(
+      buildTimelineItems(
+        [],
+        [espn, bbc, guardian],
+        decidedMap([
+          [espn, "approve"],
+          [bbc, "approve"],
+          [guardian, "approve"],
+        ]),
+      ),
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0].approvals).toHaveLength(3);
+    expect(items[0].decided).toEqual({ a1: "approve", a2: "approve", a3: "approve" });
+  });
 });

@@ -798,18 +798,26 @@ impl RunStore for FsOps {
                 spec.id
             )));
         }
-        let attempt = runs
-            .iter()
-            .filter(|r| r.task_id == spec.task_id)
-            .map(|r| r.attempt)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
+        // A card-less run (issue #983) is always attempt 1: the ordinal counts
+        // attempts *at a card*, and with no card there is nothing for a second
+        // attempt to be the second of. Folding them all into one anonymous
+        // bucket would make every chat turn the Nth attempt at nothing.
+        let attempt = match &spec.task_id {
+            Some(task_id) => runs
+                .iter()
+                .filter(|r| r.task_id.as_deref() == Some(task_id.as_str()))
+                .map(|r| r.attempt)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            None => 1,
+        };
         let run = RunRecord {
             id: spec.id,
             company: company.clone(),
             task_id: spec.task_id,
             agent_id: spec.agent_id,
+            chat_id: spec.chat_id,
             attempt,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2331,6 +2339,14 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_run_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    /// A run row written before `task_id` could be absent still loads
+    /// (issue #983). Backend-independent — see the assertion's own docs — so it
+    /// is driven from the one backend every lane builds.
+    #[test]
+    fn conformance_legacy_run_row_loads() {
+        conformance::assert_legacy_run_row_loads();
     }
 
     #[tokio::test]

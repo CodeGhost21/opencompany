@@ -55,21 +55,40 @@ import { approvedLine } from "@/lib/approval-wording";
 import { approvalAction, payloadLines } from "@/lib/language";
 import { cn } from "@/lib/utils";
 
-/** What the card says once a verdict has been witnessed. */
-function settledLabel(verdict: Verdict): string {
-  // Mirrors the wording the Approvals page files into the transcript, and for
-  // the same reason: approving is not "done", it hands the agent a single-use
-  // grant and re-dispatches it. A decline IS terminal.
-  //
-  // `undefined` rather than a count, because this card is not the surface that
-  // made the request — the verdict reaches it through the witnessed map, which
-  // carries no `stillAwaiting`. It therefore cannot know whether this decision
-  // released the turn, and issue #561 is precisely about not guessing: on a
-  // turn that parked four calls, three of four approves release nothing, and
-  // this sentence claimed otherwise for every one of them.
-  return verdict === "approve"
-    ? approvedLine(undefined)
-    : "Declined — recorded, and nothing will run";
+/** One count written with the noun it qualifies. */
+function actionCount(count: number): string {
+  return `${count} action${count === 1 ? "" : "s"}`;
+}
+
+/**
+ * The one permanent receipt a fully settled turn leaves in the transcript
+ * (#970).
+ *
+ * A batch's individual decisions are clicks; the turn only resumes once, when
+ * the last one lands. By the time every item is in `decided`, that final
+ * decision has happened, so this is the only point in chat that may honestly
+ * say the agent is picking the work up. The toast and Approvals page remain
+ * per-click feedback — this is deliberately the shared-channel summary.
+ */
+function settledReceipt(approvals: ApprovalSummary[], decided: Record<string, Verdict>): string {
+  const approved = approvals.filter((a) => decided[a.id] === "approve").length;
+  const declined = approvals.length - approved;
+
+  // Preserve #561's established singular wording exactly. A one-action turn
+  // earns no extra count or disclosure furniture. `undefined`, not `0`: this
+  // card only knows its own item settled, not that the turn's stillAwaiting
+  // count is zero — a sibling approval elsewhere in the same turn could still
+  // be open, and claiming "picking it up now" here would be a guess.
+  if (approvals.length === 1) {
+    return approved === 1 ? approvedLine(undefined) : "Declined — recorded, and nothing will run";
+  }
+  if (approved === approvals.length) {
+    return `Approved ${actionCount(approved)} — the agent is picking it up now`;
+  }
+  if (declined === approvals.length) {
+    return `Declined ${actionCount(declined)} — the agent will not take them`;
+  }
+  return `Approved ${actionCount(approved)} and declined ${actionCount(declined)} — the agent is picking it up now`;
 }
 
 /**
@@ -210,6 +229,16 @@ export function ApprovalRow({
     </>
   );
 
+  // Keep a completed turn visible, but compact it into one receipt instead of
+  // leaving a full approval form permanently embedded in every shared channel.
+  // The disclosure preserves the individual verdicts without making them the
+  // transcript's primary story.
+  if (done) {
+    return (
+      <SettledApprovalReceipt approvals={approvals} decided={decided} />
+    );
+  }
+
   return (
     <div className="px-4 py-2">
       <div
@@ -217,12 +246,7 @@ export function ApprovalRow({
         aria-label={approvals.length > 1 ? "Approval request for several actions" : "Approval request"}
         data-approval-id={lead.id}
         data-approval-count={approvals.length}
-        className={cn(
-          "rounded-xl border bg-card px-4 py-3 shadow-sm",
-          // A settled card steps back rather than disappearing: the operator
-          // has to be able to see their own decision land.
-          done && "opacity-70",
-        )}
+        className="rounded-xl border bg-card px-4 py-3 shadow-sm"
       >
         <div className="flex flex-col gap-3">
           {approvals.length > 1 ? (
@@ -283,14 +307,7 @@ export function ApprovalRow({
             now={now}
             askerNames={askerNames}
             status={
-              done
-                ? approvals.length > 1
-                  ? `All ${approvals.length} decided`
-                  : // A single-item card says what it always said. `pending` is
-                    // empty here, so the lead's verdict is present — the `??`
-                    // only satisfies the type, it is not a reachable state.
-                    settledLabel(decided[lead.id] ?? "deny")
-                : busy
+              busy
                   ? awaiting("approve")
                     ? "Waiting for the agent…"
                     : "Recording…"
@@ -307,6 +324,50 @@ export function ApprovalRow({
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The compact, inspectable receipt a settled turn leaves in chat (#970). */
+function SettledApprovalReceipt({
+  approvals,
+  decided,
+}: {
+  approvals: ApprovalSummary[];
+  decided: Record<string, Verdict>;
+}) {
+  const lead = approvals[0];
+  const multiple = approvals.length > 1;
+
+  return (
+    <div className="px-4 py-2">
+      <section
+        aria-label={multiple ? "Approval receipt for several actions" : "Approval receipt"}
+        data-approval-receipt="true"
+        data-approval-id={lead.id}
+        data-approval-count={approvals.length}
+        className="rounded-xl border bg-card px-4 py-3 text-sm shadow-sm"
+      >
+        <p className="font-medium">{settledReceipt(approvals, decided)}</p>
+        {multiple && (
+          <details className="mt-2">
+            <summary className="cursor-pointer text-xs text-muted-foreground">
+              Show individual decisions
+            </summary>
+            <ul className="mt-2 flex flex-col gap-1.5">
+              {approvals.map((approval) => (
+                <BatchItem
+                  key={approval.id}
+                  approval={approval}
+                  verdict={decided[approval.id] ?? null}
+                  deciding={null}
+                  failure={null}
+                />
+              ))}
+            </ul>
+          </details>
+        )}
+      </section>
     </div>
   );
 }
