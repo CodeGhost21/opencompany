@@ -99,50 +99,38 @@ export function appendExample(current: string, example: string): string {
 }
 
 /**
- * What we heard in the industry answer, as chips the operator can drop.
+ * The jobs the operator named, split the way the **host** splits them.
  *
- * Two jobs, and the second is the important one. It sharpens the prompt, yes —
- * but mostly it *proves they were heard* immediately after the one question they
- * put effort into. A flow that swallows a sentence and moves on feels like a
- * form; one that repeats it back feels like a conversation.
+ * ## This replaced a keyword guess, and that is the point
  *
- * Inferred with the same vocabulary the host matches templates on, so a chip can
- * never claim a reading the host would not make.
+ * What stood here was `inferSignals` — a regex over a hand-copied duplicate of
+ * the host's template keywords, rendering chips like "e-commerce · physical
+ * products" under the first question. It claimed the product had *understood*
+ * them, before anything had read a word: the chips were never sent anywhere,
+ * never reached the prompt, and never touched the roster. And the duplicated
+ * keyword list drifted from the host's within a week of being written.
+ *
+ * This does a smaller thing honestly. It is not inference — it is their own
+ * words, split on the separators they typed, shown back so they can see the
+ * checklist the roster will be judged against. The host runs the identical rule
+ * (`job_items` in `src/company/setup.rs`), and
+ * `tests/fixtures/setup-jobs.json` is what stops the two drifting: both test
+ * suites read that file, so a change to either rule fails the other's tests.
+ *
+ * `MAX_JOBS` mirrors the host's cap. Past it a checklist is a backlog.
  */
-export const INDUSTRY_SIGNALS: readonly { chip: string; any: readonly string[] }[] = [
-  {
-    chip: "e-commerce",
-    // Mirrors the host's own ECOMMERCE keywords (`src/company/setup.rs`), goods
-    // included: it matches `homeware` as e-commerce, so a chip that read the
-    // same sentence as "physical products" only would under-report what the
-    // host is about to do with it.
-    any: [
-      "ecommerce",
-      "e-commerce",
-      "online store",
-      "shopify",
-      "etsy",
-      "storefront",
-      "dropship",
-      "retail",
-      "homeware",
-      "apparel",
-      "merch",
-    ],
-  },
-  { chip: "physical products", any: ["homeware", "apparel", "merch", "stock", "inventory", "shipping", "dispatch"] },
-  { chip: "content", any: ["content", "creator", "youtube", "instagram", "tiktok", "newsletter", "podcast", "blog"] },
-  { chip: "clients", any: ["agency", "client", "clients", "retainer", "consulting", "consultancy"] },
-  { chip: "software", any: ["software", "saas", "app", "platform", "api", "developer"] },
-  { chip: "services", any: ["studio", "salon", "clinic", "practice", "bookings", "appointments"] },
-];
+export const MAX_JOBS = 12;
 
-/** The signals present in an answer, in declaration order, de-duplicated. */
-export function inferSignals(industry: string): string[] {
-  const hay = industry.toLowerCase();
-  const hit = (needle: string) =>
-    new RegExp(`\\b${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "i").test(hay);
-  return INDUSTRY_SIGNALS.filter((s) => s.any.some(hit)).map((s) => s.chip);
+export function jobItems(automate: string): string[] {
+  const items: string[] = [];
+  for (const raw of automate.split(/[,;\n\r]/)) {
+    const item = raw.trim().replace(/\.+$/, "").trim();
+    if (!item) continue;
+    if (items.some((seen) => seen.toLowerCase() === item.toLowerCase())) continue;
+    items.push(item);
+    if (items.length >= MAX_JOBS) break;
+  }
+  return items;
 }
 
 /** The three answers, as the form holds them. */

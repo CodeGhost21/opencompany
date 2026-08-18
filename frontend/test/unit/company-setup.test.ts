@@ -1,10 +1,14 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import type { TeamMemberDto } from "@/api/types";
 import {
   SETUP_STEPS,
+  MAX_JOBS,
   appendExample,
-  inferSignals,
+  jobItems,
   buildOutLabel,
   draftIsSubmittable,
   emptySetupDraft,
@@ -156,39 +160,44 @@ describe("buildOutLabel", () => {
   });
 });
 
-describe("industry signals", () => {
+describe("the job checklist", () => {
   /**
-   * The chips exist to prove the operator was heard, so they must actually
-   * reflect what was typed rather than fire on everything.
+   * The rule that replaced `inferSignals`.
+   *
+   * The old chips were a regex over a hand-copied duplicate of the host's
+   * template keywords, claiming the product had *understood* the operator
+   * before anything had read a word — the chips were never sent anywhere and
+   * never touched the roster. This does a smaller thing honestly: it splits
+   * their own words the way the host splits them, so the checklist the roster is
+   * judged against is one they can see.
+   *
+   * Driven by the SAME fixture the Rust test reads. Two implementations of one
+   * rule is precisely how the keyword list drifted, and this file is what stops
+   * it happening twice.
    */
-  it("reads the obvious signals out of a sentence", () => {
-    expect(inferSignals("E-commerce — I sell homeware online")).toEqual([
-      "e-commerce",
-      "physical products",
-    ]);
-    expect(inferSignals("I run a YouTube channel and a newsletter")).toEqual(["content"]);
-    expect(inferSignals("a small marketing agency with retainer clients")).toEqual(["clients"]);
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("../../../tests/fixtures/setup-jobs.json", import.meta.url)),
+      "utf8",
+    ),
+  ) as {
+    maxJobs: number;
+    cases: { why: string; input: string; items: string[] }[];
+  };
+
+  it("agrees with the host about the cap", () => {
+    expect(MAX_JOBS).toBe(fixture.maxJobs);
   });
 
-  /** A blended business should surface both, not pick a winner. */
-  it("keeps every signal in a blended answer", () => {
-    const signals = inferSignals("I sell homeware online and run a YouTube channel");
-    expect(signals).toContain("e-commerce");
-    expect(signals).toContain("content");
+  it("has cases to assert on at all", () => {
+    expect(fixture.cases.length).toBeGreaterThan(0);
   });
 
-  /** Silence is better than a wrong chip: claiming to have heard something
-   * that was never said is worse than showing nothing. */
-  it("says nothing when it recognises nothing", () => {
-    expect(inferSignals("zzzz qqqq")).toEqual([]);
-    expect(inferSignals("")).toEqual([]);
-  });
-
-  /** The regression the host has too: a chip must not fire on a substring of
-   * an unrelated word. */
-  it("matches on word starts, not substrings", () => {
-    expect(inferSignals("research into materials")).not.toContain("e-commerce");
-  });
+  for (const testCase of fixture.cases) {
+    it(testCase.why, () => {
+      expect(jobItems(testCase.input)).toEqual(testCase.items);
+    });
+  }
 });
 
 describe("appendExample", () => {

@@ -135,10 +135,18 @@ export interface DesignedCompany {
   adminEmail?: string | null;
 }
 
-export interface DesignedAgent {
-  name: string;
+export interface DesignedAgent {  name: string;
   role: string;
   description: string;
+  /**
+   * The job shape the design pass assigned, carried back untouched.
+   *
+   * This is what narrows the teammate's tool belt on the host. Dropping it here
+   * would silently hand every designed agent the company-wide belt — which is
+   * `["*", "media", "composio"]` by default, i.e. real-money media and
+   * per-tenant credentials — so the round trip is load-bearing, not incidental.
+   */
+  focus?: string | null;
 }
 
 /** One agent the host proposes for a company that does not exist yet. */
@@ -146,6 +154,15 @@ export interface SetupRosterAgent {
   name: string;
   role: string;
   description: string;
+  /**
+   * The job shape that decides this teammate's tool belt on the host
+   * (`AgentFocus` in `src/company/setup.rs`).
+   *
+   * Carried, never shown and never edited. The console has no business picking
+   * a permission boundary; round-tripping it untouched is what makes the belt
+   * an operator approves on the review screen the belt they actually get.
+   */
+  focus?: string | null;
 }
 
 /** What `POST /api/v1/setup/roster` answers. */
@@ -155,6 +172,23 @@ export interface SetupRoster {
   template: string;
   /** `model` — designed from the answers. `fallback` — the curated team. */
   source: "model" | "fallback";
+  /**
+   * The jobs the operator named, as the **host** split them.
+   *
+   * Echoed on the review screen so the list the roster was judged against is the
+   * list they can see — a bad split is visible to the person who typed it rather
+   * than silently shaping a prompt.
+   */
+  jobs?: string[];
+  /**
+   * The jobs no teammate on this roster owns.
+   *
+   * Non-empty only when `source` is `"model"`: coverage is a claim the design
+   * pass makes and the host checks against its own list, by set maths. A curated
+   * team was chosen by keyword and never read the list, so it claims nothing
+   * about it.
+   */
+  uncovered?: string[];
 }
 
 /**

@@ -52,7 +52,7 @@ import {
   AUTOMATE_EXAMPLES,
   appendExample,
   emptySetupDraft,
-  inferSignals,
+  jobItems,
   type SetupDraft,
 } from "@/lib/company-setup";
 import { cn } from "@/lib/utils";
@@ -1031,7 +1031,12 @@ function ReviewStep({
     return (
       <div className="flex flex-col items-center gap-3 py-12" data-testid="setup-designing">
         <Loader2 className="size-6 animate-spin text-primary" />
-        <p className="text-sm text-muted-foreground">Designing your team…</p>
+        {/* Not "Designing your team…". The console cannot know which path the
+            host will take, and on a laptop with no credential nothing designs
+            anything — the curated team comes back in milliseconds under a word
+            that claimed a model had read their answers. This is true either
+            way; the review screen then says which actually happened. */}
+        <p className="text-sm text-muted-foreground">Putting your team together…</p>
       </div>
     );
   }
@@ -1125,6 +1130,40 @@ function ReviewStep({
             A company needs at least one teammate. Add one back, or start again.
           </AlertDescription>
         </Alert>
+      )}
+
+      {/* What the host checked, reported whichever way it came out.
+          The checklist is the operator's own words, split by the host, and the
+          verdict is set maths over that list — not the design pass's opinion of
+          its own work. Reporting only the good case would make this decoration;
+          the gap is the half worth showing, because it is the one they can do
+          something about. */}
+      {roster.source === "model" && (roster.jobs?.length ?? 0) > 0 && (
+        <div
+          className="rounded-lg border p-3 text-sm"
+          data-testid="setup-coverage"
+        >
+          {(roster.uncovered?.length ?? 0) === 0 ? (
+            <p className="text-muted-foreground">
+              Every job you listed has an owner on this team.
+            </p>
+          ) : (
+            <>
+              <p className="font-medium">Nobody owns this yet</p>
+              <ul className="mt-1.5 space-y-1 text-muted-foreground">
+                {roster.uncovered?.map((job) => (
+                  <li key={job} data-testid="setup-uncovered-job">
+                    {job}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-[13px] leading-snug text-muted-foreground">
+                You can still continue — add someone for it here, or later from
+                the team page.
+              </p>
+            </>
+          )}
+        </div>
       )}
 
       {/* Stated, not asked. Nobody five screens in can answer a governance
@@ -1267,7 +1306,7 @@ function BusinessStep({
   onChange: (update: (d: SetupDraft) => SetupDraft) => void;
   onEnter: () => void;
 }) {
-  const signals = inferSignals(draft.industry);
+  const jobs = jobItems(draft.automate);
 
   return (
     <div className="space-y-7">
@@ -1294,18 +1333,6 @@ function BusinessStep({
             if (e.key === "Enter") onEnter();
           }}
         />
-        {/* Proof they were heard, right where they typed it. Silent when
-            nothing was recognised — a wrong chip is worse than no chip. */}
-        {signals.length > 0 && (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5" data-testid="setup-signals">
-            <span className="text-xs text-muted-foreground">Sounds like</span>
-            {signals.map((signal) => (
-              <Badge key={signal} variant="secondary">
-                {signal}
-              </Badge>
-            ))}
-          </div>
-        )}
       </div>
 
       <div>
@@ -1339,6 +1366,15 @@ function BusinessStep({
             </button>
           ))}
         </div>
+        {/* Their own words, split the way the host splits them — not a guess at
+            what they meant. This is the checklist the roster is judged against,
+            so showing it here is what makes a bad split fixable by the person
+            who typed it rather than a silent input to a prompt. */}
+        {jobs.length > 1 && (
+          <p className="mt-2 text-[13px] leading-snug text-muted-foreground" data-testid="setup-jobs">
+            {jobs.length} jobs — each one needs an owner on your team.
+          </p>
+        )}
       </div>
 
       <div>

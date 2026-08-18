@@ -22,6 +22,15 @@ export interface ProposedAgent {
   name: string;
   role: string;
   description: string;
+  /**
+   * The job shape that decides this teammate's tool belt on the host
+   * (`AgentFocus` in `src/company/setup.rs`).
+   *
+   * Carried, never shown and never edited. The console has no business choosing
+   * a permission boundary, and round-tripping it untouched is what makes the
+   * belt an operator approves on the review screen the belt they get.
+   */
+  focus?: string | null;
 }
 
 export interface RosterProposal {
@@ -44,6 +53,22 @@ export interface RosterProposal {
    * produced.
    */
   source: "model" | "fallback";
+  /**
+   * The jobs the operator named, as the **host** split them.
+   *
+   * Echoed on the review screen so the list the roster was judged against is the
+   * list they can see — a bad split is then visible to the person who typed it,
+   * rather than silently shaping a prompt.
+   */
+  jobs?: string[];
+  /**
+   * The jobs no teammate on this roster owns.
+   *
+   * Non-empty only when `source` is `"model"`: coverage is a claim the design
+   * pass makes and the host checks against its own list. A curated team was
+   * chosen by keyword and never read the list, so it claims nothing about it.
+   */
+  uncovered?: string[];
 }
 
 /**
