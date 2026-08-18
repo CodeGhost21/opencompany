@@ -2986,15 +2986,6 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
     }
 }
 
-        prompt: None,
-        prompt_files: Vec::new(),
-        prompt_files_resolved: Vec::new(),
-        classes: Vec::new(),
-        ledgers: None,
-        can_declare_ledgers: true,
-    }
-}
-
 /// A minimal [`HarnessDeps`] for tests that only care about **workflow-tool
 /// wiring**: which namespaces a `tool_call` can reach, and why the others cannot.
 ///
