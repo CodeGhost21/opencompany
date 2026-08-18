@@ -1490,16 +1490,49 @@ pub(crate) async fn set_company_workflow_enabled(
     // host cannot read is exactly the kind an operator most wants to stop, and
     // refusing would leave them nothing to do about it. It just journals under
     // its id.
-    let name = crate::company::load_workflow_with_globals(
+    let file = crate::company::load_workflow_with_globals(
         source_dir,
         &record.overlay_workflows,
         &record.manifest.globals.disable,
         wid,
     )
     .ok()
-    .flatten()
-    .map(|file| file.name)
-    .unwrap_or_else(|| wid.to_string());
+    .flatten();
+    let name = file
+        .as_ref()
+        .map(|file| file.name.clone())
+        .unwrap_or_else(|| wid.to_string());
+
+    // Issue #976: arming is where the promise is made, so it is where the
+    // promise is checked. A stage-less graph with a schedule fires on time, runs
+    // nothing and reports nothing — `campaign` on staging is exactly that, one
+    // resume away from a schedule it cannot keep.
+    //
+    // **Refused here rather than at save, deliberately.** Saving a stub
+    // mid-authoring is legitimate and the module is built for it: `parse_workflow`
+    // was made lenient on purpose (#661) so the console can drop a trigger and
+    // add stages afterwards, and refusing an empty graph at save would also
+    // refuse every existing seed and legacy body on its next edit. Saving
+    // promises nothing; switching a schedule on promises that something happens.
+    // This is also the human gate #276 already forces a scheduled graph through,
+    // and it has the parsed graph in hand for the journal name above — so the
+    // check costs no extra load.
+    //
+    // Only `enabled`, and only when a schedule is what is being armed. Switching
+    // such a workflow OFF stays allowed: an operator must always be able to stop
+    // a thing, which is the same call the unparseable-body case above makes.
+    // A manual (unscheduled) graph is left alone — running a stub by hand is the
+    // author's own business, and the run says so through
+    // [`STAGELESS_WORKFLOW_NOTICE`](crate::company::STAGELESS_WORKFLOW_NOTICE).
+    if enabled
+        && let Some(file) = file.as_ref()
+        && file.trigger_schedule().is_some()
+        && !file.has_runnable_node()
+    {
+        return Err(OpenCompanyError::InvalidRequest(
+            crate::company::STAGELESS_SCHEDULE_REFUSAL.to_string(),
+        ));
+    }
 
     if !record.set_workflow_enabled(wid, enabled) {
         return Ok(false);
@@ -2495,6 +2528,138 @@ to = "done"
                 .await
                 .expect_err("name collides with the overlay body");
         assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+    }
+
+    /// A graph whose only node is its trigger, carrying a schedule — the
+    /// `campaign` shape from staging (issue #976).
+    fn stageless_scheduled_draft(id: &str, name: &str) -> RawWorkflow {
+        let mut draft = valid_draft(id, name);
+        // Keep only the trigger, and put a schedule on it. This is what the
+        // console produces when somebody drops a Start node, sets a cron, and
+        // saves before adding any stage.
+        draft.nodes.retain(|n| n.kind == "trigger");
+        draft.edges.clear();
+        draft.nodes[0].schedule = Some("0 9 * * *".to_string());
+        draft
+    }
+
+    /// Saving one is **allowed**, and that is the deliberate half of the fix.
+    /// Authoring is incremental: the console drops a Start node first and adds
+    /// stages after, `parse_workflow` was made lenient on purpose (#661) to
+    /// support exactly that, and refusing at save would also refuse every
+    /// existing seed and legacy body on its next edit.
+    #[tokio::test]
+    async fn a_stageless_graph_still_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            stageless_scheduled_draft("campaign", "Campaign"),
+        )
+        .await
+        .expect("a stub mid-authoring is legitimate and must save");
+    }
+
+    /// ...but switching its schedule on is refused. Arming is where the promise
+    /// is made, so it is where the promise is checked: resume this and it fires
+    /// on time, runs nothing, and reports nothing.
+    #[tokio::test]
+    async fn arming_a_stageless_schedule_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            stageless_scheduled_draft("campaign", "Campaign"),
+        )
+        .await
+        .expect("saves");
+
+        let err = set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "campaign",
+            true,
+        )
+        .await
+        .expect_err("a schedule that cannot run must not be armed");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("no stage to run"),
+            "the operator is told WHAT is wrong: {rendered}"
+        );
+        assert!(
+            rendered.contains("Add at least one node"),
+            "...and the one thing they can do about it: {rendered}"
+        );
+    }
+
+    /// Switching such a workflow **off** stays allowed. An operator must always
+    /// be able to stop a thing — the same call the unparseable-body case makes
+    /// — and a guard that trapped a workflow in the armed state would be worse
+    /// than the silence it replaced.
+    #[tokio::test]
+    async fn a_stageless_schedule_can_still_be_switched_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            stageless_scheduled_draft("campaign", "Campaign"),
+        )
+        .await
+        .expect("saves");
+
+        set_company_workflow_enabled(&company, Some(dir.path()), &store, None, "campaign", false)
+            .await
+            .expect("pausing must never be refused");
+    }
+
+    /// A graph with a real stage arms normally. Without this the refusal above
+    /// would pass against a build that refused every schedule.
+    #[tokio::test]
+    async fn arming_a_scheduled_graph_with_a_stage_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        let mut draft = valid_draft("greeter", "Greeter");
+        draft.nodes[0].schedule = Some("0 9 * * *".to_string());
+        create_company_workflow(&company, Some(dir.path()), &store, None, draft)
+            .await
+            .expect("saves");
+
+        set_company_workflow_enabled(&company, Some(dir.path()), &store, None, "greeter", true)
+            .await
+            .expect("a graph that can actually run may be armed");
     }
 
     /// A manifest-`enabled` id with no body in either source is shown by the
