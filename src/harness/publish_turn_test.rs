@@ -1186,7 +1186,6 @@ fn chat(text: &str) -> CycleRequest {
             by: None,
             chat: None,
             parent: None,
-            planning_attempts: Vec::new(),
             deliverable: None,
         }],
         event_seqs: Vec::new(),

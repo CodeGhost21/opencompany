@@ -5902,7 +5902,6 @@ members = ["eng1", "eng2"]
                     text: "we should announce this".into(),
                     by: None,
                     chat: None,
-                    planning_attempts: Vec::new(),
                     deliverable: None,
                 }]),
                 &NoopHost,
