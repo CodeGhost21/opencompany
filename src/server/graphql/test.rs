@@ -1545,6 +1545,89 @@ async fn graphql_lists_a_company_override_of_a_global_id_by_its_own_content() {
     );
 }
 
+/// A company that opts out of a global workflow via `[globals].disable` must
+/// neither list it in `Company.workflows` nor resolve it through
+/// `Company.workflow(id)` — the same contract `crate::globals::test`'s
+/// `a_disabled_global_workflow_neither_lists_nor_loads` pins at the pure
+/// `list_workflows_with_globals` / `load_workflow_with_globals` layer, checked
+/// here through the actual GraphQL resolvers (`resolve_summaries` /
+/// `resolve_one`) instead of calling those functions directly.
+#[tokio::test]
+async fn graphql_hides_a_company_disabled_global_workflow() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    let dropped = crate::globals::workflows()[0].id.clone();
+    let kept = crate::globals::workflows()[1].id.clone();
+
+    let disabling_manifest: CompanyManifest = toml::from_str(&format!(
+        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\n\
+         [globals]\ndisable = [\"workflow:{dropped}\"]\n"
+    ))
+    .unwrap();
+
+    let store = FsCompanyStore::new(home.to_path_buf());
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: disabling_manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), disabling_manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    state.registry().insert(id, Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let value = query(
+        router(state),
+        &format!(
+            r#"{{"query":"{{ company(id:\"acme\"){{ workflows {{ id }} dropped: workflow(id:\"{dropped}\"){{ id }} kept: workflow(id:\"{kept}\"){{ id }} }} }}"}}"#
+        ),
+    )
+    .await;
+    let company = &value["data"]["company"];
+    let ids: Vec<&str> = company["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&dropped.as_str()),
+        "the disabled global must not be listed: {value}"
+    );
+    assert!(
+        ids.contains(&kept.as_str()),
+        "an unrelated global must still be listed: {value}"
+    );
+    assert!(
+        company["dropped"].is_null(),
+        "the disabled global must not resolve by id either: {value}"
+    );
+    assert!(
+        !company["kept"].is_null(),
+        "an unrelated global must still resolve by id: {value}"
+    );
+}
+
 /// `Company.workspaceSearch` (issue #607), over the same shared helper the REST
 /// route and the agent tool use.
 ///
