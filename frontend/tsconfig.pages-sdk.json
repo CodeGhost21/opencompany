@@ -4,5 +4,7 @@
     "composite": false,
     "noEmit": true
   },
-  "include": ["pages-sdk", "src"]
+  "include": [
+    "pages-sdk"
+  ]
 }
