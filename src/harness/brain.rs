@@ -60,6 +60,29 @@ const NO_TASK_STORE: &str = "this company has no task board wired, so the card c
 /// time the cycle reaches it (deleted, or never persisted).
 const CARD_VANISHED: &str = "the card was gone by the time its dispatch ran";
 
+/// The system bubble appended when a turn paused at its tool-iteration cap
+/// (issue #926).
+///
+/// Three things it must say, and one it must not:
+///
+/// - **It paused** — the reply above is a checkpoint, so it reads like a plan
+///   the agent simply chose not to carry out. QA reported this as agents
+///   "getting permanently stuck mid-task", which is what an unexplained pause
+///   looks like from the outside.
+/// - **Nothing failed** — a cap is a budget, not an error. Without saying so,
+///   the notice reads as a crash report for a turn that worked fine.
+/// - **How to carry on** — the operator's move is to reply.
+///
+/// What it must NOT do is promise the agent resumes where it left off. The
+/// pooled `Agent` keeps its history in memory, and `HarnessPool::ensure`
+/// rebuilds the agent whenever the roster / skill / MCP fingerprint moves — so
+/// "continue" is an instruction to the operator, phrased as a request to the
+/// agent, never a durability guarantee this layer cannot make.
+pub(crate) const ITERATION_CAP_PAUSE_NOTICE: &str = "\
+The reply above is a pause, not a finished answer: this turn reached the maximum number of steps \
+it may take for a single reply, so it stopped and wrote up where it had got to. Nothing errored — \
+the work so far stands. Reply \"continue\" to ask it to pick up from there.";
+
 use crate::harness::run_trace::RunTraceSink;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
@@ -2716,6 +2739,35 @@ impl HarnessBrain {
                         reply_to: None,
                         steps: operator_steps,
                     });
+                    // Issue #926: a turn that paused at its step cap says so,
+                    // in its own bubble.
+                    //
+                    // A SIBLING bubble rather than text appended to the reply,
+                    // for the reason the approval-overflow notice below gives:
+                    // the reply is the agent's answer and this is the system
+                    // saying the agent was cut off. Here that separation is
+                    // load-bearing rather than tidy — `HarnessPool::run`
+                    // persists `outcome.reply` to the context store, so
+                    // appending would write "you hit the step limit" into
+                    // memory and recall it as something the agent said in a
+                    // later turn.
+                    //
+                    // Unauthored (`agent: None`) for the same reason: no
+                    // teammate said this, and attributing it to the responder
+                    // would put the platform's words in its mouth. Empty steps
+                    // — the turn's timeline is already on the bubble above, and
+                    // repeating it would double every row in the console.
+                    if turn.hit_iteration_cap {
+                        channel_responses.push(OutboundMessage {
+                            message_id: None,
+                            task_id: None,
+                            channel: "operator".to_string(),
+                            agent: None,
+                            text: ITERATION_CAP_PAUSE_NOTICE.to_string(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                        });
+                    }
                     channel_responses.extend(turn.bubbles);
                 }
                 CompanyEvent::TaskDispatched { task_id, run_id } => {
