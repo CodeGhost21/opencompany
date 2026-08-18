@@ -152,6 +152,7 @@ mod tests {
         ApprovalSummary {
             id: ApprovalId::new("appr-1"),
             kind: "email.send".to_string(),
+            group: crate::ports::types::EffectGroup::Send,
             amount_usd: Some(2400.0),
             at_millis: 1_000,
             expires_at_millis: Some(87_400_000),
