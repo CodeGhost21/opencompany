@@ -1831,6 +1831,68 @@ mod tests {
         }
     }
 
+    /// An in-memory [`EventLog`] whose [`subscribe`](EventLog::subscribe) stream
+    /// actually delivers what [`append`](EventLog::append) writes — the property
+    /// [`MemLog`] above deliberately lacks (its `subscribe` is empty). This is
+    /// what lets a test stand in for the live SSE fan-out: the console's picker
+    /// re-reads off exactly this broadcast (issue #1045), so a create/delete
+    /// that reaches a live subscriber here is evidence that in-process delivery
+    /// is intact and a stale picker is a console-side defect, not a lost frame.
+    struct BroadcastMemLog {
+        tx: tokio::sync::broadcast::Sender<StoredEvent>,
+        next_seq: StdMutex<u64>,
+    }
+
+    impl BroadcastMemLog {
+        fn new() -> Self {
+            Self {
+                tx: tokio::sync::broadcast::channel(64).0,
+                next_seq: StdMutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EventLog for BroadcastMemLog {
+        async fn append(&self, id: &CompanyId, event: CompanyEvent) -> Result<EventSeq> {
+            let seq = {
+                let mut n = self.next_seq.lock().unwrap();
+                *n += 1;
+                *n
+            };
+            let stored = StoredEvent {
+                seq: EventSeq::new(seq),
+                company: id.clone(),
+                event,
+                at_millis: now_millis(),
+            };
+            // No live subscriber is not an error — a send with zero receivers
+            // just means nobody is watching yet.
+            let _ = self.tx.send(stored);
+            Ok(EventSeq::new(seq))
+        }
+        async fn read_from(
+            &self,
+            _id: &CompanyId,
+            _seq: EventSeq,
+            _limit: usize,
+        ) -> Result<Vec<StoredEvent>> {
+            Ok(Vec::new())
+        }
+        fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+            let rx = self.tx.subscribe();
+            Box::pin(stream::unfold(rx, |mut rx| async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => return Some((event, rx)),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            }))
+        }
+    }
+
     /// An in-memory [`WorkflowRevisionStore`] so the capture, prune, cascade and
     /// rollback behaviour can be asserted without a real backend. Pruning to the
     /// cap is applied on push, mirroring the durable backends.
@@ -3083,6 +3145,88 @@ to = "done"
                 assert_eq!(name, "Greeter");
             }
             other => panic!("expected WorkflowDeleted, got {other:?}"),
+        }
+    }
+
+    /// Issue #1045: the REST create/delete persist path puts
+    /// `WorkflowCreated` / `WorkflowDeleted` on a stream a **live subscriber**
+    /// actually receives — the in-process delivery the console's SSE picker
+    /// depends on. A green characterization: it locates the reported "graph
+    /// authored elsewhere stays invisible" defect on the console side, not in a
+    /// dropped host frame.
+    ///
+    /// The projection of these variants onto the `{type, workflowId, name}` wire
+    /// frame the console keys on is asserted next to `project_event` itself
+    /// (`server::operator` — `projects_workflow_created_without_the_actor`,
+    /// `projects_workflow_updated_and_deleted_without_the_actor`). This test
+    /// closes the remaining link: that the persist path emits those variants,
+    /// carrying the same id and name, onto a stream `subscribe` delivers.
+    #[tokio::test]
+    async fn create_and_delete_reach_a_live_subscriber() {
+        use futures::StreamExt;
+
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let log = Arc::new(BroadcastMemLog::new());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+        // Subscribe before the writes, exactly as the SSE handler does.
+        let mut stream = log_dyn.subscribe(&company);
+
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            Some(&log_dyn),
+            valid_draft("greeter", "Greeter"),
+        )
+        .await
+        .expect("creates");
+
+        let created = stream
+            .next()
+            .await
+            .expect("workflow_created delivered live");
+        match &created.event {
+            CompanyEvent::WorkflowCreated {
+                workflow_id, name, ..
+            } => {
+                assert_eq!(workflow_id, "greeter");
+                assert_eq!(name, "Greeter");
+            }
+            other => panic!("expected WorkflowCreated on the wire, got {other:?}"),
+        }
+
+        // Delete the same graph over the same persist path. `None` expected
+        // version skips the optimistic-concurrency check — this test is about
+        // the emitted frame, not the token.
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            Some(&log_dyn),
+            "greeter",
+            None,
+        )
+        .await
+        .expect("deletes");
+
+        let deleted = stream
+            .next()
+            .await
+            .expect("workflow_deleted delivered live");
+        match &deleted.event {
+            CompanyEvent::WorkflowDeleted {
+                workflow_id, name, ..
+            } => {
+                assert_eq!(workflow_id, "greeter");
+                assert_eq!(name, "Greeter");
+            }
+            other => panic!("expected WorkflowDeleted on the wire, got {other:?}"),
         }
     }
 
