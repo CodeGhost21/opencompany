@@ -1207,6 +1207,30 @@ struct ChatMessage {
     /// a question opens no card regardless.
     #[serde(default)]
     deliverable: Option<crate::ports::tasks::TaskDeliverable>,
+    /// Return as soon as the turn has been accepted and given an id, instead of
+    /// holding the request open for the whole turn (issue #983).
+    ///
+    /// A turn's duration is unbounded, so the synchronous shape is broken by
+    /// construction and no timeout value fixes it: five concurrent messages
+    /// queued on the per-company serial lock all 504'd at the edge while the
+    /// work ran on invisibly. This is the response path that removes the wait —
+    /// the turn is journaled and given a durable row before this returns, so the
+    /// operator reads its progress and its answer back rather than holding a
+    /// socket open for them.
+    ///
+    /// **Opt-in, and compatible in both directions.** A caller that omits it
+    /// gets today's synchronous response byte-for-byte. A newer console talking
+    /// to an *older* host sends it and the old host ignores the unknown field
+    /// (this struct has no `deny_unknown_fields`) and answers the full
+    /// synchronous 200 — which is exactly why the console must decide what
+    /// happened from the response's **shape**, not from what it asked for.
+    ///
+    /// Deliberately not the default. A trivial turn settles in 4–6s, and a fast
+    /// synchronous answer is genuinely better when it fits; the eventual right
+    /// shape is a hybrid that answers synchronously up to N seconds and then
+    /// hands back a 202, which needs this turn record to exist first.
+    #[serde(default)]
+    detach: bool,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1232,6 +1256,67 @@ struct ChatResponse {
     /// exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     still_awaiting: Option<usize>,
+    /// The durable turn row this message opened (issue #983), additive on the
+    /// synchronous response exactly as `runId` was added to the workflow run
+    /// response — so a caller that never asked to detach can still read the
+    /// turn back from `GET {scope}/runs/{turn_id}` afterwards.
+    ///
+    /// `None` when the run store refused to mint a row: record-keeping does not
+    /// get to fail the work it records, so the turn still ran and still answered
+    /// here. A caller that finds it missing has the reply in hand anyway.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+}
+
+/// The `detach: true` response (issue #983): the turn's id and the durable id of
+/// the operator's own message, handed back before the cycle has taken the
+/// per-company lock.
+///
+/// **`detached` is the discriminator, and it is a constant `true` on purpose.**
+/// A newer console pointed at an older host sends `detach` and gets the *full
+/// synchronous* body back, because the old host ignores the unknown field. So
+/// the console cannot tell the two apart by what it asked for — only by what
+/// came back. `responses` present means the turn already settled; `detached`
+/// present means read it back. A field that is only ever `true` is what makes
+/// that a presence check rather than a guess.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DetachedChatResponse {
+    /// The turn's durable row, to poll on `GET {scope}/runs/{turn_id}`.
+    ///
+    /// Optional for the same reason [`ChatResponse::turn_id`] is: a run store
+    /// that refused a row does not get to refuse the turn. A console that finds
+    /// it missing cannot poll, and falls back to re-reading `chat/history`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+    /// The durable id the operator's own message was journaled under.
+    ///
+    /// Never optional here, unlike on the synchronous response: since issue #983
+    /// the append happens at accept time, so by the time this body exists the
+    /// message is already in the transcript. That is what lets the console
+    /// reconcile its optimistic bubble immediately instead of at settle.
+    message_id: String,
+    detached: bool,
+}
+
+/// The two shapes `POST {scope}/chat` can answer with.
+///
+/// An enum rather than a bare [`Response`] so the two bodies stay typed and the
+/// status codes live in one place: `200` for the settled turn the route has
+/// always returned, `202 Accepted` for a turn that has been accepted and started
+/// but has not finished — which is precisely what `202` means.
+enum ChatOk {
+    Settled(Box<ChatResponse>),
+    Detached(DetachedChatResponse),
+}
+
+impl IntoResponse for ChatOk {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Settled(body) => Json(body).into_response(),
+            Self::Detached(body) => (StatusCode::ACCEPTED, Json(body)).into_response(),
+        }
+    }
 }
 
 /// The canonical assignee for a card opened from a chat message: whoever the
@@ -1693,7 +1778,7 @@ async fn chat_and_emit(
     runtime: Arc<CompanyRuntime>,
     message: ChatMessage,
     by: Option<Actor>,
-) -> Result<Json<ChatResponse>, ApiError> {
+) -> Result<ChatOk, ApiError> {
     // The default desk for an unaddressed message.
     let desk = message
         .chat
@@ -1731,7 +1816,13 @@ async fn chat_and_emit(
     // a turn killed with the pod becomes a `Failed` row and a `TurnFailed` line
     // rather than permanent silence.
     let accepted = accept_chat_turn(&runtime, id, &message, by.as_ref(), parent, &desk).await?;
-    let (report, feedback_note) = join_chat_turn(spawn_chat_turn(ChatTurn {
+    // Read off the accepted turn before it moves onto the task: both are facts
+    // the accept already established, so the 202 can carry them without waiting
+    // for a cycle that has not even taken the lock yet.
+    let turn_id = accepted.turn_id.clone();
+    let message_id = accepted.message_seq.value().to_string();
+    let detach = message.detach;
+    let turn = spawn_chat_turn(ChatTurn {
         runtime,
         company: id.clone(),
         desk,
@@ -1739,20 +1830,57 @@ async fn chat_and_emit(
         by,
         parent,
         accepted,
-    }))
-    .await?;
+    });
+
+    if detach {
+        // Nothing here waits on the turn. The webhook fan-out still owes the
+        // report, so it moves onto its own task rather than being dropped — a
+        // detached turn must not silently stop notifying subscribers. Same shape
+        // as the detached approval resolve below (issue #561).
+        //
+        // The turn task is otherwise left to itself: it journals its own replies
+        // and settles its own row (issue #983), which is what the operator reads
+        // back. Detaching is the entire point.
+        let state = state.clone();
+        let company = id.clone();
+        tokio::spawn(async move {
+            match join_chat_turn(turn).await {
+                Ok((report, feedback_note)) => {
+                    emit_cycle_webhooks(&state, &company, &report).await;
+                    if let Some(note) = feedback_note {
+                        emit_feedback_webhook(&state, &company, &note).await;
+                    }
+                }
+                // A failed turn already settled its row as `Failed` and wrote a
+                // `TurnFailed` transcript line, which is what the operator sees;
+                // there is no report to fan out. Logged because nothing else
+                // reports it once the request is gone.
+                Err(err) => {
+                    tracing::error!(%company, detail = %err.0, "[chat] a detached turn did not finish");
+                }
+            }
+        });
+        return Ok(ChatOk::Detached(DetachedChatResponse {
+            turn_id,
+            message_id,
+            detached: true,
+        }));
+    }
+
+    let (report, feedback_note) = join_chat_turn(turn).await?;
     emit_cycle_webhooks(state, id, &report).await;
     if let Some(note) = feedback_note {
         emit_feedback_webhook(state, id, &note).await;
     }
-    Ok(Json(ChatResponse {
+    Ok(ChatOk::Settled(Box::new(ChatResponse {
         // The operator's own message is the cycle's single input event, so its
         // sequence is the first the cycle journaled (issue #364).
         message_id: report.input_seqs.first().map(|seq| seq.value().to_string()),
         responses: report.responses,
         // A chat turn is nobody's sign-off, so this stays absent here.
         still_awaiting: None,
-    }))
+        turn_id,
+    })))
 }
 
 /// Everything a chat turn needs once it is off the request's future.
@@ -1960,7 +2088,7 @@ async fn operator_chat(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<Json<ChatResponse>, Response> {
+) -> Result<ChatOk, Response> {
     let company = CompanyId::new(&id);
     let by = chat_actor(&headers, &state, &company, peer).await?;
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
@@ -1975,7 +2103,7 @@ async fn operator_chat_single(
     headers: HeaderMap,
     crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
     Json(message): Json<ChatMessage>,
-) -> Result<Json<ChatResponse>, Response> {
+) -> Result<ChatOk, Response> {
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     let by = chat_actor(&headers, &state, &id, peer).await?;
@@ -2743,6 +2871,9 @@ async fn run_resolve(
         message_id: None,
         responses: report.responses,
         still_awaiting: Some(still_awaiting),
+        // A resolve runs a follow-up cycle, not an operator turn, so it opens no
+        // turn row of its own.
+        turn_id: None,
     })
     .into_response())
 }
@@ -3397,6 +3528,7 @@ mode = "full"
                 chat: None,
                 parent: None,
                 deliverable: None,
+                detach: false,
             };
             let accepted = accept_chat_turn(
                 &runtime,
@@ -4760,6 +4892,145 @@ mode = "full"
         assert!(
             ids.contains(&reply),
             "reply id absent from history: {ids:?}"
+        );
+    }
+
+    /// `detach: true` answers `202` with the ids the accept already established,
+    /// and claims nothing about a turn that has not settled — the half that
+    /// removes the 504 from the operator's path (issue #983).
+    #[tokio::test]
+    async fn a_detached_turn_answers_202_with_the_ids_and_no_settled_keys() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"do the long thing","detach":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(body["detached"], true, "{body}");
+        assert!(
+            body["turnId"].as_str().is_some_and(|s| !s.is_empty()),
+            "the turn id is what the console polls: {body}"
+        );
+        assert!(
+            body["messageId"].as_str().is_some_and(|s| !s.is_empty()),
+            "the message is journaled at accept, so its id is knowable here: {body}"
+        );
+        // The whole point: this body is not allowed to look settled. A console
+        // that found `responses` here would render an empty answer as the reply.
+        assert!(
+            body.get("responses").is_none(),
+            "a detached response must not look settled: {body}"
+        );
+        assert!(
+            body.get("stillAwaiting").is_none(),
+            "a detached response must not look settled: {body}"
+        );
+    }
+
+    /// The wire-compat guarantee in the other direction: a caller that sends no
+    /// `detach` gets exactly the response it always got — a `200` carrying the
+    /// settled turn — plus the additive `turnId`. An older console is untouched.
+    #[tokio::test]
+    async fn a_body_without_detach_still_gets_the_synchronous_response() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        // `post_chat` asserts the 200 itself — the legacy status is part of what
+        // this test is pinning.
+        let body = post_chat(&app, &cookie, r#"{"text":"hi"}"#).await;
+
+        assert!(
+            body["responses"].as_array().is_some_and(|r| !r.is_empty()),
+            "the settled shape carries the replies: {body}"
+        );
+        assert!(
+            body["messageId"].as_str().is_some(),
+            "the legacy durable id is unchanged: {body}"
+        );
+        assert!(
+            body.get("detached").is_none(),
+            "the synchronous response must not carry the detach discriminator: {body}"
+        );
+        assert!(
+            body["turnId"].as_str().is_some(),
+            "`turnId` is additive on the synchronous response too: {body}"
+        );
+    }
+
+    /// The detached turn is not fire-and-forget: the message it journaled at
+    /// accept, and the answer the spawned task journals afterwards, both land in
+    /// the durable transcript. This is the backstop the console re-reads, and
+    /// the reason a dropped frame is not a lost answer.
+    #[tokio::test]
+    async fn a_detached_turn_still_journals_its_question_and_its_answer() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/company/chat")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"text":"detached hello","detach":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mine = body["messageId"].as_str().unwrap().to_string();
+
+        // The turn owns its own settle, so wait for the answer to appear rather
+        // than for a handle this route deliberately does not hold.
+        let mut history = Vec::new();
+        for _ in 0..100 {
+            history = get_history(&app, &cookie, "").await;
+            if history
+                .iter()
+                .any(|m| m["text"].as_str() == Some("You said: detached hello"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let ids: Vec<&str> = history.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&mine.as_str()),
+            "the id handed back at 202 must resolve in history: {ids:?}"
+        );
+        assert!(
+            history
+                .iter()
+                .any(|m| m["text"].as_str() == Some("You said: detached hello")),
+            "the detached turn's answer never reached the transcript: {history:?}"
         );
     }
 
