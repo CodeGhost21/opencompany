@@ -478,6 +478,121 @@ async fn a_run_that_parked_a_card_says_so_even_though_it_paused_no_gate_and_rout
     );
 }
 
+/// The graph for the #1008 blocked-arm persist test: an agent node that
+/// SUCCEEDS (`intro`), then one that blocks on a gated tool (`work`).
+///
+/// The preceding success is deliberate — it is what makes "earlier node output
+/// present" a real claim: the observer captures `intro`'s emitted text before
+/// `work` halts the run, and that capture must survive the blocked arm.
+fn intro_then_block_graph() -> String {
+    r#"
+id = "intro_block"
+name = "Intro then block"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "intro"
+kind = "agent"
+name = "Intro"
+summary = "Introduce the project."
+agent = "ceo"
+[[node]]
+id = "work"
+kind = "agent"
+name = "Work"
+summary = "Write the quarterly spec."
+agent = "ceo"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "intro"
+[[edge]]
+from = "intro"
+to = "work"
+[[edge]]
+from = "work"
+to = "done"
+"#
+    .to_string()
+}
+
+/// Issue #1008 (blocked-arm sibling of the runner's failure-arm test): a run
+/// that BLOCKS on an operator (the `#881` halt arm, which returns `Ok` with a
+/// `Null` in-memory output) must STILL persist the per-node output the observer
+/// captured before the block — flagged `partial`, with the earlier successful
+/// node's output present. Before #1008 the blocked arm persisted NOTHING, so
+/// reopening the run showed "this run predates output capture".
+#[tokio::test]
+async fn a_blocked_run_persists_the_partial_output_it_reached() {
+    use crate::ports::run_output::WorkflowRunOutputStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(crate::store::FsOps::new(dir.path()));
+
+    let (base_url, _script) = spawn_script_recording(vec![
+        // `intro` node: a plain reply carrying a marker we can find in the
+        // persisted snapshot — proof the earlier node's output was captured.
+        Turn::Say("Introduction complete. BLOCK-MARKER-42."),
+        // `work` node: calls the gated `shell` tool, which parks for approval —
+        // the model is refused inside its tool loop and the run blocks.
+        Turn::Call {
+            tool: "shell",
+            args: json!({ "command": "write-spec" }),
+        },
+        Turn::Say("The spec is blocked pending your approval."),
+    ])
+    .await;
+
+    let (mut deps, _journal) = deps(base_url, dir.path());
+    deps.run_output_store = Some(store.clone());
+    let rec = record();
+    let pool = std::sync::Arc::new(HarnessPool::new());
+    pool.ensure(&rec, &deps).await.expect("roster builds");
+
+    let file = parse_workflow(&intro_then_block_graph()).expect("graph parses");
+    let ctx = WorkflowRunContext::new(false);
+    let run_id = ctx.run_id.clone();
+
+    let run = super::runner::run_workflow(
+        pool,
+        deps,
+        &rec,
+        &file,
+        json!({ "request": "the quarterly spec" }),
+        &ctx,
+    )
+    .await
+    .expect("a blocked run settles Ok rather than failing");
+    assert!(
+        run.blocked_nodes.iter().any(|b| b.node_id == "work")
+            || run.pending_approvals.iter().any(|id| id == "work"),
+        "the run must report that `work` blocked: {run:?}"
+    );
+
+    // The decisive assertion: the blocked run persisted a snapshot (was `None`
+    // pre-#1008).
+    let stored = store
+        .get_run_output(&rec.id, &run_id)
+        .await
+        .expect("store read")
+        .expect("a blocked run must still persist the output it reached before blocking");
+    assert!(
+        stored.partial,
+        "a blocked-arm capture must be flagged partial: {stored:?}"
+    );
+    // The earlier successful `intro` node's produced text is in the snapshot.
+    assert!(
+        stored.nodes.to_string().contains("BLOCK-MARKER-42"),
+        "the node that succeeded before the block must be in the partial snapshot: {}",
+        stored.nodes
+    );
+}
+
 #[cfg(test)]
 mod pure {
     use super::*;
