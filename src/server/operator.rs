@@ -1496,6 +1496,7 @@ async fn run_chat(
             // "build me a workflow for X" (deliverable: "workflow") routes the
             // card through the builder pass when it reaches In Progress. Nothing
             // here infers the choice from the text (decision D2a).
+            planning_attempts: Vec::new(),
             deliverable: message.deliverable.unwrap_or_default(),
             workflow_proposal: None,
             // Issue #983: the turn that opened it. A card raised from chat used

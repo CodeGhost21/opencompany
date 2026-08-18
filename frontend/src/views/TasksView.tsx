@@ -53,6 +53,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { formatUsdCost } from "@/lib/cost";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { labelFor, PRIORITY_STYLES } from "@/lib/board-columns";
 import { approvalAction, timeAgo } from "@/lib/language";
@@ -478,6 +479,11 @@ export function TaskItem({
             {initials(task.assignee)}
           </span>
           <span className="truncate text-xs text-muted-foreground">{task.assignee}</span>
+        </div>
+      )}
+      {formatUsdCost(task.cost, "total") && (
+        <div className="mt-2 text-2xs font-medium tabular-nums text-foreground">
+          {formatUsdCost(task.cost, "total")}
         </div>
       )}
       {task.deliverable === "workflow" && (

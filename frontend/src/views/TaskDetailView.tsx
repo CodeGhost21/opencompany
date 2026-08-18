@@ -1,7 +1,7 @@
 // The Task Detail screen (v1, #184): the epic's capstone read surface. One
 // `GET …/tasks/{id}` (#185/#190) drives a header, the lineage rail, the event
 // timeline, and a controls bar; a 4s visibility-gated poll keeps it live while
-// the card is open. Cost/₹ is intentionally absent everywhere. The Artifacts tab is
+// the card is open. The Artifacts tab is
 // its own self-fetching surface (#306, over #187's routes); Discussion stays an
 // honest stub pending its own backend. Export (#352) is a host-rendered
 // document the controls bar downloads — the console lays out none of it.
@@ -111,6 +111,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { formatUsdCost } from "@/lib/cost";
 import { approvalAction, effectDone } from "@/lib/language";
 
 import { labelFor, PRIORITY_STYLES, type TaskColumn } from "@/lib/board-columns";
@@ -714,6 +715,12 @@ function DetailHeader({
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
+        {formatUsdCost(task.cost, "total") && (
+          <span className="font-medium tabular-nums text-foreground">
+            {formatUsdCost(task.cost, "total")}
+            {task.cost?.amountUsd !== undefined && " total"}
+          </span>
+        )}
         <span className="inline-flex items-center gap-1.5">
           <span className="font-medium text-foreground">Status</span>
           <Badge variant="secondary" className="font-normal">
@@ -1135,6 +1142,11 @@ function LineageRail({
             <span className="min-w-0 flex-1 truncate">
               {lineage.parent.title}
             </span>
+            {formatUsdCost(lineage.parent.cost, "total") && (
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatUsdCost(lineage.parent.cost, "total")}
+              </span>
+            )}
             <Badge variant="secondary" className="shrink-0 font-normal">
               {columnLabel(columns, lineage.parent.column)}
             </Badge>
@@ -1151,6 +1163,11 @@ function LineageRail({
           >
             <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate">{child.title}</span>
+            {formatUsdCost(child.cost, "total") && (
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {formatUsdCost(child.cost, "total")}
+              </span>
+            )}
             <Badge variant="secondary" className="shrink-0 font-normal">
               {columnLabel(columns, child.column)}
             </Badge>
@@ -1212,7 +1229,7 @@ function groupTimeline(
       last.entries.push(e);
     } else {
       groups.push({
-        key: String(e.seq),
+        key: e.costKey ?? String(e.seq),
         kind: e.kind,
         status: e.status,
         label: e.label,
@@ -1483,6 +1500,11 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
           <Badge variant="outline" className="shrink-0 font-normal">
             ×{group.count}
           </Badge>
+        )}
+        {formatUsdCost(first.cost, "line") && (
+          <span className="shrink-0 font-medium tabular-nums text-foreground">
+            {formatUsdCost(first.cost, "line")}
+          </span>
         )}
         {/* A run step's own duration (#242); journal entries carry none. A
             gated call never ran, so its 0ms is the absence of a measurement
