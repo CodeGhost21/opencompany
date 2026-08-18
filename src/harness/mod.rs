@@ -159,6 +159,12 @@ pub mod workflow_refs;
 #[cfg(test)]
 mod workspace_provision_turn_test;
 pub mod workspace_tools;
+/// Agent-authored internal dashboard pages: `pages_list` / `pages_read` /
+/// `pages_write` / `pages_delete` over `Pages/<slug>/` in the same
+/// [`crate::ports::workspace::WorkspaceStore`], with `pages_write` compiling
+/// `Page.tsx` to `Page.compiled.mjs` via `swc_core`. See
+/// `docs/spec/runtime/pages.md`.
+pub mod pages_tools;
 /// End-to-end proof that the #237 workspace tools are reachable from a real
 /// turn, with only the model's choices stubbed. Test-only.
 #[cfg(test)]
