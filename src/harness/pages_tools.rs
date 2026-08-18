@@ -62,7 +62,9 @@ use crate::company::workspace_scaffold::{
 };
 use crate::harness::workspace_tools::store_reason;
 use crate::ports::types::CompanyId;
-use crate::ports::workspace::{FolderClaim, NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+use crate::ports::workspace::{
+    FolderClaim, NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore,
+};
 
 /// Tool name: list every page's manifest.
 pub const PAGES_LIST_TOOL: &str = "pages_list";
@@ -475,7 +477,11 @@ impl Tool for PagesListTool {
                     .as_deref()
                     .map(|i| format!(" [icon={i}]"))
                     .unwrap_or_default(),
-                hidden = if manifest.nav_visible { "" } else { " (hidden from nav)" },
+                hidden = if manifest.nav_visible {
+                    ""
+                } else {
+                    " (hidden from nav)"
+                },
                 title = manifest.title,
             ));
         }
@@ -594,9 +600,9 @@ impl Tool for PagesReadTool {
                 }
                 _ => out.push_str("Its `Page.tsx` could not be read.\n"),
             },
-            None => out.push_str(
-                "This page has no `Page.tsx` yet — write one with `pages_write`.\n",
-            ),
+            None => {
+                out.push_str("This page has no `Page.tsx` yet — write one with `pages_write`.\n")
+            }
         }
 
         Ok(ToolResult::success(out))
@@ -780,7 +786,11 @@ impl Tool for PagesWriteTool {
             .get("description")
             .and_then(Value::as_str)
             .map(str::to_string)
-            .or_else(|| existing_manifest.as_ref().and_then(|m| m.description.clone()));
+            .or_else(|| {
+                existing_manifest
+                    .as_ref()
+                    .and_then(|m| m.description.clone())
+            });
         let icon = args
             .get("icon")
             .and_then(Value::as_str)
@@ -789,7 +799,12 @@ impl Tool for PagesWriteTool {
         let nav_visible = args
             .get("nav_visible")
             .and_then(Value::as_bool)
-            .unwrap_or_else(|| existing_manifest.as_ref().map(|m| m.nav_visible).unwrap_or(true));
+            .unwrap_or_else(|| {
+                existing_manifest
+                    .as_ref()
+                    .map(|m| m.nav_visible)
+                    .unwrap_or(true)
+            });
         let manifest = PageManifest {
             title,
             description,
@@ -819,7 +834,13 @@ impl Tool for PagesWriteTool {
         // Manifest: write over the existing node, or create it.
         if let Err(e) = self
             .pages
-            .write_or_create_text(&folder_id, existing.as_ref().and_then(|b| b.manifest.clone()), MANIFEST_NAME, &manifest_toml, origin.clone())
+            .write_or_create_text(
+                &folder_id,
+                existing.as_ref().and_then(|b| b.manifest.clone()),
+                MANIFEST_NAME,
+                &manifest_toml,
+                origin.clone(),
+            )
             .await
         {
             return Ok(ToolResult::error(format!(
@@ -944,7 +965,9 @@ impl CompanyPages {
                     size: None,
                     sha256: None,
                 };
-                self.store.create_binary(&self.company, &node, bytes).await?;
+                self.store
+                    .create_binary(&self.company, &node, bytes)
+                    .await?;
                 Ok(())
             }
         }
@@ -1002,9 +1025,7 @@ impl Tool for PagesDeleteTool {
             ));
         };
         if !valid_slug(slug) {
-            return Ok(ToolResult::error(format!(
-                "Invalid `slug`: \"{slug}\"."
-            )));
+            return Ok(ToolResult::error(format!("Invalid `slug`: \"{slug}\".")));
         }
 
         let bundle = match self.pages.page(slug).await {
@@ -1022,7 +1043,12 @@ impl Tool for PagesDeleteTool {
             )));
         };
 
-        match self.pages.store.delete(&self.pages.company, &folder_id).await {
+        match self
+            .pages
+            .store
+            .delete(&self.pages.company, &folder_id)
+            .await
+        {
             Ok(true) => Ok(ToolResult::success(format!(
                 "Deleted the page `{slug}` and everything in it."
             ))),
@@ -1134,7 +1160,11 @@ export default function Page() {
             .expect("execute ok");
         assert!(!result.is_error, "write should succeed: {result:?}");
 
-        let bundle = pages.page("revenue").await.expect("read ok").expect("exists");
+        let bundle = pages
+            .page("revenue")
+            .await
+            .expect("read ok")
+            .expect("exists");
         assert!(bundle.manifest.is_some());
         assert!(bundle.source.is_some());
         assert!(bundle.compiled.is_some());

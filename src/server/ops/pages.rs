@@ -57,8 +57,7 @@ use crate::server::ops::{ScopedCompany, scoped};
 /// header does not need to permit because it never leaves the frame as a
 /// request this origin makes. `frame-ancestors 'self'` keeps the shell from
 /// being embedded anywhere but this console.
-const PAGES_CSP: &str =
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
+const PAGES_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; \
      connect-src 'none'; frame-ancestors 'self'";
 
 /// Builds the pages route fragment.
@@ -144,10 +143,9 @@ async fn all_pages(
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
-    for folder in nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Folder && n.parent_id.as_deref() == Some(pages_root.id.as_str()))
-    {
+    for folder in nodes.iter().filter(|n| {
+        n.kind == NodeKind::Folder && n.parent_id.as_deref() == Some(pages_root.id.as_str())
+    }) {
         let mut bundle = PageBundle {
             manifest: None,
             compiled: None,
@@ -193,7 +191,13 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
     for (slug, bundle) in &pages {
         let manifest = match &bundle.manifest {
             Some(node) => {
-                read_manifest(company.runtime.workspace().as_ref(), company.id(), node, slug).await
+                read_manifest(
+                    company.runtime.workspace().as_ref(),
+                    company.id(),
+                    node,
+                    slug,
+                )
+                .await
             }
             None => StoredManifest {
                 title: slug.clone(),
@@ -225,15 +229,11 @@ async fn page_shell(
     Path(SlugPath { slug }): Path<SlugPath>,
 ) -> Result<Response, ApiError> {
     if !valid_slug(&slug) {
-        return Err(ApiError(OpenCompanyError::NotFound(format!(
-            "page {slug}"
-        ))));
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
     let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
     if !pages.iter().any(|(name, _)| name == &slug) {
-        return Err(ApiError(OpenCompanyError::NotFound(format!(
-            "page {slug}"
-        ))));
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
 
     let html = format!(
@@ -283,15 +283,11 @@ async fn bundle(
     Path(SlugPath { slug }): Path<SlugPath>,
 ) -> Result<Response, ApiError> {
     if !valid_slug(&slug) {
-        return Err(ApiError(OpenCompanyError::NotFound(format!(
-            "page {slug}"
-        ))));
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     }
     let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
     let Some((_, bundle)) = pages.into_iter().find(|(name, _)| name == &slug) else {
-        return Err(ApiError(OpenCompanyError::NotFound(format!(
-            "page {slug}"
-        ))));
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
     };
     let Some(compiled) = bundle.compiled else {
         return Err(ApiError(OpenCompanyError::NotFound(format!(
@@ -321,9 +317,11 @@ async fn bundle(
     if let Some(size) = node.size {
         response = response.header(header::CONTENT_LENGTH, size);
     }
-    let mut response = response
-        .body(Body::from_stream(stream))
-        .map_err(|e| ApiError(OpenCompanyError::Store(format!("bundle response failed: {e}"))))?;
+    let mut response = response.body(Body::from_stream(stream)).map_err(|e| {
+        ApiError(OpenCompanyError::Store(format!(
+            "bundle response failed: {e}"
+        )))
+    })?;
     apply_pages_headers(response.headers_mut());
     Ok(response)
 }
