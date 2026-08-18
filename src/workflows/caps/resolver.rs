@@ -552,52 +552,33 @@ to = "sub"
         );
     }
 
-    /// A parent whose only `sub_workflow` child is a company-disabled global
-    /// must fail the same way — resolving that child never reaches the cycle
-    /// scan, so a disabled global cannot be smuggled in by being (wrongly)
-    /// excluded from the scan rather than from the union it is loaded from.
+    /// A disabled global is excluded from the cycle scan the same way an
+    /// unresolvable child is (per `guard_cycle`'s own doc comment): `middle`
+    /// runs the disabled global as a `sub_workflow`, and if the scan tried to
+    /// load it the same way it loads a live child, it would hit the same
+    /// company-disabled refusal `a_company_disabled_global_child_fails_resolution`
+    /// pins — instead the disabled id is skipped as unresolvable, so resolving
+    /// `middle` itself succeeds rather than failing with an unrelated
+    /// "workflow not found" surfaced through the cycle guard.
     #[tokio::test]
-    async fn a_disabled_global_referenced_by_a_parent_fails_the_same_way() {
+    async fn a_disabled_global_in_the_closure_is_skipped_not_treated_as_a_cycle() {
         let dropped = crate::globals::workflows()[0].id.clone();
         let dir = tempfile::tempdir().unwrap();
-        write_wf(dir.path(), "parent", &parent_of("parent", &dropped));
-        let entries = vec![format!("workflow:{dropped}")];
-        let manifest: CompanyManifest = toml::from_str(&format!(
-            "[company]\nname = \"Acme\"\n\n[globals]\ndisable = [\"{}\"]\n",
-            entries[0]
-        ))
-        .expect("valid manifest");
-        let store: Arc<dyn CompanyStore> = Arc::new(MemStore(std::sync::Mutex::new(Some(
-            CompanyRecord {
-                id: CompanyId::new("acme"),
-                manifest,
-                ledger: Vec::new(),
-                lifecycle: "running".to_string(),
-                overlay_agents: Vec::new(),
-                overlay_desk_members: Vec::new(),
-                overlay_desk_order: Vec::new(),
-                overlay_desks: Vec::new(),
-                overlay_workflows: Vec::new(),
-                overlay_budgets: Vec::new(),
-                overlay_policy: None,
-                overlay_desk_tools: Default::default(),
-                disabled_workflows: Vec::new(),
-                template_provenance: None,
-            },
-        ))));
+        write_wf(dir.path(), "middle", &parent_of("middle", &dropped));
+        let store = store_with_globals_disable(Vec::new(), vec![format!("workflow:{dropped}")]);
         let resolver = StoreWorkflowResolver::new(
             Some(dir.path().to_path_buf()),
             store,
             CompanyId::new("acme"),
-            "parent".to_string(),
+            "root".to_string(),
             None,
         );
 
-        let err = resolver.resolve(&dropped).await.unwrap_err();
-        assert!(
-            err.to_string().contains("not a saved workflow"),
-            "{err}"
-        );
+        let graph = resolver
+            .resolve("middle")
+            .await
+            .expect("the disabled global in the closure is skipped, not fatal");
+        assert_eq!(graph.id.as_deref(), Some("middle"));
     }
 
     #[tokio::test]
