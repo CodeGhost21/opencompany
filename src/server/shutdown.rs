@@ -179,6 +179,13 @@ pub async fn signal() {
 /// no reason — and a tenant can hold more than one.
 pub async fn drain(state: &AppState, grace: Duration) -> bool {
     let registry = state.registry();
+    // Before the snapshot, deliberately. The host keeps serving through the
+    // drain, so `POST /api/v1/companies` can register a company while this
+    // runs; without this it would land after the snapshot, never be quiesced,
+    // and be free to start a turn nothing is waiting for. Setting the flag
+    // first makes every later registration born quiesced, so a company is
+    // either in the snapshot below or unable to run a cycle at all.
+    registry.begin_shutdown();
     let runtimes: Vec<_> = registry
         .list()
         .iter()
@@ -436,6 +443,80 @@ mod tests {
         turn.await.expect("the turn task did not panic");
     }
 
+    /// **The provisioning race.** A company registered *while the drain is
+    /// running* must not be able to start a turn.
+    ///
+    /// The host keeps serving through the drain on purpose, so
+    /// `POST /api/v1/companies` stays reachable for the whole window — up to 25
+    /// seconds. A company registered after the drain took its snapshot is not in
+    /// that snapshot, so nothing waits for it; if it could still accept a cycle
+    /// it would start a turn seconds before the process exits and lose it.
+    ///
+    /// Closed at the registry rather than in the provisioning handler: boot, the
+    /// provision route and a rebuild swap all register through `insert`, and a
+    /// re-scan after the drain would only move the race to whatever lands after
+    /// the last scan.
+    #[tokio::test]
+    async fn a_company_registered_during_the_drain_cannot_start_a_turn() {
+        let dir = home();
+        let c = stalled_company(dir.path()).await;
+        let turn = start_detached_turn(&c).await;
+
+        // The drain is now pending on the parked turn — the window a provision
+        // request would land in.
+        let mut draining = Box::pin(drain(&c.state, Duration::from_secs(30)));
+        tokio::select! {
+            _ = &mut draining => panic!("the drain returned through a live turn"),
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+
+        let late = CompanyId::new("globex");
+        let runtime = RuntimeBuilder::new(dir.path().join("globex"), manifest("Globex"))
+            .with_id(late.clone())
+            .build()
+            .await
+            .expect("build a runtime");
+        c.state.registry().insert(late.clone(), Arc::new(runtime));
+
+        let registered = c.state.registry().get(&late).expect("registered");
+        assert!(
+            registered.is_quiesced(),
+            "a company registered mid-drain can accept cycles nothing will wait for"
+        );
+        assert!(
+            registered
+                .run_cycle(vec![operator_message("late work")])
+                .await
+                .is_err(),
+            "the late company must refuse the cycle, not merely be flagged"
+        );
+
+        c.release.notify_waiters();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), draining)
+                .await
+                .expect("the drain finished")
+        );
+        turn.await.expect("the turn task did not panic");
+    }
+
+    /// The flag is one-way and scoped to shutdown: an ordinary registration is
+    /// untouched, or every company would boot refusing work.
+    #[tokio::test]
+    async fn registering_a_company_before_shutdown_leaves_it_accepting_work() {
+        let dir = home();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        assert!(!state.registry().is_shutting_down());
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(dir.path().to_path_buf(), manifest("Acme"))
+            .with_id(id.clone())
+            .build()
+            .await
+            .expect("build a runtime");
+        state.registry().insert(id.clone(), Arc::new(runtime));
+        assert!(!state.registry().get(&id).expect("registered").is_quiesced());
+    }
+
     /// The same proof one level up, over the real server.
     ///
     /// Lives here rather than beside `serve_on_until` because what it asserts is
@@ -552,6 +633,83 @@ mod tests {
             .expect("giving up on a connection is not an error");
 
         c.release.notify_waiters();
+        drop(socket);
+    }
+
+    /// An **idle** host must not sit out the whole drain bound just because a
+    /// connection is open.
+    ///
+    /// This is the case the ceiling's clock placement decides, and the one the
+    /// other ceiling test cannot see: with nothing in flight the drain returns
+    /// at once, so timing the connection window from the *signal* would leave
+    /// the host waiting out all of `grace` for a stream that is never going to
+    /// end, while timing it from the drain lets it go in two seconds. Staging
+    /// tenants are refreshed several times an afternoon and are idle most of the
+    /// time, so this is the common path, not the exotic one.
+    ///
+    /// The connection is a real event stream — the thing that actually never
+    /// ends — and, unlike a parked chat `POST`, it holds no `serial` lock, so
+    /// the host is genuinely idle while it is open.
+    #[tokio::test]
+    async fn an_idle_host_does_not_wait_out_the_drain_bound_for_an_open_stream() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = home();
+        let c = stalled_company(dir.path()).await;
+        crate::server::test_support::seed_fixed_admin(&c.state, "acme").await;
+        // Deliberately no turn: `drain` has nothing to wait for and returns
+        // immediately, which is what puts the two clock placements far apart.
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("a bound address");
+        let (signal, wait_for_signal) = tokio::sync::oneshot::channel::<()>();
+        // A bound far larger than the connection grace, so the two placements
+        // are trivially distinguishable: 30s versus about 2s.
+        let grace = Duration::from_secs(30);
+        let host = tokio::spawn(crate::server::routes::serve_on_until_with_grace(
+            listener,
+            c.state.clone(),
+            async move {
+                let _ = wait_for_signal.await;
+            },
+            grace,
+        ));
+
+        let request = format!(
+            "GET /api/v1/company/events HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Cookie: {}\r\n\
+             Accept: text/event-stream\r\n\r\n",
+            crate::server::test_support::fixed_cookie("acme"),
+        );
+        let mut socket = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to the host");
+        socket
+            .write_all(request.as_bytes())
+            .await
+            .expect("write the request");
+        socket.flush().await.expect("flush the request");
+
+        // Read the response head so the stream is provably established — an
+        // unestablished connection would be idle, which hyper closes at once and
+        // which would prove nothing.
+        let mut head = [0u8; 32];
+        let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut head))
+            .await
+            .expect("the event stream answered")
+            .expect("read the response head");
+        assert!(read > 0, "the event stream sent nothing");
+
+        signal.send(()).expect("deliver the termination signal");
+        tokio::time::timeout(super::CONNECTION_GRACE + Duration::from_secs(5), host)
+            .await
+            .expect("an idle host waited out the whole drain bound for an open stream")
+            .expect("the host task did not panic")
+            .expect("giving up on a connection is not an error");
+
         drop(socket);
     }
 

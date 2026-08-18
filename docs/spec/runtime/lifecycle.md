@@ -169,6 +169,12 @@ On SIGINT/SIGTERM (`src/server/shutdown.rs`), in order:
    so waiting for connections to close on their own terms would hold the pod open
    until the kubelet's `SIGKILL`.
 
+That two-second clock starts when step 2 returns, not at the signal, so a host
+with nothing in flight but an open event stream exits in about two seconds
+instead of sitting out the whole drain bound. Signal to exit is therefore at
+most `OPENCOMPANY_SHUTDOWN_GRACE_SECONDS` + 2s — the total the pod's
+`terminationGracePeriodSeconds` has to stay above.
+
 Handling the signal at all is the load-bearing part: without a handler the
 default disposition applies and the process dies on the first signal, which is
 what a grace period on the pod spec is a window *for*. The tenant pod therefore

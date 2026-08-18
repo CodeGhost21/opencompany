@@ -306,6 +306,12 @@ pub async fn serve_on(listener: TcpListener, state: AppState) -> Result<()> {
 ///    `SIGKILL` — trading a clean exit for the exact abrupt one this is here to
 ///    remove.
 ///
+/// Step 2's clock starts when the drain *returns*, not at the signal, so an idle
+/// host with an open event stream exits in about `CONNECTION_GRACE` rather than
+/// sitting out the whole bound. Total time from signal to exit is therefore at
+/// most `grace + CONNECTION_GRACE` — the number the pod's
+/// `terminationGracePeriodSeconds` has to stay above.
+///
 /// `/healthz` is untouched. Nothing in this path runs before the signal, and the
 /// signal only arrives at the end of a pod's life — the manager's
 /// wake-on-request proxy blocks on that endpoint during *boot*, which this
@@ -340,13 +346,20 @@ where
     use std::future::IntoFuture;
 
     let drain_state = state.clone();
-    // Starts the ceiling's clock at the signal rather than at boot, so the
-    // deadline below bounds the shutdown and not the lifetime of the server.
-    let (began_tx, began_rx) = tokio::sync::oneshot::channel::<()>();
+    // Starts the ceiling's clock when the *drain* returns, not at the signal.
+    //
+    // Timing it from the signal instead would make the connection window
+    // whatever the drain left over — up to the whole of `grace` on an idle host
+    // — so a tenant with nothing in flight but an open event stream would sit
+    // there for the full bound before exiting. That is the rollout latency this
+    // whole change exists to reduce. Drained-then-two-seconds keeps the worst
+    // case identical (`grace` + `CONNECTION_GRACE`, since `drain` is itself
+    // bounded by `grace`) while letting the common case go quickly.
+    let (drained_tx, drained_rx) = tokio::sync::oneshot::channel::<()>();
     let shutting_down = async move {
         signal.await;
-        let _ = began_tx.send(());
         crate::server::shutdown::drain(&drain_state, grace).await;
+        let _ = drained_tx.send(());
     };
 
     // `into_future` because `WithGracefulShutdown` is `IntoFuture`, not
@@ -361,17 +374,17 @@ where
     // `Err` means the sender was dropped, which can only happen once the serve
     // future is gone — at which point the other arm has already won.
     let ceiling = async {
-        if began_rx.await.is_err() {
+        if drained_rx.await.is_err() {
             std::future::pending::<()>().await;
         }
-        tokio::time::sleep(grace + crate::server::shutdown::CONNECTION_GRACE).await;
+        tokio::time::sleep(crate::server::shutdown::CONNECTION_GRACE).await;
     };
 
     tokio::select! {
         served = &mut serving => served?,
         () = ceiling => tracing::warn!(
-            "connections were still open {}s after the shutdown signal; exiting anyway",
-            (grace + crate::server::shutdown::CONNECTION_GRACE).as_secs()
+            "connections were still open {}s after the drain finished; exiting anyway",
+            crate::server::shutdown::CONNECTION_GRACE.as_secs()
         ),
     }
     Ok(())
