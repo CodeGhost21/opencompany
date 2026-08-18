@@ -166,6 +166,60 @@ pub async fn signal() {
     }
 }
 
+/// Arms a listener for a *second* termination signal and hard-exits on it.
+///
+/// The first signal replaces the kernel's default disposition and resolves
+/// [`signal`], so a `SIGTERM`/`SIGINT` that arrives after that (while the drain
+/// is running) is otherwise swallowed for the rest of the process's life. On an
+/// idle host the process is gone a couple of seconds after the first signal and
+/// this never fires; it exists for the other half — a long drain, where the
+/// developer who pressed Ctrl-C once and watched the 25s ceiling start has no
+/// way to change their mind. A second press is the escape hatch. `130` is the
+/// conventional "terminated by Ctrl-C" exit code.
+///
+/// Deliberately a one-way, process-level action: there is no graceful recovery
+/// from having been told to stop twice.
+#[cfg(unix)]
+pub fn arm_force_exit_on_second_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    tokio::spawn(async move {
+        let mut term = signal(SignalKind::terminate()).ok();
+        let mut interrupt = signal(SignalKind::interrupt()).ok();
+        let terminated = async {
+            match term.as_mut() {
+                Some(s) => {
+                    let _ = s.recv().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let interrupted = async {
+            match interrupt.as_mut() {
+                Some(s) => {
+                    let _ = s.recv().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            () = terminated => {}
+            () = interrupted => {}
+        }
+        tracing::warn!("received a second termination signal; exiting immediately");
+        std::process::exit(130);
+    });
+}
+
+/// Arms a listener for a second `Ctrl-C` and hard-exits on it.
+#[cfg(not(unix))]
+pub fn arm_force_exit_on_second_signal() {
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::warn!("received a second Ctrl-C; exiting immediately");
+        std::process::exit(130);
+    });
+}
+
 /// Stops every registered company accepting new cycles, then waits for the ones
 /// in flight to settle, for at most `grace`.
 ///

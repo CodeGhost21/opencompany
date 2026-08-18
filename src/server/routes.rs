@@ -358,6 +358,7 @@ where
     let (drained_tx, drained_rx) = tokio::sync::oneshot::channel::<()>();
     let shutting_down = async move {
         signal.await;
+        crate::server::shutdown::arm_force_exit_on_second_signal();
         crate::server::shutdown::drain(&drain_state, grace).await;
         let _ = drained_tx.send(());
     };
