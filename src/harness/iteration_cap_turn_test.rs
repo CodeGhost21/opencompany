@@ -1,6 +1,9 @@
 //! End-to-end proof of issue #988's two halves, driven by a *model*: the turn's
-//! tool-iteration ceiling really is [`MAX_TOOL_ITERATIONS`], and a turn that
-//! outruns its money has an in-turn brake that halts it.
+//! tool-iteration ceiling really is [`MAX_TOOL_ITERATIONS`], and a teammate who
+//! has declared a `budget_usd_daily` gets an in-turn brake that halts a turn
+//! outrunning it — while a teammate who has declared none gets no such brake at
+//! all, matching openhuman's own opt-in `GoalBudgetStopHook` posture rather
+//! than a blanket ceiling this crate would invent and own alone.
 //!
 //! Neither half can be shown by a unit test. The cap lives on the vendored
 //! session's config and is only spent by the real tool loop, and
@@ -33,7 +36,10 @@
 //! * a budget halt and an iteration-cap pause are **different outcomes** —
 //!   openhuman reports the latter through `Agent::last_turn_hit_cap`, which
 //!   stays `false` for the former. Part 1 of #926 makes the cap pause
-//!   operator-visible, so the two must never be conflated.
+//!   operator-visible, so the two must never be conflated; and
+//! * a teammate with **no declared `budget_usd_daily`** gets no in-turn brake
+//!   at all — a turn that would have blown past any invented blanket figure
+//!   still finishes, because there is no hook installed to stop it.
 
 use std::sync::{Arc, Mutex};
 
@@ -453,6 +459,54 @@ async fn a_budget_halt_stops_the_turn_and_is_not_an_iteration_cap_pause() {
         !hit_cap(&agent).await,
         "a budget halt must NOT be reported as an iteration-cap pause — Part 1 of #926 \
          renders that pause to the operator and the two are different outcomes"
+    );
+}
+
+/// The negative case the budget-halt test above needs to be meaningful: a
+/// teammate who has declared **no** `budget_usd_daily` gets no in-turn brake at
+/// all, so a turn that would have blown past any invented blanket figure still
+/// finishes.
+///
+/// Same script as the budget-halt test — a million reported prompt tokens per
+/// call, which would trip even a generous fixed ceiling on the very first
+/// iteration — with the manifest budget omitted instead of set. If this test
+/// fails, either a hook is being armed for a teammate who declared nothing, or
+/// some other default crept back in.
+#[tokio::test]
+async fn a_turn_with_no_declared_budget_gets_no_in_turn_brake_at_any_cost() {
+    let reads = INHERITED_CAP + 2;
+    let (model_url, script) =
+        spawn_script(read_then_answer(reads, "Spec published."), 1_000_000).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let agent = company_agent(model_url, dir.path(), None, reads).await;
+    assert_eq!(
+        agent.turn_spend_cap_usd(),
+        None,
+        "the fixture must actually be undeclared for this test to prove anything"
+    );
+
+    let (outcome, _usages) = agent
+        .run("Draft and publish the pricing spec.")
+        .await
+        .expect("the turn runs");
+
+    assert!(
+        outcome.reply.contains("Spec published."),
+        "a turn with no declared budget was halted anyway — a brake armed \
+         without one being declared: {}",
+        outcome.reply
+    );
+    assert_eq!(
+        model_calls(&script),
+        reads + 1,
+        "expected every scripted round to run — nothing should have cut it short"
+    );
+    assert!(
+        !hit_cap(&agent).await,
+        "the script stayed well under the iteration ceiling; a cap pause here \
+         would mean something other than the intended reply mechanism stopped \
+         the turn"
     );
 }
 
