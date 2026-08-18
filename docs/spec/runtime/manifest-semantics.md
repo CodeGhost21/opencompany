@@ -1,3 +1,9 @@
+# Company Manifest: Semantics
+
+The behaviour each `company.toml` key and table actually has, beyond the
+schema sketch in [manifest.md](manifest.md). Split out from that file to keep
+each page under the 500-line cap.
+
 ## Semantics
 
 - **`[company]`** becomes the seed of the [Charter](../company-brain/charter.md).
@@ -354,4 +360,3 @@
   answers `429` (see `api.md`), a scheduled fire is skipped for that minute, and
   the orchestrator tool tells the agent to wait. A slot frees the instant a run
   settles.
-
