@@ -520,11 +520,27 @@ impl CompanyRuntime {
         self.builder.as_ref()
     }
 
+    /// This deployment's workflow-tool wiring for `company`: the namespaces a
+    /// `tool_call` can actually reach here, **and** why each of the others
+    /// cannot — the same
+    /// [`WorkflowToolWiring`](crate::workflows::caps::WorkflowToolWiring) the
+    /// run-time gate reads, so what a caller is told is available and what
+    /// `refusal_for` says at run time come from one computation.
+    ///
+    /// `None` means the wiring is not knowable — no harness deps are attached,
+    /// so there is no deployment to ask. Callers must treat that as "cannot
+    /// say" and fall back to the grant-only answer rather than reporting
+    /// everything as unwired.
+    ///
+    /// The capability filter is resolved per call because a budget plan makes it
+    /// a function of *current* spend (issue #661): a tier that is open now can
+    /// be filtered an hour later, and a cached set would advertise a namespace
+    /// the run would refuse.
     #[cfg(feature = "openhuman")]
-    pub async fn wired_workflow_namespaces(
+    pub(crate) async fn workflow_tool_wiring(
         &self,
         company: &crate::ports::CompanyRecord,
-    ) -> Option<std::collections::BTreeSet<&'static str>> {
+    ) -> Option<crate::workflows::caps::WorkflowToolWiring> {
         let deps = self.workflow_harness_deps.as_ref()?;
         let mut resolved = deps.clone();
         if let Some(plan) = &resolved.plan {
@@ -536,7 +552,15 @@ impl CompanyRuntime {
             )
             .await;
         }
-        Some(crate::workflows::caps::wired_workflow_namespaces(&resolved))
+        Some(crate::workflows::caps::workflow_tool_wiring(&resolved))
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub async fn wired_workflow_namespaces(
+        &self,
+        company: &crate::ports::CompanyRecord,
+    ) -> Option<std::collections::BTreeSet<&'static str>> {
+        Some(self.workflow_tool_wiring(company).await?.wired_namespaces)
     }
 
     #[cfg(feature = "openhuman")]
@@ -2490,65 +2514,10 @@ mod tests {
         (runtime, record, home)
     }
 
+    /// The shared workflow-wiring fixture, re-exported under the name these
+    /// tests already use.
     #[cfg(feature = "openhuman")]
-    fn wiring_deps(
-        runtime: &super::CompanyRuntime,
-        meter: Option<Arc<dyn crate::ports::UsageMeter>>,
-        capabilities: crate::harness::toolbelt::CapabilityFilter,
-        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
-    ) -> crate::harness::HarnessDeps {
-        crate::harness::HarnessDeps {
-            ledgers: None,
-            ledger_registry: Default::default(),
-            provider: Arc::new(crate::harness::provider::MockProvider::default()),
-            provider_slug: "mock".to_string(),
-            context: runtime.context.clone(),
-            store: runtime.store.clone(),
-            meter,
-            workspace_root: std::env::temp_dir(),
-            workspace_git_enabled: false,
-            audit_root: std::env::temp_dir(),
-            model_override: None,
-            tasks: None,
-            artifacts: None,
-            skills: None,
-            skills_source_dir: None,
-            skills_registry: Arc::from([]),
-            mcp_servers: Vec::new(),
-            default_mcp_servers: Vec::new(),
-            facts: None,
-            events: None,
-            delegations: crate::harness::orchestrator::DelegationQueue::default(),
-            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
-            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
-            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
-            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
-            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
-            run_output_store: None,
-            workflow_revisions: None,
-            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
-            secrets: None,
-            web_allowed_domains: Vec::new(),
-            capabilities,
-            workflow_source_dir: None,
-            plan,
-            media: None,
-            composio: None,
-            #[cfg(feature = "chargebee")]
-            chargebee: None,
-            #[cfg(feature = "paypal")]
-            paypal: None,
-            hosting: None,
-            search: None,
-            steer: crate::company::steer::InflightRegistry::default(),
-            run_supervisor: crate::runtime::RunSupervisor::default(),
-            delivery: None,
-            workspace: None,
-            repos: None,
-            repo_bindings: Vec::new(),
-            checkouts: crate::harness::repo::CheckoutLedger::default(),
-        }
-    }
+    use crate::harness::workflow_wiring_deps as wiring_deps;
 
     #[cfg(feature = "openhuman")]
     #[tokio::test]
@@ -2600,6 +2569,112 @@ mod tests {
         assert!(!namespaces.contains("web"));
         assert!(!namespaces.contains("code"));
         assert_eq!(*meter.queried_companies.lock().unwrap(), vec![record.id]);
+    }
+
+    /// Issue #874: the wiring carries **why** a namespace is out, not just that
+    /// it is — the two reasons `refusal_for` renders at run time, so a caller
+    /// (the `tool-slugs` route) can tell an operator "no provider configured"
+    /// apart from "your capability tier filtered it" before a run fails.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn workflow_wiring_names_why_each_namespace_is_unwired() {
+        let (mut runtime, record, _home) = runtime_and_record().await;
+        // `wiring_deps` leaves `search: None` — the staging shape in issue #874,
+        // where `searchCredentialConfigured` was false — and we deny `web` on top
+        // so both reasons appear in one map.
+        runtime.set_workflow_harness_deps(wiring_deps(
+            &runtime,
+            None,
+            crate::harness::toolbelt::CapabilityFilter::DenyNamespaces(
+                ["web"].into_iter().collect(),
+            ),
+            None,
+        ));
+        let wiring = runtime.workflow_tool_wiring(&record).await.expect("wiring");
+        assert_eq!(
+            wiring.missing.get("search").copied(),
+            Some(crate::workflows::caps::MissingReason::SearchBackendNotConfigured),
+            "no search backend is configured: {:?}",
+            wiring.missing
+        );
+        assert_eq!(
+            wiring.missing.get("web").copied(),
+            Some(crate::workflows::caps::MissingReason::CapabilityTierFiltered),
+            "web is denied by the capability filter: {:?}",
+            wiring.missing
+        );
+        assert!(
+            !wiring.missing.contains_key("shell"),
+            "a wired namespace carries no reason: {:?}",
+            wiring.missing
+        );
+    }
+
+    /// Issue #874, the staging repro at the layer the route reads: a company that
+    /// explicitly grants `search` on a deployment with **no** search backend must
+    /// not be offered `web_search` for grounding — it must be reported as granted
+    /// but unwired instead, so the copilot cannot author a node that dies at the
+    /// first run.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_granted_but_unwired_tool_is_reported_not_offered() {
+        let (mut runtime, mut record, _home) = runtime_and_record().await;
+        record.manifest.tools.allow.push("search".to_string());
+        record.manifest.tools.allow.push("shell".to_string());
+        runtime.set_workflow_harness_deps(wiring_deps(
+            &runtime,
+            None,
+            crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            None,
+        ));
+        let wiring = runtime.workflow_tool_wiring(&record).await;
+        let wired = wiring.as_ref().map(|w| &w.wired_namespaces);
+
+        let effective = crate::company::workflow_effective_tool_slugs(&record, wired);
+        let unwired = crate::company::workflow_granted_but_unwired_tool_slugs(&record, wired);
+        assert!(
+            !effective.iter().any(|slug| slug == "web_search"),
+            "an unwired search tool is not offered for grounding: {effective:?}"
+        );
+        assert!(
+            unwired.iter().any(|slug| slug == "web_search"),
+            "…but it IS reported as granted-and-unwired: {unwired:?}"
+        );
+        assert!(
+            effective.iter().any(|slug| slug == "shell"),
+            "a granted AND wired tool is still offered: {effective:?}"
+        );
+        // The two lists partition the granted set: nothing may appear in both, or
+        // a caller grounding on one and warning from the other contradicts itself.
+        assert!(
+            !effective.iter().any(|slug| unwired.contains(slug)),
+            "effective {effective:?} and unwired {unwired:?} overlap"
+        );
+    }
+
+    /// The other half of the honesty split: with no harness deps the wiring is
+    /// *unknowable*, so every granted tool stays offered and nothing is claimed
+    /// to be unwired. Reporting "all granted tools are broken" on a host that
+    /// simply cannot say would be the worse failure.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn unknowable_wiring_offers_the_grant_only_set_and_reports_nothing_unwired() {
+        let (runtime, mut record, _home) = runtime_and_record().await;
+        record.manifest.tools.allow.push("search".to_string());
+        let wiring = runtime.workflow_tool_wiring(&record).await;
+        assert!(wiring.is_none(), "no harness deps means no wiring answer");
+        let wired = wiring.as_ref().map(|w| &w.wired_namespaces);
+
+        assert!(
+            crate::company::workflow_effective_tool_slugs(&record, wired)
+                .iter()
+                .any(|slug| slug == "web_search"),
+            "a granted tool is still offered when the deployment cannot be asked"
+        );
+        assert!(
+            crate::company::workflow_granted_but_unwired_tool_slugs(&record, wired).is_empty(),
+            "nothing is claimed unwired when the deployment cannot be asked"
+        );
     }
 
     /// Issue #86: the kill switch's boot decision, including the direction it

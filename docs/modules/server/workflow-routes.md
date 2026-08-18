@@ -308,8 +308,8 @@ card builder (`draft_workflow_from_description` in `src/harness/workflow_build.r
 with the board card removed — the company evidence, the one tool-less model call,
 and the host's authority over the id, the display name, the approval gating and
 the node-kind vocabulary are identical. The one extra it grounds the model in is
-the company's **granted tool slugs** (`workflow_callable_tool_slugs`), because a
-typed description is far likelier to want a `tool_call` step than a card is.
+the company's **effective tool slugs** (`workflow_effective_tool_slugs`), because
+a typed description is far likelier to want a `tool_call` step than a card is.
 
 **It never persists.** The draft is validated exactly as `POST …/workflows`
 would (`courtesy_validate_draft`), handed back, and hydrated into the create
@@ -346,3 +346,49 @@ step (a restart, or configuring inference in Settings) rather than a bare
 failure. The spend is metered like a card pass, under a freshly minted id and a
 `workflow:copilot` sentinel agent; there is no `RunStore` row, because a
 synchronous request is not a card's attempt at its own work.
+
+## Which tools a proposal may name (issues #783, #874)
+
+`GET …/workflows/tool-slugs` is the browser-side copilot's tool grounding — the
+`CopilotPanel` reads it once and inlines the answer in the message it composes,
+so a proposed `tool_call` names a real slug instead of an invented one.
+
+```jsonc
+{ "slugs": ["shell", "read_workspace_state"],
+  "unwired": [ { "slug": "web_search",
+                 "reason": "searchBackendNotConfigured",
+                 "detail": "granted, but no managed search backend is configured on this deployment; …" } ] }
+```
+
+`slugs` is the **effective** set — `workflow_effective_tool_slugs`: the catalogue,
+the company's `[tools].allow`, and this deployment's wiring all agreeing. It is
+the same set the in-process create/fix copilot grounds on, so the two surfaces
+cannot drift.
+
+`unwired` is the granted-but-unwired remainder, with the reason from the same
+`WorkflowToolWiring` the run-time gate reads — `searchBackendNotConfigured` or
+`capabilityTierFiltered`, matching the two sentences `refusal_for` produces at
+run time. Reporting it, rather than dropping it, is what lets a reader tell "this
+company is not allowed that tool" (absent from both lists) from "allowed, but
+nobody configured the provider here".
+
+That distinction is issue #874. The route used to answer the wider **grant-only**
+set, so on a deployment with no search credential a granted `web_search` was
+offered, the copilot authored a node on it, and the run failed at the first node
+with `tool_call 'web_search' is not available in company workflows`.
+
+Two deliberate non-changes:
+
+- **Create/save validation stays permissive.** `validate_tool_call_node` still
+  checks grants alone, so authoring a graph now and wiring the provider later
+  remains legal. This route narrows what a caller is *told is available*, not
+  what the host will *accept*.
+- **Unknowable wiring is not "unwired".** With no harness deps attached the
+  deployment cannot be asked, so `slugs` falls back to the grant-only set and
+  `unwired` is empty — the pre-#874 answer. Claiming every granted tool is broken
+  would be the worse failure. A default build (no `openhuman` feature) wires no
+  `tool_call` grants at all and answers two empty lists rather than a 404, so the
+  copilot grounds on "no tools" instead of being unable to tell.
+
+A host predating #874 sends no `unwired` key; the client defaults it to `[]`,
+which reads identically to a fully wired deployment.
