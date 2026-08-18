@@ -58,6 +58,46 @@ fn console_dir_from_env() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+/// Stamps the cache policy the console's own file naming already implies.
+///
+/// The bundle is content-hashed: `index.html` names `index-<hash>.js`, and a
+/// build that changes the bytes changes the name. That makes the assets safe to
+/// keep forever and makes the shell the one file that must never be kept — it
+/// is the only thing that knows which hashes are current.
+///
+/// Without this the shell was served with an `etag` and no `cache-control`, so
+/// browsers applied heuristic freshness and held it across a deploy. The held
+/// shell asks for chunks the new image no longer contains; those requests fall
+/// through to the SPA fallback and answer with `index.html`, so the dynamic
+/// import receives HTML, throws, and unmounts the app — a blank page with no
+/// error anywhere a user can see it (issue #979).
+///
+/// Keyed on the response's own content type rather than the request path,
+/// because the SPA fallback serves the shell at paths that look like anything
+/// at all — including, in the failure above, paths under `/assets/`.
+fn cache_console_response(mut response: Response) -> Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
+
+    let is_html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
+
+    // `no-cache` still allows the browser to keep the file; it requires a
+    // revalidation before reuse, which is what makes a deploy visible on the
+    // very next request. `no-store` would be stricter and slower for no gain.
+    let policy = if is_html {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    };
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static(policy));
+    response
+}
+
 /// Builds the Axum router, mounting the operator console at `/` when
 /// `OPENCOMPANY_CONSOLE_DIR` is configured.
 pub fn router(state: AppState) -> Router {
@@ -114,7 +154,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
                         return StatusCode::NOT_FOUND.into_response();
                     }
                     match serve.oneshot(request).await {
-                        Ok(response) => response.into_response(),
+                        Ok(response) => cache_console_response(response.into_response()),
                         Err(err) => match err {},
                     }
                 }
@@ -264,7 +304,8 @@ mod tests {
     use super::*;
     use crate::AppConfig;
 
-    /// Writes a minimal console tree (just `index.html`) into a temp dir.
+    /// Writes a minimal console tree — the shell plus one hashed asset, which
+    /// is the shape the cache policy distinguishes between.
     fn console_fixture() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -272,8 +313,23 @@ mod tests {
             "<!doctype html><title>console</title>",
         )
         .unwrap();
+        std::fs::create_dir(dir.path().join("assets")).unwrap();
+        std::fs::write(
+            dir.path().join("assets").join("index-abc123.js"),
+            "export const x = 1;\n",
+        )
+        .unwrap();
         let path = dir.path().to_path_buf();
         (dir, path)
+    }
+
+    fn cache_control(response: &axum::response::Response) -> &str {
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .expect("the console fallback stamps a cache policy on every response")
+            .to_str()
+            .unwrap()
     }
 
     async fn body_text(response: axum::response::Response) -> String {
@@ -313,6 +369,71 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("<title>console</title>"));
+    }
+
+    #[tokio::test]
+    async fn the_shell_is_never_kept_without_revalidating() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        for path in ["/", "/some/spa/route"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(cache_control(&response), "no-cache", "for {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hashed_asset_is_kept_forever() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/index-abc123.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            cache_control(&response),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    /// The failure that made issue #979 a blank page rather than a 404: a
+    /// stale shell asks for a chunk this build does not have, the SPA fallback
+    /// answers with `index.html`, and the browser is handed HTML where it
+    /// expected a module. Whatever else that response is, it must not be
+    /// cached as though it were the immutable asset it was addressed as —
+    /// which is why the policy is keyed on what came back, not what was asked
+    /// for.
+    #[tokio::test]
+    async fn a_missing_chunk_answers_with_the_shell_and_is_not_kept() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/KnowledgeGraph-fromlastbuild.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cache_control(&response), "no-cache");
         assert!(body_text(response).await.contains("<title>console</title>"));
     }
 
