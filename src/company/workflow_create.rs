@@ -1471,8 +1471,9 @@ pub(crate) async fn set_company_workflow_enabled(
     // bodiless manifest-`enabled` id and could never be paused from here,
     // despite `disabled_workflows` (the pause flag this function writes) being
     // a wholly separate mechanism from the globals opt-out.
-    let is_undisabled_global = !crate::globals::disabled(&record.manifest.globals.disable, "workflow", wid)
-        && crate::globals::workflows().iter().any(|w| w.id == wid);
+    let is_undisabled_global =
+        !crate::globals::disabled(&record.manifest.globals.disable, "workflow", wid)
+            && crate::globals::workflows().iter().any(|w| w.id == wid);
     let has_body = seed_file_exists(source_dir, wid)
         || record.overlay_workflows.iter().any(|w| w.id == wid)
         || is_undisabled_global;
