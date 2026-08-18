@@ -1529,7 +1529,14 @@ export function WorkflowsView({
       if (!overlayOutput.record) return { state: "unavailable" };
       const value = nodeOutputFor(overlayOutput.record.nodes, selectedNode.id);
       if (value === undefined) return { state: "unavailable" };
-      return { state: "present", value, truncated: overlayOutput.record.truncated };
+      // Issue #1008: a failed/blocked run's snapshot is flagged partial; carry it
+      // so the inspector badges the capture. A live run (below) is never partial.
+      return {
+        state: "present",
+        value,
+        truncated: overlayOutput.record.truncated,
+        partial: overlayOutput.record.partial,
+      };
     }
     if (result) {
       const value = nodeOutputFor(result.output, selectedNode.id);

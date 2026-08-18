@@ -2039,6 +2039,7 @@ pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutput
         at_millis: at,
         nodes: serde_json::json!({ "writer": { "items": [marker] } }),
         truncated: false,
+        partial: false,
     };
 
     // Roundtrip: a stored record reads back byte-identically.
