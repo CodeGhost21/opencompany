@@ -14,7 +14,7 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import type { TaskDeliverable } from "@/api/tasks";
-import type { OpenTurn } from "@/components/app-shell";
+import type { OpenTurn } from "@/lib/live-reply";
 import { setInboxEnabled } from "@/api/inbox";
 import {
   ApiError,

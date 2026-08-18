@@ -48,7 +48,7 @@ import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
 import { startVisiblePolling } from "@/lib/visible-poll";
-import { openTurnsFromRuns, PendingSyncPosts } from "@/lib/live-reply";
+import { openTurnsFromRuns, PendingSyncPosts, type OpenTurn } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
@@ -182,26 +182,6 @@ const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
  * worth — it exists to bound a long-lived tab, not to ration frames. */
 const WORKFLOW_EVENT_WINDOW = 300;
-
-/**
- * A chat turn that has been accepted but has not settled (issue #983).
- *
- * Held per thread rather than per turn: a thread has at most one turn the
- * operator is waiting on, and keying by thread is what lets the working
- * indicator be looked up where it renders.
- */
-export type OpenTurn = {
-  /**
-   * The durable row to poll. Absent when the host could not mint one — the turn
-   * still ran, and the indicator still shows, it just cannot be watched.
-   */
-  turnId?: string;
-  /**
-   * The row is still `pending`: accepted, but waiting on the per-company serial
-   * lock rather than working. Drives the indicator's wording.
-   */
-  queued: boolean;
-};
 
 /**
  * How often an open turn's row is re-read.

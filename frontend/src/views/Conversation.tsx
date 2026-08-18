@@ -35,7 +35,7 @@ import { cn } from "@/lib/utils";
 import { type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
 import { WorkingIndicator } from "@/views/chat/WorkingIndicator";
 import { isDetachedChat } from "@/api/types";
-import type { OpenTurn } from "@/components/app-shell";
+import type { OpenTurn } from "@/lib/live-reply";
 import type { Thread, ThreadContact } from "@/lib/threads";
 
 interface Props {

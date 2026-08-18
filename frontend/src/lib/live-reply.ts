@@ -217,15 +217,28 @@ export class PendingSyncPosts<F extends LiveReplyFrame = LiveReplyFrame> {
 }
 
 /**
- * A chat turn accepted but not settled, keyed by the thread it belongs to.
+ * A chat turn that has been accepted but has not settled (issue #983).
  *
- * Mirrors `OpenTurn` in the shell, declared here so the fold below can be tested
- * without standing up a React tree.
+ * Held per thread rather than per turn: a thread has at most one turn the
+ * operator is waiting on, and keying by thread is what lets the working
+ * indicator be looked up where it renders. Declared here rather than in the
+ * shell so the fold below and the views can share it without a type-cycle.
  */
-export interface OpenTurnRow {
+export type OpenTurn = {
+  /**
+   * The durable row to poll. Absent when the host could not mint one — the turn
+   * still ran, and the indicator still shows, it just cannot be watched.
+   */
   turnId?: string;
+  /**
+   * The row is still `pending`: accepted, but waiting on the per-company serial
+   * lock rather than working. Drives the indicator's wording.
+   */
   queued: boolean;
-}
+};
+
+/** The per-thread rows the fold produces — the same shape as {@link OpenTurn}. */
+export type OpenTurnRow = OpenTurn;
 
 /** The shape {@link openTurnsFromRuns} reads — the run rows' relevant fields. */
 export interface OpenRunRow {
