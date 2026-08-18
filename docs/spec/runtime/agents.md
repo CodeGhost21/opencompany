@@ -196,6 +196,57 @@ An empty or whitespace-only document is dropped rather than rendered as a bare
 heading. An empty section reads to the model as a source that exists and says
 nothing, which is worse than its absence.
 
+## What a turn is allowed to spend
+
+Two ceilings bound one turn, and they bound different things.
+
+### Tool iterations — 25
+
+A turn may run **25** tool-calling rounds before the runtime pauses it and hands
+the operator a resumable checkpoint instead of an answer.
+
+The number is stated by this crate, not inherited. It used to be inherited: the
+agent builder was never told a cap, so every teammate silently ran on the
+vendored default of ten. Ten is a summariser's budget. A product manager asked
+for a feature spec reads the standards, reads the release checklist, reads the
+nearest prior spec, drafts, and publishes — and spends the ten before delivering
+anything, which is the incident the raise comes from.
+
+Twenty-five is ~2.5x headroom over that shape without the 5x of the runtime's
+"extended" 50. **Cost grows faster than the multiplier**: each iteration re-sends
+a transcript longer than the last one's, so 2.5x the rounds is more than 2.5x the
+spend. That is why the ceiling is the smallest number that covers the observed
+work rather than the largest one that would be safe.
+
+It is a **global** default, deliberately: it reaches every shipped template
+without editing each one. A teammate cannot raise or lower it from its manifest
+today.
+
+### In-turn spend — $5.00, or the teammate's daily cap, whichever is lower
+
+The company's other two spend controls — the plan-level token ceiling and a
+teammate's `budget_usd_daily` — are both **pre-dispatch**. They decide whether a
+turn may *start*; neither can see inside one. So a turn that begins one cent
+under a cap can finish arbitrarily far over it, and raising the iteration ceiling
+widens that window in proportion.
+
+A running turn is therefore also metered against an in-turn ceiling, checked
+between iterations, and halted the moment cumulative spend reaches it. The
+ceiling is the **lower** of $5.00 and this teammate's `budget_usd_daily`: a
+teammate capped at $2/day must not be able to spend $5 inside the one turn that
+slipped past the pre-dispatch gate, while a generous daily cap does not raise the
+per-turn ceiling above the absolute one.
+
+$5.00 is several times what a legitimate turn that spends the whole 25-iteration
+ceiling costs on the managed tiers, so it does not ration ordinary work. It exists
+to bound a pathological loop, and to put a number on a worst case that previously
+had none.
+
+A budget halt is **not** an iteration-cap pause, and the runtime reports them
+separately. A cap pause means the teammate ran out of rounds with work still to
+do and can be resumed; a budget halt means it ran out of money. Anything that
+renders one to an operator must not label it with the other.
+
 ## `classes`
 
 The explicit epistemic classification
@@ -230,6 +281,8 @@ rename can switch off is not a control.
 | Routing table and exclusions | `src/company/context_routing.rs` |
 | Roster type and constants | `src/company/types.rs` |
 | Manifest wiring and validation | `src/company/manifest.rs` |
+| Iteration cap, stated on every built agent | `src/harness/build.rs` |
+| In-turn spend brake, installed per turn | `src/harness/mod.rs` |
 
 The first three are **always compiled**, though the harness that spends the
 prompt is behind the `openhuman` feature. Composition, clamping and the
