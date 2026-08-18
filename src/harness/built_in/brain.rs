@@ -119,7 +119,19 @@ impl Drop for CheckoutJanitor {
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
     pool: Arc<HarnessPool>,
-    deps: HarnessDeps,
+    deps: Arc<HarnessDeps>,
+    /// Every harness lane beyond the default, by id, and which agents are bound
+    /// to which. Empty for a company that declares no `[[harness]]` block —
+    /// which is every company that has not asked for one — and in that case
+    /// [`run_turn`](Self::run_turn) hands back the default lane directly, so the
+    /// single-harness path stays exactly what it was.
+    lanes: Vec<(String, Arc<dyn RunTurn>)>,
+    /// Agent id -> harness id, for agents bound to a named harness.
+    bindings: std::collections::HashMap<String, String>,
+    /// Declared harnesses this host cannot run, and why.
+    unavailable: Vec<(String, String)>,
+    /// The harness id agents naming none run on.
+    default_harness: String,
     /// The LLM triage escalation, built on first use (issue #678).
     ///
     /// Lazy because it needs the company id, and a brain outlives any one
@@ -175,14 +187,70 @@ impl HarnessBrain {
     /// once and reused across cycles.
     pub fn new(pool: Arc<HarnessPool>, deps: HarnessDeps, record: CompanyRecord) -> Self {
         let responder = orchestrator::orchestrator_id(&record.manifest.agents).unwrap_or_default();
+        let default_harness = record.manifest.default_harness_id();
+        let bindings = record
+            .manifest
+            .agents
+            .iter()
+            .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
+            .collect();
         Self {
             pool,
-            deps,
+            deps: Arc::new(deps),
+            lanes: Vec::new(),
+            bindings,
+            unavailable: Vec::new(),
+            default_harness,
             record: std::sync::RwLock::new(Arc::new(record)),
             responder,
             runs: None,
             triage: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Attaches the harness lanes beyond the default.
+    ///
+    /// Each entry is a declared harness id and the engine serving it — another
+    /// `built_in` pool on its own provider, or an ACP agent. Without this a
+    /// brain routes every turn to the default lane, which is correct for a
+    /// company that declares no `[[harness]]`.
+    pub fn with_lanes(mut self, lanes: Vec<(String, Arc<dyn RunTurn>)>) -> Self {
+        self.lanes = lanes;
+        self
+    }
+
+    /// Records that a declared harness has no engine on this host, and why, so
+    /// a turn bound to it fails with something actionable instead of silently
+    /// running somewhere nobody chose.
+    pub fn with_unavailable_lanes(mut self, unavailable: Vec<(String, String)>) -> Self {
+        self.unavailable = unavailable;
+        self
+    }
+
+    /// The [`RunTurn`] this brain's turns go through.
+    ///
+    /// With no extra lanes this is the default harness alone — byte-identical
+    /// behaviour to before named harnesses existed, and no routing table is
+    /// consulted. With lanes, it is a [`HarnessRouter`] that sends each agent's
+    /// turn to the harness it is bound to.
+    fn run_turn(&self) -> Arc<dyn RunTurn> {
+        let default_lane: Arc<dyn RunTurn> =
+            Arc::new(HarnessRunTurn::new(self.pool.clone(), self.deps.clone()));
+        if self.lanes.is_empty() && self.unavailable.is_empty() {
+            return default_lane;
+        }
+        let mut router = crate::harness::router::HarnessRouter::new(&self.default_harness)
+            .with_engine(&self.default_harness, default_lane);
+        for (id, engine) in &self.lanes {
+            router = router.with_engine(id, engine.clone());
+        }
+        for (id, reason) in &self.unavailable {
+            router = router.with_unavailable(id, reason);
+        }
+        for (agent, harness) in &self.bindings {
+            router = router.bind(agent, harness);
+        }
+        Arc::new(router)
     }
 
     /// This company's record as of the current cycle's refresh.
@@ -372,7 +440,7 @@ impl HarnessBrain {
         );
         let control = guard.control().clone();
 
-        let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        let run_turn = self.run_turn();
         // Bound for the runner's whole lifetime (issue #707): one turn, one record.
         let record = self.record();
         // Issue #453: the same argument as the publish claim below, one queue
@@ -486,7 +554,7 @@ impl HarnessBrain {
         // on this path. That is a strict improvement on dropping it unrun, and it
         // is recorded on the card the hand-off opens.
         let drained = match self
-            .delegation_runner(&run_turn, &record)
+            .delegation_runner(run_turn.as_ref(), &record)
             .drain_and_execute(
                 grant.origin_thread.as_deref(),
                 delegation::MessageContext::default(),
@@ -728,7 +796,7 @@ impl HarnessBrain {
         let mut redirects: u32 = 0;
         // Route the background turn through the brain-agnostic `RunTurn` seam
         // (issue #176), re-attaching `HarnessDeps` behind `HarnessRunTurn`.
-        let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        let run_turn = self.run_turn();
         // Bound for the runner's whole lifetime (issue #707): one turn, one record.
         let record = self.record();
         // Issue #242: where this attempt's own approval requests begin. The
@@ -819,7 +887,7 @@ impl HarnessBrain {
                             // way to `todo` — the hand-off did happen, and a
                             // re-dispatch should start from who it was given to.
                             let handoff = match self
-                                .delegation_runner(&run_turn, &record)
+                                .delegation_runner(run_turn.as_ref(), &record)
                                 .for_task(&card.id)
                                 // The delegate's turn is part of THIS attempt —
                                 // its steps and its spend belong to the card's
@@ -1012,7 +1080,7 @@ impl HarnessBrain {
         if !unpublished_before_nudge.is_empty() {
             declined = self
                 .nudge_for_unpublished(
-                    &run_turn,
+                    run_turn.as_ref(),
                     &responder,
                     &base_instruction,
                     &result_text,
@@ -1451,7 +1519,7 @@ impl HarnessBrain {
     #[allow(clippy::too_many_arguments)]
     async fn nudge_for_unpublished(
         &self,
-        run_turn: &HarnessRunTurn<'_>,
+        run_turn: &dyn RunTurn,
         responder: &str,
         brief: &str,
         reply: &str,
@@ -2377,9 +2445,9 @@ impl HarnessBrain {
         delegation: Delegation,
         chat_id: Option<&str>,
     ) -> Result<delegation::DelegationOutcome> {
-        let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        let run_turn = self.run_turn();
         let record = self.record();
-        self.delegation_runner(&run_turn, &record)
+        self.delegation_runner(run_turn.as_ref(), &record)
             .run_delegation(delegation, chat_id, delegation::MessageContext::default())
             .await
     }
@@ -2403,7 +2471,7 @@ impl HarnessBrain {
     /// turn on a single consistent record.
     fn delegation_runner<'a>(
         &'a self,
-        run_turn: &'a HarnessRunTurn<'a>,
+        run_turn: &'a dyn RunTurn,
         record: &'a CompanyRecord,
     ) -> DelegationRunner<'a> {
         DelegationRunner::new(
@@ -2603,11 +2671,11 @@ impl HarnessBrain {
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
                     // re-attached behind `HarnessRunTurn`.
-                    let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+                    let run_turn = self.run_turn();
                     // Bound for the runner's whole lifetime (issue #707): one turn, one record.
                     let record = self.record();
                     let turn = self
-                        .delegation_runner(&run_turn, &record)
+                        .delegation_runner(run_turn.as_ref(), &record)
                         .handle_operator_message(&responder, text, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
@@ -2915,6 +2983,12 @@ description = "Runs Acme."
     }
 
     fn brain_over_mock(dir: &std::path::Path) -> HarnessBrain {
+        brain_over_mock_with(dir, record())
+    }
+
+    /// [`brain_over_mock`] over a chosen record, so a test can vary the roster
+    /// (and its `[[harness]]` block) without restating the whole deps literal.
+    fn brain_over_mock_with(dir: &std::path::Path, record: CompanyRecord) -> HarnessBrain {
         let deps = HarnessDeps {
             ledgers: None,
             ledger_registry: Default::default(),
@@ -2967,7 +3041,7 @@ description = "Runs Acme."
             repo_bindings: Vec::new(),
             checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
-        HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
+        HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record)
     }
 
     fn request(events: Vec<CompanyEvent>) -> CycleRequest {
@@ -4316,7 +4390,11 @@ members = ["engineer"]
 
         let dir = tempfile::tempdir().unwrap();
         let (mut brain, _ops) = brain_with_artifacts(dir.path());
-        brain.deps.artifacts = Some(Arc::new(BrokenArtifacts));
+        // Sole owner at this point — no turn has run, so nothing has cloned the
+        // deps into a lane yet.
+        Arc::get_mut(&mut brain.deps)
+            .expect("the brain is the only holder of its deps before any turn")
+            .artifacts = Some(Arc::new(BrokenArtifacts));
 
         let err = brain
             .record_published_artifacts(
@@ -8527,5 +8605,156 @@ members = ["eng1", "eng2"]
         // work is not a hand-off.
         let parent = cards.iter().find(|c| c.id == "t-parent").expect("parent");
         assert_eq!(parent.column, "in_review");
+    }
+
+    // ---- named harnesses: does the wiring actually route? ------------------
+
+    /// Records which agents it ran, so a test can assert *which* lane served a
+    /// turn rather than only that one did.
+    struct SpyLane {
+        label: String,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for SpyLane {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.seen.lock().unwrap().push(agent_id.to_string());
+            Ok(crate::harness::built_in::TurnOutcome {
+                reply: self.label.clone(),
+                steps: Vec::new(),
+            })
+        }
+        async fn run_steered(
+            &self,
+            c: &CompanyId,
+            a: &str,
+            m: &str,
+            _: &crate::company::steer::SteerControl,
+            chat: Option<&str>,
+            _: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.run(c, a, m, chat).await
+        }
+        async fn run_steered_background(
+            &self,
+            c: &CompanyId,
+            a: &str,
+            m: &str,
+            _: &crate::company::steer::SteerControl,
+            _: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::built_in::TurnOutcome> {
+            self.run(c, a, m, None).await
+        }
+    }
+
+    /// A roster spanning two declared harnesses.
+    fn two_harness_record() -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "researcher"
+role = "Researcher"
+harness = "deep"
+
+[[harness]]
+id = "embedded"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "deep"
+kind = "built_in"
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// The wiring's whole point: an agent bound to a named harness runs on that
+    /// harness's engine, and an unbound one stays on the default.
+    #[tokio::test]
+    async fn a_bound_agent_runs_on_its_own_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = Arc::new(SpyLane {
+            label: "deep".to_string(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let brain = brain_over_mock_with(dir.path(), two_harness_record()).with_lanes(vec![(
+            "deep".to_string(),
+            deep.clone() as Arc<dyn crate::runtime::delegation::RunTurn>,
+        )]);
+
+        let company = CompanyId::new("acme");
+        let out = brain
+            .run_turn()
+            .run(&company, "researcher", "hi", None)
+            .await
+            .expect("routes to the deep lane");
+        assert_eq!(out.reply, "deep");
+        assert_eq!(&*deep.seen.lock().unwrap(), &["researcher".to_string()]);
+
+        // The unbound agent must not reach it — it belongs to the default pool.
+        let _ = brain.run_turn().run(&company, "ceo", "hi", None).await;
+        assert_eq!(
+            &*deep.seen.lock().unwrap(),
+            &["researcher".to_string()],
+            "the default agent must not land on the named lane"
+        );
+    }
+
+    /// A declared harness this host cannot run fails the turn, naming the
+    /// harness and the reason. It must never quietly borrow the default lane:
+    /// that turn would succeed on a model and a credential nobody chose, and
+    /// the only evidence would be a billing line.
+    #[tokio::test]
+    async fn an_unrunnable_harness_fails_rather_than_falling_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain =
+            brain_over_mock_with(dir.path(), two_harness_record()).with_unavailable_lanes(vec![(
+                "deep".to_string(),
+                "this build has no ACP transport wired".to_string(),
+            )]);
+
+        let err = brain
+            .run_turn()
+            .run(&CompanyId::new("acme"), "researcher", "hi", None)
+            .await
+            .expect_err("must not fall back to the default lane");
+        let msg = err.to_string();
+        assert!(msg.contains("researcher"), "{msg}");
+        assert!(msg.contains("deep"), "{msg}");
+        assert!(msg.contains("ACP transport"), "names the fix: {msg}");
+    }
+
+    /// A company declaring no `[[harness]]` keeps exactly the single-lane path:
+    /// no lanes, no bindings, nothing to consult.
+    #[tokio::test]
+    async fn a_company_with_no_harness_block_is_unrouted() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = brain_over_mock(dir.path());
+        assert!(brain.lanes.is_empty());
+        assert!(brain.unavailable.is_empty());
+        assert!(brain.bindings.is_empty());
+        assert_eq!(brain.default_harness, "default");
     }
 }

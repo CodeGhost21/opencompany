@@ -2248,7 +2248,7 @@ impl RuntimeBuilder {
                                     Vec::new()
                                 }),
                             );
-                            let deps = HarnessDeps {
+                            let mut deps = HarnessDeps {
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
                                 default_mcp_servers: self.default_mcp_servers.clone(),
@@ -2260,7 +2260,7 @@ impl RuntimeBuilder {
                                     id.clone(),
                                     secrets.clone(),
                                     self.manifest.inference.clone(),
-                                    env_default,
+                                    env_default.clone(),
                                 )),
                                 // Static fallback only; `HarnessPool::run` reads
                                 // the live slug from the provider per turn.
@@ -2527,12 +2527,38 @@ impl RuntimeBuilder {
                             builder = Some(Arc::new(
                                 crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
                             ));
+                            // The company's other declared harnesses, each on
+                            // its own pool and its own provider. Empty unless
+                            // `[[harness]]` names more than one, so a company
+                            // that declares none keeps exactly the single-pool
+                            // path it always had.
+                            let lanes = crate::harness::lanes::build(
+                                &record,
+                                &deps,
+                                secrets.clone(),
+                                env_default,
+                            );
+                            if !lanes.lanes.is_empty() || !lanes.unavailable.is_empty() {
+                                tracing::info!(
+                                    company = %id,
+                                    lanes = lanes.lanes.len(),
+                                    unavailable = lanes.unavailable.len(),
+                                    "wired named harnesses"
+                                );
+                            }
+                            // Narrow the default pool to the agents it actually
+                            // serves once other lanes exist; `None` (the
+                            // single-harness case) keeps the whole roster.
+                            deps.serves = lanes.default_serves;
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
                                 // choke point mints into and the boot reaper
                                 // sweeps, so an attempt's trace, cost and
                                 // status all land on the row it opened.
-                                HarnessBrain::new(pool, deps, record).with_runs(ops.runs.clone()),
+                                HarnessBrain::new(pool, deps, record)
+                                    .with_lanes(lanes.lanes)
+                                    .with_unavailable_lanes(lanes.unavailable)
+                                    .with_runs(ops.runs.clone()),
                             ) as Arc<dyn Brain>)
                         } else {
                             // Do not degrade silently (issue #174): an openhuman

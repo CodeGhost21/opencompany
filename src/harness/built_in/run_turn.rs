@@ -20,21 +20,28 @@ use crate::harness::{HarnessDeps, HarnessPool, TurnOutcome};
 use crate::ports::types::CompanyId;
 use crate::runtime::delegation::RunTurn;
 
-/// The harness's [`RunTurn`]: re-attaches [`HarnessDeps`] onto each pool turn.
-pub struct HarnessRunTurn<'a> {
-    pool: &'a HarnessPool,
-    deps: &'a HarnessDeps,
+/// The built-in harness's [`RunTurn`]: re-attaches [`HarnessDeps`] onto each
+/// pool turn.
+///
+/// Holds its pool and deps by `Arc` rather than by reference so it can live in
+/// a [`HarnessRouter`](crate::harness::router::HarnessRouter) alongside the
+/// other lanes. A company running two `built_in` harnesses has one of these per
+/// harness, each over its own pool and its own provider — which is the whole
+/// point of naming more than one.
+pub struct HarnessRunTurn {
+    pool: Arc<HarnessPool>,
+    deps: Arc<HarnessDeps>,
 }
 
-impl<'a> HarnessRunTurn<'a> {
-    /// Wraps a pool + deps for one cycle's worth of turns.
-    pub fn new(pool: &'a HarnessPool, deps: &'a HarnessDeps) -> Self {
+impl HarnessRunTurn {
+    /// Wraps a pool + deps as one harness lane.
+    pub fn new(pool: Arc<HarnessPool>, deps: Arc<HarnessDeps>) -> Self {
         Self { pool, deps }
     }
 }
 
 #[async_trait]
-impl RunTurn for HarnessRunTurn<'_> {
+impl RunTurn for HarnessRunTurn {
     async fn run(
         &self,
         company: &CompanyId,
@@ -43,7 +50,7 @@ impl RunTurn for HarnessRunTurn<'_> {
         chat_id: Option<&str>,
     ) -> Result<TurnOutcome> {
         self.pool
-            .run(company, agent_id, message, self.deps, chat_id)
+            .run(company, agent_id, message, &self.deps, chat_id)
             .await
     }
 
@@ -58,7 +65,7 @@ impl RunTurn for HarnessRunTurn<'_> {
     ) -> Result<TurnOutcome> {
         self.pool
             .run_steered(
-                company, agent_id, message, self.deps, control, chat_id, run_sink,
+                company, agent_id, message, &self.deps, control, chat_id, run_sink,
             )
             .await
     }
@@ -72,7 +79,7 @@ impl RunTurn for HarnessRunTurn<'_> {
         run_sink: Option<Arc<RunTraceSink>>,
     ) -> Result<TurnOutcome> {
         self.pool
-            .run_steered_background(company, agent_id, message, self.deps, control, run_sink)
+            .run_steered_background(company, agent_id, message, &self.deps, control, run_sink)
             .await
     }
 }

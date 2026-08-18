@@ -28,6 +28,7 @@
 
 pub mod acp;
 pub mod built_in;
+pub mod lanes;
 pub mod router;
 
 pub use built_in::*;

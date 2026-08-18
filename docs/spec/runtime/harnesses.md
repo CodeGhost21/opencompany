@@ -170,14 +170,27 @@ harness and forwards each call to the one its agent names. `RunTurn` already
 carried `agent_id` on all three of its methods, so the dispatch point always
 existed — nothing had ever varied on it.
 
+The lanes are built at runtime-build time by `harness::lanes::build`, and
+`HarnessBrain` routes through them. **A company declaring one harness (or none)
+builds no router at all** — `run_turn()` hands back the single lane directly, so
+the overwhelmingly common path is byte-identical to what it was.
+
+Each `built_in` lane gets its own `HarnessPool` and its own `HarnessDeps`,
+differing in exactly two fields: the provider (scoped to that harness's config
+and credential slots) and `serves`, which narrows the pool to the agents bound
+to it. That narrowing is what makes one-pool-per-harness affordable — without
+it, a ten-agent roster across three harnesses would stand up thirty live agents
+to use ten.
+
 All three methods route. A method forwarding to a fixed engine would send
 *dispatched card* turns to the wrong model while operator chat looked correct.
 
 ### A harness with no engine fails the turn
 
-A harness can be declared, valid, and still have no engine: an `acp` one in a
-build compiled without the `acp` feature, or a `built_in` one on a host that
-resolved no inference. Those turns fail, naming the harness and the fix.
+A harness can be declared, valid, and still have no engine. Today that is every
+`acp` harness on a server build: the transports live in the desktop shell (a
+stdio subprocess) and the runner lane (a socket), and neither is wired into the
+server. Those turns fail, naming the harness and the fix.
 
 They MUST NOT fall back to another harness's engine. That is the worst outcome
 available: the turn would succeed, on a model and a credential nobody chose, and
@@ -206,6 +219,7 @@ the only evidence would be a billing line.
 | manifest types, kind/transport vocabularies | `src/company/types.rs` |
 | validation, `effective_harnesses`, `harness_for` | `src/company/manifest.rs` |
 | per-agent dispatch | `src/harness/router.rs` |
+| building the lanes at boot | `src/harness/lanes.rs` |
 | the built-in engine | `src/harness/built_in/` |
 | the ACP `RunTurn` and its port | `src/harness/acp/run_turn.rs` |
 | local transport: discovery, spawn, codec | `src-tauri/src/acp/` |
