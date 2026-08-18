@@ -2082,22 +2082,29 @@ async fn workflow_tool_slugs(
 }
 
 /// The `GET …/workflows/wired-channels` answer (issue #813): the chat channel
-/// ids this running company can deliver to, so the output-node destination
-/// editor offers a picker of real targets. `operator` is always present. Not
-/// feature-gated — the wired-channel set exists on every build.
+/// ids this running company can actually deliver to, so the output-node
+/// destination editor offers a picker of real targets. Not feature-gated — the
+/// channel set exists on every build.
+///
+/// **`operator` is not among them** (issue #981). This used to say the opposite
+/// and serve the unfiltered adapter list, which offered authors the one target
+/// workflow delivery refuses by name. An empty list is a truthful answer for a
+/// company with no desks and no provider channels: there is nowhere to deliver.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WiredChannelsResponse {
-    /// The channel ids an `output` node's `channel` destination may target;
-    /// anything else fails at delivery with `ChannelNotWired`.
+    /// The channel ids an `output` node's `channel` destination may target.
+    /// Anything else is rejected when the workflow is saved, and — for a graph
+    /// saved before the desk went away — fails at delivery with
+    /// `ChannelNotWired`.
     channels: Vec<String>,
 }
 
 /// `GET …/workflows/wired-channels` (both scope forms). Reads the running
-/// company's wired channels directly — infallible, no record load needed.
+/// company's deliverable channels directly — infallible, no record load needed.
 async fn workflow_wired_channels(company: ScopedCompany) -> Json<WiredChannelsResponse> {
     Json(WiredChannelsResponse {
-        channels: company.runtime.wired_channel_ids(),
+        channels: company.runtime.deliverable_channel_ids(),
     })
 }
 
