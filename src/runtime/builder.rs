@@ -1521,10 +1521,18 @@ impl RuntimeBuilder {
             match crate::ports::runs::reap_orphaned_runs(ops.runs.as_ref(), &id).await {
                 Ok(reaped) => {
                     for run in reaped {
+                        // Issue #983: a reaped chat turn names no card, so the
+                        // row settle above was the whole of its cleanup. The
+                        // transcript half — folding its unterminated
+                        // `TurnStarted` into a `TurnFailed` — is the journal
+                        // sweep further down, not this one.
+                        let Some(task_id) = run.task_id.as_deref() else {
+                            continue;
+                        };
                         match crate::runtime::advance::advance_settled_card(
                             ops.tasks.as_ref(),
                             &id,
-                            &run.task_id,
+                            task_id,
                             crate::ports::runs::RunStatus::Failed,
                             crate::ports::runs::ORPHAN_ERROR,
                         )
@@ -1533,7 +1541,7 @@ impl RuntimeBuilder {
                             Ok(Some(column)) => tracing::info!(
                                 company = %id,
                                 run = %run.id,
-                                task = %run.task_id,
+                                task = %task_id,
                                 column,
                                 "returned a card stranded by a previous host process"
                             ),
@@ -1544,7 +1552,7 @@ impl RuntimeBuilder {
                             Err(err) => tracing::warn!(
                                 company = %id,
                                 run = %run.id,
-                                task = %run.task_id,
+                                task = %task_id,
                                 error = %err,
                                 "reaped an orphaned run but could not return its card"
                             ),
@@ -3394,16 +3402,9 @@ mod test {
                 .await
                 .expect("first boot");
             let runs = rt.runs();
-            runs.create_run(
-                &id,
-                NewRun {
-                    id: "run-1".to_string(),
-                    task_id: "t-1".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
-            .await
-            .expect("mint");
+            runs.create_run(&id, NewRun::for_task("run-1", "t-1", "ceo"))
+                .await
+                .expect("mint");
             runs.begin_run(&id, "run-1", EventSeq::new(3))
                 .await
                 .expect("begin");
@@ -3933,11 +3934,7 @@ mod test {
         let home = home_dir.path().to_path_buf();
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
-        let spec = |run: &str, task: &str| NewRun {
-            id: run.to_string(),
-            task_id: task.to_string(),
-            agent_id: "ceo".to_string(),
-        };
+        let spec = |run: &str, task: &str| NewRun::for_task(run, task, "ceo");
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
             .with_id(id.clone())
@@ -4051,29 +4048,15 @@ mod test {
             .upsert(&id, &card("card-b", COLUMN_PAUSED))
             .await
             .unwrap();
-        runs.create_run(
-            &id,
-            NewRun {
-                id: "run-a".to_string(),
-                task_id: "card-a".to_string(),
-                agent_id: "ceo".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-a", "card-a", "ceo"))
+            .await
+            .unwrap();
         runs.begin_run(&id, "run-a", crate::ports::types::EventSeq::new(1))
             .await
             .unwrap();
-        runs.create_run(
-            &id,
-            NewRun {
-                id: "run-b".to_string(),
-                task_id: "card-b".to_string(),
-                agent_id: "ceo".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-b", "card-b", "ceo"))
+            .await
+            .unwrap();
         runs.begin_run(&id, "run-b", crate::ports::types::EventSeq::new(2))
             .await
             .unwrap();
@@ -4130,14 +4113,7 @@ mod test {
             RunStatus::Failed
         );
         let next = runs
-            .create_run(
-                &id,
-                NewRun {
-                    id: "run-a2".to_string(),
-                    task_id: "card-a".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
+            .create_run(&id, NewRun::for_task("run-a2", "card-a", "ceo"))
             .await
             .unwrap();
         assert_eq!(

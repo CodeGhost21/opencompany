@@ -534,10 +534,16 @@ impl<'a> CycleRunner<'a> {
             // The reason goes onto the note so the board says why, and the move
             // is guarded: a card an operator has since dragged, or that a later
             // attempt parked, is left exactly where it is.
+            // Issue #983: a card-less run has no card to strand, so there is
+            // nothing here to make truthful. Settling the row above was the
+            // whole of this run's cleanup.
+            let Some(task_id) = run.task_id.as_deref() else {
+                continue;
+            };
             match crate::runtime::advance::advance_settled_card(
                 self.rt.tasks().as_ref(),
                 company,
-                &run.task_id,
+                task_id,
                 RunStatus::Failed,
                 &reason,
             )
@@ -546,7 +552,7 @@ impl<'a> CycleRunner<'a> {
                 Ok(Some(column)) => tracing::info!(
                     company = %company,
                     run = %id,
-                    task = %run.task_id,
+                    task = %task_id,
                     column,
                     "[runs] the terminality backstop returned a stranded card"
                 ),
@@ -557,7 +563,7 @@ impl<'a> CycleRunner<'a> {
                 Err(err) => tracing::warn!(
                     company = %company,
                     run = %id,
-                    task = %run.task_id,
+                    task = %task_id,
                     error = %err,
                     "[runs] the terminality backstop settled an attempt but could not move its card"
                 ),
@@ -3026,11 +3032,7 @@ mod test {
         rt.runs()
             .create_run(
                 rt.id(),
-                crate::ports::runs::NewRun {
-                    id: crate::ports::generate_id(),
-                    task_id: task.to_string(),
-                    agent_id: "ceo".to_string(),
-                },
+                crate::ports::runs::NewRun::for_task(crate::ports::generate_id(), task, "ceo"),
             )
             .await
             .expect("mint a run")

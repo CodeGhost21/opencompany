@@ -160,7 +160,12 @@ CREATE INDEX IF NOT EXISTS artifacts_by_task ON artifacts (company_id, task_id);
 CREATE TABLE IF NOT EXISTS runs (
     company_id TEXT NOT NULL,
     id         TEXT NOT NULL,
-    task_id    TEXT NOT NULL,
+    -- Nullable since issue #983: a chat turn is a recorded attempt at work that
+    -- opens no card. This column is only the index mirror of `run_json`'s own
+    -- `taskId`, so NULL here reads as "no card" in exactly the way the record
+    -- does, and `task_id = ?` never matches it — which is what a per-card
+    -- filter wants.
+    task_id    TEXT,
     status     TEXT NOT NULL,
     attempt    INTEGER NOT NULL,
     created_ms INTEGER NOT NULL,
@@ -355,6 +360,61 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &st
         .map_err(sql_err)
 }
 
+/// Drops the `NOT NULL` constraint on `runs.task_id` (issue #983).
+///
+/// A column constraint cannot be altered in place in SQLite, so this is the
+/// documented rebuild: create the new shape, copy, drop, rename, recreate the
+/// indexes — all inside one transaction, so a database is never left with two
+/// half-populated tables. The rows themselves need no rewriting: their
+/// `task_id` values are already non-`NULL` strings, and the record's `task_id`
+/// is `#[serde(default)]`, so the blob column loads unchanged either way.
+///
+/// Gated on `PRAGMA table_info`'s `notnull` flag rather than run unconditionally
+/// — the rebuild would otherwise fire on every open of every database forever,
+/// rewriting the whole run history each time.
+fn relax_runs_task_id_nullability(conn: &Connection) -> Result<()> {
+    let not_null = {
+        let mut stmt = conn.prepare("PRAGMA table_info(runs)").map_err(sql_err)?;
+        // `table_info` column 1 is the name and column 3 is the `notnull` flag.
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(3)?)))
+            .map_err(sql_err)?;
+        let mut flagged = false;
+        for row in rows {
+            let (name, notnull) = row.map_err(sql_err)?;
+            if name == "task_id" && notnull != 0 {
+                flagged = true;
+                break;
+            }
+        }
+        flagged
+    };
+    if !not_null {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN;
+         CREATE TABLE runs_rebuilt (
+             company_id TEXT NOT NULL,
+             id         TEXT NOT NULL,
+             task_id    TEXT,
+             status     TEXT NOT NULL,
+             attempt    INTEGER NOT NULL,
+             created_ms INTEGER NOT NULL,
+             run_json   TEXT NOT NULL,
+             PRIMARY KEY (company_id, id)
+         );
+         INSERT INTO runs_rebuilt
+             SELECT company_id, id, task_id, status, attempt, created_ms, run_json FROM runs;
+         DROP TABLE runs;
+         ALTER TABLE runs_rebuilt RENAME TO runs;
+         CREATE INDEX IF NOT EXISTS runs_by_task ON runs (company_id, task_id);
+         CREATE INDEX IF NOT EXISTS runs_by_status ON runs (company_id, status);
+         COMMIT;",
+    )
+    .map_err(sql_err)
+}
+
 /// Runs `write` with `synchronous=FULL`, so its commit is fsynced, and restores
 /// `NORMAL` afterwards no matter how `write` ended.
 ///
@@ -422,6 +482,12 @@ impl SqliteStore {
         // exactly the "this node is not binary" test the reads use, and needs no
         // backfill.
         add_column_if_missing(&conn, "workspace_nodes", "blob", "BLOB")?;
+        // Issue #983: `runs.task_id` was `NOT NULL`, and SQLite has no way to
+        // drop a column constraint — so a database created before this needs the
+        // twelve-step table rebuild, or the first card-less chat turn fails its
+        // insert on a constraint the record no longer has. Idempotent: it reads
+        // the live schema and does nothing once the constraint is gone.
+        relax_runs_task_id_nullability(&conn)?;
         Ok(Self {
             conn: Arc::new(StdMutex::new(conn)),
             senders: Arc::new(StdMutex::new(HashMap::new())),
@@ -2153,19 +2219,25 @@ impl crate::ports::runs::RunStore for SqliteStore {
                 spec.id
             )));
         }
-        let attempt: i64 = tx
-            .query_row(
-                "SELECT COALESCE(MAX(attempt), 0) + 1 FROM runs \
-                 WHERE company_id = ?1 AND task_id = ?2",
-                params![company.as_ref(), spec.task_id],
-                |r| r.get(0),
-            )
-            .map_err(sql_err)?;
+        // A card-less run (issue #983) is always attempt 1 — see the fs
+        // backend's `create_run` for why the ordinal is not shared across them.
+        let attempt: i64 = match &spec.task_id {
+            Some(task_id) => tx
+                .query_row(
+                    "SELECT COALESCE(MAX(attempt), 0) + 1 FROM runs \
+                     WHERE company_id = ?1 AND task_id = ?2",
+                    params![company.as_ref(), task_id],
+                    |r| r.get(0),
+                )
+                .map_err(sql_err)?,
+            None => 1,
+        };
         let run = RunRecord {
             id: spec.id,
             company: company.clone(),
             task_id: spec.task_id,
             agent_id: spec.agent_id,
+            chat_id: spec.chat_id,
             attempt: attempt as u32,
             status: RunStatus::Pending,
             trigger_event_seq: None,

@@ -223,10 +223,23 @@ pub struct RunRecord {
     /// The company that owns the attempt. Carried on the record as well as in
     /// the store key so an exported/streamed row is self-describing.
     pub company: CompanyId,
-    /// The board card this attempt is an attempt *at*.
-    pub task_id: String,
+    /// The board card this attempt is an attempt *at*, when there is one.
+    ///
+    /// Optional since issue #983: an operator chat turn is a recorded attempt at
+    /// *work*, and the work frequently opens no card. Serialized with
+    /// `skip_serializing_if` rather than as an explicit `null`, matching how
+    /// every other optional field on this record is written, so a dispatch row
+    /// is byte-identical to the ones written before the field could be absent —
+    /// and `#[serde(default)]` is what lets every row already on disk, which
+    /// carries a plain string here, still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     /// The desk/teammate the card was dispatched to.
     pub agent_id: String,
+    /// The conversation this attempt belongs to, when one raised it
+    /// (issue #983) — the only handle a card-less chat turn has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
     /// Which attempt at `task_id` this is, **1-based** — the first run of a card
     /// is `Attempt 1`. Assigned by the backend at create time; see
     /// [`RunStore::create_run`] for the concurrency contract.
@@ -305,10 +318,54 @@ pub struct RunStepRecord {
 pub struct NewRun {
     /// The caller-minted run id.
     pub id: String,
-    /// The card being attempted.
-    pub task_id: String,
+    /// The card being attempted, when there is one.
+    ///
+    /// `None` for a run that attempts no card — an operator chat turn
+    /// (issue #983) frequently opens none, and inventing a synthetic card id to
+    /// keep this required would put a card on the board that nobody asked for
+    /// and that every `RunStore` consumer would then have to know was a
+    /// fiction. A card-less run still carries a status, a step trace, a cost and
+    /// an orphan reaper, which is the whole of what this store is for.
+    pub task_id: Option<String>,
     /// The desk it was dispatched to.
     pub agent_id: String,
+    /// The conversation the run belongs to, when one raised it (issue #983).
+    ///
+    /// What makes a card-less chat turn *findable*: without a `task_id` there is
+    /// no other handle on it, so a desk asking "what is running for me" would
+    /// have nothing to filter on. `None` for a dispatch, which is already
+    /// reachable through its card.
+    pub chat_id: Option<String>,
+}
+
+impl NewRun {
+    /// A run that attempts a board card — the dispatch shape (issue #242).
+    pub fn for_task(
+        id: impl Into<String>,
+        task_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            task_id: Some(task_id.into()),
+            agent_id: agent_id.into(),
+            chat_id: None,
+        }
+    }
+
+    /// A run that attempts no card — the chat-turn shape (issue #983).
+    pub fn for_chat(
+        id: impl Into<String>,
+        chat_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            task_id: None,
+            agent_id: agent_id.into(),
+            chat_id: Some(chat_id.into()),
+        }
+    }
 }
 
 /// The settle of an attempt, as handed to [`RunStore::finish_run`].
@@ -393,7 +450,7 @@ impl RunFilter {
     /// filter in memory apply it after [`sort_newest_first`].
     pub fn matches(&self, run: &RunRecord) -> bool {
         if let Some(task_id) = &self.task_id
-            && &run.task_id != task_id
+            && run.task_id.as_deref() != Some(task_id.as_str())
         {
             return false;
         }
@@ -826,7 +883,8 @@ mod test {
         RunRecord {
             id: id.to_string(),
             company: CompanyId::new("alpha"),
-            task_id: "card".to_string(),
+            task_id: Some("card".to_string()),
+            chat_id: None,
             agent_id: "ceo".to_string(),
             attempt,
             status: RunStatus::Pending,
@@ -859,7 +917,7 @@ mod test {
         let mut pending = run("a", 10, 1);
         let mut done = run("b", 10, 2);
         done.status = RunStatus::Succeeded;
-        done.task_id = "other".to_string();
+        done.task_id = Some("other".to_string());
 
         assert!(RunFilter::default().matches(&pending));
         assert!(RunFilter::default().matches(&done));

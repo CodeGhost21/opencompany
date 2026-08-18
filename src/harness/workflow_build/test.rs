@@ -806,11 +806,7 @@ async fn open_run(runtime: &Arc<CompanyRuntime>, task_id: &str) -> String {
         .runs()
         .create_run(
             runtime.id(),
-            NewRun {
-                id: crate::ports::generate_id(),
-                task_id: task_id.to_string(),
-                agent_id: "maya".to_string(),
-            },
+            NewRun::for_task(crate::ports::generate_id(), task_id, "maya"),
         )
         .await
         .expect("mint the attempt row")

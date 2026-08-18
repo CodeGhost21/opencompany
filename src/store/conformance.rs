@@ -3733,11 +3733,7 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
 
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
-    let spec = |id: &str, task: &str| NewRun {
-        id: id.to_string(),
-        task_id: task.to_string(),
-        agent_id: "ceo".to_string(),
-    };
+    let spec = |id: &str, task: &str| NewRun::for_task(id, task, "ceo");
 
     // -- create: a fresh run is Pending and nothing else ---------------------
 
@@ -3745,7 +3741,8 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
     assert_eq!(first.status, RunStatus::Pending);
     assert_eq!(first.attempt, 1, "the first attempt at a card is 1-based");
     assert_eq!(first.company, alpha);
-    assert_eq!(first.task_id, "card");
+    assert_eq!(first.task_id.as_deref(), Some("card"));
+    assert_eq!(first.chat_id, None, "a dispatch names no conversation");
     assert_eq!(first.agent_id, "ceo");
     assert_eq!(first.trigger_event_seq, None);
     assert_eq!(first.started_at_millis, None);
@@ -4106,6 +4103,117 @@ pub async fn assert_run_store(runs: Arc<dyn crate::ports::runs::RunStore>) {
         runs.list_stale_active(&alpha).await.unwrap().is_empty(),
         "parked is not active: a run waiting on a person is not stale"
     );
+
+    // -- a run at no card (issue #983) ---------------------------------------
+    //
+    // The chat-turn shape: an attempt at work that opened no board card. It has
+    // to round-trip, it has to be reachable, and — the part a backend gets wrong
+    // by accident — it must not answer a per-card filter, because `task_id`
+    // being absent is not the same as it matching.
+
+    let chat = runs
+        .create_run(&alpha, NewRun::for_chat("t1", "general", "ceo"))
+        .await
+        .unwrap();
+    assert_eq!(chat.task_id, None);
+    assert_eq!(chat.chat_id.as_deref(), Some("general"));
+    assert_eq!(
+        chat.attempt, 1,
+        "with no card there is nothing for a second attempt to be the second of"
+    );
+    assert_eq!(runs.get_run(&alpha, "t1").await.unwrap(), Some(chat));
+
+    let second_chat = runs
+        .create_run(&alpha, NewRun::for_chat("t2", "general", "ceo"))
+        .await
+        .unwrap();
+    assert_eq!(
+        second_chat.attempt, 1,
+        "card-less runs do not share one anonymous attempt counter"
+    );
+
+    for card in ["card", "other", "no-such-card"] {
+        let matched = runs
+            .list_runs(&alpha, &RunFilter::for_task(card))
+            .await
+            .unwrap();
+        assert!(
+            !matched.iter().any(|r| r.id == "t1" || r.id == "t2"),
+            "a card-less run answered the filter for card '{card}'"
+        );
+    }
+    let all = runs.list_runs(&alpha, &RunFilter::default()).await.unwrap();
+    assert!(
+        all.iter().any(|r| r.id == "t1"),
+        "an unfiltered list must still reach a card-less run"
+    );
+
+    // It moves through the state machine like any other row, so the orphan
+    // reaper and the terminality backstop need no card-less special case.
+    runs.begin_run(&alpha, "t1", EventSeq::new(31))
+        .await
+        .unwrap();
+    assert_eq!(
+        runs.list_stale_active(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.id == "t1")
+            .count(),
+        1,
+        "a running card-less run is active"
+    );
+    let settled = runs
+        .finish_run(&alpha, "t1", RunOutcome::new(RunStatus::Succeeded))
+        .await
+        .unwrap();
+    assert_eq!(settled.status, RunStatus::Succeeded);
+    assert_eq!(settled.task_id, None, "the settle invented no card");
+}
+
+/// Asserts a [`RunRecord`](crate::ports::runs::RunRecord) written before
+/// `task_id` could be absent still loads (issue #983).
+///
+/// This is a pure serde property, so it is asserted once here rather than per
+/// backend: all three store the record as the same JSON blob, so a row written
+/// by a pre-#983 host is a `"taskId": "<string>"` whichever backend holds it.
+/// It is in the conformance module because that is where the round-trip
+/// contract lives, and because a backend that ever stops using the record's own
+/// serialization is exactly what this would catch.
+pub fn assert_legacy_run_row_loads() {
+    use crate::ports::runs::{RunRecord, RunStatus};
+
+    let legacy = serde_json::json!({
+        "id": "run-1",
+        "company": "acme",
+        "taskId": "card-7",
+        "agentId": "ceo",
+        "attempt": 2,
+        "status": "running",
+        "createdAtMillis": 1_700_000_000_000u64,
+    });
+    let loaded: RunRecord = serde_json::from_value(legacy).expect("a pre-#983 row still loads");
+    assert_eq!(loaded.task_id.as_deref(), Some("card-7"));
+    assert_eq!(loaded.chat_id, None, "an absent conversation reads as None");
+    assert_eq!(loaded.status, RunStatus::Running);
+
+    // And the new shape omits the key rather than writing `null`, so a dispatch
+    // row is byte-identical to the ones already on disk.
+    let card_less = RunRecord {
+        task_id: None,
+        chat_id: Some("general".to_string()),
+        ..loaded
+    };
+    let written = serde_json::to_value(&card_less).unwrap();
+    assert!(
+        written.get("taskId").is_none(),
+        "an absent card must be omitted, never null: {written}"
+    );
+    assert_eq!(
+        serde_json::from_value::<RunRecord>(written).unwrap(),
+        card_less,
+        "the card-less row round-trips"
+    );
 }
 
 /// Asserts the boot-reaper contract
@@ -4117,11 +4225,7 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
 
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
-    let spec = |id: &str, task: &str| NewRun {
-        id: id.to_string(),
-        task_id: task.to_string(),
-        agent_id: "ceo".to_string(),
-    };
+    let spec = |id: &str, task: &str| NewRun::for_task(id, task, "ceo");
 
     // One of each state the reaper has an opinion about.
     runs.create_run(&alpha, spec("pending", "a")).await.unwrap();
@@ -4171,7 +4275,7 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
     // Issue #337: the caller gets the records, not a count, because it has to
     // return each reaped run's *card* to To-do — and for that it needs the
     // `task_id`s. A count would leave the board claiming work nothing is doing.
-    let mut reaped_tasks: Vec<&str> = reaped.iter().map(|r| r.task_id.as_str()).collect();
+    let mut reaped_tasks: Vec<&str> = reaped.iter().filter_map(|r| r.task_id.as_deref()).collect();
     reaped_tasks.sort_unstable();
     assert_eq!(
         reaped_tasks,

@@ -903,11 +903,11 @@ impl CompanyRuntime {
     /// [`RunStatus::Pending`]: crate::ports::runs::RunStatus::Pending
     #[cfg(feature = "openhuman")]
     async fn open_run(&self, task: &TaskRecord) -> Option<String> {
-        let spec = crate::ports::runs::NewRun {
-            id: crate::ports::generate_id(),
-            task_id: task.id.clone(),
-            agent_id: task.assignee.clone(),
-        };
+        let spec = crate::ports::runs::NewRun::for_task(
+            crate::ports::generate_id(),
+            task.id.clone(),
+            task.assignee.clone(),
+        );
         match self.ops.runs.create_run(&self.id, spec).await {
             Ok(run) => {
                 tracing::debug!(
