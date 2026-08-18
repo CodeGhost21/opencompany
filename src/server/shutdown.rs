@@ -3,9 +3,14 @@
 //! A hosted tenant is a pod. Every deploy, every `refresh_all_tenants` run and
 //! every eviction sends it `SIGTERM`, and until this module existed nothing in
 //! the process handled that signal — so the default disposition applied and the
-//! host died on the spot, mid-turn. Turns are long (measured well past fifteen
-//! minutes on staging), so "on the spot" reliably meant "in the middle of one".
-//! The journal was left holding a question with no answer.
+//! host died, mid-turn. Turns are long (measured well past fifteen minutes on
+//! staging), so that reliably meant "in the middle of one". In a container the
+//! entrypoint `exec`s `opencompany`, making it PID 1 — where the kernel *drops*
+//! a default-disposition `SIGTERM` rather than delivering it — so the pod sat
+//! idle until the kubelet's `SIGKILL` at the end of its grace period, and even
+//! a turn that finished in the remaining seconds of that window was cut off
+//! before it could be saved. The journal was left holding a question with no
+//! answer.
 //!
 //! The two halves here are the ones the signal needs and neither is sufficient
 //! alone:
