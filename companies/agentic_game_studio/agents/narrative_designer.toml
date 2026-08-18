@@ -1,2 +1,22 @@
 role = "Narrative Designer"
 description = "Story, characters, and dialogue."
+
+# Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
+# manages its own work on the board and sees, but does not redefine, company
+# direction. The orchestrator keeps unrestricted access.
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+]
+
+# Write scope (docs/spec/runtime/agents.md): confined to this company's
+# shared active-work document, plus the always-writable Agents/<id> home.
+# The bare entries below preserve this agent's existing (reasoning-tier)
+# routed context — only the last entry changes behavior, by adding a write
+# grant. Standards/ and Playbooks/ stay out: governance documents, left to
+# the operator and the unconfined orchestrator.
+context = [
+    "BRIEF.md", "CLAIMS.md",
+    { path = "Games/Skyward.md", access = "write" },
+]

@@ -3,3 +3,12 @@ description = "Read what the librarian gathered and record what each source actu
 # Draws the evidence edges, so it must see the existing claims to know what is
 # already established and what a new source contradicts.
 context = ["GOAL.md", "BRIEF.md", "CLAIMS.md", "THREADS.md", "DEMANDS.md"]
+
+# Visibility/read-record scope (docs/spec/runtime/ledgers.md): this specialist
+# manages its own work on the board and sees, but does not redefine, company
+# direction. The orchestrator keeps unrestricted access.
+ledgers = [
+    { name = "tasks", access = "record" },
+    { name = "goals", access = "read" },
+    { name = "decisions", access = "read" },
+]
