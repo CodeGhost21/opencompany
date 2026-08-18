@@ -245,6 +245,42 @@ describe("composeCopilotMessage", () => {
   });
 
   /**
+   * Issue #874, the pairing the advisory depends on. The unwired list is a
+   * NARROWING of the effective list above it, so when that list could not be
+   * read there is nothing to narrow — and saying "do NOT author these" directly
+   * under "the granted tools could not be listed here" contradicts itself.
+   *
+   * It matters beyond tidiness because the caller holds the two in separate
+   * state: the panel resets them on a company switch, and the tool-slug read
+   * for the new company is in flight for a while afterwards. Gating the section
+   * here means an unwired list that outlives its slugs — for any reason — can
+   * never reach the model, rather than that depending on the caller clearing
+   * both. See `workflow-copilot-company-switch` for the mounted half.
+   */
+  it("omits the unwired advisory when the tool set could not be listed", () => {
+    const message = composeCopilotMessage(
+      {
+        ...context,
+        toolSlugs: undefined,
+        toolSlugsKnown: false,
+        // Not `web_search`: the schema example above names that slug, so it is
+        // in the message either way and could not witness the omission.
+        unwiredTools: [
+          {
+            slug: "deep_research",
+            reason: "searchBackendNotConfigured",
+            detail: "granted, but no managed search backend is configured",
+          },
+        ],
+      },
+      "add a research step",
+    );
+    expect(message).toMatch(/could not be listed/i);
+    expect(message).not.toMatch(/granted but NOT wired/i);
+    expect(message).not.toContain("deep_research");
+  });
+
+  /**
    * Issue #900. `describeRun`'s blocked arm is the copilot's half of the same
    * fix `RunHistoryPanel` gets on the console side: a blocked run has no
    * `error`, is not `cancelled`, is not `running` and routed no report, so
