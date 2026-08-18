@@ -7,6 +7,14 @@ import { reconcileIds, type ChatMessage } from "@/lib/chat";
 import type { Transport, TransportRequest, TransportResponse } from "@/api/transport";
 
 /**
+ * Posts a chat turn with `detach: true`, so the flag is not buried behind the
+ * positional arguments that separate it from the prompt (issue #983).
+ */
+function postDetached(c: OpenCompanyClient, text: string): Promise<ChatPostResult> {
+  return c.chat(text, null, "main", null, undefined, true);
+}
+
+/**
  * Detached chat turns (issue #983).
  *
  * The gap this closes is total: the chat POST's error and hang paths had no
@@ -56,7 +64,7 @@ describe("the chat POST discriminates on the response, not on the request", () =
       detached: true,
     });
 
-    const answer: ChatPostResult = await c.chat("do the long thing", null, "main", null, undefined, true);
+    const answer: ChatPostResult = await postDetached(c, "do the long thing");
 
     expect(isDetachedChat(answer)).toBe(true);
     if (!isDetachedChat(answer)) throw new Error("unreachable");
@@ -95,7 +103,7 @@ describe("the chat POST discriminates on the response, not on the request", () =
       messageId: "7",
     });
 
-    const answer = await c.chat("hi", null, "main", null, undefined, true);
+    const answer = await postDetached(c, "hi");
 
     expect(sent[0].body).toMatchObject({ detach: true });
     expect(isDetachedChat(answer)).toBe(false);
@@ -410,7 +418,7 @@ describe("reconciling the optimistic id from a 202", () => {
       detached: true,
     });
 
-    const answer = await c.chat("do the long thing", null, "main", null, undefined, true);
+    const answer = await postDetached(c, "do the long thing");
     if (!isDetachedChat(answer)) throw new Error("expected the accepted shape");
 
     // What `ChatView.send` does with it, before it branches on the shape at all.
@@ -422,7 +430,7 @@ describe("reconciling the optimistic id from a 202", () => {
 
   it("carries a reply typed against the optimistic bubble across the swap", async () => {
     const { client: c } = client(202, { turnId: "t", messageId: "42", detached: true });
-    const answer = await c.chat("the plan", null, "main", null, undefined, true);
+    const answer = await postDetached(c, "the plan");
     if (!isDetachedChat(answer)) throw new Error("expected the accepted shape");
 
     const before = [
