@@ -37,7 +37,8 @@ use crate::ports::types::{
 use crate::runtime::grants::{GrantId, GrantScope, MAX_STANDING_GRANT_MILLIS};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{
-    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, history_for_desk,
+    CHAT_HISTORY_PAGE_LIMIT, MessageView, ReactionView, Viewer, channel_attributed_replies,
+    history_for_desk,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::GqlAuth;
@@ -53,6 +54,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/companies/{id}", get(company_status))
         .route("/api/v1/companies/{id}/chat", post(operator_chat))
         .route("/api/v1/companies/{id}/chat/history", get(chat_history))
+        .route(
+            "/api/v1/companies/{id}/chat/attribution-audit",
+            get(attribution_audit),
+        )
         // Set or clear one reaction on one message (issue #364). Not registered
         // through `scoped` because the two forms take different path tuples.
         .route(
@@ -67,6 +72,10 @@ pub fn router() -> Router<AppState> {
         // Single-company aliases (no id; resolved via the sole registered company).
         .route("/api/v1/company/chat", post(operator_chat_single))
         .route("/api/v1/company/chat/history", get(chat_history_single))
+        .route(
+            "/api/v1/company/chat/attribution-audit",
+            get(attribution_audit_single),
+        )
         .route(
             "/api/v1/company/chat/messages/{seq}/reactions",
             post(react_to_message_single),
@@ -1488,7 +1497,15 @@ async fn journal_chat_replies(
                     // schema change.
                     task_id: response.task_id.clone(),
                     chat_id: desk.to_string(),
-                    agent_id: response.channel.clone(),
+                    // Issue #885: the author, falling back to the channel only
+                    // when the producer did not name one. `agent_id`'s contract
+                    // is "the agent that produced the reply"; `channel` is the
+                    // destination, so copying it here journaled every bubble on
+                    // the operator channel as though the operator wrote it.
+                    agent_id: response
+                        .agent
+                        .clone()
+                        .unwrap_or_else(|| response.channel.clone()),
                     text: response.text.clone(),
                     // Persist the per-bubble timeline so a history reload
                     // rehydrates the tool calls, not just the text.
@@ -1801,6 +1818,78 @@ async fn chat_history_single(
     let runtime = sole(&state).map_err(IntoResponse::into_response)?;
     let id = runtime.id().clone();
     chat_history_response(&state, &id, runtime, &headers, peer, query).await
+}
+
+/// The wire shape of `GET {scope}/chat/attribution-audit` (issue #885).
+#[derive(Debug, serde::Serialize)]
+struct AttributionAuditDto {
+    /// Every `AgentReply` in the journal.
+    replies: usize,
+    /// Those whose stored author names no roster teammate.
+    affected: usize,
+    /// The distinct bad values with a count each, so an operator can see whether
+    /// they are all `operator` (the #885 shape) or whether something else is
+    /// also writing a non-agent into the field.
+    by_agent_id: std::collections::BTreeMap<String, usize>,
+}
+
+/// `GET {scope}/chat/attribution-audit` — the blast radius of issue #885.
+///
+/// Exists because "we do not know how many rows are wrong" is not an acceptable
+/// end state for a data-integrity bug, and the answer needs a journal to count
+/// against — which no test fixture and no source checkout has.
+///
+/// **Counts, never repairs.** The overwritten author is not recoverable from
+/// anything on disk; see [`channel_attributed_replies`] for the full argument.
+///
+/// Gated by the same reader check the sibling transcript route uses, and returns
+/// strictly less: counts and agent-id strings, never message text.
+async fn attribution_audit_response(
+    state: &AppState,
+    company: &CompanyId,
+    runtime: Arc<CompanyRuntime>,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+) -> Result<Json<AttributionAuditDto>, Response> {
+    let _viewer = history_viewer(headers, state, company, peer).await?;
+    let record = runtime
+        .store()
+        .load(runtime.id())
+        .await
+        .map_err(|e| ApiError(e).into_response())?
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::CompanyNotFound(company.to_string())).into_response()
+        })?;
+    let audit = channel_attributed_replies(&runtime, &record)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
+    Ok(Json(AttributionAuditDto {
+        replies: audit.replies,
+        affected: audit.affected,
+        by_agent_id: audit.by_agent_id,
+    }))
+}
+
+async fn attribution_audit(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+) -> Result<Json<AttributionAuditDto>, Response> {
+    let company = CompanyId::new(&id);
+    let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
+    attribution_audit_response(&state, &company, runtime, &headers, peer).await
+}
+
+/// `GET /api/v1/company/chat/attribution-audit` (single-company alias).
+async fn attribution_audit_single(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+) -> Result<Json<AttributionAuditDto>, Response> {
+    let runtime = sole(&state).map_err(IntoResponse::into_response)?;
+    let id = runtime.id().clone();
+    attribution_audit_response(&state, &id, runtime, &headers, peer).await
 }
 
 /// Body for `POST {scope}/chat/messages/{seq}/reactions` (issue #364).
@@ -4931,6 +5020,7 @@ mod test {
                         message_id: None,
                         task_id: None,
                         channel: "operator".into(),
+                        agent: None,
                         text: SLOW_TURN_REPLY.into(),
                         steps: Vec::new(),
                         reply_to: None,
@@ -6587,6 +6677,7 @@ mod test {
                             message_id: None,
                             task_id: None,
                             channel: grant.agent.clone(),
+                            agent: None,
                             text: format!("re-issued {approval_id}"),
                             steps: Vec::new(),
                             reply_to: None,
