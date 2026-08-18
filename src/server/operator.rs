@@ -1207,6 +1207,62 @@ struct ChatResponse {
     still_awaiting: Option<usize>,
 }
 
+/// The canonical assignee for a card opened from a chat message: whoever the
+/// thread was addressed to (issue #982).
+///
+/// `""` — today's unconditional behaviour, and still the answer for most
+/// messages — for an unaddressed message, for a key that names nothing on the
+/// roster, for an ambiguous one, and for a company record that will not load.
+/// A teammate resolves to their canonical id; a **desk** resolves to the desk
+/// id, never to its lead: a desk assignment is ownership, and
+/// [`AssigneeResolution::canonical`] is where that invariant lives (issue #214),
+/// so this reads it rather than restating it. An empty desk resolves to the desk
+/// too, which dispatch refuses visibly with a reason — a better outcome than the
+/// silent misroute this replaces.
+///
+/// The `dm:` fallback is tried **last** and only on a key that resolved to
+/// nothing, so it can never take a thread that routes somewhere today.
+async fn addressed_assignee(runtime: &Arc<CompanyRuntime>, chat: Option<&str>) -> String {
+    use crate::runtime::assignee::{self, AssigneeResolution};
+
+    let Some(chat) = chat.map(str::trim).filter(|c| !c.is_empty()) else {
+        return String::new();
+    };
+    let company = match runtime.store().load(runtime.id()).await {
+        Ok(Some(company)) => company,
+        Ok(None) => {
+            tracing::warn!(
+                company = %runtime.id(),
+                "no company record while assigning a chat card; leaving it unassigned"
+            );
+            return String::new();
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                company = %runtime.id(),
+                "failed to read the roster while assigning a chat card; leaving it unassigned"
+            );
+            return String::new();
+        }
+    };
+    let mut resolution = assignee::resolve(&company, chat);
+    if matches!(resolution, AssigneeResolution::Unknown(_))
+        && let Some(key) = assignee::dm_key(chat)
+    {
+        resolution = assignee::resolve(&company, key);
+    }
+    if let Some(reason) = resolution.rejection() {
+        tracing::debug!(
+            company = %runtime.id(),
+            chat = %chat,
+            reason = %reason,
+            "[chat] the addressed thread names nobody the card can be handed to"
+        );
+    }
+    resolution.canonical().unwrap_or_default().to_string()
+}
+
 /// Runs one operator-chat cycle, returning the report and, when a complaint
 /// intent captured feedback, the note that was captured (so the caller can emit
 /// the `feedback.created` webhook).
@@ -1342,15 +1398,36 @@ async fn run_chat(
         } else {
             crate::ports::tasks::COLUMN_TODO
         };
+        // Issue #982: the card is handed to whoever the operator addressed, and
+        // it is resolved HERE — before the single `upsert_task` below, which is
+        // the write that fires the planning pass. That ordering is the whole of
+        // the fix. A card born blank is a card the planning pass is entitled to
+        // fill in from a content match of its title against teammate roles, and
+        // that guess is what a DM to a named teammate was losing to; patching
+        // the assignee on afterwards would not fix it, it would race it, and
+        // cost a second board event besides.
+        //
+        // Best-effort in exactly one direction: every case that does not resolve
+        // to a real teammate or desk degrades to `""`, which is what this site
+        // wrote unconditionally before. A chat must never 400 and must never
+        // lose its card over who it was addressed to.
+        let assignee = addressed_assignee(&runtime, message.chat.as_deref()).await;
         let record = crate::ports::tasks::TaskRecord {
             id: crate::ports::generate_id(),
             title,
             note,
             column: column.to_string(),
             priority: "medium".to_string(),
-            assignee: String::new(),
+            assignee,
             updated_at_millis: crate::ports::now_millis(),
-            origin_chat_id: None,
+            // Issue #982: the thread this card was opened from, so the settle
+            // marker lands back in the conversation that asked for the work
+            // rather than only on the board. This is the field #151 added for
+            // exactly that (`relay_reply` answers in the origin thread), and the
+            // console already renders a marker in a DM channel — nothing there
+            // changes. `None` for an unaddressed message, which is every card
+            // this site opened before and therefore no change for one.
+            origin_chat_id: message.chat.clone(),
             parent_task_id: None,
             // Nothing has run yet, so there is no deliverable to point at
             // (issue #339). The first successful settle stamps it.
@@ -2861,6 +2938,293 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
+    }
+
+    // ── Issue #982: the card goes to whoever was addressed ──────────────────
+
+    /// A roster with three teammates and one desk, so a chat can be addressed
+    /// to something that exists.
+    ///
+    /// The ids are the ones the smoke that found #982 used, and the roles are
+    /// deliberately distinct words, so a test can address one teammate in a
+    /// message whose text points at another.
+    fn roster_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "product_manager"
+role = "Product Manager"
+
+[[agent]]
+id = "backend_engineer"
+role = "Backend Engineer"
+
+[[agent]]
+id = "designer"
+role = "Designer"
+
+[[group_chat]]
+id = "engineering"
+name = "Engineering"
+members = ["backend_engineer"]
+
+[policy]
+mode = "full"
+"#,
+        )
+        .unwrap()
+    }
+
+    /// [`state_with_company`] over [`roster_manifest`]. Written out rather than
+    /// threaded through the shared builders above, which several other suites
+    /// call with the roster-less fixture.
+    async fn state_with_roster(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: roster_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), roster_manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    /// One chat request, optionally addressed to a thread.
+    fn chat_to(text: &str, chat: Option<&str>) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/chat")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "text": text, "chat": chat }).to_string(),
+            ))
+            .unwrap()
+    }
+
+    /// The message the smoke sent: an actionable ask whose *text* points at one
+    /// teammate, addressed to a different one.
+    const CROSSED: &str = "build the backend deployment pipeline";
+
+    /// The card a chat opens is handed to the teammate the operator addressed.
+    ///
+    /// The fixture is the whole test. `CROSSED` names *backend* work and is
+    /// addressed to the **product manager**, so the two candidate answers are
+    /// distinguishable: pre-fix this card was born blank and the planning pass
+    /// filled it from a content match of the title against teammate roles —
+    /// which is exactly the wrong answer here. A message whose text and
+    /// addressee agree would pass on pre-fix code and prove nothing; that is
+    /// what the two "right" rows of the issue's table were.
+    #[tokio::test]
+    async fn chat_addressed_to_a_teammate_assigns_that_teammate() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        assert!(
+            matches!(
+                crate::company::task_intent::triage_message(CROSSED),
+                crate::company::task_intent::MessageTriage::Track(_)
+            ),
+            "fixture must be a message the handler cards, or this proves nothing"
+        );
+
+        let r = app
+            .oneshot(chat_to(CROSSED, Some("product_manager")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "an actionable ask opens one card");
+        assert_eq!(
+            tasks[0].assignee, "product_manager",
+            "the card belongs to the teammate the operator addressed"
+        );
+        assert_ne!(
+            tasks[0].assignee, "backend_engineer",
+            "…and not to whoever the message text happens to name"
+        );
+    }
+
+    /// A desk-addressed chat is assigned to the **desk**, not to its lead.
+    ///
+    /// Writing the lead would erase the desk from the board the moment the card
+    /// was created — the invariant `AssigneeResolution::canonical` holds for
+    /// every other write site (issue #214), now held here too.
+    #[tokio::test]
+    async fn chat_addressed_to_a_desk_assigns_the_desk() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .oneshot(chat_to(CROSSED, Some("engineering")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].assignee, "engineering",
+            "picking a desk IS the operator's routing decision"
+        );
+    }
+
+    /// Everything that addresses nobody in particular still opens a blank card:
+    /// no thread at all, the empty string, the console's legacy fallback desk
+    /// id, and the default "General" desk this company does not have.
+    ///
+    /// This pins the direction of the change — *more* cards are operator-chosen,
+    /// none fewer — and it is the clause that keeps the orchestrator's own queue
+    /// working: a blank assignee is what hands a card to it.
+    #[tokio::test]
+    async fn an_unaddressed_chat_leaves_the_card_unassigned() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        for thread in [None, Some(""), Some("main"), Some(DEFAULT_DESK)] {
+            let r = app.clone().oneshot(chat_to(CROSSED, thread)).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "thread {thread:?}");
+        }
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 4, "one card per message: {tasks:?}");
+        for card in &tasks {
+            assert_eq!(
+                card.assignee, "",
+                "an unaddressed message leaves the card for the orchestrator"
+            );
+        }
+    }
+
+    /// A thread key that names nothing on the roster is not an error: the card
+    /// is opened, unassigned, exactly as it was before this route resolved
+    /// anything. A chat must never 400 — and must never lose its card — over who
+    /// it was addressed to.
+    #[tokio::test]
+    async fn an_unknown_addressee_leaves_the_card_unassigned() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .oneshot(chat_to(CROSSED, Some("nobody_by_that_name")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "an unknown thread is not a 400");
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1, "…and the card is still opened");
+        assert_eq!(tasks[0].assignee, "", "…with nobody guessed onto it");
+    }
+
+    /// The card remembers the thread it was opened from, so the marker that says
+    /// it settled lands back in the conversation that asked for the work.
+    ///
+    /// `origin_chat_id` is the field issue #151 added for exactly this, and the
+    /// console already renders the marker in whatever channel it names — the
+    /// route was simply never filling it in. An unaddressed message still opens
+    /// a card with no origin, which is every card this route opened before.
+    #[tokio::test]
+    async fn a_chat_card_remembers_the_thread_it_was_opened_from() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .clone()
+            .oneshot(chat_to(CROSSED, Some("dm:designer")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(
+            tasks[0].origin_chat_id.as_deref(),
+            Some("dm:designer"),
+            "the thread as the console addressed it"
+        );
+
+        let r = app
+            .oneshot(chat_to("draft the investor update", None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        let unaddressed = tasks
+            .iter()
+            .find(|c| c.title == "Draft the investor update")
+            .expect("the second card");
+        assert_eq!(
+            unaddressed.origin_chat_id, None,
+            "an unaddressed message has no thread to answer in"
+        );
+    }
+
+    /// The console mints a DM channel id as `dm:<teammate-id>`, and that form is
+    /// documented as a valid channel key — so it has to address the teammate
+    /// here as well as in the responder lookup.
+    #[tokio::test]
+    async fn a_console_dm_channel_id_addresses_the_teammate() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_roster(&home).await;
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let app = router(state);
+
+        let r = app
+            .oneshot(chat_to(CROSSED, Some("dm:designer")))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let tasks = runtime.tasks().list(&id).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].assignee, "designer");
     }
 
     /// Issue #845: an explicit "Build me the workflow" opens a card even when
