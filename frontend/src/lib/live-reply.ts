@@ -254,7 +254,12 @@ export function openTurnsFromRuns(runs: readonly OpenRunRow[]): Record<string, O
   const open: Record<string, OpenTurnRow> = {};
   for (const run of runs) {
     if (!run.chatId) continue;
-    open[run.chatId] = { turnId: run.id, queued: run.status === "pending" };
+    const queued = run.status === "pending";
+    // A thread can hold a running turn and a queued one behind it. The running
+    // one is what the operator is waiting on, so it names the row — otherwise
+    // the answer would depend on the order the store listed the rows in.
+    if (open[run.chatId] && !open[run.chatId].queued) continue;
+    open[run.chatId] = { turnId: run.id, queued };
   }
   return open;
 }
