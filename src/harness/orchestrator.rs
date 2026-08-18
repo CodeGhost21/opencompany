@@ -3671,13 +3671,21 @@ impl Tool for RunWorkflowTool {
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: run failed");
                 if let Some(events) = self.events.as_ref() {
+                    let message = err.to_string();
                     crate::runtime::record_run_finished(
                         events,
                         &self.company,
                         &wid,
                         false,
                         &ctx.run_id,
-                        Err(err.to_string().as_str()),
+                        // Issue #1008: an agent-started run journals what it did
+                        // before it broke on exactly the same terms as a console
+                        // or scheduled one — the three entry points share this
+                        // helper so their history cannot drift.
+                        Err(crate::runtime::FailedRun {
+                            error: message.as_str(),
+                            partial: err.partial_run(),
+                        }),
                     )
                     .await;
                 }

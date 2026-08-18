@@ -2649,7 +2649,7 @@ async fn list_runs(
             &entry.workflow_id,
             entry.scheduled,
             &run_id,
-            Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART),
+            Err(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.into()),
         )
         .await;
         // In-memory half: flip the row this response returns, so the console does
