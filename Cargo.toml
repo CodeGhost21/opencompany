@@ -26,6 +26,31 @@ path = "examples/live_company_turn.rs"
 required-features = ["openhuman"]
 
 [dependencies]
+# Compiles agent-authored `Page.tsx` (issue: agent-authored dashboard pages)
+# into browser-runnable JS inside `pages_write` (`src/harness/pages_tools.rs`).
+# The runtime image's builder stage (see `Dockerfile`) has no Node — only the
+# separate frontend Docker build stage does — so turning agent-written TSX into
+# something a browser can run has to happen as a Rust-native step, at request
+# time, inside this binary. `swc_core` is a pure-Rust TS/JSX compiler with no
+# system libs and no Node subprocess, which is the one property that makes that
+# possible. Feature-gated to the narrow slice actually used, to keep compile
+# times down: `ecma_parser` + `ecma_parser_typescript` parse TSX,
+# `ecma_transforms_typescript` strips the type annotations,
+# `ecma_transforms_react` rewrites JSX to `jsx`/`jsxs` calls against the
+# automatic `"react/jsx-runtime"` import, `ecma_visit` walks the parsed
+# `ImportDecl`s for the import allow-list check, and `ecma_codegen` renders the
+# transformed AST back to JS text. None of swc's bundler, minifier, CSS, or
+# plugin-host surfaces are enabled.
+swc_core = { version = "77", features = [
+    "ecma_ast",
+    "ecma_parser",
+    "ecma_parser_typescript",
+    "ecma_transforms_typescript",
+    "ecma_transforms_react",
+    "ecma_visit",
+    "ecma_codegen",
+    "common",
+] }
 async-graphql = "7"
 async-graphql-axum = "7"
 async-trait = "0.1"
