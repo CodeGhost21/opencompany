@@ -164,3 +164,18 @@ touching cookies, the parent DOM, or making its own credentialed requests,
 but it does not limit what an authorized request can *do* once it crosses
 the bridge. The iframe embedding, the bridge, and the nav view that lists
 pages are frontend concerns and are not described further here.
+
+
+**Normative: the bridge's residual privilege.** A page that the console's parent
+frame loads through the bridge described above MUST be assumed able to perform
+every query and mutation the operator's session authorizes, unless the console
+imposes an operation allow-list at the point the bridge forwards a request.
+Verifying `event.source` against `iframe.contentWindow` authenticates the
+caller's window identity but does NOT restrict the scope of operations an
+authorized message can request. The operational consequence feature
+(`pages_write`, `pages_delete`) gates *persisting* a page — approval is
+single-use and covers only that one storage operation; every later GraphQL
+request the rendered page fires through the bridge is ungated. This is the
+deliberate trade-off described in the client half above: the sandbox protects
+the operator's *session credential* from the page, but does not protect the
+operator's *authority* from what a page asks to do with it.
