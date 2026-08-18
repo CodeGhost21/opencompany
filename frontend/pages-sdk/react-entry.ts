@@ -13,6 +13,7 @@
 // depends on the console build's internal chunk hashes.
 import * as React from "react";
 import { createRoot, hydrateRoot } from "react-dom/client";
+import { jsx, jsxs } from "react/jsx-runtime";
 
 // `export * from "react"` doesn't typecheck here: `@types/react` declares
 // itself with `export =`, and TS refuses to re-export `*` from a module
@@ -34,8 +35,6 @@ export const {
   createRef,
   forwardRef,
   isValidElement,
-  jsx,
-  jsxs,
   lazy,
   memo,
   startTransition,
