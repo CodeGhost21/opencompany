@@ -890,6 +890,9 @@ async fn update_workflow(
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeleteWorkflowQuery {
+    /// The token of the graph being removed. **Required** (issue #1013): an
+    /// absent `?expectedVersion=` is a `400`, not an unconditional delete, so a
+    /// stale editor can't drop a workflow that changed since they last looked.
     #[serde(default)]
     expected_version: Option<String>,
 }
@@ -904,8 +907,13 @@ struct DeleteWorkflowQuery {
 /// the workflow did, and that stays true after it is gone — `GET
 /// …/workflows/runs` keeps serving them. See the module doc.
 ///
-/// `204` on success. `404` for an unknown id; `409` for a source-defined or
-/// body-less id, or a stale `expectedVersion`.
+/// `expectedVersion` is **required** (issue #1013), for the same reason it is on
+/// `PUT`: an absent token used to mean an unconditional delete, so a console
+/// holding a stale graph could remove a workflow that changed underneath it. A
+/// missing `?expectedVersion=` is now a `400`.
+///
+/// `204` on success. `400` for a missing `expectedVersion`; `404` for an unknown
+/// id; `409` for a source-defined or body-less id, or a stale `expectedVersion`.
 async fn delete_workflow(
     company: ScopedCompany,
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
@@ -916,6 +924,17 @@ async fn delete_workflow(
             "workflow {wid}"
         ))));
     }
+    // `expectedVersion` is required (issue #1013) — a tokenless delete is refused
+    // rather than run unconditionally, so a stale editor can't drop a workflow
+    // that moved since they loaded it.
+    let Some(expected) = query.expected_version.as_deref() else {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "`expectedVersion` is required: read this workflow and pass its `version` as \
+             `?expectedVersion=`. Deleting without the version you read from could remove a \
+             workflow that changed since you last looked."
+                .to_string(),
+        )));
+    };
     delete_company_workflow(
         company.id(),
         company.runtime.source_dir(),
@@ -924,7 +943,7 @@ async fn delete_workflow(
         Some(company.runtime.schedule_fires()),
         Some(company.runtime.events()),
         &wid,
-        query.expected_version.as_deref(),
+        Some(expected),
     )
     .await
     .map_err(ApiError)?;
@@ -6097,7 +6116,7 @@ mod tests {
             let home_dir = home();
             let home = home_dir.path().to_path_buf();
             let (state, _store, id) = hosted_state(&home).await;
-            create_greeter(&state).await;
+            let version = create_greeter(&state).await;
             journal_run(
                 &state,
                 &id,
@@ -6109,7 +6128,11 @@ mod tests {
             .await;
 
             let response = router(state.clone())
-                .oneshot(request("DELETE", "/api/v1/company/workflows/greeter", None))
+                .oneshot(request(
+                    "DELETE",
+                    &format!("/api/v1/company/workflows/greeter?expectedVersion={version}"),
+                    None,
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -6176,11 +6199,48 @@ mod tests {
             let home = home_dir.path().to_path_buf();
             let (state, _store, _id) = hosted_state(&home).await;
 
+            // A token is required (issue #1013), so send one; the unknown id is
+            // resolved before the token is ever compared, so this stays a 404.
             let response = router(state)
-                .oneshot(request("DELETE", "/api/v1/company/workflows/ghost", None))
+                .oneshot(request(
+                    "DELETE",
+                    "/api/v1/company/workflows/ghost?expectedVersion=deadbeef",
+                    None,
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// **The silent-clobber guard on delete (issue #1013).** A tokenless
+        /// `DELETE` used to remove unconditionally; a stale editor could drop a
+        /// workflow that changed underneath them. It is now a `400` that tells the
+        /// operator to re-read and pass the `version`, and removes nothing.
+        #[tokio::test]
+        async fn a_delete_without_a_token_is_rejected() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_greeter(&state).await;
+
+            let response = router(state.clone())
+                .oneshot(request("DELETE", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = json_body(response).await;
+            let message = body["error"].as_str().unwrap_or_default().to_lowercase();
+            assert!(
+                message.contains("version") && message.contains("read"),
+                "the 400 must tell the operator to re-read and pass the version: {body}"
+            );
+
+            // The refusal removed nothing — the workflow is still there.
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
         }
 
         /// The write verbs are reachable under the platform scope form too, not
@@ -6201,11 +6261,16 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
+            // The edit moved the token; delete with the one it just returned.
+            let next = json_body(response).await["version"]
+                .as_str()
+                .expect("edit returns a fresh token")
+                .to_string();
 
             let response = router(state)
                 .oneshot(request(
                     "DELETE",
-                    "/api/v1/companies/acme/workflows/greeter",
+                    &format!("/api/v1/companies/acme/workflows/greeter?expectedVersion={next}"),
                     None,
                 ))
                 .await
@@ -6269,9 +6334,15 @@ mod tests {
                 .expect("listed under its id");
             assert_eq!(legacy["editable"], false, "{items}");
 
-            // And the host agrees when actually asked to delete it.
+            // And the host agrees when actually asked to delete it. A token is
+            // required (issue #1013), so send one; the body-less id is a 409
+            // before the token is ever compared.
             let response = router(state)
-                .oneshot(request("DELETE", "/api/v1/company/workflows/legacy", None))
+                .oneshot(request(
+                    "DELETE",
+                    "/api/v1/company/workflows/legacy?expectedVersion=deadbeef",
+                    None,
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::CONFLICT);
