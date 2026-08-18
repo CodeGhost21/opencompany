@@ -457,6 +457,21 @@ export function WorkflowCreateDialog({
    * and only resets when the dialog reopens.
    */
   const [idTouched, setIdTouched] = useState(false);
+  /**
+   * Write an id somebody **chose** — the operator, a copilot draft, a prefilled
+   * correction — and latch it against derivation in the same step.
+   *
+   * One doorway on purpose (issue #1053 review). The latch was originally
+   * applied at each site that set a chosen id, and `runDraft`'s hydrate was
+   * missed: a create-mode draft landed its id and the next keystroke in Name
+   * slugged over it. Pairing the two writes here means a future path cannot set
+   * a chosen id *without* claiming it — the bug is removed as a class, not as an
+   * instance. Bare `setId` now means exactly one thing: a derived id.
+   */
+  function setAuthoredId(next: string) {
+    setIdTouched(true);
+    setId(next);
+  }
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -550,10 +565,9 @@ export function WorkflowCreateDialog({
     // be a latent bug if that invariant ever drifted.
     if (prefilledDraft) {
       const g = prefilledDraft.workflow;
-      setId(workflow?.id ?? g.id);
-      // Issue #1053: a drafted id was chosen by the copilot, not left blank —
-      // editing the name afterwards must not slug over it.
-      setIdTouched(true);
+      // Issue #1053: chosen by the copilot, not left blank — editing the name
+      // afterwards must not slug over it.
+      setAuthoredId(workflow?.id ?? g.id);
       setName(g.name.trim());
       setDescription(g.description ?? "");
       setNodes(draftNodes(g));
@@ -934,7 +948,8 @@ export function WorkflowCreateDialog({
         const graph = drafted.workflow;
         // Hydrate via the same helpers edit mode uses, so a drafted graph and a
         // saved one populate the form identically.
-        setId(graph.id);
+        // Issue #1053: the copilot chose this id, so the name stops writing it.
+        setAuthoredId(graph.id);
         setName(graph.name);
         setDescription(graph.description ?? "");
         setNodes(draftNodes(graph));
@@ -1207,8 +1222,7 @@ export function WorkflowCreateDialog({
               onChange={(e) => {
                 // Issue #1053: the operator has taken the field — the name stops
                 // writing it, including when they clear it back to empty.
-                setIdTouched(true);
-                setId(e.target.value);
+                setAuthoredId(e.target.value);
               }}
               readOnly={editing}
               aria-readonly={editing || undefined}
@@ -1274,6 +1288,7 @@ export function WorkflowCreateDialog({
                 company={company}
                 roster={roster}
                 wiredChannels={wiredChannels}
+                channelsLoaded={channelsLoaded}
                 workflows={workflows}
                 createMode={!editing}
                 errors={{
@@ -1452,6 +1467,7 @@ function NodeRow({
   company,
   roster,
   wiredChannels,
+  channelsLoaded,
   workflows,
   createMode,
   errors,
@@ -1470,6 +1486,8 @@ function NodeRow({
   /** The company's wired chat channels (#813): the output-node channel-destination
    * picker's options. Empty → the channel target degrades to a free-text box. */
   wiredChannels: string[];
+  /** Whether that list has answered yet (issue #1053 review). */
+  channelsLoaded: boolean;
   /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
   workflows: WorkflowSummary[];
   /** True while creating a new workflow (not editing an existing one), so the
@@ -1659,7 +1677,15 @@ function NodeRow({
                 so the free-text box above is the honest fallback rather than a
                 picker of one bad option. Say why it is empty; without this the
                 author sees a blank box and no reason. */}
-            {node.destinationKind === "channel" && wiredChannels.length === 0 && (
+            {/* Issue #1053 (review): only once the read has ANSWERED. An
+                unanswered `[]` used to render this, telling the author their
+                company has no channels while the list was still in flight — the
+                same defect the validator one layer up was fixed for, on the
+                surface the author actually reads. Pending shows nothing rather
+                than a claim that will be wrong a moment later. */}
+            {node.destinationKind === "channel" &&
+              channelsLoaded &&
+              wiredChannels.length === 0 && (
               <p className="text-2xs leading-snug text-muted-foreground">
                 No delivery channels are wired for this company — add a desk, or
                 connect a channel, before a report can be posted to one.
