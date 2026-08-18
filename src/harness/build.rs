@@ -760,6 +760,23 @@ pub fn build_agent(
         tools.extend(workspace_tools);
     }
 
+    // Agent-authored internal dashboard pages (`Pages/<slug>/` in the same
+    // workspace store). Unlike workspace reads vs. writes above, there is no
+    // two-tier gate here: per the design, `pages` rides the default `"*"`
+    // grant whole, so a single `grants_cover` check on `pages` is enough —
+    // whoever gets any pages tool gets create/read/write/delete together.
+    // Unwired-store is fail-closed, same as the workspace block: with no
+    // `deps.workspace` no tool is built and the agent is unaffected.
+    if let Some(store) = &deps.workspace
+        && grants_cover(grants, "pages")
+    {
+        tools.extend(crate::harness::pages_tools::pages_tools(
+            store.clone(),
+            company.clone(),
+            manifest_agent.id.clone(),
+        ));
+    }
+
     // The company's own record. Ungated, and deliberately: an agent that can
     // read the task board but not what the company already decided is exactly
     // the split these ledgers exist to close, and every *write* here is

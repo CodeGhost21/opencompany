@@ -15,6 +15,9 @@ import tailwindcss from "@tailwindcss/vite";
 // from `vite.react.config.ts`), so a page's module graph never pulls in a
 // second copy of React alongside the one the import map already provides.
 export default defineConfig({
+  define: {
+    "process.env.NODE_ENV": '"production"',
+  },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
