@@ -112,7 +112,7 @@ use crate::runtime::CycleRunner;
 use crate::runtime::continuation::ContinuationQueue;
 use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantId, GrantScope, GrantSet, StandingGrant};
-use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, RuntimeJournal};
+use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, ExpiryReason, RuntimeJournal};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::runtime::workflow_gates::WorkflowGateQueue;
 use crate::server::ops::mailer::MailSender;
@@ -1751,7 +1751,9 @@ impl CompanyRuntime {
         let now = now_millis();
         let expired = self.approval_gate.sweep_expired(now);
         for id in &expired {
-            self.journal.record_expired(id, now).await?;
+            self.journal
+                .record_expired(id, now, ExpiryReason::Ttl)
+                .await?;
             // Issue #796: the parked approval is gone, so its work unit is no
             // longer awaiting a resume — drop the pending mark so the checkout it
             // was holding across the park becomes sweepable.
