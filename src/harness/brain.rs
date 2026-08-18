@@ -2242,7 +2242,8 @@ impl HarnessBrain {
     ///
     /// Desks are tried first so a desk whose id happens to match an agent id
     /// keeps routing as a desk; the DM case only ever claims ids that resolve to
-    /// no desk at all. Without step 2 a DM thread would silently reach the
+    /// no desk at all. The console's `dm:<teammate-id>` channel key is resolved
+    /// last, after both (issue #982) — see the comment on that arm. Without step 2 a DM thread would silently reach the
     /// orchestrator instead of the teammate the operator opened — the console
     /// would look like it were addressing an agent while talking to someone
     /// else.
@@ -2286,6 +2287,21 @@ impl HarnessBrain {
         }
         if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
             return agent;
+        }
+        // Issue #982, step 3: the console's DM channel id, `dm:<teammate-id>`.
+        // Tried LAST, and for the same reason the case-folding above is safe —
+        // it can only claim a key that resolves to nothing today, so no existing
+        // thread moves, and a company that really does have a desk or teammate
+        // called `dm:x` keeps it. Without it a `dm:`-keyed thread reached arm 4
+        // and the orchestrator answered a DM addressed to somebody else, which
+        // is the same misroute #884 closed for a bare key.
+        if let Some(key) = crate::runtime::assignee::dm_key(chat) {
+            if let Some(lead) = self.desk_lead(key) {
+                return lead;
+            }
+            if let Some(agent) = self.record().resolve_roster_agent_id(key) {
+                return agent;
+            }
         }
         tracing::warn!(
             company = %self.record().id,
@@ -5534,15 +5550,18 @@ members = ["engineer"]
     fn responder_for_warns_before_falling_back_to_the_orchestrator() {
         let dir = tempfile::tempdir().unwrap();
         let (brain, _tasks) = brain_with_desk(dir.path());
+        // `dm:engineer` was this fixture until issue #982 made it resolve; the
+        // key here has to be one that names nothing at all, or the test would
+        // pass by asserting the wrong fact and #884's coverage would be gone.
         let logs = logs_from(|| {
             assert_eq!(
-                brain.responder_for(Some("dm:engineer")),
+                brain.responder_for(Some("dm:nobody_by_that_name")),
                 "chief",
                 "the fallback itself is unchanged"
             );
         });
         assert!(
-            logs.contains("dm:engineer"),
+            logs.contains("dm:nobody_by_that_name"),
             "the unresolved key must be named so the fall-through is greppable: {logs}"
         );
         assert!(logs.contains("WARN"), "{logs}");
@@ -5554,6 +5573,30 @@ members = ["engineer"]
             assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
         });
         assert!(quiet.is_empty(), "a resolved key must not warn: {quiet}");
+    }
+
+    /// Issue #982: the console mints a DM channel id as `dm:<teammate-id>`, and
+    /// a sibling route documents that form as a valid channel key — so a thread
+    /// keyed on it has to be answered by the teammate it names, not by the
+    /// orchestrator.
+    ///
+    /// The prefix is stripped **after** the desk and roster attempts, so this
+    /// can only ever claim a key that resolved to nothing: `engineer` and
+    /// `eng_desk` still route exactly as they did, which the test above pins.
+    #[test]
+    fn responder_for_answers_a_console_dm_channel_key_as_the_teammate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        assert_eq!(
+            brain.responder_for(Some("dm:engineer")),
+            "engineer",
+            "a DM channel key addresses the teammate it names"
+        );
+        assert_eq!(
+            brain.responder_for(Some("dm:")),
+            "chief",
+            "a prefix with nothing after it names nobody"
+        );
     }
 
     /// A human- or console-typed teammate key resolves case-insensitively to the

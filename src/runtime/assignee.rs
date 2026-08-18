@@ -142,6 +142,27 @@ to tell which one you meant — rename one of them, or assign the card by teamma
     }
 }
 
+/// The console's DM channel-key prefix: `#/chat/dm:designer` addresses the
+/// teammate `designer`.
+pub const DM_PREFIX: &str = "dm:";
+
+/// The roster key a `dm:`-prefixed channel id addresses, or `None` when the key
+/// carries no prefix (or nothing after it).
+///
+/// The console mints a DM channel id as `dm:<teammate-id>` (`chat/model.ts`'s
+/// `dmChannelId`), and that id is a *documented* channel key on the chat route —
+/// so it reaches both the responder lookup and the card the route opens, and
+/// both used to read it as naming nothing. This is the one place that shape is
+/// spelled, so the two cannot drift.
+///
+/// Callers must try the key **as sent** first and fall back to this only when it
+/// resolves to nothing: stripping unconditionally would let `dm:x` claim a desk
+/// or teammate literally named `dm:x`, which is a key that resolves today.
+pub fn dm_key(chat: &str) -> Option<&str> {
+    let key = chat.strip_prefix(DM_PREFIX)?.trim();
+    (!key.is_empty()).then_some(key)
+}
+
 /// Resolves `assignee` against `record`'s full roster.
 ///
 /// Resolution order, and the order matters: **desks first**, mirroring
