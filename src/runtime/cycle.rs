@@ -1814,6 +1814,13 @@ fn cycle_task_id(
             // work merely by existing, and that work's own card writes would
             // announce again.
             | CompanyEvent::TaskCardChanged { .. }
+            // Issue #983: the accept/settle brackets of a chat turn. Records of
+            // something that already happened, exactly like the workflow-run
+            // brackets above — they name no card, and they are appended by the
+            // route that already started the turn they describe, so treating
+            // either as a stimulus would make a turn re-trigger itself.
+            | CompanyEvent::TurnStarted { .. }
+            | CompanyEvent::TurnFailed { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -1986,6 +1993,13 @@ fn cycle_conversation(
             // work merely by existing, and that work's own card writes would
             // announce again.
             | CompanyEvent::TaskCardChanged { .. }
+            // Issue #983: the accept/settle brackets of a chat turn. Records of
+            // something that already happened, exactly like the workflow-run
+            // brackets above — they name no card, and they are appended by the
+            // route that already started the turn they describe, so treating
+            // either as a stimulus would make a turn re-trigger itself.
+            | CompanyEvent::TurnStarted { .. }
+            | CompanyEvent::TurnFailed { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
