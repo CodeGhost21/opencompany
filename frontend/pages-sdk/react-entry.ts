@@ -14,6 +14,44 @@
 import * as React from "react";
 import { createRoot, hydrateRoot } from "react-dom/client";
 
-export * from "react";
+// `export * from "react"` doesn't typecheck here: `@types/react` declares
+// itself with `export =`, and TS refuses to re-export `*` from a module
+// shaped that way. Destructuring the namespace import instead re-exports the
+// same runtime values (React's CJS module carries these as plain
+// properties) without hitting that restriction.
 export default React;
+export const {
+  Children,
+  Component,
+  Fragment,
+  Profiler,
+  PureComponent,
+  StrictMode,
+  Suspense,
+  cloneElement,
+  createContext,
+  createElement,
+  createRef,
+  forwardRef,
+  isValidElement,
+  lazy,
+  memo,
+  startTransition,
+  useCallback,
+  useContext,
+  useDebugValue,
+  useDeferredValue,
+  useEffect,
+  useId,
+  useImperativeHandle,
+  useInsertionEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  useTransition,
+  version,
+} = React;
 export { createRoot, hydrateRoot };
