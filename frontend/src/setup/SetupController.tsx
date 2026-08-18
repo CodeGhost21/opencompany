@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { TeamMemberDto } from "@/api/types";
@@ -32,6 +32,7 @@ export function SetupController({
   client,
   company,
   force,
+  deepLinked,
   onForceHandled,
   onOpenChange,
   onCompleted,
@@ -40,6 +41,18 @@ export function SetupController({
   company: string | null;
   /** Opened by hand from the Team page's prompt, regardless of the skip flag. */
   force?: boolean;
+  /**
+   * The operator arrived on a view they named, so do not open unprompted.
+   *
+   * A blocking dialog is an *offer* when someone lands on the console with
+   * nowhere particular to be, and a *hijack* when they deep-linked to
+   * `#/workflows/x`. They asked for that page; the Team page's in-place prompt
+   * is the affordance a deliberate navigation should meet instead.
+   *
+   * This does not suppress `unstaffed` reporting — the tour still holds and the
+   * Team prompt still shows.
+   */
+  deepLinked?: boolean;
   /** Clears the caller's force flag once the dialog has taken it. */
   onForceHandled?: () => void;
   /**
@@ -67,6 +80,20 @@ export function SetupController({
   const [checked, setChecked] = useState(false);
   /** Whether the host's roster is empty, independent of the skip flag. */
   const [unstaffed, setUnstaffed] = useState(false);
+  /**
+   * Whether the gate has already been evaluated once in this mount.
+   *
+   * Setup opens **unprompted only on the first evaluation**, never again on a
+   * later company switch. A switch is navigation, not a first run: an operator
+   * who deep-links into `#/workflows/x` on a company that happens to have no
+   * team asked for that page, and a blocking modal over it is a hijack rather
+   * than an offer. The Team page's in-place prompt still covers those companies,
+   * which is the affordance a deliberate navigation should meet.
+   *
+   * A ref, not state: it must be true before the next evaluation's render, and
+   * it must not itself trigger one.
+   */
+  const evaluatedOnce = useRef(false);
 
   // Report only once the roster read has landed.
   //
@@ -98,15 +125,22 @@ export function SetupController({
         return;
       }
       if (cancelled) return;
+      const first = !evaluatedOnce.current;
+      evaluatedOnce.current = true;
       setUnstaffed(teamIsEmpty(roster));
-      setOpen(shouldOfferSetup({ roster, skipped: setupSkipped(scope) }));
+      // Only the first evaluation may open the dialog by itself; see
+      // `evaluatedOnce`. Later switches still report `unstaffed`, so the tour
+      // keeps holding and the Team page keeps prompting.
+      setOpen(
+        first && !deepLinked && shouldOfferSetup({ roster, skipped: setupSkipped(scope) }),
+      );
       setChecked(true);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [client, company, scope]);
+  }, [client, company, scope, deepLinked]);
 
   // The Team page's prompt reopens setup after a skip.
   useEffect(() => {

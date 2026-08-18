@@ -304,6 +304,16 @@ export function AppShell({
   /** Set by the Team page's prompt to reopen setup after a skip. */
   const [setupForced, setSetupForced] = useState(false);
   /**
+   * Did this mount start on a view the operator named?
+   *
+   * Captured once, from the first render's route, so first-run setup can decline
+   * to open over a deep link. `useRef(...).current` rather than state: it is a
+   * property of how the console was opened and must never change afterwards —
+   * the tour drives `view` around, and re-reading it would let a tour step
+   * suppress the very dialog that is meant to precede the tour.
+   */
+  const deepLinked = useRef(view !== "overview" || Boolean(sub)).current;
+  /**
    * Bumped when setup finishes, so the Team page re-reads a roster that now has
    * people on it. A counter rather than a boolean: a second run must re-trigger
    * the read, and a flag that was already `true` would not.
@@ -1380,6 +1390,7 @@ export function AppShell({
         client={client}
         company={company}
         force={setupForced}
+        deepLinked={deepLinked}
         onForceHandled={() => setSetupForced(false)}
         onOpenChange={setSetupOpen}
         onCompleted={() => setTeamBuilt((n) => n + 1)}
