@@ -12,6 +12,9 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, "../dist/pages-sdk"),
     emptyOutDir: false,
+    // Library mode defaults `minify` to `false` — explicit here so React
+    // itself doesn't ship to a sandboxed page as an unminified dev bundle.
+    minify: "esbuild",
     lib: {
       entry: path.resolve(__dirname, "react-entry.ts"),
       formats: ["es"],
