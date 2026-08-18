@@ -668,6 +668,76 @@ pub async fn assert_event_retention(events: Arc<dyn EventLog>) {
     let unique = seqs.len();
     seqs.dedup();
     assert_eq!(unique, seqs.len(), "duplicate sequences after prune+append");
+
+    // 6. Issue #983: a turn's accept bracket is prunable, its failure bracket is
+    //    not, and pruning the accept must not break a live turn's read-back.
+    //
+    //    The pairing is the point. `TurnStarted` is one frame per operator
+    //    message on a busy desk and its meaning is spent once the turn settles;
+    //    `TurnFailed` is the only record that a question was accepted and never
+    //    answered, so losing it would silently un-report a lost turn. And the
+    //    two are joined by `turn_id`, not by sequence — which is what makes the
+    //    accept safe to discard: nothing points *at* it, so a turn still reads
+    //    back through its row and its failure line after its start is gone.
+    let bravo = CompanyId::new("bravo");
+    for n in 0..4u64 {
+        events
+            .append(
+                &bravo,
+                CompanyEvent::TurnStarted {
+                    turn_id: format!("turn-{n}"),
+                    chat_id: "general".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    events
+        .append(
+            &bravo,
+            CompanyEvent::TurnFailed {
+                turn_id: "turn-0".to_string(),
+                error: "the host restarted".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let report = events
+        .prune(&bravo, &RetentionPolicy::with_max_entries_per_kind(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        report.removed, 3,
+        "TurnStarted must be prunable, keeping only the newest"
+    );
+
+    let kept = events
+        .read_from(&bravo, EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    let starts: Vec<&str> = kept
+        .iter()
+        .filter_map(|e| match &e.event {
+            CompanyEvent::TurnStarted { turn_id, .. } => Some(turn_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, ["turn-3"], "the newest accept must survive");
+    let settles: Vec<&str> = kept
+        .iter()
+        .filter_map(|e| match &e.event {
+            CompanyEvent::TurnFailed { turn_id, .. } => Some(turn_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        settles,
+        ["turn-0"],
+        "a turn's failure is the record that it was never answered; it is permanent"
+    );
 }
 
 /// Everything written through the ports reads back through the ports,
