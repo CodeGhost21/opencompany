@@ -183,9 +183,12 @@ persisted. This note replaces the former step without changing the outcome.)
 Handling the signal at all is the load-bearing part: without a handler the
 default disposition applies and the process dies on the first signal, which is
 what a grace period on the pod spec is a window *for*. The tenant pod therefore
-sets `terminationGracePeriodSeconds` above the drain bound; the two move
-together, and raising the bound past the pod's grace period buys a `SIGKILL`
-mid-drain rather than a longer drain.
+sets `terminationGracePeriodSeconds` above `OPENCOMPANY_SHUTDOWN_GRACE_SECONDS`
++ the 2s connection grace — the total the earlier step measured — so a pod
+configured between the drain bound and that total would be `SIGKILL`ed during
+the connection window. The two move together, and raising the drain bound past
+the pod's grace period buys that same `SIGKILL` mid-drain rather than a longer
+drain.
 
 The bound is deliberately shorter than the longest turn — turns run well past
 fifteen minutes — so this reduces how often work is killed rather than
