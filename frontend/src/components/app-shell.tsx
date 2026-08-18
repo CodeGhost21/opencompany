@@ -48,6 +48,7 @@ import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { getRun, listRuns } from "@/api/runs";
 import { startVisiblePolling } from "@/lib/visible-poll";
+import { openTurnsFromRuns, PendingSyncPosts } from "@/lib/live-reply";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
@@ -444,7 +445,7 @@ export function AppShell({
    * never going to deliver the reply, so the live frame is the answer and
    * suppressing it would mean the reply never appears at all (issue #983).
    */
-  const pendingPostThreadsRef = useRef<Set<string>>(new Set());
+  const pendingPostThreadsRef = useRef<PendingSyncPosts>(new PendingSyncPosts());
   /**
    * Turns accepted but not settled, by the thread they belong to (issue #983).
    *
@@ -713,13 +714,9 @@ export function AppShell({
     listRuns(client, company, { status: ["pending", "running"] })
       .then((runs) => {
         if (cancelled) return;
-        const open: Record<string, OpenTurn> = {};
-        for (const run of runs) {
-          // A dispatch at a card is not a chat turn and owns no thread's
-          // indicator; only a turn that names its conversation re-arms one.
-          if (!run.chatId) continue;
-          open[run.chatId] = { turnId: run.id, queued: run.status === "pending" };
-        }
+        // The fold — which rows count, and queued-vs-working — lives in
+        // `openTurnsFromRuns` so it is assertable without a React tree.
+        const open = openTurnsFromRuns(runs);
         // Merged rather than assigned: a turn POSTed while this request was in
         // flight is already in the map and is the more recent truth.
         if (Object.keys(open).length) setOpenTurns((prev) => ({ ...open, ...prev }));
@@ -973,7 +970,7 @@ export function AppShell({
       // this guard exists to prevent. `onSendDetached` drops the thread from the
       // set the moment the 202 lands, so the set means "synchronous post in
       // flight" and never merely "a turn is running".
-      if (pendingPostThreadsRef.current.has(event.chatId)) return;
+      if (pendingPostThreadsRef.current.suppressesLiveReply(event.chatId)) return;
       setThreads((ts) =>
         ts.map((t) => {
           if (t.id !== event.chatId) return t;
@@ -1118,12 +1115,12 @@ export function AppShell({
   // timeline so a fresh turn starts clean; `onSendEnd` clears it because the
   // final reply now carries the authoritative folded steps.
   const onSendStart = useCallback((threadId: string) => {
-    pendingPostThreadsRef.current.add(threadId);
+    pendingPostThreadsRef.current.started(threadId);
     activeTurnThreadRef.current = threadId;
     setLiveStepsByThread((prev) => ({ ...prev, [threadId]: [] }));
   }, []);
   const onSendEnd = useCallback((threadId: string) => {
-    pendingPostThreadsRef.current.delete(threadId);
+    pendingPostThreadsRef.current.ended(threadId);
     if (activeTurnThreadRef.current === threadId) activeTurnThreadRef.current = null;
     setLiveStepsByThread((prev) => {
       if (!prev[threadId]?.length) return prev;
@@ -1144,7 +1141,7 @@ export function AppShell({
    * is the delivery path rather than a duplicate of one.
    */
   const onSendDetached = useCallback((threadId: string, turnId?: string) => {
-    pendingPostThreadsRef.current.delete(threadId);
+    pendingPostThreadsRef.current.detached(threadId);
     setOpenTurns((prev) => ({ ...prev, [threadId]: { turnId, queued: true } }));
   }, []);
 
