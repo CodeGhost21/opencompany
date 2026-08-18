@@ -155,6 +155,11 @@ total by construction.
 
 On SIGINT/SIGTERM (`src/server/shutdown.rs`), in order:
 
+A second SIGTERM or Ctrl-C — while the drain below is still running — forces an
+immediate exit with status 130 and can cut in-flight work off before the normal
+drain completes. It is the local escape hatch from a long drain, deliberately a
+one-way action once the host has been told to stop twice.
+
 1. **Stop intake.** Every registered company is quiesced, so a new cycle is
    refused with `503 Quiescing`. The schedulers, mailbox pollers and Telegram
    pollers stop on the same signal, so nothing starts a fresh turn either.
