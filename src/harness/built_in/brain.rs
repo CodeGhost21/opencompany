@@ -2881,7 +2881,7 @@ impl HarnessBrain {
                             let nudge_control = SteerControl::new();
                             let declined = self
                                 .nudge_for_unpublished(
-                                    &run_turn,
+                                    run_turn.as_ref(),
                                     &responder,
                                     text,
                                     &operator_reply,
