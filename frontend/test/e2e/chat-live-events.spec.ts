@@ -357,7 +357,13 @@ test("a turn still open on reload re-arms the working row, and clears when it se
       body: JSON.stringify(settled ? [] : [openRun]),
     }),
   );
-  // The per-turn poll, which is what carries the terminal transition.
+  // The per-turn poll, which is what carries the queued → running → settled
+  // transitions. It keeps reporting the `pending` row until the test has
+  // observed the queued state, so the `running` response can never land before
+  // the assertion that pins the wording to "Queued…" has passed — otherwise the
+  // first poll could flip the row to working mid-assertion and turn a
+  // deterministic test into a race.
+  let runningAllowed = false;
   await page.route("**/runs/turn-e2e-1", (route) =>
     route.fulfill({
       status: 200,
@@ -365,7 +371,9 @@ test("a turn still open on reload re-arms the working row, and clears when it se
       body: JSON.stringify({
         run: settled
           ? { ...openRun, status: "succeeded", phase: "terminal", finishedAtMillis: Date.now() }
-          : { ...openRun, status: "running", phase: "active", startedAtMillis: Date.now() },
+          : runningAllowed
+            ? { ...openRun, status: "running", phase: "active", startedAtMillis: Date.now() }
+            : openRun,
         steps: [],
       }),
     }),
@@ -381,7 +389,8 @@ test("a turn still open on reload re-arms the working row, and clears when it se
   // progress here would be the console inventing something.
   await expect(workingRow(page)).toHaveAttribute("data-queued", "true");
 
-  // The poll picks up `running` and the wording follows the row.
+  // Let the poll move to `running`; the wording follows the row.
+  runningAllowed = true;
   await expect(workingRow(page)).toHaveAttribute("data-queued", "false", { timeout: 30_000 });
 
   settled = true;
