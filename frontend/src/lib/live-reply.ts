@@ -85,7 +85,7 @@ export interface LiveReplyFrame {
  * upstream body before it will build a response, which is why `/events` hangs
  * past two minutes on a hosted tenant (`opencompany-microservice#23`).
  */
-export class PendingSyncPosts {
+export class PendingSyncPosts<F extends LiveReplyFrame = LiveReplyFrame> {
   private readonly threads = new Set<string>();
   /**
    * Frames {@link capture} held back because their thread's POST shape was
@@ -94,7 +94,7 @@ export class PendingSyncPosts {
    * {@link ended} / {@link detached} / {@link failed} the POST turns out to
    * reach.
    */
-  private readonly held = new Map<string, LiveReplyFrame[]>();
+  private readonly held = new Map<string, F[]>();
 
   /**
    * A chat POST has gone out on this thread.
@@ -126,7 +126,7 @@ export class PendingSyncPosts {
    * thread's shape was unknown is ever thrown away, no matter when it lands
    * relative to the `202`.
    */
-  detached(threadId: string): LiveReplyFrame[] {
+  detached(threadId: string): F[] {
     return this.release(threadId);
   }
 
@@ -150,7 +150,7 @@ export class PendingSyncPosts {
    * still tells the operator the request failed — a reply that lands later does
    * not make the failure untrue, and the two facts are not in competition.
    */
-  failed(threadId: string): LiveReplyFrame[] {
+  failed(threadId: string): F[] {
     return this.release(threadId);
   }
 
@@ -180,7 +180,7 @@ export class PendingSyncPosts {
    * to poll; `failed` has neither, and a working row armed from it would be a
    * spinner with nothing to take it down.
    */
-  private release(threadId: string): LiveReplyFrame[] {
+  private release(threadId: string): F[] {
     this.threads.delete(threadId);
     const frames = this.held.get(threadId) ?? [];
     this.held.delete(threadId);
@@ -207,7 +207,7 @@ export class PendingSyncPosts {
    * has been unresolved. See {@link detached} for why that distinction is the
    * whole fix.
    */
-  capture(frame: LiveReplyFrame): boolean {
+  capture(frame: F): boolean {
     if (!this.suppressesLiveReply(frame.chatId)) return false;
     const queue = this.held.get(frame.chatId);
     if (queue) queue.push(frame);

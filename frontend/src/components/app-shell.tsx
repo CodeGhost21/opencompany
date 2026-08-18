@@ -465,7 +465,7 @@ export function AppShell({
    * detached turn's reply beating the `202` itself back to the browser, and
    * against a cut connection taking a still-running turn's reply with it.
    */
-  const pendingPostThreadsRef = useRef<PendingSyncPosts>(new PendingSyncPosts());
+  const pendingPostThreadsRef = useRef(new PendingSyncPosts<AgentReplyEvent>());
   /**
    * Turns accepted but not settled, by the thread they belong to (issue #983).
    *
@@ -1258,7 +1258,7 @@ export function AppShell({
     (threadId: string, turnId?: string) => {
       const held = pendingPostThreadsRef.current.detached(threadId);
       setOpenTurns((prev) => ({ ...prev, [threadId]: { turnId, queued: true } }));
-      held.forEach((frame) => renderAgentReply(frame as AgentReplyEvent));
+      held.forEach((frame) => renderAgentReply(frame));
     },
     [renderAgentReply],
   );
@@ -1287,7 +1287,7 @@ export function AppShell({
   const onSendFailed = useCallback(
     (threadId: string) => {
       const held = pendingPostThreadsRef.current.failed(threadId);
-      held.forEach((frame) => renderAgentReply(frame as AgentReplyEvent));
+      held.forEach((frame) => renderAgentReply(frame));
     },
     [renderAgentReply],
   );
