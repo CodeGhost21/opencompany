@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "description": "A company-agnostic operator console for any OpenCompany host, built with Vite + React.",
   "type": "module",
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=10"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
