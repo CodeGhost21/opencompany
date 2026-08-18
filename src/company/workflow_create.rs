@@ -1882,15 +1882,24 @@ mod tests {
         ) -> Result<Vec<StoredEvent>> {
             Ok(Vec::new())
         }
-        fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+        fn subscribe(
+            &self,
+            _id: &CompanyId,
+        ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
             let rx = self.tx.subscribe();
             Box::pin(stream::unfold(rx, |mut rx| async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(event) => return Some((event, rx)),
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                // Each call to this closure produces exactly one item and hands
+                // the receiver back as continuation state, so there is no loop
+                // here.
+                match rx.recv().await {
+                    Ok(event) => {
+                        Some((crate::ports::events::EventStreamItem::Event(event), rx))
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => Some((
+                        crate::ports::events::EventStreamItem::Gap { missed },
+                        rx,
+                    )),
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
                 }
             }))
         }
