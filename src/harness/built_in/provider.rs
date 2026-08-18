@@ -883,11 +883,11 @@ pub async fn request_plan(
     tools: Vec<serde_json::Value>,
     tool_choice: &ToolChoice,
 ) -> anyhow::Result<RequestPlan> {
-    let model = decl
-        .models
-        .get(abstract_model)
-        .cloned()
-        .unwrap_or_else(|| abstract_model.to_string());
+    // Tier -> concrete OpenRouter slug, resolved HERE rather than left to the
+    // endpoint: the direct path talks to OpenRouter, which has never heard of
+    // `chat-v1`. Resolving in one place is what keeps proxied and direct on the
+    // same model when a tenant adds a key.
+    let model = inference::model_for_tier(abstract_model, &decl.models);
     let url = format!("{}/chat/completions", decl.base_url.trim_end_matches('/'));
     let bearer = decl
         .bearer()
@@ -1982,8 +1982,11 @@ mod tests {
                 .contains(&("X-Title", OPENROUTER_TITLE.to_string()))
         );
 
-        // An unmapped tier passes through unchanged.
-        let passthrough = request_plan(
+        // A tier the manifest does not map takes the shipped default rather than
+        // passing through as a bare tier name. It used to pass through, which
+        // worked only because the platform endpoint resolved tier names; this
+        // decl is DIRECT, and OpenRouter has never heard of `reasoning-v1`.
+        let defaulted = request_plan(
             &decl,
             "reasoning-v1",
             Vec::new(),
@@ -1994,7 +1997,22 @@ mod tests {
         )
         .await
         .expect("plan");
-        assert_eq!(passthrough.model, "reasoning-v1");
+        assert_eq!(defaulted.model, "deepseek/deepseek-v4-pro");
+
+        // A concrete slug is still forwarded untouched, so a caller can name any
+        // model in OpenRouter's catalog.
+        let explicit = request_plan(
+            &decl,
+            "anthropic/claude-sonnet-4.5",
+            Vec::new(),
+            0.2,
+            None,
+            Vec::new(),
+            &ToolChoice::Auto,
+        )
+        .await
+        .expect("plan");
+        assert_eq!(explicit.model, "anthropic/claude-sonnet-4.5");
     }
 
     #[tokio::test]

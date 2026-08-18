@@ -132,10 +132,33 @@ a workload, never a model, which is what lets an agent keep its tier while
 moving between harnesses.
 
 A tier resolves to a **concrete OpenRouter model id before the request leaves
-the process**, on both the proxied and the direct path. A harness's `models`
-table overrides an entry; anything unmapped falls back to the shipped default
-table. The console shows the resolved id, so the displayed vocabulary matches
-what goes on the wire.
+the process**, on both the proxied and the direct path
+(`inference::model_for_tier`). Precedence: the harness's `models` table, then
+`DEFAULT_TIER_MODELS`, then the input verbatim — the last so a caller naming a
+concrete slug (`anthropic/claude-sonnet-4.5`) passes straight through instead of
+being treated as an unknown tier.
+
+Resolving here rather than at the endpoint is what makes the direct path work at
+all: the platform proxy would resolve a bare tier name, but OpenRouter has never
+heard of `chat-v1`, so an unmapped tier on a tenant's own key would 400. One
+table for both paths also means a tenant adding a key does not silently change
+which model their agents run on — `DEFAULT_TIER_MODELS` mirrors the platform's
+own OpenRouter bindings.
+
+The console shows the resolved id, so the displayed vocabulary matches the wire.
+
+### The proxy accepts any model id
+
+The platform endpoint is not limited to the tiers. Its registry is a curated set
+of workload SKUs, each pinned to a sub-provider so its fixed rate card stays
+exact; anything outside it is **passed through to OpenRouter and priced from
+OpenRouter's own live catalog**, billed at the normal per-plan margin. So the
+same request works proxied or direct, and naming a specific model no longer
+requires the platform to ship a registry entry for it first.
+
+A model OpenRouter will not fully price is refused rather than served: an
+unpriced request runs on the platform's key and leaves a billing row
+indistinguishable from a legitimate zero.
 
 ---
 

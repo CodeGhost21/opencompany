@@ -137,6 +137,42 @@ pub const LEGACY_MANAGED: &str = "managed";
 /// The provider a company gets when nothing names one.
 pub const DEFAULT_PROVIDER: &str = "openrouter";
 
+/// Default concrete OpenRouter model id per abstract tier.
+///
+/// A tier names a *workload*, and something must turn it into a model id before
+/// the request leaves this process. On the proxied path the platform would also
+/// resolve a bare tier name, but on the **direct** path there is nobody to do
+/// it: OpenRouter has never heard of `chat-v1`, so an unmapped tier would 400.
+/// One table serves both, so a tenant setting a key does not silently change
+/// which model their agents run on.
+///
+/// The slugs mirror the platform's own OpenRouter bindings, so proxied and
+/// direct resolve to the same models by default. A harness's `[harness.inference]
+/// .models` overrides any entry.
+pub const DEFAULT_TIER_MODELS: &[(&str, &str)] = &[
+    ("chat-v1", "deepseek/deepseek-v4-flash"),
+    ("reasoning-v1", "deepseek/deepseek-v4-pro"),
+    ("agentic-v1", "deepseek/deepseek-v4-pro"),
+    ("vision-v1", "qwen/qwen3.7-plus"),
+];
+
+/// The concrete model id for `tier`, given a harness's own overrides.
+///
+/// Precedence: the harness's `models` table, then [`DEFAULT_TIER_MODELS`], then
+/// the input verbatim — the last so a caller naming a concrete OpenRouter slug
+/// (`anthropic/claude-sonnet-4.5`) passes straight through rather than being
+/// treated as an unknown tier.
+pub fn model_for_tier(tier: &str, overrides: &BTreeMap<String, String>) -> String {
+    if let Some(mapped) = overrides.get(tier) {
+        return mapped.clone();
+    }
+    DEFAULT_TIER_MODELS
+        .iter()
+        .find(|(name, _)| *name == tier)
+        .map(|(_, model)| (*model).to_string())
+        .unwrap_or_else(|| tier.to_string())
+}
+
 /// Normalizes a provider kind: blank and the legacy `managed` both become
 /// [`DEFAULT_PROVIDER`]; anything else passes through for validation to judge.
 pub fn normalize_provider(provider: &str) -> &str {
@@ -1313,6 +1349,47 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// Every declared tier resolves to a concrete OpenRouter slug, and a tier
+    /// left unmapped by the harness still does.
+    ///
+    /// This is what makes the DIRECT path work at all: OpenRouter has never
+    /// heard of `chat-v1`, so a bare tier on a tenant's own key would 400.
+    #[test]
+    fn every_tier_resolves_to_a_concrete_model_id() {
+        let none = BTreeMap::new();
+        for tier in crate::company::types::INFERENCE_TIERS {
+            let resolved = model_for_tier(tier, &none);
+            assert_ne!(
+                &resolved, tier,
+                "`{tier}` must map to a concrete slug, not pass through"
+            );
+            assert!(
+                resolved.contains('/'),
+                "`{tier}` resolved to `{resolved}`, which is not an OpenRouter slug"
+            );
+        }
+    }
+
+    #[test]
+    fn a_harness_override_beats_the_default_and_a_concrete_slug_passes_through() {
+        let overrides =
+            BTreeMap::from([("chat-v1".to_string(), "anthropic/claude-haiku".to_string())]);
+        assert_eq!(
+            model_for_tier("chat-v1", &overrides),
+            "anthropic/claude-haiku"
+        );
+        // An unmapped tier still takes the shipped default.
+        assert_eq!(
+            model_for_tier("reasoning-v1", &overrides),
+            "deepseek/deepseek-v4-pro"
+        );
+        // A caller naming a concrete slug is not treated as an unknown tier.
+        assert_eq!(
+            model_for_tier("anthropic/claude-sonnet-4.5", &BTreeMap::new()),
+            "anthropic/claude-sonnet-4.5"
         );
     }
 
