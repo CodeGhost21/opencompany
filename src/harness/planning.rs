@@ -371,13 +371,7 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
         planned_at_millis: now_millis(),
     };
 
-    // The assignee gate. A plan may *fill in* a blank assignee but never
-    // reassign one a person chose — the operator's routing decision is not the
-    // planner's to overrule.
-    let assignee = match evidence.card_assignee.as_str() {
-        "" => proposed,
-        existing => Some(existing.to_string()),
-    };
+    let assignee = settled_assignee(&evidence.card_assignee, proposed);
     let Some(assignee) = assignee.filter(|a| evidence.assignee_is_valid(a)) else {
         settle_blocked(
             &runtime,
@@ -667,6 +661,23 @@ impl Evidence {
         let resolution = assignee::resolve(&self.record, key);
         let working = resolution.working_agent()?;
         self.teammates.iter().find(|t| t.id == working)
+    }
+}
+
+/// The assignee gate. A plan may *fill in* a blank assignee but never reassign
+/// one a person chose — the operator's routing decision is not the planner's to
+/// overrule.
+///
+/// Load-bearing on both sides since issue #982. The card a chat opens is no
+/// longer born blank when the operator addressed a teammate or a desk, so this
+/// is now the arm that most chat cards take: what used to be a rare "somebody
+/// typed a name into the board" case is the ordinary DM. `proposed` — a content
+/// match of the card's title against teammate roles — remains the answer for a
+/// genuinely unaddressed card, and *only* for one.
+fn settled_assignee(card_assignee: &str, proposed: Option<String>) -> Option<String> {
+    match card_assignee {
+        "" => proposed,
+        existing => Some(existing.to_string()),
     }
 }
 
