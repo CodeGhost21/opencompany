@@ -911,13 +911,25 @@ jobs:
 
       # Issue #914. The `tinymemory` feature binds the engine-neutral
       # `MemoryProvider` contract and adds the `remote`/`null` selection modes.
-      # It rides this lane rather than the fast `Rust` job because it implies
-      # `tinycortex` — a bundled SQLite build this lane already pays for, and the
-      # fast lane does not. Two filters because `run-scoped-suite.sh` takes
-      # exactly one each, and both halves need to run: `store::memory` covers the
-      # decorator's tenant-isolation and archive-on-evict properties, and
-      # `store::select` covers the boot refusals that keep a misconfigured hosted
-      # engine from starting.
+      #
+      # Both steps pass `tinymemory` ALONE, deliberately. The feature does not
+      # imply `tinycortex` and must not be made to: `remote`/`null` bind a
+      # provider through this contract while `embedded` uses the `tinycortex`
+      # overlay, and keeping them apart is what lets a hosted-memory tenant build
+      # without linking a bundled SQLite it will never call (tinymemory#18 §D).
+      # Adding `tinycortex` here to "make the build match the lane" would hide a
+      # regression in exactly that separation, because the contract path would
+      # never again be compiled on its own.
+      #
+      # The lane is a placement choice, not a requirement — every Rust job runs
+      # `init-vendored-submodules.sh`, so the `vendor/openhuman/vendor/tinymemory`
+      # path deps resolve in all of them.
+      #
+      # Two steps because `run-scoped-suite.sh` takes exactly one filter each, and
+      # both halves need to run: `store::memory` covers the decorator's
+      # tenant-isolation and archive-on-evict properties, and `store::select`
+      # covers the boot refusals that keep a misconfigured hosted engine from
+      # starting.
       - name: Test the TinyMemory provider contract
         run: scripts/ci/run-scoped-suite.sh "tinymemory contract" tinymemory store::memory
 
