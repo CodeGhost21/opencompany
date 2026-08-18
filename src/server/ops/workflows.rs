@@ -5192,22 +5192,24 @@ mod tests {
             let home = home_dir.path().to_path_buf();
             let (state, _store, id) = hosted_state(&home).await;
 
-            journal_start(&state, &id, "digest", "run-live", true).await;
-            journal_node_started(&state, &id, "digest", "run-live", "ceo").await;
-            journal_node(
-                &state,
-                &id,
-                "digest",
-                "run-live",
-                "ceo",
-                WorkflowNodeStatus::Ok,
-            )
-            .await;
+            // Registered on the supervisor, and the guard held across the read:
+            // since #1009 a start with no finish whose id is NOT live is settled
+            // by the read itself, so a genuinely in-flight run is the only way
+            // to see `running: true` — and it is the case under test.
+            let runtime = state.registry().get(&id).expect("registered");
+            let (ctx, _guard) = runtime
+                .run_supervisor()
+                .begin("digest", true)
+                .expect("under the default cap");
+            let run = ctx.run_id.clone();
+            journal_start(&state, &id, "digest", &run, true).await;
+            journal_node_started(&state, &id, "digest", &run, "ceo").await;
+            journal_node(&state, &id, "digest", &run, "ceo", WorkflowNodeStatus::Ok).await;
             // Started and NOT finished — the node the run is on. No finish is
             // journaled for it, which is the whole shape under test.
-            journal_node_started(&state, &id, "digest", "run-live", "draft").await;
+            journal_node_started(&state, &id, "digest", &run, "draft").await;
 
-            let response = router(state)
+            let response = router(state.clone())
                 .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
                 .await
                 .unwrap();
@@ -5215,6 +5217,7 @@ mod tests {
             let rows = body.as_array().expect("array");
             assert_eq!(rows.len(), 1, "one run: {body}");
             assert_eq!(rows[0]["running"], true, "still in flight: {body}");
+            assert_eq!(rows[0]["runId"], run, "{body}");
 
             // In start order, both brackets — the reader subtracts.
             let started = rows[0]["startedNodes"].as_array().expect("startedNodes");
