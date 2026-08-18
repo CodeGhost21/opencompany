@@ -144,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         chargebee: None,
         #[cfg(feature = "paypal")]
         paypal: None,
+        hosting: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
         run_supervisor: opencompany::runtime::RunSupervisor::default(),
         delivery: None,

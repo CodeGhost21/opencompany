@@ -174,6 +174,19 @@ pub fn grants_chargebee_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "chargebee" || grant.starts_with("chargebee."))
 }
 
+/// Whether a tool-grant list **explicitly** grants the `hosting` namespace.
+///
+/// Like its siblings, the catch-all `*` does **not** confer it. These tools
+/// publish a company's files to the public internet under its own name and can
+/// provision a managed database it is billed for, so they are opted into by
+/// name rather than ridden in on a wildcard a company set for its file and
+/// shell tools.
+pub fn grants_hosting_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "hosting" || grant.starts_with("hosting."))
+}
+
 /// Whether a tool-grant list **explicitly** grants the `paypal` namespace
 /// (issue #789).
 ///

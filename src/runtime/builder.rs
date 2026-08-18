@@ -2183,6 +2183,30 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // The per-company hosting connection, resolved
+                            // from this company's own secret store for the same
+                            // reason the billing pair above is: two companies on
+                            // one host deploy to two different hosting accounts,
+                            // and a deployment publishes files to the internet
+                            // under the account's own name. An ambient
+                            // environment variable could only ever be somebody
+                            // else's account, so none is consulted.
+                            let hosting_config = if crate::company::grants_hosting_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::hosting::TenantHosting::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[hosting] could not read the hosting credential at \
+                                             boot; wiring no hosting tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2377,6 +2401,7 @@ impl RuntimeBuilder {
                                 chargebee: chargebee_config,
                                 #[cfg(feature = "paypal")]
                                 paypal: paypal_config,
+                                hosting: hosting_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's
