@@ -266,7 +266,7 @@ pub fn compile_page(source: &str) -> Result<CompiledPage, String> {
 /// fetch outside the served import map, so the allow-list would be a lie if it
 /// only looked at static top-level imports.
 fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(), String> {
-    use swc_core::ecma::ast::{CallExpr, Callee, ExportAll, ImportDecl, NamedExport, Str};
+    use swc_core::ecma::ast::{CallExpr, Callee, ExportAll, ImportDecl, NamedExport};
     use swc_core::ecma::visit::{Visit, VisitWith};
 
     struct PageImportCheck<'a> {
@@ -279,7 +279,7 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
             Self::note(
                 &mut self.disallowed,
                 self.allowed,
-                n.src.value.as_str(),
+                n.src.value.as_str().unwrap_or(""),
                 None,
             );
         }
@@ -288,7 +288,7 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
             Self::note(
                 &mut self.disallowed,
                 self.allowed,
-                n.src.value.as_str(),
+                n.src.value.as_str().unwrap_or(""),
                 Some("via `export * from`"),
             );
         }
@@ -298,7 +298,7 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
                 Self::note(
                     &mut self.disallowed,
                     self.allowed,
-                    src.value.as_str(),
+                    src.value.as_str().unwrap_or(""),
                     Some("via `export … from`"),
                 );
             }
@@ -307,11 +307,14 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
         fn visit_call_expr(&mut self, n: &CallExpr) {
             if matches!(n.callee, Callee::Import(_)) {
                 if self.disallowed.is_none() {
-                    let spec = match n.args.first().map(|a| &a.expr) {
-                        Some(swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(
-                            Str { value, .. },
-                        ))) => value.as_str().to_string(),
-                        _ => "a dynamic `import(…)`".to_string(),
+                    let spec = match n.args.first() {
+                        Some(spread) => match &*spread.expr {
+                            swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(s)) => {
+                                s.value.as_str().unwrap_or("bad-dynamic-import").to_string()
+                            }
+                            _ => "a dynamic `import(…)`".to_string(),
+                        },
+                        None => "a dynamic `import(…)`".to_string(),
                     };
                     self.disallowed = Some(spec);
                 }
@@ -326,7 +329,7 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
                 return;
             }
             let how = how.map(|h| format!(" {h}")).unwrap_or_default();
-            disallowed = Some(format!("\"{spec}\"{how}"));
+            *disallowed = Some(format!("\"{spec}\"{how}"));
         }
     }
 
