@@ -34,6 +34,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
 import { WorkingIndicator } from "@/views/chat/WorkingIndicator";
+import { isDetachedChat } from "@/api/types";
+import type { OpenTurn } from "@/components/app-shell";
 import type { Thread, ThreadContact } from "@/lib/threads";
 
 interface Props {
@@ -57,13 +59,22 @@ interface Props {
   onSendStart?: (threadId: string) => void;
   /** Clears the in-flight mark + live timeline once the POST resolves. */
   onSendEnd?: (threadId: string) => void;
+  /**
+   * The host accepted the turn and answered `202` rather than the reply
+   * (issue #983). Unlike `onSendEnd` this does NOT end the turn — it only ends
+   * the POST, so the parent keeps the working row up and stops suppressing the
+   * live reply frame, which in this mode is the delivery path.
+   */
+  onSendDetached?: (threadId: string, turnId?: string) => void;
+  /** Turns accepted but not settled, by thread id — survives a reload (#983). */
+  openTurns?: Record<string, OpenTurn>;
 }
 
 /** Consecutive messages from one sender within this window group together. */
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
 /** WhatsApp-style two-pane chat: a thread list on the left, transcript right. */
-export function Conversation({ client, company, threads, activeId, onSelect, setMessages, onReply, taskEventTick, liveStepsByThread, onSendStart, onSendEnd }: Props) {
+export function Conversation({ client, company, threads, activeId, onSelect, setMessages, onReply, taskEventTick, liveStepsByThread, onSendStart, onSendEnd, onSendDetached, openTurns }: Props) {
   const active = threads.find((t) => t.id === activeId) ?? threads[0];
   // On mobile, the list and the chat share the pane — track which is showing.
   const [mobilePane, setMobilePane] = useState<"list" | "chat">("chat");
@@ -90,6 +101,8 @@ export function Conversation({ client, company, threads, activeId, onSelect, set
         liveSteps={liveStepsByThread?.[active.id] ?? []}
         onSendStart={onSendStart}
         onSendEnd={onSendEnd}
+        onSendDetached={onSendDetached}
+        openTurn={openTurns?.[active.id]}
         onOpenList={() => setMobilePane("list")}
         className={cn("md:flex", mobilePane === "chat" ? "flex" : "hidden")}
       />
@@ -163,6 +176,8 @@ function ChatPane({
   liveSteps,
   onSendStart,
   onSendEnd,
+  onSendDetached,
+  openTurn,
   onOpenList,
   className,
 }: {
@@ -175,6 +190,9 @@ function ChatPane({
   liveSteps?: TurnStep[];
   onSendStart?: (threadId: string) => void;
   onSendEnd?: (threadId: string) => void;
+  onSendDetached?: (threadId: string, turnId?: string) => void;
+  /** This thread's turn, when one is accepted but not settled (#983). */
+  openTurn?: OpenTurn;
   onOpenList: () => void;
   className?: string;
 }) {
@@ -198,10 +216,24 @@ function ChatPane({
     setMessages(thread.id, (m) => [...m, makeMessage("you", text)]);
     setSending(true);
     onSendStart?.(thread.id);
+    // Set when the host answers 202: the turn outlives this POST (issue #983).
+    let detached = false;
     try {
       // Address the active desk thread (issue #53). "main" and any id the
       // company doesn't define fall to the orchestrator on the backend.
-      const reply = await client.chat(text, company, thread.id);
+      //
+      // `detach` is asked for, never assumed: a host that predates it answers
+      // the full synchronous body, so the branch below reads what came back.
+      const answer = await client.chat(text, company, thread.id, undefined, undefined, true);
+      if (isDetachedChat(answer)) {
+        detached = true;
+        // The reply arrives on the stream, and durably in `chat/history` when
+        // the turn settles. Nothing to render here — but the id IS known now,
+        // at accept time rather than at settle, which is the improvement.
+        onSendDetached?.(thread.id, answer.turnId);
+        return;
+      }
+      const reply = answer;
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
             // `taskId` (issue #246): when the turn opened a board card, the
@@ -221,7 +253,9 @@ function ChatPane({
       setMessages(thread.id, (m) => [...m, makeMessage("system", `Couldn't send — ${msg}`)]);
     } finally {
       setSending(false);
-      onSendEnd?.(thread.id);
+      // A detached turn is not over when its POST is: ending the send here would
+      // clear the live timeline and drop the working row mid-turn.
+      if (!detached) onSendEnd?.(thread.id);
     }
   }
 
@@ -316,13 +350,13 @@ function ChatPane({
               addingId={addingId}
             />
           ))}
-          {sending && (
+          {(sending || !!openTurn) && (
             <>
               {/* Live tool timeline — the running/done rows stream in over SSE as
                   the turn works, before the final reply lands (issue: tool calls
                   weren't visible until the turn finished). */}
               {liveSteps && liveSteps.length > 0 && <StepTimeline steps={liveSteps} />}
-              <TypingIndicator contact={thread.contact} />
+              <TypingIndicator contact={thread.contact} queued={openTurn?.queued} />
             </>
           )}
         </div>
@@ -885,7 +919,7 @@ function ContactAvatar({ contact, className }: { contact: ThreadContact; classNa
   );
 }
 
-function TypingIndicator({ contact }: { contact: ThreadContact }) {
+function TypingIndicator({ contact, queued }: { contact: ThreadContact; queued?: boolean }) {
   return (
     <div className="mt-2 flex gap-2.5">
       <ContactAvatar contact={contact} className="mt-0.5 size-8" />
@@ -894,6 +928,7 @@ function TypingIndicator({ contact }: { contact: ThreadContact }) {
           this surface's own — only the contents are shared. */}
       <WorkingIndicator
         srLabel="Replying…"
+        queued={queued}
         className="rounded-2xl rounded-bl-md border bg-card px-3.5 py-3"
       />
     </div>

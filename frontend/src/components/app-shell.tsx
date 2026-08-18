@@ -46,6 +46,8 @@ import {
 } from "@/components/sidebar-controls";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
+import { getRun, listRuns } from "@/api/runs";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
@@ -179,6 +181,35 @@ const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
  * worth — it exists to bound a long-lived tab, not to ration frames. */
 const WORKFLOW_EVENT_WINDOW = 300;
+
+/**
+ * A chat turn that has been accepted but has not settled (issue #983).
+ *
+ * Held per thread rather than per turn: a thread has at most one turn the
+ * operator is waiting on, and keying by thread is what lets the working
+ * indicator be looked up where it renders.
+ */
+export type OpenTurn = {
+  /**
+   * The durable row to poll. Absent when the host could not mint one — the turn
+   * still ran, and the indicator still shows, it just cannot be watched.
+   */
+  turnId?: string;
+  /**
+   * The row is still `pending`: accepted, but waiting on the per-company serial
+   * lock rather than working. Drives the indicator's wording.
+   */
+  queued: boolean;
+};
+
+/**
+ * How often an open turn's row is re-read.
+ *
+ * Slower than a UI tick on purpose — the live SSE frames are what make the turn
+ * feel responsive, and this poll exists to catch the *transition* (and to be
+ * right when the frames were missed), not to drive the animation.
+ */
+const TURN_POLL_MS = 4000;
 
 /**
  * Operator-facing copy for a `connect_error` code from the host's OAuth
@@ -404,7 +435,25 @@ export function AppShell({
   // that arrives without a `chatId` (older host, or a background turn — which is
   // itself gated off in `run_inner`). See PR #125 review.
   const activeTurnThreadRef = useRef<string | null>(null);
+  /**
+   * Threads with a **synchronous** chat POST in flight — the only ones whose
+   * live `agent_reply` echo must be suppressed (see `injectAgentReply`).
+   *
+   * A thread joins on `onSendStart` and leaves on `onSendEnd`, or *early* on
+   * `onSendDetached` when the host answers `202`: from that moment the POST is
+   * never going to deliver the reply, so the live frame is the answer and
+   * suppressing it would mean the reply never appears at all (issue #983).
+   */
   const pendingPostThreadsRef = useRef<Set<string>>(new Set());
+  /**
+   * Turns accepted but not settled, by the thread they belong to (issue #983).
+   *
+   * This is what makes a mid-turn reload work, which was impossible before the
+   * turn was durable: the open rows are read back from
+   * `GET {scope}/runs?status=pending,running` on hydration, so the working
+   * indicator is re-armed on a console that never saw the POST.
+   */
+  const [openTurns, setOpenTurns] = useState<Record<string, OpenTurn>>({});
   const feed = useCompany(client, company, initialStatus);
   // Issue #379: the inline approval cards' console-local state, owned here
   // rather than in `ChatView` for the same reason `transcripts` is — the shell
@@ -650,10 +699,137 @@ export function AppShell({
         if (!cancelled) setHydration((h) => ({ ...h, discovered: true }));
       });
 
+    // Re-arm the working indicator for turns already in flight (issue #983).
+    //
+    // This is the leg a reload could not have before: until the turn had a
+    // durable row there was nothing to ask, so a console reloaded mid-turn
+    // showed a settled-looking transcript and no sign that an answer was still
+    // coming. The rows are the query — `pending` and `running` are exactly the
+    // open ones — and each carries the conversation that raised it, so the
+    // indicator goes back on the right thread.
+    //
+    // A host that predates the route 404s and nothing is re-armed, which is
+    // today's behaviour rather than a broken one.
+    listRuns(client, company, { status: ["pending", "running"] })
+      .then((runs) => {
+        if (cancelled) return;
+        const open: Record<string, OpenTurn> = {};
+        for (const run of runs) {
+          // A dispatch at a card is not a chat turn and owns no thread's
+          // indicator; only a turn that names its conversation re-arms one.
+          if (!run.chatId) continue;
+          open[run.chatId] = { turnId: run.id, queued: run.status === "pending" };
+        }
+        // Merged rather than assigned: a turn POSTed while this request was in
+        // flight is already in the map and is the more recent truth.
+        if (Object.keys(open).length) setOpenTurns((prev) => ({ ...open, ...prev }));
+      })
+      .catch(() => {
+        /* host without `/runs`, or offline — nothing to re-arm */
+      });
+
     return () => {
       cancelled = true;
     };
   }, [client, company]);
+
+  /**
+   * Watch each open turn to its end, and rebuild the transcript from the
+   * durable record when it gets there (issue #983).
+   *
+   * ## The read is the backstop; the frames are the optimisation
+   *
+   * The terminal transition always re-reads `chat/history` for that thread, even
+   * though the reply usually arrived live moments earlier. That is the point: a
+   * frame dropped by a reconnecting `EventSource`, a proxy that buffered it away
+   * or a tab that was asleep leaves the live path with nothing, and the durable
+   * transcript is the only thing that is complete in every one of those cases.
+   * Once per transition, not on a timer — the fold is idempotent (hydration
+   * merges by message id) but a re-read per poll would be a lot of history for
+   * nothing.
+   *
+   * `startVisiblePolling` is the same helper every other polling surface uses,
+   * so a hidden tab stops asking and re-reads once on the way back to visible —
+   * which is exactly the recovery a slept tab needs.
+   */
+  useEffect(() => {
+    const watching = Object.entries(openTurns).filter(([, t]) => t.turnId);
+    if (watching.length === 0) return;
+    let cancelled = false;
+
+    const settle = (threadId: string) => {
+      setOpenTurns((prev) => {
+        if (!(threadId in prev)) return prev;
+        const next = { ...prev };
+        delete next[threadId];
+        return next;
+      });
+      // The durable re-read. Folded into both stores for the same reason every
+      // other injection is — the parked Conversation reads `threads`, the Chat
+      // workspace reads `transcripts`.
+      client
+        .getChatHistory(threadId, company)
+        .then((entries) => {
+          if (cancelled || entries.length === 0) return;
+          const hydrated = fromHistory(entries);
+          setThreads((ts) =>
+            ts.map((t) => {
+              if (t.id !== threadId) return t;
+              const known = new Set(t.messages.map((m) => m.id));
+              const fresh = hydrated.filter((m) => !known.has(m.id));
+              return fresh.length === 0 ? t : { ...t, messages: [...t.messages, ...fresh] };
+            }),
+          );
+          const channelId = chatChannelByThread[threadId];
+          if (!channelId) return;
+          setTranscripts((t) => {
+            const known = new Set((t[channelId] ?? []).map((m) => m.id));
+            const fresh = hydrated.filter((m) => !known.has(m.id));
+            return fresh.length === 0
+              ? t
+              : { ...t, [channelId]: [...(t[channelId] ?? []), ...fresh] };
+          });
+        })
+        .catch(() => {
+          /* offline — the next hydration pass still rebuilds it */
+        });
+    };
+
+    const poll = () => {
+      for (const [threadId, turn] of watching) {
+        if (!turn.turnId) continue;
+        getRun(client, company, turn.turnId)
+          .then(({ run }) => {
+            if (cancelled) return;
+            if (run.phase === "terminal") {
+              settle(threadId);
+              return;
+            }
+            // Still open: keep the queued/working distinction honest. `pending`
+            // means it has not taken the per-company lock yet.
+            const queued = run.status === "pending";
+            setOpenTurns((prev) =>
+              prev[threadId] && prev[threadId].queued !== queued
+                ? { ...prev, [threadId]: { ...prev[threadId], queued } }
+                : prev,
+            );
+          })
+          .catch(() => {
+            // A 404 means the row is gone rather than open; anything else is a
+            // blip. Either way, stop claiming a turn is in flight forever.
+            if (!cancelled) settle(threadId);
+          });
+      }
+    };
+
+    const dispose = startVisiblePolling(poll, TURN_POLL_MS);
+    return () => {
+      cancelled = true;
+      dispose();
+    };
+    // `watching` is derived from `openTurns`; the transition that matters is a
+    // turn opening or closing, which changes that map.
+  }, [client, company, openTurns, chatChannelByThread]);
 
   /**
    * Unread per channel, for the channel rail's badges (issue #367 — the rail
@@ -788,6 +964,15 @@ export function AppShell({
       // thread with a POST in flight; the POST reply is authoritative. The
       // recent-tail content check below still guards a late echo that lands just
       // after the POST resolved.
+      //
+      // **Conditional since issue #983, and this is the load-bearing part.** The
+      // rule above only holds while the POST is going to *deliver* the reply. A
+      // detached turn answers `202` immediately and delivers nothing, so for it
+      // this live frame IS the answer — suppressing it would mean the reply never
+      // appears at all, which is a strictly worse failure than the double bubble
+      // this guard exists to prevent. `onSendDetached` drops the thread from the
+      // set the moment the 202 lands, so the set means "synchronous post in
+      // flight" and never merely "a turn is running".
       if (pendingPostThreadsRef.current.has(event.chatId)) return;
       setThreads((ts) =>
         ts.map((t) => {
@@ -944,6 +1129,23 @@ export function AppShell({
       if (!prev[threadId]?.length) return prev;
       return { ...prev, [threadId]: [] };
     });
+  }, []);
+  /**
+   * The host accepted the turn and handed back its id instead of its answer
+   * (issue #983).
+   *
+   * Deliberately **not** `onSendEnd`. Two things must not happen here: the live
+   * timeline must not be cleared (its steps are the only thing the operator can
+   * see while the turn runs), and the working row must not come down — the turn
+   * is still going, and a console that went idle the instant the POST resolved
+   * would be back to claiming nothing is happening.
+   *
+   * What it does do is lift the echo suppression, because from here the stream
+   * is the delivery path rather than a duplicate of one.
+   */
+  const onSendDetached = useCallback((threadId: string, turnId?: string) => {
+    pendingPostThreadsRef.current.delete(threadId);
+    setOpenTurns((prev) => ({ ...prev, [threadId]: { turnId, queued: true } }));
   }, []);
 
   // Fold one live turn frame into the in-flight thread's timeline: a `tool_call`
@@ -1266,6 +1468,8 @@ export function AppShell({
               hydration={hydration}
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
+              onSendDetached={onSendDetached}
+              openTurns={openTurns}
               liveStepsByThread={liveStepsByThread}
               unread={unread}
               onChannelViewed={onChannelViewed}
@@ -1293,6 +1497,8 @@ export function AppShell({
               liveStepsByThread={liveStepsByThread}
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
+              onSendDetached={onSendDetached}
+              openTurns={openTurns}
             />
           )}
           {view === "inbox" && <InboxView client={client} company={company} />}
