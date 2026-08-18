@@ -368,6 +368,39 @@ mod tests {
         }
     }
 
+    /// A store whose record carries `overlays` and a `[globals].disable` list —
+    /// [`store_with`] with the disable list always empty.
+    fn store_with_globals_disable(
+        overlays: Vec<OverlayWorkflow>,
+        disable: Vec<String>,
+    ) -> Arc<dyn CompanyStore> {
+        let entries = disable
+            .iter()
+            .map(|d| format!("\"{d}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest: CompanyManifest = toml::from_str(&format!(
+            "[company]\nname = \"Acme\"\n\n[globals]\ndisable = [{entries}]\n"
+        ))
+        .expect("valid manifest");
+        Arc::new(MemStore(std::sync::Mutex::new(Some(CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: overlays,
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        }))))
+    }
+
     /// A store whose record carries `overlays` as its runtime-authored graphs.
     fn store_with(overlays: Vec<OverlayWorkflow>) -> Arc<dyn CompanyStore> {
         let manifest: CompanyManifest =
