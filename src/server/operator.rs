@@ -5535,7 +5535,7 @@ mod test {
             .list_runs(runtime.id(), &crate::ports::runs::RunFilter::default())
             .await
             .unwrap();
-        rows.sort_by(|a, b| a.created_at_millis.cmp(&b.created_at_millis));
+        rows.sort_by_key(|r| r.created_at_millis);
         rows.into_iter()
             .map(|r| (r.id, r.status.to_string()))
             .collect()
@@ -5697,15 +5697,20 @@ mod test {
             async move { app.oneshot(chat_request("second")).await }
         });
 
+        // Compared as a sorted pair rather than in row order: two POSTs a
+        // millisecond apart can tie on `created_at_millis`, and what is being
+        // asserted is that the two turns hold *different* statuses at once, not
+        // which row the store lists first.
         until(
             "the second turn never queued behind the first",
             async || {
-                let statuses: Vec<String> = turn_rows(&runtime)
+                let mut statuses: Vec<String> = turn_rows(&runtime)
                     .await
                     .into_iter()
                     .map(|(_, status)| status)
                     .collect();
-                statuses == ["running", "pending"]
+                statuses.sort();
+                statuses == ["pending", "running"]
             },
         )
         .await;
