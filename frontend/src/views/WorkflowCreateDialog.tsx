@@ -46,7 +46,7 @@ import {
   configFromDraft,
   hasConfigForm,
 } from "@/lib/workflow-node-config";
-import { draftBanners } from "@/lib/workflow-draft";
+import { draftBanners, draftLanding } from "@/lib/workflow-draft";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
@@ -427,6 +427,25 @@ export function WorkflowCreateDialog({
   /** The submit-time error banner, so a failed submit can scroll it into view
    * and focus it rather than leave the message off-screen (#813 defect 6). */
   const errorRef = useRef<HTMLDivElement>(null);
+  /**
+   * Identity of the dialog's current contents (issue #1052).
+   *
+   * Bumped by the reset effect below, i.e. on every open and every re-hydrate.
+   * `runDraft` captures it before its request and compares after, so a draft the
+   * operator walked away from cannot hydrate whatever is on screen later. The
+   * file's other async paths use an effect-scoped `live` flag; an event handler
+   * has no cleanup to flip, so the same idea is carried on a ref.
+   */
+  const draftEpochRef = useRef(0);
+  /**
+   * Whether the form holds operator work, readable **after** an await.
+   *
+   * `isDraftDirty()` closes over its render's state, so calling it again when a
+   * response lands re-reads the values captured when the request was issued —
+   * it would look like a re-check and answer the old question. This ref is
+   * refreshed on every render, so the post-await read sees what is on screen now.
+   */
+  const draftDirtyRef = useRef(false);
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -478,6 +497,14 @@ export function WorkflowCreateDialog({
   // and keeping the edit would keep the stale token with it.
   useEffect(() => {
     if (!open) return;
+    // Issue #1052: a draft still in flight belongs to the contents being
+    // replaced right now, not to these. Bumping first is what makes its
+    // response land as `drop` instead of overwriting a freshly-reset form.
+    draftEpochRef.current += 1;
+    // …and the button it disabled belongs to that abandoned request too, or a
+    // reopened dialog starts with Draft it inert until a request nobody is
+    // waiting for settles.
+    setDrafting(false);
     setId(workflow?.id ?? "");
     setName(workflow?.name ?? "");
     setDescription(workflow?.description ?? "");
@@ -853,6 +880,13 @@ export function WorkflowCreateDialog({
     );
   }
 
+  // Issue #1052: refresh the post-await view of dirtiness on every render. See
+  // `draftDirtyRef` for why re-calling `isDraftDirty()` after an await cannot
+  // work on its own.
+  useEffect(() => {
+    draftDirtyRef.current = isDraftDirty();
+  });
+
   /** Draft a graph from the description and hydrate the form with it (issue
    * #753). The hydrated, editable form IS the review surface — there is no
    * read-only diff — so on success the operator lands in the ordinary create
@@ -860,16 +894,14 @@ export function WorkflowCreateDialog({
   async function runDraft() {
     const description = copilotPrompt.trim();
     if (!description || drafting || echoing) return;
-    // Overwriting work the operator has already started is a confirm, not a
-    // silent clobber — the same courtesy the History restore extends.
-    if (
-      isDraftDirty() &&
-      !window.confirm(
-        "Replace what you've started with the drafted workflow? You can still edit it before creating.",
-      )
-    ) {
-      return;
-    }
+    // Issue #1052: the consent for overwriting the operator's work is taken
+    // AFTER the await, not here. A model call takes seconds and the operator is
+    // invited to keep typing through it, so a confirm asked now would be
+    // answered about a form that no longer exists when the draft lands — and
+    // the answer would then authorise replacing work started after it was
+    // given. It also asked at all for a draft that turns out not automatable,
+    // which leaves the form untouched and needed no permission.
+    const requestedEpoch = draftEpochRef.current;
     setDrafting(true);
     setDraftError(null);
     setDraftSummary(null);
@@ -877,8 +909,30 @@ export function WorkflowCreateDialog({
     setDraftNotes([]);
     try {
       const drafted = await draftWorkflowFromDescription(client, company, description);
+      // Issue #1052: what this response is allowed to do to the form it came
+      // back to, decided against the form as it is NOW.
+      const landing = draftLanding({
+        requestedEpoch,
+        currentEpoch: draftEpochRef.current,
+        dirtyNow: draftDirtyRef.current,
+      });
+      // The dialog moved on — closed, reopened, re-hydrated. Drop it silently:
+      // nothing was asked of the operator, so nothing needs explaining, and the
+      // banners below belong to a form that is gone.
+      if (landing === "drop") return;
       const banners = draftBanners(drafted);
       if (drafted.automatable && drafted.workflow) {
+        // Only a draft that will actually replace something asks. `confirm`
+        // means the form holds work right now; declining leaves it exactly as
+        // the operator left it, prompt and all, so they can draft again.
+        if (
+          landing === "confirm" &&
+          !window.confirm(
+            "Replace what you've started with the drafted workflow? You can still edit it before creating.",
+          )
+        ) {
+          return;
+        }
         const graph = drafted.workflow;
         // Hydrate via the same helpers edit mode uses, so a drafted graph and a
         // saved one populate the form identically.
@@ -904,7 +958,10 @@ export function WorkflowCreateDialog({
       // operator can still author by hand.
       setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
     } finally {
-      setDrafting(false);
+      // Issue #1052: only the request that owns the current contents may clear
+      // the spinner — a stale one would switch off a draft the operator is
+      // actually waiting on.
+      if (draftEpochRef.current === requestedEpoch) setDrafting(false);
     }
   }
 
