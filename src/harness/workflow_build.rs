@@ -2141,9 +2141,24 @@ fn not_automatable_reason(end: &TurnEnd, diag: &[String]) -> String {
                 )
             } else {
                 // The agent finished cleanly without proposing — it judged the work
-                // a one-off; take its own words as the reason.
+                // a one-off; take its own words as the reason. But a model that
+                // closes with the raw answer envelope ({"automatable": false,
+                // "reason": "…"}) instead of prose must NOT leak that JSON to the
+                // operator (issue #1042): pull out only the typed `reason` field.
+                let extracted = parse_draft(text)
+                    .map(|draft| draft.reason.trim().to_string())
+                    .filter(|reason| !reason.is_empty());
+                if let Some(reason) = extracted {
+                    return cap(&reason, MAX_REASON_CHARS);
+                }
+                // No parseable typed reason — fall back to the prose text, unless
+                // that itself still carries a JSON-object fragment (an envelope with
+                // no usable `reason`, or partial JSON), in which case a raw brace
+                // must never reach the operator: use a generic one-off message.
                 let stated = cap(text, MAX_REASON_CHARS);
-                if stated.is_empty() {
+                let looks_like_json = stated.contains("\"automatable\"")
+                    || (stated.contains('{') && stated.contains('}'));
+                if stated.is_empty() || looks_like_json {
                     "this is better done once than built into a reusable workflow".to_string()
                 } else {
                     stated
