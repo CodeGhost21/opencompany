@@ -1140,7 +1140,7 @@ export default function Page() {
             }))
             .await
             .expect("execute ok");
-        assert!(!result.is_error(), "write should succeed: {result:?}");
+        assert!(!result.is_error, "write should succeed: {result:?}");
 
         let bundle = pages.page("revenue").await.expect("read ok").expect("exists");
         assert!(bundle.manifest.is_some());
@@ -1175,7 +1175,7 @@ export default function Page() {
             }))
             .await
             .expect("execute ok");
-        assert!(result.is_error(), "write should be refused");
+        assert!(result.is_error, "write should be refused");
 
         let bundle = pages.page("bad").await.expect("read ok");
         assert!(bundle.is_none(), "nothing should have been written");
