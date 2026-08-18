@@ -250,6 +250,23 @@ pub struct DeliveryParking {
     /// The durable record of the park. This is what `/approvals` lists and what
     /// boot replay rehydrates, so it is what makes the card survive a restart.
     pub journal: Arc<RuntimeJournal>,
+    /// How many decisions each turn is still blocked on (issue #469), so a park
+    /// raised **outside** a cycle can join a batch too.
+    ///
+    /// Added by issue #978. Before it, this path armed nothing and passed no
+    /// turn key, so every gate of a fan-out was its own batch of one: each
+    /// believed it was the last decision outstanding and each re-dispatched the
+    /// whole run. The same handle the runtime resolves against — a second queue
+    /// would count parks nobody releases.
+    pub continuations: crate::runtime::continuation::ContinuationQueue,
+    /// Which gate node each parked workflow approval is deciding, and the
+    /// trigger input its run paused with (issue #978).
+    ///
+    /// Armed in lockstep with [`continuations`](Self::continuations) and for the
+    /// same reason they are one struct rather than two options: a run whose
+    /// decisions are counted but whose gates are not recorded releases a batch
+    /// the host cannot re-dispatch.
+    pub gates: crate::runtime::workflow_gates::WorkflowGateQueue,
 }
 
 impl std::fmt::Debug for WorkflowDeliveryDeps {
@@ -915,6 +932,10 @@ async fn park_cold_recipient(
             effect,
             crate::runtime::journal::TaskLink::Unlinked,
             None,
+            // Issue #978: no turn. A cold-recipient card is one delivery's own
+            // decision, not one of a run's batch — it resolves and sends on its
+            // own, exactly as before.
+            None,
         )
         .await
     {
@@ -1032,6 +1053,7 @@ impl DeliveryParking {
         effect: Effect,
         task_link: crate::runtime::journal::TaskLink,
         thread: Option<String>,
+        turn: Option<String>,
     ) -> Result<ApprovalId, crate::error::OpenCompanyError> {
         let approval_id = self.approvals.park(company, effect.clone()).await?;
         if let Err(err) = self
@@ -1050,12 +1072,22 @@ impl DeliveryParking {
                     thread,
                     parent: None,
                 },
-                // No turn key (issue #469): a workflow node's request is not
-                // raised by a cycle, so there is no turn holding a continuation
-                // for it. It resolves and continues on its own, exactly as it
-                // always has — the gate only ever groups approvals a single
-                // cycle parked together.
-                None,
+                // The turn this park belongs to, when it belongs to one
+                // (issues #469, #978).
+                //
+                // `None` for a cold-recipient delivery and for an agent node's
+                // gated tool call: neither is raised by anything that holds a
+                // continuation, so each resolves and continues on its own,
+                // exactly as it always has.
+                //
+                // `Some` for a `requires_approval` gate, where issue #978 found
+                // the opposite: the N gates one run pauses on ARE a batch, and
+                // recording no key for them is what let every branch of a
+                // fan-out believe it was the last decision and re-dispatch the
+                // whole run. A run is a turn in precisely the sense #469 means —
+                // one unit of work, blocked on several decisions, owed exactly
+                // one continuation when the last of them lands.
+                turn.clone(),
             )
             .await
         {
@@ -1086,6 +1118,19 @@ impl DeliveryParking {
             // with.
             let _ = self.journal.record_resolved(&approval_id).await;
             return Err(err);
+        }
+        // Issues #469 / #978: arm the counters, STRICTLY AFTER the journal write
+        // and only on the path where the park actually succeeded.
+        //
+        // The ordering mirrors the cycle host's own arm: a crash between the two
+        // replays as "still parked" and is re-armed from the journal by
+        // recovery, whereas arming first would leave a run blocked on a decision
+        // no durable card can deliver. The rollback arm above returns before
+        // reaching here for the same reason, and so does `park_pending_gates`'
+        // dedupe skip — it never calls this function at all.
+        if let Some(turn) = turn {
+            self.continuations.arm(&turn);
+            self.gates.arm(&turn, &approval_id, &effect);
         }
         Ok(approval_id)
     }
@@ -1688,6 +1733,12 @@ admins = [{list}]
             self.deps.parking = Some(DeliveryParking {
                 approvals: gate.clone(),
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
             });
             self.gate = Some(gate);
             self.journal = Some(journal);
@@ -1712,6 +1763,12 @@ admins = [{list}]
             self.deps.parking = Some(DeliveryParking {
                 approvals: gate.clone(),
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
             });
             self.gate = Some(gate);
             self.journal = Some(journal);

@@ -57,6 +57,7 @@ use crate::ports::{CompanyStore, ContextStore, EventLog, InboxStore, MemoryStore
 use crate::runtime::continuation::ContinuationQueue;
 use crate::runtime::grants::GrantSet;
 use crate::runtime::journal::RuntimeJournal;
+use crate::runtime::workflow_gates::WorkflowGateQueue;
 
 /// The live state a successor runtime adopts from the runtime it replaces.
 ///
@@ -86,6 +87,11 @@ pub struct RuntimeHandover {
     /// waiting would continue the next one on its first decision instead of its
     /// last.
     pub(crate) continuations: ContinuationQueue,
+    /// Issue #978: the parked gates of every workflow run still awaiting a
+    /// decision. Inherited for [`continuations`](Self::continuations)' reason
+    /// exactly — a successor that forgot them would re-ask about every gate of a
+    /// partly-decided run.
+    pub(crate) workflow_gates: WorkflowGateQueue,
     pub(crate) serial: Arc<TokioMutex<()>>,
     pub(crate) task_writes: Arc<TokioMutex<()>>,
     #[cfg(feature = "openhuman")]
@@ -121,6 +127,7 @@ impl CompanyRuntime {
             approval_gate: self.approval_gate.clone(),
             grants: self.grants.clone(),
             continuations: self.continuations.clone(),
+            workflow_gates: self.workflow_gates.clone(),
             serial: self.serial.clone(),
             task_writes: self.task_writes.clone(),
             #[cfg(feature = "openhuman")]

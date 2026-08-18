@@ -1196,6 +1196,19 @@ approval.]"
         // blocked, or its continuation fires on the next decision as though the
         // others had never been owed.
         self.rt.continuations.rearm(self.rt.journal.parked_turns());
+        // Issue #978: the run-scoped half, from the same replayed queue. A gate
+        // still parked keeps its whole effect in the journal, so a rehydrated
+        // batch is re-dispatchable; one already resolved is gone from both, and
+        // the run it belonged to is continued by whatever decision remains.
+        let parked = self.rt.journal.pending();
+        self.rt
+            .workflow_gates
+            .rearm(parked.iter().filter_map(|entry| {
+                entry
+                    .batch
+                    .clone()
+                    .map(|turn| (turn, entry.id.clone(), &entry.effect))
+            }));
         Ok(())
     }
 
@@ -1359,8 +1372,18 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
     // expiry never reach here, and since nothing was held open, nothing running
     // is the complete outcome. See `workflow_resume` for why this is a re-run
     // and what that costs.
+    //
+    // Issue #978: it no longer starts that run **here**, and the distinction is
+    // the whole of the amplification fix. This arm fires once per approved
+    // effect, so a run with three gated nodes ran it three times: three runs,
+    // each replaying the graph with one usable approval and re-parking the other
+    // two — 3 → 6 → 12 → 24. The spawn now belongs to the batch release in
+    // `continue_turn`, which happens once per run, and this only banks the
+    // decision. A card whose run is not armed (parked before #978, so its
+    // journal line carries no turn key) still re-dispatches immediately: there
+    // is no batch coming to release it.
     if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND {
-        crate::runtime::workflow_resume::resume_from_effect(rt, effect).await?;
+        crate::runtime::workflow_resume::on_gate_approved(rt, effect).await?;
     }
     // Issue #735: an approved `repo_publish`. `execute` already staged the agent's
     // commits onto the mirror's `oc/<company>/<task>` ref (the reversible half);

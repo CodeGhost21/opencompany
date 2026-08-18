@@ -300,6 +300,13 @@ pub(crate) struct DeskReply {
     pub(crate) member: String,
     pub(crate) reply: String,
     pub(crate) steps: Vec<TurnStep>,
+    /// Whether this teammate's turn — or any turn nested beneath it — paused at
+    /// its tool-iteration cap (issue #926).
+    ///
+    /// Folded the same way `reply` and `steps` are: a deeper delegate's work is
+    /// folded INTO this member's answer rather than surfacing on its own, so a
+    /// cap two levels down is a cap on what the operator reads here.
+    pub(crate) hit_iteration_cap: bool,
 }
 
 /// What was already decided about the operator message a drain belongs to,
@@ -387,6 +394,16 @@ pub(crate) struct OperatorTurn {
     /// on. The resulting claim is incomplete but never wrong, and the bubble's
     /// step timeline still shows every `spawn_task` the turn made.
     pub(crate) spawned_task: Option<String>,
+    /// Whether **any** turn behind this bubble paused at its tool-iteration cap
+    /// (issue #926) — the responder's, a desk lead's, or the CEO relay's.
+    ///
+    /// A sticky OR rather than "the last turn's value", because one operator
+    /// message can run several turns and the operator gets exactly ONE bubble
+    /// for the whole chain. The relay turn in particular *replaces* the reply
+    /// text, so tracking the last value would erase a cap the responder or a
+    /// delegate hit — the operator would read a relayed answer that quietly
+    /// omits that a branch of it stopped half-done.
+    pub(crate) hit_iteration_cap: bool,
 }
 
 /// What a **dispatched card's** turn handed off (issue #204).
@@ -916,6 +933,10 @@ impl<'a> DelegationRunner<'a> {
         // case the relay turn's reply replaces it (below).
         let mut operator_steps = outcome.steps;
         let mut operator_reply = outcome.reply;
+        // Issue #926: sticky from here to the `OperatorTurn` below — never
+        // reassigned, only OR'd — so a cap the responder hit survives the relay
+        // turn replacing the reply text.
+        let mut hit_iteration_cap = outcome.hit_iteration_cap;
         // Settle the direct-answer card from the turn that just ran. Done before
         // the delegation drain because a direct responder queues nothing — it
         // has no delegation tools — so there is no relay turn coming that could
@@ -962,6 +983,7 @@ impl<'a> DelegationRunner<'a> {
             // Fold the teammate's activity onto the operator timeline, then
             // remember the answer to relay.
             operator_steps.extend(desk.steps);
+            hit_iteration_cap |= desk.hit_iteration_cap;
             desk_replies.push((desk.member, desk.reply));
         }
         // CEO-relay hand-back: when a synchronous desk delegation answered, run
@@ -1030,6 +1052,7 @@ impl<'a> DelegationRunner<'a> {
             }
             operator_reply = relay.reply;
             operator_steps.extend(relay.steps);
+            hit_iteration_cap |= relay.hit_iteration_cap;
         }
         // Drained after the relay, not before it: a relay turn carries the same
         // inline `create_workflow` tool, so draining at the responder's turn
@@ -1053,6 +1076,7 @@ impl<'a> DelegationRunner<'a> {
             steps: operator_steps,
             bubbles,
             spawned_task,
+            hit_iteration_cap,
         })
     }
 
@@ -1596,12 +1620,17 @@ impl<'a> DelegationRunner<'a> {
         // the operator's timeline shows the deeper member working.
         let mut reply = outcome.reply;
         let mut steps = outcome.steps;
+        // Issue #926: the cap folds in exactly as the reply and steps do. A
+        // deeper delegate that stopped half-done is folded into THIS member's
+        // answer, so its pause is a pause on what the operator ends up reading.
+        let mut hit_iteration_cap = outcome.hit_iteration_cap;
         for deeper in nested.desk_replies {
             reply.push_str(&format!(
                 "\n\n{} (delegated by {member}) replied:\n{}",
                 deeper.member, deeper.reply
             ));
             steps.extend(deeper.steps);
+            hit_iteration_cap |= deeper.hit_iteration_cap;
         }
         // A cancelled nested run folds in as a cancellation, NEVER as a
         // reply: the member said it was handing that slice on, and an
@@ -1641,6 +1670,7 @@ impl<'a> DelegationRunner<'a> {
                 member,
                 reply,
                 steps,
+                hit_iteration_cap,
             }),
             cancelled: false,
             // Issue #442: the hand-off's own card, reported the same way
@@ -3152,6 +3182,9 @@ one-off, so a card for it has been opened and the workflow builder owns authorin
             TurnOutcome {
                 reply: turn.reply,
                 steps: Vec::new(),
+                // These fixtures script delegation shapes, not cap behaviour;
+                // the cap path is proved end-to-end in `cap_turn_test`.
+                hit_iteration_cap: false,
             }
         }
     }
