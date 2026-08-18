@@ -351,7 +351,8 @@ mod tests {
             fn subscribe(
                 &self,
                 _id: &CompanyId,
-            ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
+            ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem>
+            {
                 Box::pin(futures::stream::empty())
             }
         }
