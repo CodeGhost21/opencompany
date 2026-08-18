@@ -68,7 +68,10 @@ async function show(client: OpenCompanyClient) {
 
 function button(label: string): HTMLButtonElement {
   const buttons = Array.from(container.querySelectorAll("button"));
-  const match = buttons.find((b) => b.textContent?.trim() === label);
+  // The advance button is labelled "Looks good" on the Advanced step, because
+  // there is nothing to answer there — same control, different word.
+  const wanted = label === "Next" ? ["Next", "Looks good"] : [label];
+  const match = buttons.find((b) => wanted.includes(b.textContent?.trim() ?? ""));
   expect(match, `no button labeled "${label}"`).toBeTruthy();
   return match as HTMLButtonElement;
 }
@@ -91,24 +94,21 @@ async function fill(testId: string, value: string) {
   });
 }
 
-/** business -> team -> automate -> account -> power -> review. */
+const next = async () =>
+  act(async () => {
+    button("Next").click();
+  });
+
+/** business -> account -> model -> advanced -> review. */
 async function goToReview() {
   await fill("setup-field-industry", "E-commerce — homeware");
-  // business -> team -> automate -> account
-  for (let i = 0; i < 3; i++) {
-    await act(async () => {
-      button("Next").click();
-    });
-  }
+  await next(); // -> account
   // The address is required on any host that asks people to sign in — leaving
   // it blank holds the wizard here, which is its own assertion below.
   await fill("setup-field-email", "ada@example.com");
-  // account -> power -> review
-  for (let i = 0; i < 2; i++) {
-    await act(async () => {
-      button("Next").click();
-    });
-  }
+  await next(); // -> model
+  await next(); // -> advanced
+  await next(); // -> review
   // Entering Review kicks off the design call. Let it settle, or the assertions
   // below run against the spinner rather than the outcome.
   await act(async () => {
@@ -173,15 +173,10 @@ describe("finishing setup with no companies on the host", () => {
   it("will not pass the email step on a host that asks people to sign in", async () => {
     await show(clientWith(status()));
     await fill("setup-field-industry", "E-commerce — homeware");
-    for (let i = 0; i < 3; i++) {
-      await act(async () => {
-        button("Next").click();
-      });
-    }
+    await next(); // -> account
 
-    await act(async () => {
-      button("Next").click();
-    });
+    // Pressing on with no address must not leave this step.
+    await next();
     expect(container.querySelector('[data-testid="setup-problem"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="setup-field-email"]')).toBeTruthy();
   });

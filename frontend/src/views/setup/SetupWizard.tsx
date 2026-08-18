@@ -23,9 +23,10 @@
 //     left; the completion screen shows that answer, not a guess, and never
 //     implies its own button performed the restart.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Loader2, Lock, RotateCw } from "lucide-react";
 
+import { requestCode } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   changedFields,
@@ -44,7 +45,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Stepper, type Step } from "@/components/ui/stepper";
+import { TEAM_TONES, initials, toneFor } from "@/lib/team";
+import { fieldCopy, fieldPlaceholder } from "@/lib/setup-fields";
+import type { Step } from "@/components/ui/stepper";
 import {
   AUTOMATE_EXAMPLES,
   appendExample,
@@ -70,22 +73,56 @@ import { cn } from "@/lib/utils";
  */
 const STEPS: readonly (Step & { fields: readonly string[] })[] = [
   { id: "business", label: "Business", fields: [] },
-  { id: "team", label: "Team", fields: [] },
-  { id: "automate", label: "Automate", fields: [] },
   { id: "account", label: "You", fields: [] },
-  { id: "power", label: "Power", fields: ["tinyhumans_api_key"] },
+  { id: "power", label: "Model", fields: ["tinyhumans_api_key"] },
+  { id: "advanced", label: "Advanced", fields: [] },
   { id: "review", label: "Review", fields: [] },
 ];
 
-/** The steps that used to be their own screens, now grouped under Advanced. */
-const ADVANCED_GROUPS: readonly { id: string; label: string; fields: readonly string[] }[] = [
-  { id: "signin", label: "Sign-in", fields: ["auth_mode"] },
-  { id: "brain", label: "Brain", fields: ["brain_mode", "api_url", "openhuman_url"] },
-  { id: "tools", label: "Tools", fields: ["github_token"] },
+/**
+ * Advanced, as its own stepped flow rather than a wall of fields.
+ *
+ * These were four screens before the merge, and collapsing them into one
+ * scrolling accordion made "advanced settings" mean "everything we could not
+ * place". They are four different subjects — who may sign in, what thinks, where
+ * it runs, what it can reach — and each deserves the same one-subject-per-screen
+ * treatment the main flow gets. The difference is that this is opt-in, and
+ * leaving it never blocks anything.
+ */
+const ADVANCED_GROUPS: readonly {
+  id: string;
+  label: string;
+  title: string;
+  hint: string;
+  fields: readonly string[];
+}[] = [
+  {
+    id: "signin",
+    label: "Sign-in",
+    title: "How people sign in",
+    hint: "This applies to every company this host serves.",
+    fields: ["auth_mode"],
+  },
+  {
+    id: "brain",
+    label: "Brain",
+    title: "Where the thinking runs",
+    hint: "The endpoints your teammates reason through. Defaults are the hosted ones.",
+    fields: ["brain_mode", "api_url", "openhuman_url"],
+  },
   {
     id: "host",
     label: "Host",
+    title: "How this host runs",
+    hint: "The address it serves on and how much room its workspace gets. Defaults are fine for a laptop.",
     fields: ["bind", "public_url", "workspace.max_blob_mb", "workspace.storage_quota_gb"],
+  },
+  {
+    id: "tools",
+    label: "Tools",
+    title: "What this build can reach",
+    hint: "Compiled into the binary, so these are reported rather than chosen.",
+    fields: ["github_token"],
   },
 ];
 
@@ -132,8 +169,6 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   const [email, setEmail] = useState("");
   /** Whether the operator has been shown a problem on the current step yet. */
   const [touched, setTouched] = useState(false);
-  /** Whether the Advanced disclosure is open. */
-  const [advanced, setAdvanced] = useState(false);
   /**
    * The team, once the host has designed one — and `null` until then.
    *
@@ -146,6 +181,25 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   const [designError, setDesignError] = useState<string | null>(null);
   /** How many teammates have landed, once the apply is building them. */
   const [built, setBuilt] = useState<number | null>(null);
+  /**
+   * The sign-in the wizard arranges on the operator's behalf, once the company
+   * exists.
+   *
+   * Without this the flow forgot them at the finish line: they typed an address
+   * on step four, and the console then handed them an **empty** email box with
+   * no explanation — on a laptop with no mail configured, waiting for a link
+   * that was never going to arrive. The wizard already knows who they are and
+   * can ask the host itself.
+   */
+  /** Guards the hand-off against re-running; see the effect below. */
+  const arranged = useRef(false);
+  const [handoff, setHandoff] = useState<
+    | { kind: "arranging" }
+    | { kind: "link"; url: string }
+    | { kind: "mailed" }
+    | { kind: "open" }
+    | null
+  >(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,6 +224,60 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   const set = useCallback((key: string, value: string) => {
     setValues((prev) => ({ ...prev, [key]: value }));
   }, []);
+
+  /**
+   * Arrange the operator's way in, the moment the company exists.
+   *
+   * Three outcomes, and each is said plainly rather than left to be discovered:
+   *
+   * - **No sign-in on this host** — nothing to arrange; the console is open.
+   * - **A link we can hand over** — a loopback host with no mail transport
+   *   returns the code in the response rather than mailing it, so the honest
+   *   thing is to give them the link instead of pointing at an inbox that will
+   *   stay empty. This is the laptop case, and it was the broken one.
+   * - **Mailed** — say which address, so they know where to look and that we
+   *   used the one they typed.
+   *
+   * Failure is not fatal: the sign-in form still works, and the button below
+   * still opens the console.
+   */
+  useEffect(() => {
+    // Guarded by a ref, not by `handoff`.
+    //
+    // Depending on the state this effect *sets* made it cancel itself: setting
+    // `arranging` re-ran the effect, whose cleanup flipped `cancelled` on the
+    // request still in flight, so the answer was always discarded and the screen
+    // sat on "Getting you signed in…" forever. A ref settles before the next
+    // render and is not a dependency.
+    if (!applied || arranged.current) return;
+    arranged.current = true;
+    const company = applied.seeded_company;
+    const address = email.trim();
+
+    // No status means the read failed and we cannot tell what mode this host is
+    // in; opening the console is the answer that cannot be wrong.
+    if (!company || !address || !status || !requiresSignIn(status, values)) {
+      setHandoff({ kind: "open" });
+      return;
+    }
+
+    setHandoff({ kind: "arranging" });
+    requestCode(client, company, address)
+      .then((result) => {
+        setHandoff(
+          result.dev_code
+            ? {
+                kind: "link",
+                url: `/login?company=${encodeURIComponent(company)}&code=${encodeURIComponent(result.dev_code)}`,
+              }
+            : { kind: "mailed" },
+        );
+      })
+      .catch(() => {
+        // The sign-in form still works; the button below still opens it.
+        setHandoff({ kind: "open" });
+      });
+  }, [applied, email, client, status, values]);
 
   // See `changedFields`: unchanged fields are omitted, env-owned ones are never
   // sent (the host refuses them and an apply is all-or-nothing), and a secret
@@ -317,9 +425,51 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
               </AlertDescription>
             </Alert>
           )}
-          <Button onClick={onDone}>
-            {applied.restart_required.length > 0 ? "Open the console anyway" : "Open the console"}
-          </Button>
+          {/* What happens next, said before they have to guess it. */}
+          {handoff?.kind === "arranging" && (
+            <p className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" /> Getting you signed in…
+            </p>
+          )}
+
+          {handoff?.kind === "mailed" && (
+            <Alert data-testid="setup-handoff-mailed">
+              <AlertTitle>Check your email</AlertTitle>
+              <AlertDescription>
+                We sent a sign-in link to{" "}
+                <strong className="text-foreground">{email.trim()}</strong>. It is the only
+                address that can administer this company.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {handoff?.kind === "link" && (
+            <Alert data-testid="setup-handoff-link">
+              <AlertTitle>You&apos;re ready to go in</AlertTitle>
+              <AlertDescription>
+                This host doesn&apos;t send mail, so there is no link to wait for — use the
+                button below. You&apos;ll be signed in as{" "}
+                <strong className="text-foreground">{email.trim()}</strong>.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {handoff?.kind === "link" ? (
+            <Button
+              data-testid="setup-signin"
+              onClick={() => {
+                window.location.href = handoff.url;
+              }}
+            >
+              Sign in and open my company
+            </Button>
+          ) : (
+            <Button onClick={onDone} data-testid="setup-open-console">
+              {applied.restart_required.length > 0
+                ? "Open the console anyway"
+                : "Open the console"}
+            </Button>
+          )}
         </div>
       </Shell>
     );
@@ -356,128 +506,59 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   };
 
   return (
-    <Shell>
-      <div className="space-y-6" data-testid="setup-wizard">
-        <div className="space-y-1">
-          <h1 className="text-xl font-semibold">
-            {status.complete ? "Reconfigure this instance" : "Let's build your company"}
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            {status.complete
-              ? "Saved to "
-              : "A few questions, then we'll put a team together. Saved to "}
-            <code className="font-mono text-xs">{status.config_path}</code>.
-          </p>
-        </div>
-
-        <Stepper steps={STEPS} current={step} onSelect={setStep} />
-
-        <div className="min-h-64 space-y-4">
-          {current.id === "business" && (
-            <QuestionStep
-              title="What kind of company are you setting up?"
-              hint="A sentence is plenty. What you sell, or what you do."
-              placeholder="e.g. E-commerce — I sell homeware online"
-              value={draft.industry}
-              testId="industry"
-              onChange={(v) => setDraft((d) => ({ ...d, industry: v }))}
-              onEnter={advance}
-              signals={inferSignals(draft.industry)}
-            />
-          )}
-
-          {current.id === "team" && (
-            <QuestionStep
-              title="Anyone in particular you need on the team?"
-              hint="Optional. We'll suggest a team either way — this just adds to it."
-              placeholder="e.g. someone chasing the customers who go quiet"
-              value={draft.teamHint}
-              testId="teamHint"
-              multiline
-              onChange={(v) => setDraft((d) => ({ ...d, teamHint: v }))}
-            />
-          )}
-
-          {current.id === "automate" && (
-            <QuestionStep
-              title="What are you trying to automate?"
-              hint="List whatever comes to mind. This is what your team gets built around."
-              placeholder="e.g. Meta ads, order dispatch, daily sales reports"
-              value={draft.automate}
-              testId="automate"
-              multiline
-              onChange={(v) => setDraft((d) => ({ ...d, automate: v }))}
-              examples={AUTOMATE_EXAMPLES}
-              onExample={(ex) =>
-                setDraft((d) => ({ ...d, automate: appendExample(d.automate, ex) }))
-              }
-            />
-          )}
-
-          {current.id === "account" && (
-            <AccountStep
-              value={email}
-              onChange={setEmail}
-              onEnter={advance}
-              required={needsCompany && requiresSignIn(status, values)}
-            />
-          )}
-
-          {current.id === "power" && (
-            <PowerStep
-              status={status}
-              value={values.tinyhumans_api_key ?? ""}
-              onChange={(v) => set("tinyhumans_api_key", v)}
-              onEnter={advance}
-            />
-          )}
-
-          {current.id === "review" && (
-            <ReviewStep
-              designing={designing}
-              designError={designError}
-              roster={roster}
-              onRoster={setRoster}
-              onRetry={() => void design()}
-              changed={changed}
-              restartKeys={restartKeys}
-              status={status}
-              email={email}
-              built={built}
-            />
-          )}
-
-          {problem() && touched && (
-            <p className="text-sm text-destructive" data-testid="setup-problem">
-              {problem()}
+    <Shell
+      header={
+        <div className="space-y-4">
+          <div className="space-y-1">
+            <h1 className="text-xl font-semibold tracking-tight">
+              {status.complete ? "Reconfigure this instance" : "Let's build your company"}
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              {status.complete
+                ? "Change what this host is configured with."
+                : "A few questions, then we'll put a team together."}
             </p>
-          )}
-
-          <AdvancedPanel
-            open={advanced}
-            onToggle={() => setAdvanced((v) => !v)}
-            status={status}
-            values={values}
-            set={set}
-          />
-        </div>
-
-        {saveError && (
-          <Alert variant="destructive">
-            <AlertTriangle />
-            <AlertTitle>That didn&apos;t apply</AlertTitle>
-            <AlertDescription>{saveError}</AlertDescription>
-          </Alert>
-        )}
-
-        <div className="flex items-center justify-between gap-2 border-t pt-4">
-          <div>
-            {onCancel && (
-              <Button variant="ghost" onClick={onCancel}>
-                Cancel
-              </Button>
-            )}
           </div>
+          {/* A bar, not a numbered stepper.
+              `1 Business — 2 You — 3 Model — 4 Advanced — 5 Review` is the
+              language of enterprise configuration: it tells you that you are
+              inside a multi-page form. This is sixty seconds long. Progress
+              should be felt, and the one thing worth naming is where you are. */}
+          <div className="space-y-2">
+            <div className="flex gap-1" aria-hidden>
+              {STEPS.map((s, i) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  tabIndex={-1}
+                  disabled={i >= step}
+                  onClick={() => setStep(i)}
+                  data-testid={`step-${s.id}`}
+                  className={cn(
+                    "h-1 flex-1 rounded-full transition-colors",
+                    i < step && "bg-primary/70 hover:bg-primary",
+                    i === step && "bg-primary",
+                    i > step && "bg-border",
+                  )}
+                />
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              <span className="text-foreground">{current.label}</span> · step {step + 1} of{" "}
+              {STEPS.length}
+            </p>
+          </div>
+        </div>
+      }
+      footer={
+        <div className="flex items-center justify-between gap-3">
+          {onCancel ? (
+            <Button variant="ghost" size="sm" onClick={onCancel}>
+              Cancel
+            </Button>
+          ) : (
+            <span />
+          )}
           <div className="flex gap-2">
             <Button variant="outline" disabled={step === 0} onClick={() => setStep((n) => n - 1)}>
               Back
@@ -493,11 +574,68 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
               </Button>
             ) : (
               <Button onClick={advance} data-testid="setup-next">
-                Next
+                {current.id === "advanced" ? "Looks good" : "Next"}
               </Button>
             )}
           </div>
         </div>
+      }
+    >
+      <div className="space-y-6" data-testid="setup-wizard">
+        {current.id === "business" && (
+          <BusinessStep draft={draft} onChange={setDraft} onEnter={advance} />
+        )}
+
+        {current.id === "account" && (
+          <AccountStep
+            value={email}
+            onChange={setEmail}
+            onEnter={advance}
+            required={needsCompany && requiresSignIn(status, values)}
+          />
+        )}
+
+        {current.id === "power" && (
+          <PowerStep
+            status={status}
+            value={values.tinyhumans_api_key ?? ""}
+            onChange={(v) => set("tinyhumans_api_key", v)}
+            onEnter={advance}
+          />
+        )}
+
+        {current.id === "advanced" && (
+          <AdvancedStep status={status} values={values} set={set} />
+        )}
+
+        {current.id === "review" && (
+          <ReviewStep
+            designing={designing}
+            designError={designError}
+            roster={roster}
+            onRoster={setRoster}
+            onRetry={() => void design()}
+            changed={changed}
+            restartKeys={restartKeys}
+            status={status}
+            email={email}
+            built={built}
+          />
+        )}
+
+        {problem() && touched && (
+          <p className="text-sm text-destructive" data-testid="setup-problem">
+            {problem()}
+          </p>
+        )}
+
+        {saveError && (
+          <Alert variant="destructive">
+            <AlertTriangle />
+            <AlertTitle>That didn&apos;t apply</AlertTitle>
+            <AlertDescription>{saveError}</AlertDescription>
+          </Alert>
+        )}
       </div>
     </Shell>
   );
@@ -533,13 +671,8 @@ function SignInStep({
 
   return (
     <div className="space-y-3">
-      <div className="space-y-1">
-        <h2 className="font-medium">How people sign in</h2>
-        <p className="text-sm text-muted-foreground">
-          This applies to every company this host serves.
-        </p>
-      </div>
-
+      {/* No heading here: inside Advanced the group already carries one, and a
+          second would read as a new section rather than the same one. */}
       {locked && <LayerLock />}
 
       <div className="space-y-2">
@@ -618,14 +751,9 @@ function ToolsStep({ status }: { status: SetupStatus }) {
   ];
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-1">
-        <h2 className="font-medium">Tools this build has</h2>
-        <p className="text-sm text-muted-foreground">
-          These come from how the host was built, so they aren&apos;t settings you can change
-          here.
-        </p>
-      </div>
+    <div>
+      {/* Same reason as SignInStep: the Advanced group above already titled
+          this, and repeating it split one section into two. */}
       <div className="space-y-2">
         {rows.map((r) => (
           <div
@@ -654,28 +782,40 @@ function FieldRow({
   onChange: (v: string) => void;
 }) {
   const locked = !field.editable;
+  const copy = fieldCopy(field.key);
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-center gap-2">
-        <Label htmlFor={field.key} className="font-mono text-xs">
-          {field.key}
-        </Label>
-        {field.requires_restart && (
-          <Badge variant="outline" className="text-3xs">
-            restart
-          </Badge>
-        )}
-      </div>
+    <div>
+      {/* Words first, key second.
+          The label used to *be* the key, which turned this screen into a
+          `.toml` file with input boxes. The key is still here — small and
+          monospaced — because whoever opened Advanced is often the person who
+          will next edit that file by hand. */}
+      <Label htmlFor={field.key} className="text-[15px] font-medium leading-snug">
+        {copy.label}
+      </Label>
+      {copy.hint && (
+        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">{copy.hint}</p>
+      )}
       <Input
         id={field.key}
         data-testid={`field-${field.key}`}
         value={locked ? (field.value ?? "") : value}
         disabled={locked}
         type={field.secret ? "password" : "text"}
-        placeholder={field.secret ? "unchanged" : `set by ${field.layer}`}
+        placeholder={fieldPlaceholder(field)}
+        className="mt-2.5"
         onChange={(e) => onChange(e.target.value)}
       />
-      {locked && <LayerLock />}
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <code className="font-mono text-[11px] text-muted-foreground/70">{field.key}</code>
+        {/* Only where it is true *and* actionable: a locked field cannot be
+            changed here at all, so telling its owner about a restart is noise
+            about work they are not doing. */}
+        {field.requires_restart && !locked && (
+          <span className="text-[11px] text-muted-foreground/70">· needs a restart</span>
+        )}
+      </div>
+      {locked && <div className="mt-1.5">{<LayerLock />}</div>}
     </div>
   );
 }
@@ -700,10 +840,37 @@ function LayerLock() {
   );
 }
 
-function Shell({ children }: { children: React.ReactNode }) {
+/**
+ * A card, centred — not an application shell.
+ *
+ * The previous version put edge-to-edge header and footer rules across the
+ * viewport, which is the chrome of an app you live in. This is a task you pass
+ * through once, and dressing it as an admin panel made a five-field flow look
+ * like a broken settings page: rules running off both edges, a narrow column
+ * marooned in the middle of them, and — because the content band was `flex-1` —
+ * most of a thousand pixels of nothing between the last field and the buttons.
+ *
+ * One bounded card instead, centred on both axes, with its own header and its
+ * own actions. It grows with its content and stops at 88vh, after which the
+ * middle scrolls and the header and actions stay put. Nothing floats, nothing
+ * stretches, and the eye has one object to land on.
+ */
+function Shell({
+  header,
+  footer,
+  children,
+}: {
+  header?: React.ReactNode;
+  footer?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="flex min-h-screen items-center justify-center p-6">
-      <div className="w-full max-w-2xl">{children}</div>
+    <div className="flex min-h-screen items-center justify-center bg-background p-4 sm:p-6">
+      <div className="flex max-h-[88vh] w-full max-w-[34rem] flex-col overflow-hidden rounded-2xl border bg-card shadow-xl">
+        {header && <div className="shrink-0 border-b px-6 py-5">{header}</div>}
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">{children}</div>
+        {footer && <div className="shrink-0 border-t px-6 py-4">{footer}</div>}
+      </div>
     </div>
   );
 }
@@ -712,114 +879,6 @@ function Shell({ children }: { children: React.ReactNode }) {
 // The question screens
 // ---------------------------------------------------------------------------
 
-/**
- * One question, one field, nothing else on screen.
- *
- * Deliberately sparse. These three screens are where an operator decides
- * whether this product is worth their afternoon, and every additional control
- * is something to read before answering.
- */
-function QuestionStep({
-  title,
-  hint,
-  placeholder,
-  value,
-  testId,
-  multiline,
-  onChange,
-  onEnter,
-  examples,
-  onExample,
-  signals,
-}: {
-  title: string;
-  hint: string;
-  placeholder: string;
-  value: string;
-  testId: string;
-  multiline?: boolean;
-  onChange: (v: string) => void;
-  onEnter?: () => void;
-  examples?: readonly string[];
-  onExample?: (example: string) => void;
-  /** What we heard, echoed back under the field. */
-  signals?: string[];
-}) {
-  return (
-    <div className="space-y-3">
-      <div className="space-y-1">
-        <h2 className="font-medium" data-testid="setup-question">
-          {title}
-        </h2>
-        <p className="text-sm text-muted-foreground">{hint}</p>
-      </div>
-
-      {multiline ? (
-        <Textarea
-          autoFocus
-          rows={3}
-          value={value}
-          placeholder={placeholder}
-          data-testid={`setup-field-${testId}`}
-          onChange={(e) => onChange(e.target.value)}
-        />
-      ) : (
-        <Input
-          autoFocus
-          value={value}
-          placeholder={placeholder}
-          data-testid={`setup-field-${testId}`}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onEnter?.();
-          }}
-        />
-      )}
-
-      {/* Proof they were heard, straight after the one question they put
-          effort into. Silent when nothing was recognised — a wrong chip is
-          worse than no chip. */}
-      {signals && signals.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5" data-testid="setup-signals">
-          <span className="text-xs text-muted-foreground">Sounds like</span>
-          {signals.map((signal) => (
-            <Badge key={signal} variant="secondary">
-              {signal}
-            </Badge>
-          ))}
-        </div>
-      )}
-
-      {/* Beside the field, not instead of it: they append rather than replace,
-          so the operator's own words always survive. */}
-      {examples && onExample && (
-        <div className="flex flex-wrap gap-1.5">
-          {examples.map((example) => (
-            <button
-              key={example}
-              type="button"
-              onClick={() => onExample(example)}
-              data-testid={`setup-example-${example.replace(/\s+/g, "-")}`}
-              className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              + {example}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * The address that will be able to sign in.
- *
- * Asked here rather than on screen one because by now it has an obvious
- * purpose — it is how they get back to the company they are about to build,
- * not a field on a form. It is also the fix for a real dead end: no shipped
- * template invites anybody, so without this an operator who keeps email
- * sign-in finishes setup and can then sign in as nobody.
- */
 function AccountStep({
   value,
   onChange,
@@ -832,20 +891,21 @@ function AccountStep({
   required: boolean;
 }) {
   return (
-    <div className="space-y-3">
-      <div className="space-y-1">
-        <h2 className="font-medium" data-testid="setup-question">
-          What&apos;s your email?
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          {required
-            ? "This is how you sign back in, and the only address that can administer the company."
-            : "Optional on this host — you chose no sign-in, so anyone who can reach it is the owner."}
-        </p>
-      </div>
-      <Label htmlFor="setup-email" className="sr-only">
-        Your email
+    <div>
+      {/* Same rhythm as every other question: the heading and its hint are one
+          sentence, and the gap belongs before the field. */}
+      <Label
+        htmlFor="setup-email"
+        className="text-[15px] font-medium leading-snug"
+        data-testid="setup-question"
+      >
+        What&apos;s your email?
       </Label>
+      <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+        {required
+          ? "This is how you sign back in, and the only address that can administer the company."
+          : "Optional on this host — you chose no sign-in, so anyone who can reach it is the owner."}
+      </p>
       <Input
         id="setup-email"
         autoFocus
@@ -853,6 +913,7 @@ function AccountStep({
         value={value}
         placeholder="you@example.com"
         data-testid="setup-field-email"
+        className="mt-2.5"
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") onEnter();
@@ -885,23 +946,27 @@ function PowerStep({
   const locked = field !== undefined && !field.editable;
 
   return (
-    <div className="space-y-3">
-      <div className="space-y-1">
-        <h2 className="font-medium" data-testid="setup-question">
-          What powers your team
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Your teammates think with a hosted model. With a key we design the team
-          around what you just told us; without one you get a solid standard team
-          for your industry, and you can add a key later.
-        </p>
-      </div>
-
-      {locked && <LayerLock />}
-
-      <Label htmlFor="setup-key" className="sr-only">
-        TinyHumans API key
+    <div>
+      <Label
+        htmlFor="setup-key"
+        className="text-[15px] font-medium leading-snug"
+        data-testid="setup-question"
+      >
+        What powers your team
+        <span className="ml-1.5 text-[13px] font-normal text-muted-foreground">Optional</span>
       </Label>
+      <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+        Your teammates think with a hosted model. With a key we design the team
+        around what you just told us; without one you get a solid standard team
+        for your industry, and you can add a key later.
+      </p>
+
+      {locked && (
+        <div className="mt-2.5">
+          <LayerLock />
+        </div>
+      )}
+
       <Input
         id="setup-key"
         autoFocus
@@ -910,12 +975,13 @@ function PowerStep({
         disabled={locked}
         placeholder="th-…"
         data-testid="setup-field-key"
+        className="mt-2.5"
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") onEnter();
         }}
       />
-      <p className="text-xs text-muted-foreground">
+      <p className="mt-1.5 text-xs text-muted-foreground">
         Get one at tinyhumans.ai. Leave it blank to carry on without.
       </p>
     </div>
@@ -996,31 +1062,46 @@ function ReviewStep({
 
   return (
     <div className="space-y-4" data-testid="setup-review">
-      <div className="space-y-1">
-        <h2 className="font-medium">Your team</h2>
-        <p className="text-sm text-muted-foreground">
+      <div>
+        <h2 className="text-[15px] font-medium leading-snug">Your team</h2>
+        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
           {roster.source === "model"
             ? "Built from what you told us. Rename or drop anyone — you can add more later."
             : "A solid standard team for your industry — we couldn't reach a model to tailor it. Rename or drop anyone, and add a key later to redesign."}
         </p>
       </div>
 
-      <ul className="space-y-2">
+      {/* People, not form rows.
+          This was five bare text inputs stacked in a column, which is what a
+          settings page looks like — and this is the one screen in the product
+          where someone meets their company for the first time. The field is
+          still there and still the first thing focus lands on; it just stops
+          announcing itself as a form until you go to use it. */}
+      <ul className="divide-y rounded-xl border" data-testid="setup-review-list">
         {roster.agents.map((agent, i) => (
           <li
             key={`${agent.role}-${i}`}
-            className="flex items-start gap-3 rounded-lg border p-3"
+            className="group flex items-center gap-3 p-3"
             data-testid="setup-review-agent"
           >
-            <div className="min-w-0 flex-1 space-y-1">
+            <span
+              aria-hidden
+              className={cn(
+                "flex size-9 shrink-0 items-center justify-center rounded-full text-xs font-medium",
+                TEAM_TONES[toneFor(agent.role)] ?? TEAM_TONES.sky,
+              )}
+            >
+              {initials(agent.name || agent.role)}
+            </span>
+            <div className="min-w-0 flex-1">
               <Input
                 value={agent.role}
                 aria-label={`Role for ${agent.role}`}
                 data-testid="setup-review-role"
                 onChange={(e) => rename(i, e.target.value)}
-                className="h-8"
+                className="h-7 border-transparent bg-transparent px-1 font-medium shadow-none hover:border-input focus-visible:border-input"
               />
-              <p className="truncate text-xs text-muted-foreground">{agent.description}</p>
+              <p className="truncate px-1 text-xs text-muted-foreground">{agent.description}</p>
             </div>
             <Button
               size="sm"
@@ -1028,6 +1109,7 @@ function ReviewStep({
               onClick={() => drop(i)}
               aria-label={`Remove ${agent.role}`}
               data-testid="setup-review-remove"
+              className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
             >
               Remove
             </Button>
@@ -1091,54 +1173,64 @@ function ReviewStep({
 }
 
 /**
- * Everything that used to be a step.
+ * Advanced, as a step of its own.
  *
- * A disclosure rather than four screens: sign-in mode, brain, host and tools all
- * have defaults that work on a laptop, and a knob with a working default is not
- * a decision worth putting in front of someone who has not seen the product yet.
- * Nothing is hidden — it is one click away from every screen, and the fields
- * keep their layer locks, so an env-owned value still refuses to pretend.
+ * It was a disclosure hanging under the footer, which made the page appear to
+ * end twice and made these four subjects feel like a cupboard rather than part
+ * of setting up. They are a step now, in the same sequence as everything else,
+ * and skippable by pressing on — which is what "advanced" should mean: present
+ * and passed over, not hidden and hunted for.
+ *
+ * All four groups on one screen, for the same reason the three questions are:
+ * they are short, related, and splitting them would be four more Next presses
+ * for settings most people will never touch.
  */
-function AdvancedPanel({
-  open,
-  onToggle,
+function AdvancedStep({
   status,
   values,
   set,
 }: {
-  open: boolean;
-  onToggle: () => void;
   status: SetupStatus;
   values: Record<string, string>;
   set: (key: string, value: string) => void;
 }) {
   return (
-    <div className="rounded-lg border">
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        data-testid="setup-advanced-toggle"
-        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium"
-      >
-        Advanced settings
-        <span className="text-xs font-normal text-muted-foreground">
-          {open ? "Hide" : "Sign-in, brain, host, tools"}
-        </span>
-      </button>
+    <div className="space-y-7" data-testid="setup-advanced">
+      <div>
+        <h2 className="text-[15px] font-medium leading-snug" data-testid="setup-question">
+          Anything you want to change?
+        </h2>
+        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+          Every one of these already has a working default. Press on if none of
+          it matters to you — written to{" "}
+          <code className="font-mono text-xs">{status.config_path}</code>.
+        </p>
+      </div>
 
-      {open && (
-        <div className="space-y-6 border-t p-3" data-testid="setup-advanced">
-          <SignInStep
-            status={status}
-            value={values.auth_mode ?? ""}
-            onChange={(v) => set("auth_mode", v)}
-          />
-          {ADVANCED_GROUPS.filter((group) => group.id !== "signin").map((group) => (
-            <div key={group.id} className="space-y-3">
-              <h3 className="text-sm font-medium">{group.label}</h3>
-              {group.id === "tools" && <ToolsStep status={status} />}
-              {fieldsFor(status, group.fields).map((f) => (
+      {ADVANCED_GROUPS.map((group) => (
+        // Each subject is its own bounded card. Four sections running together
+        // down one scroll is what made this read as a dump — nothing told you
+        // where "how people sign in" ended and "where the thinking runs" began.
+        <section key={group.id} className="rounded-xl border">
+          <div className="border-b px-4 py-3">
+            <h3 className="text-[15px] font-medium leading-snug">{group.title}</h3>
+            <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">{group.hint}</p>
+          </div>
+          <div className="space-y-5 px-4 py-4">
+            {group.id === "signin" && (
+              <SignInStep
+                status={status}
+                value={values.auth_mode ?? ""}
+                onChange={(v) => set("auth_mode", v)}
+              />
+            )}
+            {group.id === "tools" && <ToolsStep status={status} />}
+            {fieldsFor(status, group.fields)
+              // `auth_mode` is chosen with the three cards above. Rendering its
+              // raw input underneath offered the same setting twice, and the
+              // second one looked like the real control because it was a field.
+              .filter((f) => !(group.id === "signin" && f.key === "auth_mode"))
+              .map((f) => (
                 <FieldRow
                   key={f.key}
                   field={f}
@@ -1146,10 +1238,127 @@ function AdvancedPanel({
                   onChange={(v) => set(f.key, v)}
                 />
               ))}
-            </div>
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Everything we ask about the business, on one screen.
+ *
+ * These were three screens, one field each. That is the right shape when a
+ * question needs the operator's whole attention, and the wrong one here: the
+ * three are a single thought — *what you do, who you want, what you want off
+ * your plate* — and splitting them made two of the three feel like padding
+ * between the interesting one and the end.
+ *
+ * Read together they also answer each other. Seeing "what do you want to
+ * automate" while the industry answer is still on screen is what makes someone
+ * write "order dispatch" rather than "operations".
+ */
+function BusinessStep({
+  draft,
+  onChange,
+  onEnter,
+}: {
+  draft: SetupDraft;
+  onChange: (update: (d: SetupDraft) => SetupDraft) => void;
+  onEnter: () => void;
+}) {
+  const signals = inferSignals(draft.industry);
+
+  return (
+    <div className="space-y-7">
+      <div>
+        {/* Label and hint are one sentence, so they sit tight together; the
+            breathing room belongs *before the field*, not inside the sentence.
+            A uniform `space-y` gave all three the same gap and the question
+            read as three unrelated lines. */}
+        <Label htmlFor="setup-industry" className="text-[15px] font-medium leading-snug">
+          What kind of company are you setting up?
+        </Label>
+        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+          A sentence is plenty. What you sell, or what you do.
+        </p>
+        <Input
+          id="setup-industry"
+          autoFocus
+          value={draft.industry}
+          placeholder="e.g. E-commerce — I sell homeware online"
+          data-testid="setup-field-industry"
+          className="mt-2.5"
+          onChange={(e) => onChange((d) => ({ ...d, industry: e.target.value }))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onEnter();
+          }}
+        />
+        {/* Proof they were heard, right where they typed it. Silent when
+            nothing was recognised — a wrong chip is worse than no chip. */}
+        {signals.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5" data-testid="setup-signals">
+            <span className="text-xs text-muted-foreground">Sounds like</span>
+            {signals.map((signal) => (
+              <Badge key={signal} variant="secondary">
+                {signal}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <Label htmlFor="setup-automate" className="text-[15px] font-medium leading-snug">
+          What are you trying to automate?
+        </Label>
+        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+          List whatever comes to mind. This is what your team gets built around.
+        </p>
+        <Textarea
+          id="setup-automate"
+          className="mt-2.5 min-h-0"
+          rows={2}
+          value={draft.automate}
+          placeholder="e.g. Meta ads, order dispatch, daily sales reports"
+          data-testid="setup-field-automate"
+          onChange={(e) => onChange((d) => ({ ...d, automate: e.target.value }))}
+        />
+        {/* Beside the field, not instead of it: they append, so the operator's
+            own words always survive. */}
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {AUTOMATE_EXAMPLES.map((example) => (
+            <button
+              key={example}
+              type="button"
+              onClick={() => onChange((d) => ({ ...d, automate: appendExample(d.automate, example) }))}
+              data-testid={`setup-example-${example.replace(/\s+/g, "-")}`}
+              className="rounded-full border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              + {example}
+            </button>
           ))}
         </div>
-      )}
+      </div>
+
+      <div>
+        <Label htmlFor="setup-teamHint" className="text-[15px] font-medium leading-snug">
+          Anyone in particular you need on the team?
+          <span className="ml-1.5 text-[13px] font-normal text-muted-foreground">Optional</span>
+        </Label>
+        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+          We&apos;ll suggest a team either way — this just adds to it.
+        </p>
+        <Textarea
+          id="setup-teamHint"
+          className="mt-2.5 min-h-0"
+          rows={2}
+          value={draft.teamHint}
+          placeholder="e.g. someone chasing the customers who go quiet"
+          data-testid="setup-field-teamHint"
+          onChange={(e) => onChange((d) => ({ ...d, teamHint: e.target.value }))}
+        />
+      </div>
     </div>
   );
 }
