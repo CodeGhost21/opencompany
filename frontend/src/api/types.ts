@@ -300,6 +300,21 @@ export interface ApprovalSummary {
   amount_usd: number | null;
   at_millis: number;
   /**
+   * Epoch-millis this approval default-denies if nobody decides it (#971) —
+   * `at_millis` plus the company's approval deadline
+   * (`[policy].approval_ttl_hours`, 24 hours by default).
+   *
+   * **Never recompute it.** The host projects it from the gate that actually
+   * enforces the deadline; a console that added its own 24 hours to
+   * `at_millis` would show a deadline nothing enforces, and an operator would
+   * act on "in 3h" and be refused.
+   *
+   * Optional because a host may predate the field. Absent means "this host
+   * does not report deadlines" — render the card exactly as before rather
+   * than guessing one.
+   */
+  expires_at_millis?: number | null;
+  /**
    * Which board task this approval was parked for (#333). Mirrors `TaskLink` in
    * `src/runtime/journal.rs`.
    *

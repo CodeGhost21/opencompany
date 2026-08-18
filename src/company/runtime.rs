@@ -2109,6 +2109,16 @@ impl CompanyRuntime {
                 kind: p.effect.kind.clone(),
                 amount_usd: p.effect.amount_usd,
                 at_millis: p.at_millis,
+                // Issue #971: the deadline, filled in at the single projection
+                // point so every reader gets the same one. Read off the gate
+                // rather than recomputed from `[policy]`, because the gate is
+                // where the `None`-means-default rule resolves and a second
+                // resolution of it is a second thing that can disagree — the
+                // card would then promise a deadline the gate does not enforce.
+                expires_at_millis: Some(
+                    p.at_millis
+                        .saturating_add(self.approval_gate.ttl_millis()),
+                ),
                 task: p.task,
                 agent: p.effect.agent.clone(),
                 payload: crate::runtime::approval_display::display_payload(&p.effect),
