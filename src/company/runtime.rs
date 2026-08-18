@@ -114,6 +114,7 @@ use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantId, GrantScope, GrantSet, StandingGrant};
 use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, RuntimeJournal};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
+use crate::runtime::workflow_gates::WorkflowGateQueue;
 use crate::server::ops::mailer::MailSender;
 use crate::server::ops::smtp::SmtpCredentials;
 
@@ -274,6 +275,16 @@ pub struct CompanyRuntime {
     /// not forget that the turn is blocked, or the next decision continues it as
     /// though the others had never been owed.
     pub(crate) continuations: ContinuationQueue,
+    /// Issue #978: which gate node each parked **workflow** approval is
+    /// deciding, and the trigger input its run paused with.
+    ///
+    /// The run-scoped companion to [`continuations`](Self::continuations): that
+    /// queue counts a run's outstanding decisions, and this one holds the facts
+    /// the release needs to actually re-dispatch it. Live per-instance state and
+    /// inherited across a rebuild for the same reason both its neighbours are —
+    /// a swap mid-decision that forgot a run's parked gates would re-ask about
+    /// every one of them.
+    pub(crate) workflow_gates: WorkflowGateQueue,
     /// Held for the duration of a cycle so cycles never interleave per company.
     ///
     /// `Arc`-shared rather than owned so a rebuilt runtime can inherit the *same*
@@ -390,6 +401,7 @@ impl CompanyRuntime {
             repos: None,
             grants,
             continuations: ContinuationQueue::default(),
+            workflow_gates: WorkflowGateQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
@@ -605,6 +617,13 @@ impl CompanyRuntime {
     /// successor: a second `RuntimeJournal` over one path is the corruption
     /// hazard [`RuntimeHandover`](crate::runtime::RuntimeHandover) exists to
     /// prevent, and "we passed it along" is only checkable if it is readable.
+    /// The run-scoped workflow gate batches this runtime is holding (issue
+    /// #978). Delegated to rather than exposed as a field so the approve path in
+    /// `workflow_resume` can fork on whether a card's run is armed.
+    pub fn workflow_gates(&self) -> &WorkflowGateQueue {
+        &self.workflow_gates
+    }
+
     pub fn journal(&self) -> &Arc<RuntimeJournal> {
         &self.journal
     }
@@ -1086,6 +1105,19 @@ impl CompanyRuntime {
     /// only the approval path reads, matching how the locks are handed over.
     pub fn adopt_continuations(&mut self, continuations: ContinuationQueue) {
         self.continuations = continuations;
+    }
+
+    /// Installs the run-scoped workflow gate batches the builder prepared
+    /// (issue #978) — rehydrated from the journal's still-parked gates on a
+    /// boot, inherited live on a rebuild.
+    ///
+    /// Set through the builder for exactly
+    /// [`adopt_continuations`](Self::adopt_continuations)' reason, and always
+    /// alongside it: the two describe one run's decisions from opposite sides,
+    /// and a runtime holding a fresh copy of one and an inherited copy of the
+    /// other would release a batch it cannot re-dispatch.
+    pub fn adopt_workflow_gates(&mut self, gates: WorkflowGateQueue) {
+        self.workflow_gates = gates;
     }
 
     /// Rejects a cycle on a runtime that is being replaced.
