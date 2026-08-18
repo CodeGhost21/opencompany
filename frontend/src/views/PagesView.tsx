@@ -195,7 +195,7 @@ export function PagesView({ client, company }: Props) {
     );
   }
 
-  if (sorted.length === 0) {
+  if (visible.length === 0) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center text-muted-foreground">
         <AppWindow className="size-8" />
@@ -213,7 +213,7 @@ export function PagesView({ client, company }: Props) {
   return (
     <div className="flex flex-1 overflow-hidden">
       <section className="hidden w-64 shrink-0 flex-col overflow-y-auto border-r py-2 md:flex" data-testid="pages-list">
-        {sorted.map((page) => (
+        {visible.map((page) => (
           <button
             key={page.slug}
             onClick={() => setActiveSlug(page.slug)}
