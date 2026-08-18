@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use opencompany::company::Schedule;
-use opencompany::runtime::{CompanyScheduler, SystemClock, WorkflowScheduler};
+use opencompany::runtime::{CompanyScheduler, MaintenanceTicker, SystemClock, WorkflowScheduler};
 use opencompany::{
     AppConfig, AppState, CompanyId, CompanyManifest, Result,
     app::config::{ConfigFile, ProcessEnv, resolve},
@@ -388,6 +388,16 @@ fn spawn_scheduler(
     schedules: &[Schedule],
     shutdown: &Arc<Notify>,
 ) -> Option<tokio::task::JoinHandle<()>> {
+    // **This early return was issue #971.** Until the maintenance ticker
+    // existed, sweeping expired approvals, expired grants and stale fire claims
+    // rode this scheduler's minute loop — so a company with no `[[schedule]]`
+    // returned here, spawned nothing, and swept nothing, forever, at any age.
+    // The tenant that reported it drove everything through *workflow* schedules,
+    // which run on a different loop that never called maintenance.
+    //
+    // It is correct now, and only because maintenance no longer depends on it:
+    // `spawn_maintenance_ticker` is process-wide and always on. Nothing that
+    // has to happen for every company may be attached below this line.
     if schedules.is_empty() {
         return None;
     }
@@ -422,6 +432,24 @@ fn spawn_workflow_scheduler(
     shutdown: &Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     WorkflowScheduler::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
+}
+
+/// Starts the process-wide maintenance ticker: one task that retires overdue
+/// approvals, expired grants and stale fire claims for every registered company
+/// (issue #971).
+///
+/// Process-wide for the same reason as [`spawn_workflow_scheduler`], and it is
+/// the whole fix. The per-company [`spawn_scheduler`] above has to be reached at
+/// every place a company can come into existence — a `--company` flag, adoption
+/// of an existing data root, a hosted tenant registered after boot — and it
+/// declines to start at all for a company with no manifest cron. Maintenance
+/// must happen for every company unconditionally, so it hangs off the registry
+/// and is started once, here, whether or not any company is loaded yet.
+fn spawn_maintenance_ticker(
+    state: &AppState,
+    shutdown: &Arc<Notify>,
+) -> tokio::task::JoinHandle<()> {
+    MaintenanceTicker::new(state.registry().clone(), Arc::new(SystemClock)).spawn(shutdown.clone())
 }
 
 /// Starts a company's IMAP mailbox poller as a background task, if the
@@ -1359,6 +1387,12 @@ async fn async_main() -> Result<()> {
             // companies loaded: it re-reads the registry each minute, so a
             // company registered later is picked up without a restart.
             scheduler_handles.push(spawn_workflow_scheduler(&state, &shutdown));
+
+            // And one maintenance ticker, for the same reason and started the
+            // same way (issue #971). This is the only place approvals, grants
+            // and fire claims are retired, and it covers a company registered
+            // after boot — which the per-company scheduler spawn above does not.
+            scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
 
             // Stop the schedulers on Ctrl-C so background cycle work halts with
             // the process (lifecycle shutdown).

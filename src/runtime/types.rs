@@ -121,6 +121,26 @@ pub struct ApprovalSummary {
     pub amount_usd: Option<f64>,
     /// Epoch-millis the effect was parked.
     pub at_millis: u64,
+    /// Epoch-millis this approval default-denies if nobody decides it
+    /// (issue #971) — `at_millis` plus the gate's TTL.
+    ///
+    /// **Projected, not a second source of truth.** The deadline is the gate's
+    /// (`[policy].approval_ttl_hours`, defaulting to 24 hours), and the gate
+    /// re-checks it on every resolve; this is that same number said out loud so
+    /// a card can show it. Computing it a second way in the console — or on the
+    /// GraphQL side — would be a deadline the host does not enforce, which is
+    /// worse than no deadline at all: an operator would read "in 3h", act on
+    /// it, and be refused.
+    ///
+    /// It is the honest half of shortening the deadline. An approval that
+    /// vanishes is only acceptable if the card said when it would, so nothing
+    /// disappears unannounced.
+    ///
+    /// Omitted when absent, the additive pattern the fields below follow: an
+    /// old console ignores the key and a new one reads its absence as "this
+    /// host does not report deadlines" and renders the card exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_millis: Option<u64>,
     /// Which board task this approval was parked for (issue #333).
     ///
     /// Three states, and the Task Detail read depends on telling them apart:

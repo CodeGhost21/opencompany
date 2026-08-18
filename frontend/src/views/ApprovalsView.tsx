@@ -23,7 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
-import { approvalSummary, grantHeadline, timeAgo, toolAction } from "@/lib/language";
+import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
 import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
@@ -293,6 +293,15 @@ export function ApprovalsView({
                   : `${visible.length} things need your approval`}
               </h2>
             </div>
+            {/* #971: nothing may vanish unannounced. Requests now age out on
+                their own, so the queue says so once, up front — mirroring the
+                standing-permissions section's "Each one expires on its own"
+                below. Each card carries its own deadline; this is the sentence
+                that stops that deadline being a surprise. */}
+            <p className="mb-3 text-xs text-muted-foreground">
+              Each one has a deadline. Anything still undecided by then is
+              declined on its own, and the work behind it moves on.
+            </p>
             <div className="flex flex-col gap-3">
               {visible.map((a) => (
                 <ApprovalCard
@@ -505,15 +514,6 @@ function granterLabel(g: StandingGrant, granterNames: Map<string, string>): stri
   return granterNames.get(g.granted_by.id) ?? "someone with admin access";
 }
 
-/** "in 42m" / "in 6h" / "in 3d" — how long a permission has left. */
-function untilLabel(atMillis: number, now: number): string {
-  const mins = Math.max(0, Math.round((atMillis - now) / 60_000));
-  if (mins < 60) return `in ${mins}m`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `in ${hours}h`;
-  return `in ${Math.round(hours / 24)}d`;
-}
-
 /**
  * One parked approval, told in full (#372).
  *
@@ -561,7 +561,7 @@ function ApprovalCard({
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
   return (
-    <Card>
+    <Card data-approval-id={a.id}>
       <CardContent className="flex flex-col gap-3 py-4">
         <ApprovalHeadline
           approval={a}

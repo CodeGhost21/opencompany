@@ -472,31 +472,60 @@ export function getWorkflow(
   );
 }
 
-/** The `GET …/workflows/tool-slugs` answer (issue #783). */
+/**
+ * One tool this company is granted but that cannot run on this deployment
+ * (issue #874) — reported so the console can tell "not allowed here" from
+ * "allowed, not configured yet".
+ */
+export interface UnwiredWorkflowTool {
+  slug: string;
+  /** `searchBackendNotConfigured` | `capabilityTierFiltered` — new tokens may appear. */
+  reason: string;
+  /** The same reason in prose, safe to show as-is. */
+  detail: string;
+}
+
+/** The `GET …/workflows/tool-slugs` answer (issues #783, #874). */
 interface WorkflowToolSlugsResponse {
   slugs: string[];
+  /** Absent on a host predating issue #874. */
+  unwired?: UnwiredWorkflowTool[];
+}
+
+/** What {@link listWorkflowToolSlugs} resolves to. */
+export interface WorkflowToolSlugs {
+  /** The effective slugs — granted AND wired here. Ground prompts on these. */
+  slugs: string[];
+  /**
+   * Granted but unwired here. Empty on a host predating issue #874, which is
+   * indistinguishable from "everything granted is wired" — both mean there is
+   * nothing extra to warn about, so no caller needs to tell them apart.
+   */
+  unwired: UnwiredWorkflowTool[];
 }
 
 /**
- * The wired, granted `tool_call` slugs the per-workflow copilot may ground a
- * proposal on (issue #783).
+ * The `tool_call` slugs the per-workflow copilot may ground a proposal on
+ * (issue #783), narrowed to the **effective** set by issue #874.
  *
- * Every slug here is one a proposed `tool_call` node would clear at the host's
- * courtesy validation — the route serves the SAME set the create-time copilot
- * grounds on (issue #753), so what the copilot is told it can call and what the
- * host will accept cannot drift. A host predating the route 404s; the caller
- * degrades to an empty list, exactly as it does for the roster read, rather than
- * blocking the copilot.
+ * A slug in `slugs` is granted by `[tools].allow` AND wired on this deployment,
+ * so a proposed node has a chance of running — the route serves the SAME set the
+ * create-time copilot grounds on, so the two cannot drift. Tools the company
+ * holds a grant for but that cannot run here come back under `unwired` instead
+ * of being dropped, so the copilot can be told not to author them and still say
+ * why when asked. A host predating the route 404s; the caller degrades to empty
+ * lists, exactly as it does for the roster read, rather than blocking the
+ * copilot.
  */
 export function listWorkflowToolSlugs(
   client: OpenCompanyClient,
   company: string | null,
-): Promise<string[]> {
+): Promise<WorkflowToolSlugs> {
   return client
     .get<WorkflowToolSlugsResponse>(
       `${client.scopeFor(company)}/workflows/tool-slugs`,
     )
-    .then((r) => r.slugs);
+    .then((r) => ({ slugs: r.slugs, unwired: r.unwired ?? [] }));
 }
 
 /** The `GET …/workflows/wired-channels` answer (issue #813). */
@@ -636,7 +665,9 @@ export function listWorkflowRuns(
  *
  * `nodes` is the engine's `{ "<node id>": { "items": [ … ] } }` map, bounded for
  * storage; `truncated` says whether any value was clipped to fit the caps, so the
- * inspector can badge it honestly.
+ * inspector can badge it honestly. `partial` says the run FAILED or BLOCKED, so
+ * the map is only what the runner captured from the nodes that finished before
+ * the stop — not a complete outcome (issue #1008).
  */
 export interface WorkflowRunOutputRecord {
   runId: string;
@@ -647,6 +678,13 @@ export interface WorkflowRunOutputRecord {
   nodes: unknown;
   /** Whether any value was clipped to fit the durable size caps. */
   truncated: boolean;
+  /**
+   * Whether this is a partial capture from a run that failed or blocked rather
+   * than a clean settled outcome (issue #1008). Optional so a snapshot written
+   * before this field existed (always a clean settle) reads back as absent,
+   * which the inspector treats as `false`.
+   */
+  partial?: boolean;
 }
 
 /**

@@ -38,7 +38,7 @@ import {
 
 import type { OpenCompanyClient } from "@/api/client";
 import { GRANT_DURATIONS, type ApprovalSummary, type GrantScope } from "@/api/types";
-import { approvalAction, money, payloadLines, timeAgo } from "@/lib/language";
+import { approvalAction, money, payloadLines, timeAgo, untilLabel } from "@/lib/language";
 import { cn } from "@/lib/utils";
 
 const KIND_ICONS: Record<string, LucideIcon> = {
@@ -150,6 +150,20 @@ export function ApprovalMeta({
         </>
       )}
       <span>{timeAgo(a.at_millis, now)}</span>
+      {/* The deadline (#971), beside how long it has already waited — the two
+          halves of "is this still worth deciding?".
+
+          Rendered only when the host reports one. An absent
+          `expires_at_millis` means the host does not have deadlines, NOT that
+          this card has none, so the console shows nothing rather than
+          computing a deadline nothing would enforce: an operator who acted on
+          an invented "in 3h" would be refused. */}
+      {typeof a.expires_at_millis === "number" && (
+        <>
+          <span aria-hidden>·</span>
+          <span>declined {untilLabel(a.expires_at_millis, now)}</span>
+        </>
+      )}
       {status && (
         <>
           <span aria-hidden>·</span>

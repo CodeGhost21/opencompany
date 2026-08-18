@@ -1094,6 +1094,7 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         parent_task_id: None,
         output: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,
@@ -2073,6 +2074,7 @@ pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutput
         at_millis: at,
         nodes: serde_json::json!({ "writer": { "items": [marker] } }),
         truncated: false,
+        partial: false,
     };
 
     // Roundtrip: a stored record reads back byte-identically.
