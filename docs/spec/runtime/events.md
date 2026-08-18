@@ -69,7 +69,8 @@ that have no business holding agent prompts or destination addresses),
 `WorkflowRunFinished` (issue #228 — the durable record of what a run did, from
 every entry point) and, from issue #371/#382, `WorkflowRunStarted` /
 `WorkflowNodeStarted` / `WorkflowNodeFinished` (the per-node progress trail; see
-[Workflow run progress](#workflow-run-progress-issue-371)).
+[Workflow run progress](#workflow-run-progress-issue-371)), and, from issue
+#983, `TurnStarted` / `TurnFailed` (see [Chat turn brackets](#chat-turn-brackets-issue-983)).
 
 ### Per-task event correlation (issue #185)
 
@@ -434,6 +435,42 @@ has ever parked an approval from operator chat.
 into `in_progress` (`company/runtime.rs`, `upsert_task` → `dispatch_task`) — has
 the same shape and now has this read available to it, and is deliberately left
 for a follow-up rather than half-gated here.
+
+## Chat turn brackets (issue #983)
+
+An operator chat turn brackets itself the way a workflow run does.
+`TurnStarted` is appended the instant the request is accepted — before the turn
+takes the per-company serial lock, which is the whole point: the operator's
+message is journaled at the same moment, so `chat/history` is right from
+acceptance rather than from whenever the turn wins that lock. `TurnFailed`
+closes the bracket when the turn errors, and the boot sweep
+(`runtime::sweep_interrupted_turns`) writes one for any start left unmatched by
+a dead host.
+
+Both are structural. `TurnStarted` carries the turn id, the desk, the thread
+parent and the asker; there is no message text on it, because the text is on the
+`OperatorMessage` it brackets. `TurnFailed` carries a tenant-scoped reason that
+is deliberately **not** projected onto the operator SSE stream.
+
+The turn also mints a `RunRecord` (see [ports-runs.md](ports-runs.md)), and the
+two are not redundant. The row answers *status* and is read by a poll; the event
+is the *transcript*, and "a turn was accepted for this message" cannot be
+inferred from the log without it — an `OperatorMessage` with no reply after it
+is indistinguishable from a chatter message that legitimately produced none, so
+silence is not evidence of a lost turn until the acceptance is explicit.
+
+Retention (see [Retention](ports-state.md#retention-issue-275)) splits them
+deliberately: `TurnStarted` is **prunable** — it is not evidence, nothing is
+addressed by its sequence (the turn is joined by `turn_id`), and the only thing
+that reads it back is a boot sweep that by construction runs before any
+retention pass on that host. `TurnFailed` is **permanent**, being the only
+record that a question was accepted and never answered.
+
+Like every sweep of this shape, the boot sweep is **suppressed on a live runtime
+rebuild** — and here the mis-fire is worse than for a workflow run, because
+`rebuild_company` drains the cycle lock but a turn's spawned task journals its
+replies and settles its row after the cycle returns. Sweeping mid-life would
+tell the operator their turn failed moments before its answer arrived.
 
 ## Workflow run progress (issue #371)
 
