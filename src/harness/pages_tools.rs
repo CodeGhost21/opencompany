@@ -52,6 +52,14 @@ use serde_json::{Value, json};
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
+// The workspace layout — `Pages/<slug>/{page.toml,Page.tsx,Page.compiled.mjs}`
+// — is shared with `crate::server::ops::pages`, which is always compiled and
+// therefore cannot import from this `openhuman`-gated module. Both sides
+// import the same constants from `workspace_scaffold` instead.
+use crate::company::workspace_scaffold::{
+    PAGE_COMPILED_MIME as COMPILED_MIME, PAGE_COMPILED_NAME as COMPILED_NAME,
+    PAGE_MANIFEST_NAME as MANIFEST_NAME, PAGE_SOURCE_NAME as SOURCE_NAME, PAGES_ROOT,
+};
 use crate::harness::workspace_tools::store_reason;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{FolderClaim, NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
@@ -64,15 +72,6 @@ pub const PAGES_READ_TOOL: &str = "pages_read";
 pub const PAGES_WRITE_TOOL: &str = "pages_write";
 /// Tool name: remove one page.
 pub const PAGES_DELETE_TOOL: &str = "pages_delete";
-
-// The workspace layout — `Pages/<slug>/{page.toml,Page.tsx,Page.compiled.mjs}`
-// — is shared with `crate::server::ops::pages`, which is always compiled and
-// therefore cannot import from this `openhuman`-gated module. Both sides
-// import the same constants from `workspace_scaffold` instead.
-use crate::company::workspace_scaffold::{
-    PAGE_COMPILED_MIME as COMPILED_MIME, PAGE_COMPILED_NAME as COMPILED_NAME,
-    PAGE_MANIFEST_NAME as MANIFEST_NAME, PAGE_SOURCE_NAME as SOURCE_NAME, PAGES_ROOT,
-};
 
 /// Max bytes of `Page.tsx` source one `pages_write` call accepts.
 ///
