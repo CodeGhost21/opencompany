@@ -382,8 +382,12 @@ impl Tool for ReadWorkflowTool {
             ));
         };
 
-        let overlays = match self.admin.overlays().await {
-            Ok(overlays) => overlays,
+        // Loaded once, together: the fallback below needs `disable` beside
+        // `overlays`, and a second, later load of the same record could see a
+        // globals opt-out this first load missed (or the reverse), letting a
+        // company-disabled global slip through — see `overlays_and_globals`.
+        let (overlays, disable) = match self.admin.overlays_and_globals().await {
+            Ok(pair) => pair,
             Err(result) => return Ok(result),
         };
         let stored = overlay_body(&overlays, &wid);
