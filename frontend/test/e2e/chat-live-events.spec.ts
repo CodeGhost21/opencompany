@@ -406,7 +406,11 @@ test("a failed turn leaves a durable line, not a spinner", async ({ page }) => {
   // written — in the exact shape `chat/history` serves. What is asserted below
   // is that the console renders that line, which is the durable-record
   // behaviour the title promises rather than a status it invented.
-  await page.route("**/chat/history", (route) =>
+  //
+  // The `?*` matters, not decoration: the host's path is `…/chat/history?desk=…`,
+  // and a bare `**/chat/history` glob stops at the query string, so the mock
+  // never fires and the journal read misses the line the test is proving.
+  await page.route("**/chat/history?*", (route) =>
     route.fulfill({
       status: 200,
       headers: { "content-type": "application/json" },
