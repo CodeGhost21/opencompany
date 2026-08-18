@@ -171,7 +171,7 @@ pub fn compile_page(source: &str) -> Result<CompiledPage, String> {
     use swc_core::common::comments::NoopComments;
     use swc_core::common::sync::Lrc;
     use swc_core::common::{FileName, GLOBALS, Mark, SourceMap};
-    use swc_core::ecma::ast::{EsVersion, ModuleDecl, ModuleItem, Program};
+    use swc_core::ecma::ast::{EsVersion, Program};
     use swc_core::ecma::codegen::text_writer::JsWriter;
     use swc_core::ecma::codegen::{Config as CodegenConfig, Emitter};
     use swc_core::ecma::parser::lexer::Lexer;
