@@ -1,0 +1,256 @@
+import { describe, expect, it } from "vitest";
+
+import { OpenCompanyClient } from "@/api/client";
+import { isDetachedChat, type ChatPostResult } from "@/api/types";
+import { openTurnsFromRuns, PendingSyncPosts } from "@/lib/live-reply";
+import { reconcileIds, type ChatMessage } from "@/lib/chat";
+import type { Transport, TransportRequest, TransportResponse } from "@/api/transport";
+
+/**
+ * Detached chat turns (issue #983).
+ *
+ * The gap this closes is total: the chat POST's error and hang paths had no
+ * coverage at all, which is how a route contractually defined to answer with the
+ * *finished* turn — an operation of unbounded duration — went to production and
+ * 504'd five requests out of five. Nothing here is guarded by an existing test,
+ * so each case is written as if it were the only thing standing between the
+ * change and the operator.
+ */
+
+/** A transport that answers one canned body, and records what it was asked. */
+function stubTransport(status: number, body: unknown) {
+  const sent: { url: string; body: unknown }[] = [];
+  const transport: Transport = {
+    request: async ({ url, body: raw }: TransportRequest): Promise<TransportResponse> => {
+      sent.push({ url, body: raw ? JSON.parse(raw) : undefined });
+      return {
+        status,
+        statusText: "",
+        url,
+        text: JSON.stringify(body),
+        header: () => null,
+      };
+    },
+    // Never opened here: these cases are about the POST's answer, not the feed.
+    subscribe: () => () => {},
+  };
+  return { transport, sent };
+}
+
+function client(status: number, body: unknown) {
+  const { transport, sent } = stubTransport(status, body);
+  return {
+    client: new OpenCompanyClient(
+      { baseUrl: "", company: null, operatorToken: null, sessionHeader: null },
+      transport,
+    ),
+    sent,
+  };
+}
+
+describe("the chat POST discriminates on the response, not on the request", () => {
+  it("reads an accepted turn when the body carries `detached: true`", async () => {
+    const { client: c } = client(202, {
+      turnId: "turn-1",
+      messageId: "42",
+      detached: true,
+    });
+
+    const answer: ChatPostResult = await c.chat("do the long thing", null, "main", null, undefined, true);
+
+    expect(isDetachedChat(answer)).toBe(true);
+    if (!isDetachedChat(answer)) throw new Error("unreachable");
+    expect(answer.turnId).toBe("turn-1");
+    // Known at accept time — this is what the optimistic bubble reconciles to,
+    // and the reason it no longer has to wait for the whole turn.
+    expect(answer.messageId).toBe("42");
+  });
+
+  it("reads a settled turn when the body carries no discriminator", async () => {
+    const { client: c } = client(200, {
+      responses: [{ text: "done", channel: "main" }],
+      messageId: "42",
+      turnId: "turn-1",
+    });
+
+    const answer = await c.chat("hi", null, "main");
+
+    expect(isDetachedChat(answer)).toBe(false);
+    if (isDetachedChat(answer)) throw new Error("unreachable");
+    expect(answer.responses.map((r) => r.text)).toEqual(["done"]);
+    // Additive on the synchronous shape too, so a caller that never detached can
+    // still read the turn back afterwards.
+    expect(answer.turnId).toBe("turn-1");
+  });
+
+  /**
+   * The compatibility case that makes shape-discrimination mandatory rather than
+   * merely tidy: a host predating the field ignores `detach` (there is no
+   * `deny_unknown_fields`) and answers the full synchronous body. A console that
+   * decided from what it *asked* would sit waiting for a reply it already held.
+   */
+  it("reads a settled turn even when detach was requested and silently ignored", async () => {
+    const { client: c, sent } = client(200, {
+      responses: [{ text: "old host", channel: "main" }],
+      messageId: "7",
+    });
+
+    const answer = await c.chat("hi", null, "main", null, undefined, true);
+
+    expect(sent[0].body).toMatchObject({ detach: true });
+    expect(isDetachedChat(answer)).toBe(false);
+  });
+
+  it("omits `detach` entirely when it was not asked for", async () => {
+    const { client: c, sent } = client(200, { responses: [] });
+
+    await c.chat("hi", null, "main");
+
+    // The body shape an older host has always received, byte for byte.
+    expect(sent[0].body).toEqual({ text: "hi", chat: "main" });
+    expect(sent[0].body).not.toHaveProperty("detach");
+  });
+});
+
+/**
+ * The live-reply suppression rule — the single highest-risk line in the console
+ * half, and the one that fails invisibly in both directions.
+ */
+describe("live-reply suppression", () => {
+  it("suppresses the echo while a synchronous post is in flight", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+
+    // The awaited POST is going to deliver this reply itself, so the live frame
+    // is a duplicate. Rendering it doubles the bubble.
+    expect(pending.suppressesLiveReply("main")).toBe(true);
+  });
+
+  it("does NOT suppress once the post detached, though the turn is still running", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    pending.detached("main");
+
+    // The whole point of the conditional. In detached mode this frame IS the
+    // answer — suppressing it means the reply never appears at all, which is
+    // strictly worse than the double bubble the rule exists to prevent. Note
+    // that nothing has ended the turn: `detached` is not `ended`.
+    expect(pending.suppressesLiveReply("main")).toBe(false);
+  });
+
+  it("stops suppressing when a synchronous post resolves", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    pending.ended("main");
+
+    expect(pending.suppressesLiveReply("main")).toBe(false);
+  });
+
+  it("suppresses per thread, so a detached turn does not unmute a synchronous one", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+    pending.started("design");
+    pending.detached("design");
+
+    // Two conversations in flight at once is the ordinary case on a busy
+    // company, and the mode is a property of each POST, not of the console.
+    expect(pending.suppressesLiveReply("main")).toBe(true);
+    expect(pending.suppressesLiveReply("design")).toBe(false);
+  });
+
+  it("never suppresses a thread this console did not post on", () => {
+    const pending = new PendingSyncPosts();
+    pending.started("main");
+
+    // An inbound Telegram turn, a background desk turn, another operator's
+    // message: nothing here is a duplicate of anything, so it all renders.
+    expect(pending.suppressesLiveReply("ops")).toBe(false);
+  });
+});
+
+/**
+ * Re-arming the working indicator after a reload — the leg that was impossible
+ * before the turn had a durable row, and the one that proves the whole design.
+ */
+describe("open turns read back from the run store", () => {
+  it("re-arms the indicator on the thread that raised the turn", () => {
+    const open = openTurnsFromRuns([
+      { id: "turn-1", chatId: "main", status: "running" },
+    ]);
+
+    expect(open).toEqual({ main: { turnId: "turn-1", queued: false } });
+  });
+
+  it("calls a turn that has not taken the lock queued, not working", () => {
+    const open = openTurnsFromRuns([
+      { id: "turn-1", chatId: "main", status: "pending" },
+    ]);
+
+    // The serial train is real — five concurrent messages queue behind one
+    // another — and a spinner implying progress while a turn waits its turn is
+    // the console saying something untrue.
+    expect(open.main.queued).toBe(true);
+  });
+
+  it("ignores a dispatch at a card, which owns no conversation's indicator", () => {
+    const open = openTurnsFromRuns([
+      { id: "run-9", status: "running" },
+      { id: "turn-1", chatId: "main", status: "running" },
+    ]);
+
+    expect(Object.keys(open)).toEqual(["main"]);
+  });
+
+  it("re-arms each conversation independently", () => {
+    const open = openTurnsFromRuns([
+      { id: "turn-1", chatId: "main", status: "running" },
+      { id: "turn-2", chatId: "design", status: "pending" },
+    ]);
+
+    expect(open.main.queued).toBe(false);
+    expect(open.design.queued).toBe(true);
+  });
+});
+
+/**
+ * The id reconciliation at the 202 call site.
+ *
+ * Strictly better than the synchronous path it replaces: since the message is
+ * journaled at accept time, the durable id is a fact within milliseconds rather
+ * than after the whole turn — so the operator's own bubble becomes replyable and
+ * reactable immediately instead of at settle.
+ */
+describe("reconciling the optimistic id from a 202", () => {
+  it("swaps the local id for the durable one the accept already minted", async () => {
+    const { client: c } = client(202, {
+      turnId: "turn-1",
+      messageId: "42",
+      detached: true,
+    });
+
+    const answer = await c.chat("do the long thing", null, "main", null, undefined, true);
+    if (!isDetachedChat(answer)) throw new Error("expected the accepted shape");
+
+    // What `ChatView.send` does with it, before it branches on the shape at all.
+    const before = [{ id: "m1", from: "you", text: "do the long thing", at: 1_000 } as ChatMessage];
+    const after = reconcileIds(before, "m1", answer.messageId);
+
+    expect(after[0].id).toBe("h42");
+  });
+
+  it("carries a reply typed against the optimistic bubble across the swap", async () => {
+    const { client: c } = client(202, { turnId: "t", messageId: "42", detached: true });
+    const answer = await c.chat("the plan", null, "main", null, undefined, true);
+    if (!isDetachedChat(answer)) throw new Error("expected the accepted shape");
+
+    const before = [
+      { id: "m1", from: "you", text: "the plan", at: 1_000 } as ChatMessage,
+      { id: "m2", from: "you", text: "and this", at: 1_001, parentId: "m1" } as ChatMessage,
+    ];
+    const after = reconcileIds(before, "m1", answer.messageId);
+
+    // The race the immediate reconciliation makes shorter, not longer: the
+    // operator opened a thread on their own bubble while the turn ran.
+    expect(after[1].parentId).toBe("h42");
+  });
+});
