@@ -276,7 +276,12 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
 
     impl Visit for PageImportCheck<'_> {
         fn visit_import_decl(&mut self, n: &ImportDecl) {
-            Self::note(&mut self.disallowed, self.allowed, n.src.value.as_str(), None);
+            Self::note(
+                &mut self.disallowed,
+                self.allowed,
+                n.src.value.as_str(),
+                None,
+            );
         }
 
         fn visit_export_all(&mut self, n: &ExportAll) {
@@ -303,10 +308,9 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
             if matches!(n.callee, Callee::Import(_)) {
                 if self.disallowed.is_none() {
                     let spec = match n.args.first().map(|a| &a.expr) {
-                        Some(swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(Str {
-                            value,
-                            ..
-                        }))) => value.as_str().to_string(),
+                        Some(swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(
+                            Str { value, .. },
+                        ))) => value.as_str().to_string(),
                         _ => "a dynamic `import(…)`".to_string(),
                     };
                     self.disallowed = Some(spec);
@@ -1278,7 +1282,11 @@ export * from "https://evil.example/x.js";
             .await
             .expect("initial write ok");
 
-        let bundle = pages.page("revenue").await.expect("read ok").expect("exists");
+        let bundle = pages
+            .page("revenue")
+            .await
+            .expect("read ok")
+            .expect("exists");
         let rev = bundle.source.expect("source node").updated_at_millis;
 
         // A stale revision must be refused and leave the source untouched.
@@ -1291,7 +1299,11 @@ export * from "https://evil.example/x.js";
             .await
             .expect("execute ok");
         assert!(result.is_error, "a CAS mismatch must be refused");
-        let after = pages.page("revenue").await.expect("read ok").expect("exists");
+        let after = pages
+            .page("revenue")
+            .await
+            .expect("read ok")
+            .expect("exists");
         assert_eq!(
             after.source.expect("source node").updated_at_millis,
             rev,
@@ -1322,7 +1334,10 @@ export * from "https://evil.example/x.js";
         assert!(pages.page("temp").await.expect("read ok").is_some());
 
         let delete = PagesDeleteTool::new(pages.clone());
-        let result = delete.execute(json!({ "slug": "temp" })).await.expect("execute ok");
+        let result = delete
+            .execute(json!({ "slug": "temp" }))
+            .await
+            .expect("execute ok");
         assert!(!result.is_error, "delete should succeed");
         assert!(pages.page("temp").await.expect("read ok").is_none());
     }
