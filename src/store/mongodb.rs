@@ -4378,7 +4378,8 @@ mod test {
     #[tokio::test]
     async fn conformance_event_subscription_surfaces_gap() {
         let Some(s) = store().await else { return };
-        conformance::assert_event_subscription_surfaces_gap(s).await;
+        conformance::assert_event_subscription_surfaces_gap(s.clone()).await;
+        drop_db(&s).await;
     }
 
     #[tokio::test]
