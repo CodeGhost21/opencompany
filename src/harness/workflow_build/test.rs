@@ -1866,6 +1866,14 @@ fn spec_from(value: serde_json::Value) -> WorkflowGraphSpec {
     serde_json::from_value(value).expect("the spec parses")
 }
 
+/// A global-baseline roster teammate for the local-vs-global precedence tests.
+fn global_roster_entry(id: &str, role: &str, name: Option<&str>) -> RosterEntry {
+    RosterEntry {
+        global: true,
+        ..roster_entry(id, role, name)
+    }
+}
+
 /// The normalizer collapses `-`, `_` and whitespace runs so a role, an id and a
 /// name spelled three ways compare equal — and nothing fuzzier.
 #[test]
