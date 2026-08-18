@@ -86,6 +86,7 @@ function graphFor(id: string): WorkflowGraph {
   return {
     id,
     name: id,
+    version: null,
     nodes: [{ id: "start", kind: "trigger", name: "Start" }],
     edges: [],
   };
