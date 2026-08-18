@@ -4139,18 +4139,24 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md — plus the system roots
-        // boot always scaffolds beside them (issue #551), which are not seeded
-        // content and so are not what the re-seed gate is about. Filtering by
-        // `SYSTEM_ROOTS` rather than by name keeps this honest as that set
-        // changes (issue #645 took `Desks/` out of it).
+        // Seeded: README.md, Brand/, Brand/voice.md — plus runtime scaffold
+        // (`Agents/` and `secrets/README.md`) which is not what the re-seed
+        // gate is about.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
+            let secrets = tree
+                .iter()
+                .find(|node| {
+                    node.parent_id.is_none()
+                        && node.name == crate::company::workspace_scaffold::SECRETS_ROOT
+                })
+                .map(|node| node.id.as_str());
             let mut names: Vec<String> = tree
                 .iter()
-                .map(|n| n.name.clone())
-                .filter(|name| {
-                    !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&name.as_str())
+                .filter(|node| {
+                    !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&node.name.as_str())
+                        && node.parent_id.as_deref() != secrets
                 })
+                .map(|node| node.name.clone())
                 .collect();
             names.sort();
             names
@@ -4180,9 +4186,8 @@ mod test {
         assert!(runtime.store().load(&id).await.unwrap().is_some());
     }
 
-    /// Issue #551: boot lays down the workspace's system roots — and nothing
-    /// inside them. Since issue #645 that is `Agents/` alone: `Desks/` had no
-    /// producer, so it is minted on first use instead of standing empty here.
+    /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
+    /// has no producer, so it is minted on first use instead of standing empty.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
     /// that agent produces something, so a roster of teammates who have done
@@ -4194,7 +4199,7 @@ mod test {
     /// an existing company picks the root up.
     #[tokio::test]
     async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
-        use crate::company::workspace_scaffold::AGENTS_ROOT;
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -4219,15 +4224,19 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT],
-            "boot provisions the managed root with no seed dir — no `Desks/`, and no \
+            vec![AGENTS_ROOT, "README.md", SECRETS_ROOT],
+            "boot provisions the managed roots with no seed dir — no `Desks/`, and no \
              folder for a teammate that has produced nothing"
         );
         for node in &tree {
-            assert!(node.parent_id.is_none());
-            assert_eq!(node.kind, NodeKind::Folder);
             assert_eq!(node.created_by, WorkspaceOrigin::Seed);
         }
+        assert_eq!(
+            tree.iter()
+                .filter(|node| node.parent_id.is_none() && node.kind == NodeKind::Folder)
+                .count(),
+            2
+        );
 
         // An existing, non-empty workspace: an `is_empty` gate would have
         // skipped this boot entirely, and a company that predates the feature
@@ -4269,7 +4278,13 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, "Desks", "creative_studio"],
+            vec![
+                AGENTS_ROOT,
+                "Desks",
+                "README.md",
+                "creative_studio",
+                SECRETS_ROOT,
+            ],
             "the deleted root was re-provisioned, and the unmanaged `Desks/` left as it stood"
         );
     }
@@ -4278,7 +4293,7 @@ mod test {
     /// roster: a company with no agents at all still gets it.
     #[tokio::test]
     async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
-        use crate::company::workspace_scaffold::AGENTS_ROOT;
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
 
         let home_dir = tmp_home("oc-noagents-");
         let id = CompanyId::new("acme");
@@ -4294,7 +4309,7 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT]);
+        assert_eq!(names, vec![AGENTS_ROOT, "README.md", SECRETS_ROOT]);
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the

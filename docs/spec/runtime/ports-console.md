@@ -330,15 +330,16 @@ Backends persist the node as opaque JSON and both fields are
 round-trip, the write stamp, and the rename non-stamp across all three
 backends.
 
-**`Agents/` and `Desks/` (#551, #645).** `company::workspace_scaffold` owns the
-workspace's two reserved system roots and the folders beneath them, on two
-different schedules:
+**System workspace roots.** `company::workspace_scaffold` owns `Agents/`,
+`Desks/`, and the operator-only `secrets/` subtree on different schedules:
 
 * `ensure_workspace_scaffold` adopt-or-creates the roots listed in
-  `SYSTEM_ROOTS` — `Agents` alone — **empty**, from one seam:
+  `SYSTEM_ROOTS` — `Agents` and lowercase `secrets` — from one seam:
   `RuntimeBuilder::build` (boot). It takes no roster (a company with no agents
-  still gets it), so an existing company picks it up on its next boot.
-  Idempotent; one tree read.
+  still gets them), so an existing company picks them up on its next boot.
+  `Agents/` stays empty; `secrets/README.md` explains that every agent workspace
+  tool omits or refuses this subtree while operator APIs retain normal access.
+  Idempotent.
 * `ensure_agent_folder` / `ensure_desk_folder` adopt-or-create
   `Agents/<agent-id>/` and `Desks/<desk-id>/` **on demand**, returning the node
   id, called when that agent or desk first produces something. A folder means
@@ -358,8 +359,9 @@ Both are fail-closed: a name collision (a *file* of that name, or several nodes
 sharing it) is never resolved by creating a duplicate that would make the path
 permanently ambiguous. The scaffold warns and skips, since nothing waits on its
 result; a minter returns the collision as an error, since its caller needs the
-id. The folder is an organizational and attribution unit only; agents may
-create and write **anywhere** in their company's tree.
+id. The agent/desks folders are organizational and attribution units only;
+agents may create and write ordinary shared content anywhere. `secrets/` is
+the operator-only exception on the workspace tool surface.
 
 ### FactStore
 

@@ -362,6 +362,10 @@ impl CompanyManifest {
             }
         }
 
+        // `ledgers` grants (per-agent ledger access): see `ledger_grant_problems`.
+        let (builtin_ledgers, _) = crate::ledger::builtins();
+        problems.extend(ledger_grant_problems(&self.agents, &builtin_ledgers));
+
         // Connections: a provider is required; a stated priority must be known.
         for (index, connection) in self.connections.iter().enumerate() {
             let label = if connection.provider.trim().is_empty() {
@@ -687,6 +691,55 @@ pub(crate) fn is_snake_case(id: &str) -> bool {
     }
     id.chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Problems from every agent's `[[agent]].ledgers` grants, checked against
+/// `builtin_ledgers`.
+///
+/// An `access = "record"` grant that a built-in ledger's `writers` excludes is
+/// a manifest error rather than a silent tool refusal at call time — the two
+/// sources of truth (the agent's grant, the ledger's `writers`) must not
+/// disagree for a slug the manifest can actually see. A company-declared
+/// ledger is not checked here: it may not exist yet when the manifest is
+/// validated (the same reasoning as `context`'s missing-document rule), so any
+/// disagreement there surfaces as an ordinary tool refusal at call time
+/// instead. A free function, not a `CompanyManifest` method, so it can be
+/// pointed at a synthetic ledger list in a test without a real registry.
+fn ledger_grant_problems(
+    agents: &[crate::company::Agent],
+    builtin_ledgers: &[crate::ledger::LedgerSpec],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for agent in agents {
+        let label = if agent.id.is_empty() {
+            "an agent".to_string()
+        } else {
+            format!("agent `{}`", agent.id)
+        };
+        let Some(grants) = &agent.ledgers else {
+            continue;
+        };
+        for grant in grants {
+            if grant.access != crate::company::LedgerAccess::Record {
+                continue;
+            }
+            let Some(spec) = builtin_ledgers
+                .iter()
+                .find(|spec| spec.slug.eq_ignore_ascii_case(grant.name.trim()))
+            else {
+                continue;
+            };
+            if !spec.writable_by(&agent.id) {
+                problems.push(format!(
+                    "{label} declares `ledgers` access `record` to `{}`, but that ledger's \
+                     `writers` does not name this agent — the two must agree. Either add `{}` to \
+                     `{}`'s `writers`, or change this grant to `read`.",
+                    spec.slug, agent.id, spec.slug
+                ));
+            }
+        }
+    }
+    problems
 }
 
 /// Parses a decimal USD string, rejecting anything non-numeric or negative.
@@ -1142,6 +1195,65 @@ mod tests {
                  validator rejects — unreachable from a company.toml: {problems:?}"
             );
         }
+    }
+
+    /// An `access = "record"` grant to a built-in ledger whose `writers`
+    /// excludes this agent must not silently disagree — it is a manifest
+    /// error, not a refusal the agent discovers at call time.
+    #[test]
+    fn a_record_grant_disagreeing_with_a_builtins_writers_is_rejected() {
+        let agents = vec![toml::from_str::<crate::company::Agent>(
+            "id = \"intern\"\nrole = \"Intern\"\nledgers = [{ name = \"risks\", access = \"record\" }]\n",
+        )
+        .unwrap()];
+        let risks = crate::ledger::parse(
+            &serde_json::json!({
+                "slug": "risks",
+                "title": "Risks",
+                "fields": [
+                    { "name": "id", "role": "id" },
+                    { "name": "risk", "role": "title" },
+                    { "name": "status", "role": "status" }
+                ],
+                "statuses": [{ "name": "open" }, { "name": "closed", "closed": true }],
+                "writers": ["cfo"]
+            }),
+            true,
+        )
+        .unwrap();
+
+        let problems = ledger_grant_problems(&agents, &[risks]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("agent `intern`"), "{}", problems[0]);
+        assert!(problems[0].contains("`risks`"), "{}", problems[0]);
+        assert!(problems[0].contains("writers"), "{}", problems[0]);
+    }
+
+    /// A `read` grant never conflicts with `writers` — only `record` implies
+    /// write access, so only `record` is checked.
+    #[test]
+    fn a_read_grant_never_conflicts_with_writers() {
+        let agents = vec![toml::from_str::<crate::company::Agent>(
+            "id = \"intern\"\nrole = \"Intern\"\nledgers = [{ name = \"risks\", access = \"read\" }]\n",
+        )
+        .unwrap()];
+        let risks = crate::ledger::parse(
+            &serde_json::json!({
+                "slug": "risks",
+                "title": "Risks",
+                "fields": [
+                    { "name": "id", "role": "id" },
+                    { "name": "risk", "role": "title" },
+                    { "name": "status", "role": "status" }
+                ],
+                "statuses": [{ "name": "open" }, { "name": "closed", "closed": true }],
+                "writers": ["cfo"]
+            }),
+            true,
+        )
+        .unwrap();
+
+        assert!(ledger_grant_problems(&agents, &[risks]).is_empty());
     }
 
     /// A `delegates_to` entry must name a real desk (issue #176).
