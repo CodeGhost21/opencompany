@@ -922,11 +922,11 @@ impl CompanyRuntime {
     /// [`RunStatus::Pending`]: crate::ports::runs::RunStatus::Pending
     #[cfg(feature = "openhuman")]
     async fn open_run(&self, task: &TaskRecord) -> Option<String> {
-        let spec = crate::ports::runs::NewRun {
-            id: crate::ports::generate_id(),
-            task_id: task.id.clone(),
-            agent_id: task.assignee.clone(),
-        };
+        let spec = crate::ports::runs::NewRun::for_task(
+            crate::ports::generate_id(),
+            task.id.clone(),
+            task.assignee.clone(),
+        );
         match self.ops.runs.create_run(&self.id, spec).await {
             Ok(run) => {
                 tracing::debug!(
@@ -1126,7 +1126,13 @@ impl CompanyRuntime {
     /// durable lifecycle an operator chose (paused, archived) and renders `409`;
     /// this one is a process-local window that clears itself within a turn and
     /// renders `503`.
-    fn ensure_accepting(&self) -> Result<()> {
+    /// `pub(crate)` since issue #983 rather than private: a caller that journals
+    /// its own input has to be able to ask this **before** it writes, since a
+    /// refusal ordered after the append would leave a message in the transcript
+    /// that no turn will ever answer. Every in-tree caller still goes through
+    /// one of the cycle entry points below; this exists so the chat route can
+    /// run the same check one step earlier.
+    pub(crate) fn ensure_accepting(&self) -> Result<()> {
         if self.is_quiesced() {
             return Err(OpenCompanyError::Quiescing(self.id.as_ref().to_string()));
         }
@@ -1137,6 +1143,31 @@ impl CompanyRuntime {
     pub async fn run_cycle(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
         self.ensure_accepting()?;
         CycleRunner::new(self).run(events).await
+    }
+
+    /// [`run_cycle`](Self::run_cycle), for inputs the caller has **already**
+    /// appended to the journal (issue #983).
+    ///
+    /// The chat route journals the operator's message the instant the request
+    /// is accepted, so the transcript is correct from acceptance rather than
+    /// from whenever the cycle wins the per-company serial lock — behind a busy
+    /// company, an unbounded time later. Handing the seq over here is what stops
+    /// the same message being appended a second time.
+    ///
+    /// `run_id` is a run row moved `Pending` → `Running` once that lock is
+    /// actually held; see [`CycleRunner::run_journaled`].
+    ///
+    /// Deliberately a second entry point rather than a parameter on the first:
+    /// every other trigger — scheduler, cron, webhooks, telegram, delegation,
+    /// approval follow-ups — keeps `run_cycle` byte-unchanged, so the append
+    /// they rely on cannot be turned off by a mistake at a call site.
+    pub async fn run_journaled_cycle(
+        &self,
+        events: Vec<(EventSeq, CompanyEvent)>,
+        run_id: Option<String>,
+    ) -> Result<CycleReport> {
+        self.ensure_accepting()?;
+        CycleRunner::new(self).run_journaled(events, run_id).await
     }
 
     /// Resolves a parked approval and runs a follow-up cycle so the brain learns

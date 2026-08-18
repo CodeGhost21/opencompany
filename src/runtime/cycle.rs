@@ -179,6 +179,13 @@ impl ResolveReceipt {
 /// Deliberately coarse and deliberately not the event's payload: this lands in a
 /// durable record, and a label is not the place for message text or tool
 /// arguments.
+fn cycle_trigger_of(events: &[(Option<EventSeq>, CompanyEvent)]) -> String {
+    match events.first() {
+        Some((_, first)) => cycle_trigger(std::slice::from_ref(first)),
+        None => "empty".to_string(),
+    }
+}
+
 fn cycle_trigger(events: &[CompanyEvent]) -> String {
     let Some(first) = events.first() else {
         return "empty".to_string();
@@ -229,8 +236,63 @@ impl<'a> CycleRunner<'a> {
     /// deliberate — a banked decision is *correctly* not running, and giving it
     /// a bracket would leave an open cycle that never closes and never should.
     pub async fn run(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
+        // Every input still needs appending — this is the wrapper every trigger
+        // but the chat route uses, and it is byte-unchanged from its pre-#983
+        // self.
+        self.run_bracketed(
+            events.into_iter().map(|event| (None, event)).collect(),
+            None,
+        )
+        .await
+    }
+
+    /// [`run`](Self::run), for inputs whose journal append has **already
+    /// happened** (issue #983).
+    ///
+    /// The chat route appends the operator's message the instant the request is
+    /// accepted, before it takes this lock, so `chat/history` is correct from
+    /// acceptance rather than from whenever the cycle wins the per-company
+    /// mutex — which, behind a busy company, is an unbounded time later. That
+    /// append must not then happen a second time in here, so the caller hands
+    /// over each event together with the [`EventSeq`] it was appended under and
+    /// this skips the write.
+    ///
+    /// **Everything downstream stays keyed on the supplied seqs.** The
+    /// `TaskDispatched` → `begin_run` handling, `CycleReport::input_seqs` (and
+    /// therefore the chat response's `messageId`), and the seq list the brain
+    /// sees are all built from them, so a pre-journaled cycle is
+    /// indistinguishable from an appending one everywhere except in who wrote
+    /// the line.
+    ///
+    /// `run_id` is a run row to move `Pending` → `Running` once the serial lock
+    /// is actually held. That placement is the point: a chat turn's row is
+    /// minted at accept time, so `Pending` means "queued behind other turns" and
+    /// `Running` means "owns the lock" — a distinction the caller cannot make
+    /// from outside, because the wait on the lock happens in here.
+    pub async fn run_journaled(
+        &self,
+        events: Vec<(EventSeq, CompanyEvent)>,
+        run_id: Option<String>,
+    ) -> Result<CycleReport> {
+        self.run_bracketed(
+            events
+                .into_iter()
+                .map(|(seq, event)| (Some(seq), event))
+                .collect(),
+            run_id,
+        )
+        .await
+    }
+
+    /// The shared body of both entry points: open the journal bracket, take the
+    /// serial lock, run, close the bracket.
+    async fn run_bracketed(
+        &self,
+        events: Vec<(Option<EventSeq>, CompanyEvent)>,
+        run_id: Option<String>,
+    ) -> Result<CycleReport> {
         let cycle_id = crate::ports::generate_id();
-        let trigger = cycle_trigger(&events);
+        let trigger = cycle_trigger_of(&events);
 
         // Best-effort, and it must stay that way: record-keeping does not get to
         // refuse a cycle. A failed open simply means this cycle is unbracketed,
@@ -250,7 +312,7 @@ impl<'a> CycleRunner<'a> {
         }
 
         let guard = self.rt.serial.lock().await;
-        let outcome = self.run_locked(events, cycle_id.clone()).await;
+        let outcome = self.run_locked(events, cycle_id.clone(), run_id).await;
         // Closed while the lock is still held, so the bracket cannot outlive the
         // critical section it describes.
         let error = outcome.as_ref().err().map(|err| err.to_string());
@@ -273,19 +335,28 @@ impl<'a> CycleRunner<'a> {
 
     async fn run_locked(
         &self,
-        mut events: Vec<CompanyEvent>,
+        inputs: Vec<(Option<EventSeq>, CompanyEvent)>,
         cycle_id: String,
+        run_id: Option<String>,
     ) -> Result<CycleReport> {
         let company = self.rt.id.clone();
 
         // 2. Persist input — durable before any thinking.
         let mut persisted_seq = None;
-        let mut event_seqs = Vec::with_capacity(events.len());
+        let mut event_seqs = Vec::with_capacity(inputs.len());
         // Issue #242: the attempt rows this cycle is about to run, moved
         // `Pending` → `Running` below and backstopped after the brain returns.
         let mut dispatched_runs: Vec<String> = Vec::new();
-        for event in &events {
-            let seq = self.rt.events.append(&company, event.clone()).await?;
+        let mut events: Vec<CompanyEvent> = Vec::with_capacity(inputs.len());
+        for (journaled, event) in inputs {
+            // Issue #983: an input the caller already appended keeps the seq it
+            // was appended under. Everything below is keyed on `seq` and not on
+            // who wrote it, so the two entry points diverge here and nowhere
+            // else.
+            let seq = match journaled {
+                Some(seq) => seq,
+                None => self.rt.events.append(&company, event.clone()).await?,
+            };
             event_seqs.push(seq);
             persisted_seq = Some(seq);
             // Start the run here, not inside the brain: the serial lock is held,
@@ -296,7 +367,7 @@ impl<'a> CycleRunner<'a> {
             if let CompanyEvent::TaskDispatched {
                 run_id: Some(run_id),
                 ..
-            } = event
+            } = &event
             {
                 match self.rt.runs().begin_run(&company, run_id, seq).await {
                     Ok(_) => dispatched_runs.push(run_id.clone()),
@@ -314,6 +385,34 @@ impl<'a> CycleRunner<'a> {
                     ),
                 }
             }
+            events.push(event);
+        }
+
+        // Issue #983: the caller's own run row, moved `Pending` → `Running`
+        // here — inside the serial lock — because that is what makes the two
+        // statuses mean anything. A row started at accept time would read
+        // `Running` while it was in fact queued behind another turn, which is
+        // precisely the wait an operator staring at a slow company needs to see.
+        //
+        // Deliberately **not** added to `dispatched_runs`: the terminality
+        // backstop settles what it started as soon as this cycle ends, and the
+        // chat turn's settle belongs to the task that also journals its replies,
+        // which outlives this call. A cycle error still settles the row — the
+        // caller sees the `Err` and settles it `Failed` — and a panic is the
+        // boot reaper's job, exactly as it is for a dispatch.
+        //
+        // Best-effort and logged, on the same terms as the dispatch rows above:
+        // record-keeping does not get to fail the work it records.
+        if let Some(run_id) = run_id.as_deref()
+            && let Some(seq) = event_seqs.first().copied()
+            && let Err(err) = self.rt.runs().begin_run(&company, run_id, seq).await
+        {
+            tracing::warn!(
+                company = %company,
+                run = %run_id,
+                error = %err,
+                "[runs] could not start a turn row; the turn runs untracked"
+            );
         }
 
         // 3. Load — history, context index, roster.
@@ -534,10 +633,16 @@ impl<'a> CycleRunner<'a> {
             // The reason goes onto the note so the board says why, and the move
             // is guarded: a card an operator has since dragged, or that a later
             // attempt parked, is left exactly where it is.
+            // Issue #983: a card-less run has no card to strand, so there is
+            // nothing here to make truthful. Settling the row above was the
+            // whole of this run's cleanup.
+            let Some(task_id) = run.task_id.as_deref() else {
+                continue;
+            };
             match crate::runtime::advance::advance_settled_card(
                 self.rt.tasks().as_ref(),
                 company,
-                &run.task_id,
+                task_id,
                 RunStatus::Failed,
                 &reason,
             )
@@ -546,7 +651,7 @@ impl<'a> CycleRunner<'a> {
                 Ok(Some(column)) => tracing::info!(
                     company = %company,
                     run = %id,
-                    task = %run.task_id,
+                    task = %task_id,
                     column,
                     "[runs] the terminality backstop returned a stranded card"
                 ),
@@ -557,7 +662,7 @@ impl<'a> CycleRunner<'a> {
                 Err(err) => tracing::warn!(
                     company = %company,
                     run = %id,
-                    task = %run.task_id,
+                    task = %task_id,
                     error = %err,
                     "[runs] the terminality backstop settled an attempt but could not move its card"
                 ),
@@ -1831,6 +1936,13 @@ fn cycle_task_id(
             // work merely by existing, and that work's own card writes would
             // announce again.
             | CompanyEvent::TaskCardChanged { .. }
+            // Issue #983: the accept/settle brackets of a chat turn. Records of
+            // something that already happened, exactly like the workflow-run
+            // brackets above — they name no card, and they are appended by the
+            // route that already started the turn they describe, so treating
+            // either as a stimulus would make a turn re-trigger itself.
+            | CompanyEvent::TurnStarted { .. }
+            | CompanyEvent::TurnFailed { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -2003,6 +2115,13 @@ fn cycle_conversation(
             // work merely by existing, and that work's own card writes would
             // announce again.
             | CompanyEvent::TaskCardChanged { .. }
+            // Issue #983: the accept/settle brackets of a chat turn. Records of
+            // something that already happened, exactly like the workflow-run
+            // brackets above — they name no card, and they are appended by the
+            // route that already started the turn they describe, so treating
+            // either as a stimulus would make a turn re-trigger itself.
+            | CompanyEvent::TurnStarted { .. }
+            | CompanyEvent::TurnFailed { .. }
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
@@ -3049,11 +3168,7 @@ mod test {
         rt.runs()
             .create_run(
                 rt.id(),
-                crate::ports::runs::NewRun {
-                    id: crate::ports::generate_id(),
-                    task_id: task.to_string(),
-                    agent_id: "ceo".to_string(),
-                },
+                crate::ports::runs::NewRun::for_task(crate::ports::generate_id(), task, "ceo"),
             )
             .await
             .expect("mint a run")
@@ -6897,6 +7012,171 @@ mod test {
         assert!(
             !rt.pending_approvals()[0].broadly_grantable,
             "sending mail stays a per-call decision"
+        );
+    }
+
+    // ── Issue #983: the pre-journaled entry point ────────────────────────────
+
+    /// Every input of a cycle appears in the journal **exactly once**, whichever
+    /// entry point drove it.
+    ///
+    /// This is the pin the plumbing change is worth having. `run_cycle` is what
+    /// every other trigger in the tree uses — the scheduler, cron, webhooks, the
+    /// telegram poller, delegation, approval follow-ups — so the append it does
+    /// must stay exactly one per input; and `run_journaled_cycle`, which exists
+    /// so the chat route can append at accept time instead, must do none. Either
+    /// half getting it wrong is invisible at the call site and shows up as a
+    /// duplicated (or missing) message in somebody's transcript.
+    ///
+    /// It also pins `CycleReport::input_seqs`, and therefore the chat response's
+    /// `messageId`: the pre-journaled path reports back the seqs it was handed,
+    /// not seqs of its own.
+    #[tokio::test]
+    async fn each_input_is_journaled_exactly_once_by_either_entry_point() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let rt = RuntimeBuilder::new(home, manifest("full"))
+            .with_brain(Arc::new(CapturingBrain {
+                seen: Arc::clone(&seen),
+            }))
+            .build()
+            .await
+            .unwrap();
+
+        let ask = |text: &str| CompanyEvent::OperatorMessage {
+            text: text.to_string(),
+            by: None,
+            chat: None,
+            parent: None,
+            deliverable: None,
+        };
+        let messages = |stored: &[crate::ports::types::StoredEvent]| -> Vec<String> {
+            stored
+                .iter()
+                .filter_map(|s| match &s.event {
+                    CompanyEvent::OperatorMessage { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // The appending wrapper: one line per input, and the report names them.
+        let appended = rt.run_cycle(vec![ask("first")]).await.unwrap();
+        let stored = rt
+            .events()
+            .read_from(rt.id(), EventSeq::new(0), 1_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages(&stored),
+            ["first"],
+            "the appending entry point wrote its input exactly once"
+        );
+        assert_eq!(appended.input_seqs.len(), 1);
+        assert_eq!(
+            stored
+                .iter()
+                .find(|s| matches!(&s.event, CompanyEvent::OperatorMessage { text, .. } if text == "first"))
+                .map(|s| s.seq),
+            appended.input_seqs.first().copied(),
+            "the reported seq is the one the message was appended under"
+        );
+
+        // The pre-journaled entry point: the caller's append is the only one.
+        let pre = rt.events().append(rt.id(), ask("second")).await.unwrap();
+        let journaled = rt
+            .run_journaled_cycle(vec![(pre, ask("second"))], None)
+            .await
+            .unwrap();
+        let stored = rt
+            .events()
+            .read_from(rt.id(), EventSeq::new(0), 1_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            messages(&stored),
+            ["first", "second"],
+            "the pre-journaled entry point appended its input a second time"
+        );
+        assert_eq!(
+            journaled.input_seqs,
+            vec![pre],
+            "the report carries the seq the caller supplied, not one of its own"
+        );
+
+        // And the brain saw both, so skipping the append did not skip the input.
+        assert_eq!(*seen.lock().expect("seen"), ["first", "second"]);
+    }
+
+    /// A pre-journaled cycle moves the caller's run row to `Running` **inside**
+    /// the serial lock, and leaves settling it to the caller.
+    ///
+    /// Both halves matter. Starting the row outside the lock would make
+    /// `Running` mean "accepted" rather than "owns the lock", which is exactly
+    /// the queued-behind-another-turn wait an operator needs to see. And letting
+    /// the cycle's terminality backstop settle it would close the row while the
+    /// task that journals the turn's replies is still running.
+    #[tokio::test]
+    async fn a_journaled_cycle_starts_the_callers_run_and_leaves_it_running() {
+        use crate::ports::runs::{NewRun, RunStatus};
+
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let rt = RuntimeBuilder::new(home, manifest("full"))
+            .build()
+            .await
+            .unwrap();
+        rt.runs()
+            .create_run(rt.id(), NewRun::for_chat("turn-1", "general", "ceo"))
+            .await
+            .unwrap();
+
+        let seq = rt
+            .events()
+            .append(
+                rt.id(),
+                CompanyEvent::OperatorMessage {
+                    text: "hello".into(),
+                    by: None,
+                    chat: None,
+                    parent: None,
+                    deliverable: None,
+                },
+            )
+            .await
+            .unwrap();
+        rt.run_journaled_cycle(
+            vec![(
+                seq,
+                CompanyEvent::OperatorMessage {
+                    text: "hello".into(),
+                    by: None,
+                    chat: None,
+                    parent: None,
+                    deliverable: None,
+                },
+            )],
+            Some("turn-1".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let row = rt
+            .runs()
+            .get_run(rt.id(), "turn-1")
+            .await
+            .unwrap()
+            .expect("the row survives the cycle");
+        assert_eq!(
+            row.status,
+            RunStatus::Running,
+            "the cycle started the row and must not have settled it"
+        );
+        assert_eq!(
+            row.trigger_event_seq,
+            Some(seq),
+            "the row is stamped with the seq the caller supplied"
         );
     }
 }

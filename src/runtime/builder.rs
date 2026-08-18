@@ -1533,10 +1533,18 @@ impl RuntimeBuilder {
             match crate::ports::runs::reap_orphaned_runs(ops.runs.as_ref(), &id).await {
                 Ok(reaped) => {
                     for run in reaped {
+                        // Issue #983: a reaped chat turn names no card, so the
+                        // row settle above was the whole of its cleanup. The
+                        // transcript half — folding its unterminated
+                        // `TurnStarted` into a `TurnFailed` — is the journal
+                        // sweep further down, not this one.
+                        let Some(task_id) = run.task_id.as_deref() else {
+                            continue;
+                        };
                         match crate::runtime::advance::advance_settled_card(
                             ops.tasks.as_ref(),
                             &id,
-                            &run.task_id,
+                            task_id,
                             crate::ports::runs::RunStatus::Failed,
                             crate::ports::runs::ORPHAN_ERROR,
                         )
@@ -1545,7 +1553,7 @@ impl RuntimeBuilder {
                             Ok(Some(column)) => tracing::info!(
                                 company = %id,
                                 run = %run.id,
-                                task = %run.task_id,
+                                task = %task_id,
                                 column,
                                 "returned a card stranded by a previous host process"
                             ),
@@ -1556,7 +1564,7 @@ impl RuntimeBuilder {
                             Err(err) => tracing::warn!(
                                 company = %id,
                                 run = %run.id,
-                                task = %run.task_id,
+                                task = %task_id,
                                 error = %err,
                                 "reaped an orphaned run but could not return its card"
                             ),
@@ -1621,6 +1629,28 @@ impl RuntimeBuilder {
         // logged inside the sweep and never stops a company booting.
         if handover.is_none() {
             crate::runtime::sweep_interrupted_runs(&events, &id).await;
+
+            // Issue #983, the chat-turn equivalent, resting on the same three
+            // invariants: a turn journals a `TurnStarted` before it takes the
+            // serial lock, every turn is driven in this process, and one process
+            // owns this journal. So a start with no terminal at boot is a turn
+            // that died with the last host — and without this the operator's
+            // question sits in the transcript with no answer after it and no
+            // explanation, which is indistinguishable from a message that never
+            // warranted a reply.
+            //
+            // The row half of the same turn is reclaimed by
+            // `reap_orphaned_runs` above; this is the transcript half. Both are
+            // needed: the row makes a status query honest, the event makes the
+            // conversation honest, and neither can be derived from the other.
+            //
+            // Gated on the handover for exactly the reason the sweeps above are,
+            // and here the mis-fire is the worst of the three: a chat turn
+            // survives a live runtime swap — the drain covers its *cycle*, but
+            // the spawned task journals the replies and settles the row after
+            // that cycle returns — so sweeping mid-life would tell the operator
+            // their turn failed and then answer it.
+            crate::runtime::sweep_interrupted_turns(&events, &id).await;
 
             // Issue #390, the cycle-level equivalent, resting on the same three
             // invariants: a cycle journals a start before it takes the serial
@@ -3435,16 +3465,9 @@ mod test {
                 .await
                 .expect("first boot");
             let runs = rt.runs();
-            runs.create_run(
-                &id,
-                NewRun {
-                    id: "run-1".to_string(),
-                    task_id: "t-1".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
-            .await
-            .expect("mint");
+            runs.create_run(&id, NewRun::for_task("run-1", "t-1", "ceo"))
+                .await
+                .expect("mint");
             runs.begin_run(&id, "run-1", EventSeq::new(3))
                 .await
                 .expect("begin");
@@ -3974,11 +3997,7 @@ mod test {
         let home = home_dir.path().to_path_buf();
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
-        let spec = |run: &str, task: &str| NewRun {
-            id: run.to_string(),
-            task_id: task.to_string(),
-            agent_id: "ceo".to_string(),
-        };
+        let spec = |run: &str, task: &str| NewRun::for_task(run, task, "ceo");
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
             .with_id(id.clone())
@@ -4037,6 +4056,187 @@ mod test {
         assert!(runs.list_stale_active(&id).await.unwrap().is_empty());
     }
 
+    /// Issue #983: a chat turn the host died under is reclaimed on **both**
+    /// halves — a `Failed` row carrying the orphan reason, and a `TurnFailed`
+    /// line closing the transcript bracket.
+    ///
+    /// Both are needed and neither is derivable from the other. The row makes
+    /// `GET {scope}/runs` honest; the event makes the *conversation* honest,
+    /// and without it the operator's question sits there with no answer and no
+    /// explanation — which is what a message that never warranted a reply looks
+    /// like too. The turn names no card, which is exactly why the row sweep
+    /// alone leaves nothing an operator would ever find.
+    #[tokio::test]
+    async fn boot_reclaims_a_chat_turn_stranded_by_a_previous_host() {
+        use crate::ports::runs::{NewRun, ORPHAN_ERROR, RunStatus};
+        use crate::ports::types::{CompanyEvent, EventSeq};
+
+        let home_dir = tmp_home("oc-turn-reap-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+
+        let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        first_boot
+            .runs()
+            .create_run(&id, NewRun::for_chat("turn-dead", "general", "general"))
+            .await
+            .unwrap();
+        first_boot
+            .runs()
+            .begin_run(&id, "turn-dead", EventSeq::new(1))
+            .await
+            .unwrap();
+        first_boot
+            .events()
+            .append(
+                &id,
+                CompanyEvent::TurnStarted {
+                    turn_id: "turn-dead".to_string(),
+                    chat_id: "general".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The host dies here: no settle, no reply, no failure line.
+        drop(first_boot);
+
+        let second_boot = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let row = second_boot
+            .runs()
+            .get_run(&id, "turn-dead")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, RunStatus::Failed);
+        assert_eq!(row.error.as_deref(), Some(ORPHAN_ERROR));
+        assert_eq!(row.task_id, None, "a chat turn attempted no card");
+
+        let swept: Vec<String> = second_boot
+            .events()
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::TurnFailed { turn_id, error } if turn_id == "turn-dead" => {
+                    Some(error)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            swept,
+            vec![crate::runtime::TURN_INTERRUPTED_BY_RESTART.to_string()],
+            "the transcript bracket was left open by the boot sweep"
+        );
+    }
+
+    /// **The negative half, and the one that matters most.** A live runtime
+    /// rebuild must sweep *neither* half of a chat turn.
+    ///
+    /// This is the #290 lesson in its sharpest form. A rebuild happens in a
+    /// process that has been serving, so "nothing from this process can be in
+    /// flight" — the whole proof both sweeps rest on — is false. And a chat turn
+    /// is more exposed than a workflow run: `rebuild_company` quiesces and
+    /// drains the *cycle* lock, but the spawned turn task journals its replies
+    /// and settles its row **after** the cycle returns, so a turn is routinely
+    /// live at exactly the moment a rebuild reaches here. Sweeping would fail
+    /// the row out from under it — its own settle is then rejected by the
+    /// transition table — and tell the operator in the transcript that the turn
+    /// failed, moments before its answer arrives.
+    #[tokio::test]
+    async fn a_rebuild_sweeps_no_live_chat_turn() {
+        use crate::ports::runs::{NewRun, RunStatus};
+        use crate::ports::types::{CompanyEvent, EventSeq};
+
+        let home_dir = tmp_home("oc-turn-rebuild-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+
+        let live = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        live.runs()
+            .create_run(&id, NewRun::for_chat("turn-live", "general", "general"))
+            .await
+            .unwrap();
+        live.runs()
+            .begin_run(&id, "turn-live", EventSeq::new(1))
+            .await
+            .unwrap();
+        live.events()
+            .append(
+                &id,
+                CompanyEvent::TurnStarted {
+                    turn_id: "turn-live".to_string(),
+                    chat_id: "general".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The swap, as `rebuild_company` performs it: quiesce, hand over, build.
+        live.quiesce().await;
+        let successor = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_handover(live.handover())
+            .build()
+            .await
+            .unwrap();
+
+        let row = successor
+            .runs()
+            .get_run(&id, "turn-live")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.status,
+            RunStatus::Running,
+            "a rebuild failed a turn that is still working"
+        );
+        assert!(
+            !successor
+                .events()
+                .read_from(&id, EventSeq::new(0), usize::MAX)
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| matches!(&s.event, CompanyEvent::TurnFailed { .. })),
+            "a rebuild told the operator a live turn had failed"
+        );
+
+        // And the turn's own settle still lands, because nothing took the row
+        // to a terminal state behind its back.
+        successor
+            .runs()
+            .finish_run(
+                &id,
+                "turn-live",
+                crate::ports::runs::RunOutcome::new(RunStatus::Succeeded),
+            )
+            .await
+            .expect("the live turn can still settle itself");
+    }
+
     /// Issue #337, the crash-truthfulness half: reaping the *row* is not enough
     /// — the **card** has to leave In Progress too, or the board keeps claiming
     /// work that provably is not being done and nothing will ever re-drive it
@@ -4092,29 +4292,15 @@ mod test {
             .upsert(&id, &card("card-b", COLUMN_PAUSED))
             .await
             .unwrap();
-        runs.create_run(
-            &id,
-            NewRun {
-                id: "run-a".to_string(),
-                task_id: "card-a".to_string(),
-                agent_id: "ceo".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-a", "card-a", "ceo"))
+            .await
+            .unwrap();
         runs.begin_run(&id, "run-a", crate::ports::types::EventSeq::new(1))
             .await
             .unwrap();
-        runs.create_run(
-            &id,
-            NewRun {
-                id: "run-b".to_string(),
-                task_id: "card-b".to_string(),
-                agent_id: "ceo".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-b", "card-b", "ceo"))
+            .await
+            .unwrap();
         runs.begin_run(&id, "run-b", crate::ports::types::EventSeq::new(2))
             .await
             .unwrap();
@@ -4171,14 +4357,7 @@ mod test {
             RunStatus::Failed
         );
         let next = runs
-            .create_run(
-                &id,
-                NewRun {
-                    id: "run-a2".to_string(),
-                    task_id: "card-a".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
+            .create_run(&id, NewRun::for_task("run-a2", "card-a", "ceo"))
             .await
             .unwrap();
         assert_eq!(

@@ -4764,16 +4764,9 @@ members = ["engineer"]
             .upsert(&company, &card("t-1", assignee))
             .await
             .expect("seed");
-        runs.create_run(
-            &company,
-            NewRun {
-                id: "run-1".to_string(),
-                task_id: "t-1".to_string(),
-                agent_id: assignee.to_string(),
-            },
-        )
-        .await
-        .expect("mint");
+        runs.create_run(&company, NewRun::for_task("run-1", "t-1", assignee))
+            .await
+            .expect("mint");
         (brain.with_runs(Arc::clone(&runs)), tasks, runs)
     }
 
@@ -4881,16 +4874,9 @@ members = ["engineer"]
         let runs: Arc<dyn crate::ports::RunStore> = Arc::new(FsOps::new(dir.path()));
         let brain = brain.with_runs(Arc::clone(&runs));
         let company = CompanyId::new("acme");
-        runs.create_run(
-            &company,
-            NewRun {
-                id: "run-1".to_string(),
-                task_id: "t-gone".to_string(),
-                agent_id: "engineer".to_string(),
-            },
-        )
-        .await
-        .expect("mint");
+        runs.create_run(&company, NewRun::for_task("run-1", "t-gone", "engineer"))
+            .await
+            .expect("mint");
 
         assert!(
             brain

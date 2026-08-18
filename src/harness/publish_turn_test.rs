@@ -387,17 +387,9 @@ fn brain_with(
 async fn mint_run(ops: &Arc<FsOps>, run_id: &str, task_id: &str) {
     use crate::ports::RunStore;
     use crate::ports::runs::NewRun;
-    RunStore::create_run(
-        &**ops,
-        &company(),
-        NewRun {
-            id: run_id.to_string(),
-            task_id: task_id.to_string(),
-            agent_id: AGENT.to_string(),
-        },
-    )
-    .await
-    .expect("mint the attempt row");
+    RunStore::create_run(&**ops, &company(), NewRun::for_task(run_id, task_id, AGENT))
+        .await
+        .expect("mint the attempt row");
 }
 
 fn company() -> CompanyId {
