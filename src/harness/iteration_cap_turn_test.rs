@@ -48,7 +48,7 @@ use crate::harness::mcp_probe::McpFailureQueue;
 use crate::harness::orchestrator::{DelegationQueue, WorkflowRunnerHandle};
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::harness::provider::{HostedProvider, HostedProviderConfig};
-use crate::harness::{CompanyAgent, HarnessDeps, MAX_TURN_SPEND_USD};
+use crate::harness::{CompanyAgent, HarnessDeps};
 use crate::ports::types::CompanyId;
 use crate::store::{FsCompanyStore, FsContextStore};
 
@@ -322,35 +322,42 @@ async fn hit_cap(agent: &CompanyAgent) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// The per-turn ceiling is the **lower** of the absolute cap and the teammate's
-/// daily cap — and a malformed manifest value is ignored rather than forwarded.
+/// The in-turn brake arms **only** when the teammate declares a daily cap — and
+/// a malformed manifest value is ignored rather than forwarded.
 ///
-/// Forwarding it would be worse than ignoring it: the vendored hook fails closed
-/// on a non-finite or non-positive cap, so a zero would silently halt every turn
-/// that teammate ever ran at its first iteration.
+/// This is deliberate and matches upstream: openhuman constructs
+/// `BudgetStopHook` nowhere and applies only an opt-in token-based goal hook, so
+/// this crate, like upstream, refuses to invent a blanket per-turn number no
+/// operator can see or change. A teammate with no declared budget is not
+/// hard-stopped mid-turn. Forwarding a malformed value would be worse than
+/// ignoring it: the vendored hook fails closed on a non-finite or non-positive
+/// cap, so a zero would silently halt every turn that teammate ever ran at its
+/// first iteration.
 #[tokio::test]
-async fn the_per_turn_spend_ceiling_is_the_lower_of_the_two_caps() {
+async fn the_budget_brake_arms_only_when_a_daily_cap_is_declared() {
     let (model_url, _script) = spawn_script(vec![Turn::Say("hi")], 12).await;
     let dir = tempfile::tempdir().unwrap();
     let mut agent = company_agent(model_url, dir.path(), None, 0).await;
 
-    // No manifest cap (every shipped template today) → the absolute ceiling.
-    assert_eq!(agent.turn_spend_cap_usd(), MAX_TURN_SPEND_USD);
+    // No declared budget → no hook armed.
+    assert_eq!(agent.turn_spend_cap_usd(), None);
 
-    // A tighter daily cap also bounds a single turn.
+    // A declared daily cap arms the brake at exactly that value — one cap bounds
+    // the worst-case overshoot rather than "one turn, of unknown size".
     agent.budget_usd_daily = Some(2.0);
-    assert_eq!(agent.turn_spend_cap_usd(), 2.0);
+    assert_eq!(agent.turn_spend_cap_usd(), Some(2.0));
 
-    // A generous daily cap does NOT raise the per-turn ceiling.
     agent.budget_usd_daily = Some(500.0);
-    assert_eq!(agent.turn_spend_cap_usd(), MAX_TURN_SPEND_USD);
+    assert_eq!(agent.turn_spend_cap_usd(), Some(500.0));
 
-    // Malformed values fall back rather than arming a fail-closed hook.
+    // Malformed values arm nothing rather than a fail-closed hook: such a
+    // teammate is already refused pre-dispatch (`spent >= cap` holds at zero
+    // spend), so no hook is the safe and honest choice.
     for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         agent.budget_usd_daily = Some(bad);
         assert_eq!(
             agent.turn_spend_cap_usd(),
-            MAX_TURN_SPEND_USD,
+            None,
             "a manifest cap of {bad} must not reach the hook"
         );
     }
