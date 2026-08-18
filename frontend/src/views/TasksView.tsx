@@ -122,6 +122,7 @@ export function TasksView({
   client,
   company,
   taskEventTick,
+  attemptEventTick,
   approvals = EMPTY_APPROVALS,
   now,
   onOpenThread,
@@ -137,6 +138,13 @@ export function TasksView({
    * reload.
    */
   taskEventTick?: number;
+  /**
+   * Bumped on every `run_status_changed` (issue #1015), passed straight through
+   * to the detail screen. The board itself does not react to it: an attempt
+   * moving does not move a card, and folding it into `taskEventTick` would
+   * refetch the whole board on every transition of every run.
+   */
+  attemptEventTick?: number;
   /**
    * The company's parked approvals (issue #883), from the shell's existing feed
    * poll. A paused card is blocked until every approval its turn parked has
@@ -310,6 +318,7 @@ export function TasksView({
   if (detailId) {
     return (
       <TaskDetailView
+        attemptEventTick={attemptEventTick}
         client={client}
         company={company}
         taskId={detailId}
