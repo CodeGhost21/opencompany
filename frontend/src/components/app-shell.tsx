@@ -1411,6 +1411,17 @@ export function AppShell({
               />
             </Suspense>
           )}
+          {view === "pages" && (
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                  Loading pages…
+                </div>
+              }
+            >
+              <PagesView client={client} company={company} />
+            </Suspense>
+          )}
           {view === "finances" && (
             <Suspense
               fallback={

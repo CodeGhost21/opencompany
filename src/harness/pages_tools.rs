@@ -65,17 +65,14 @@ pub const PAGES_WRITE_TOOL: &str = "pages_write";
 /// Tool name: remove one page.
 pub const PAGES_DELETE_TOOL: &str = "pages_delete";
 
-/// The workspace root every page bundle lives under: `Pages/<slug>/`.
-pub const PAGES_ROOT: &str = "Pages";
-
-/// The manifest node's name inside a page's folder.
-const MANIFEST_NAME: &str = "page.toml";
-/// The source node's name inside a page's folder.
-const SOURCE_NAME: &str = "Page.tsx";
-/// The compiled output node's name inside a page's folder.
-const COMPILED_NAME: &str = "Page.compiled.mjs";
-/// The mime [`crate::server::ops::pages`] serves the compiled node as.
-const COMPILED_MIME: &str = "application/javascript";
+// The workspace layout — `Pages/<slug>/{page.toml,Page.tsx,Page.compiled.mjs}`
+// — is shared with `crate::server::ops::pages`, which is always compiled and
+// therefore cannot import from this `openhuman`-gated module. Both sides
+// import the same constants from `workspace_scaffold` instead.
+use crate::company::workspace_scaffold::{
+    PAGE_COMPILED_MIME as COMPILED_MIME, PAGE_COMPILED_NAME as COMPILED_NAME,
+    PAGE_MANIFEST_NAME as MANIFEST_NAME, PAGE_SOURCE_NAME as SOURCE_NAME, PAGES_ROOT,
+};
 
 /// Max bytes of `Page.tsx` source one `pages_write` call accepts.
 ///
