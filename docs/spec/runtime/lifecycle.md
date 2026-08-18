@@ -180,7 +180,6 @@ write every cycle — nothing is buffered beyond the current turn — so an
 explicit checkpoint is redundant; the work the drain waited for is already
 persisted. This note replaces the former step without changing the outcome.)
 
-
 Handling the signal at all is the load-bearing part: without a handler the
 default disposition applies and the process dies on the first signal, which is
 what a grace period on the pod spec is a window *for*. The tenant pod therefore
