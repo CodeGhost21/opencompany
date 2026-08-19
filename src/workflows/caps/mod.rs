@@ -228,7 +228,9 @@ pub async fn build_capabilities(
         );
         (
             Arc::new(dry_run::DryRunTools::new(grants, wiring.clone())),
-            Arc::new(dry_run::DryRunHttp),
+            Arc::new(dry_run::DryRunHttp::new(
+                record.manifest.tools.web_allowed_domains.clone(),
+            )),
             Arc::new(NoopState),
             Some(Arc::new(dry_run::DryRunAgent)),
         )
@@ -2267,12 +2269,18 @@ mod tests {
         .await
         .expect("build_capabilities");
 
-        // http: the stub echoes without sending, carrying the marker.
+        // http: the stub reports without sending, carrying the marker.
+        //
+        // A *public* URL, deliberately. This case used to use `127.0.0.1`, which
+        // the real guard refuses — so it asserted that the dry slot answers `ok`
+        // for a target no real run can reach, pinning issue #1048's false green
+        // in place. The slot being the stub is what this test is about; whether a
+        // given target is refused is `dry_run`'s own suite.
         let http_out = caps
             .http
-            .request(json!({ "url": "http://127.0.0.1:9/" }), None)
+            .request(json!({ "url": "https://example.com/hook" }), None)
             .await
-            .expect("dry http never fails");
+            .expect("an allowed target is not refused by the dry stub");
         assert_eq!(
             http_out["dry_run"],
             json!(true),
