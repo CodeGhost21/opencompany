@@ -165,7 +165,25 @@ impl Memory for FakeEngine {
     }
 
     async fn namespace_summaries(&self) -> anyhow::Result<Vec<NamespaceSummary>> {
-        Ok(Vec::new())
+        // Real summaries, derived from the rows: the mandatory composition's
+        // `export_page` WALKS these namespaces — a fake that reports none
+        // exports nothing, and every export/import test silently asserts on
+        // an empty page.
+        let rows = self.rows.lock().unwrap();
+        let mut namespaces: Vec<String> = rows.keys().map(|(ns, _)| ns.clone()).collect();
+        namespaces.sort();
+        namespaces.dedup();
+        Ok(namespaces
+            .into_iter()
+            .map(|namespace| {
+                let count = rows.keys().filter(|(ns, _)| *ns == namespace).count();
+                NamespaceSummary {
+                    namespace,
+                    count,
+                    last_updated: None,
+                }
+            })
+            .collect())
     }
 
     async fn count(&self) -> anyhow::Result<usize> {
@@ -637,4 +655,52 @@ async fn conformance_context_chunk_stamps() {
 #[tokio::test]
 async fn conformance_fact_store() {
     conformance::assert_fact_store(engine().facts()).await;
+}
+
+/// #914's acceptance names "taint survives export and re-import" and #1113
+/// found no test for it. This is the round trip: inbound content stored
+/// through the decorator (stamped `ExternalSync`), exported through the
+/// provider's portability family, imported into a *fresh* engine — and the
+/// taint must still be `ExternalSync` on the other side. A driver or a
+/// migration that laundered the stamp here would let content a company read
+/// from the web re-enter as something the company decided.
+#[tokio::test]
+async fn taint_survives_export_and_reimport() {
+    let (_fake, provider) = FakeEngine::with_handle();
+    let memory = BoundMemory::bind(provider.clone(), DriverClass::Embedded).unwrap();
+    memory
+        .inbound_context()
+        .put(
+            &acme_id(),
+            ContextChunk {
+                label: "web".into(),
+                body: "scraped from a page, must stay external".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let page = provider.export_page(None, 100).await.unwrap();
+    let exported: Vec<_> = page
+        .records
+        .iter()
+        .filter(|record| record.payload.to_string().contains("must stay external"))
+        .collect();
+    assert!(!exported.is_empty(), "the inbound chunk must export");
+    for record in &exported {
+        assert_eq!(
+            record.taint,
+            MemoryTaint::ExternalSync,
+            "export must carry the stamp, record {}",
+            record.id
+        );
+    }
+
+    let (importer, fresh) = FakeEngine::with_handle();
+    fresh.import_records(page.records).await.unwrap();
+    assert_eq!(
+        importer.taint_of("must stay external"),
+        Some(MemoryTaint::ExternalSync),
+        "re-import must land the content still stamped ExternalSync"
+    );
 }

@@ -119,8 +119,8 @@ impl From<MemoryDriverError> for OpenCompanyError {
 fn labels() -> ConfigLabels<'static> {
     ConfigLabels {
         section: "OPENCOMPANY_MEMORY",
-        drivers: "[memory]",
-        driver_entry: "[memory]",
+        drivers: "OPENCOMPANY_MEMORY_DRIVER",
+        driver_entry: "OPENCOMPANY_MEMORY_DRIVER",
     }
 }
 
@@ -156,8 +156,8 @@ pub fn open_driver(
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| {
                     MemoryDriverError(format!(
-                        "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_DRIVER (or \
-                         [memory].provider) naming the hosted engine — one of {}. There is no \
+                        "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_DRIVER \
+                         naming the hosted engine — one of {}. There is no \
                          default: binding the wrong hosted engine writes a company's memory \
                          somewhere it cannot be read back from.",
                         SUPPORTED_REMOTE_DRIVERS.join(", ")
@@ -165,13 +165,13 @@ pub fn open_driver(
                 })?;
             let url = require(
                 config.url.as_deref(),
-                "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_URL (or [memory].base_url) \
+                "OPENCOMPANY_MEMORY=remote requires OPENCOMPANY_MEMORY_URL \
                  naming the hosted engine's endpoint",
             )?;
             let key = require(
                 config.api_key.as_deref(),
                 "OPENCOMPANY_MEMORY=remote requires a credential: set OPENCOMPANY_MEMORY_API_KEY, \
-                 or name a SecretStore key with [memory].api_key_secret",
+                — the key is a secret and env is its only channel",
             )?;
             let class = admit(driver_id, DriverClass::External)?;
             (remote_provider(driver_id, url, key)?, class)
@@ -333,7 +333,7 @@ fn remote_provider(driver_id: &str, url: &str, key: &str) -> Result<Arc<dyn Memo
 fn open_failed(error: anyhow::Error) -> OpenCompanyError {
     OpenCompanyError::Config(format!(
         "could not open the configured memory engine: {error}. \
-         Check OPENCOMPANY_MEMORY_URL (or [memory].base_url)."
+         Check OPENCOMPANY_MEMORY_URL."
     ))
 }
 
@@ -526,13 +526,16 @@ mod test {
     }
 
     #[test]
-    fn remote_without_a_credential_refuses_and_names_both_ways_to_supply_one() {
+    fn remote_without_a_credential_refuses_and_names_the_knob() {
         let mut cfg = config(MemoryMode::Remote);
         cfg.driver_id = Some(SUPERMEMORY_DRIVER_ID.into());
         cfg.url = Some("https://memory.example".into());
         let error = open_driver(&cfg).err().unwrap().to_string();
         assert!(error.contains("OPENCOMPANY_MEMORY_API_KEY"), "{error}");
-        assert!(error.contains("api_key_secret"), "{error}");
+        // The refusal must not resurrect the phantom manifest knob (#1113):
+        // env is the credential's only channel, and the message says so.
+        assert!(!error.contains("api_key_secret"), "{error}");
+        assert!(error.contains("only channel"), "{error}");
     }
 
     #[test]
