@@ -1477,6 +1477,20 @@ mod tests {
     }
 
     #[test]
+    fn tenant_namespace_rejects_the_id_delimiter() {
+        // A namespace containing `--` makes the `<tenant>--` id prefix
+        // ambiguous between tenants, so the boundary that reads
+        // `OPENCOMPANY_TENANT_ID` rejects it.
+        assert!(validate_tenant_namespace("acme").is_ok());
+        assert!(validate_tenant_namespace("acme-corp").is_ok());
+        assert_eq!(
+            validate_tenant_namespace("acme--other").unwrap_err(),
+            "tenant namespace `acme--other` contains `--`, which is the company-id \
+             delimiter; a namespace may not contain it"
+        );
+    }
+
+    #[test]
     fn ownership_is_keyed_canonically_across_representations() {
         let state = AppState::new(AppConfig::default());
         let id = CompanyId::new("acme--acme");
