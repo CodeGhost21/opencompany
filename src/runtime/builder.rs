@@ -30,11 +30,11 @@ use crate::feedback::tinyhumans::TinyHumansClient;
 use crate::feedback::tool::BuiltinToolProvider;
 use crate::feedback::types::ConsentMode;
 #[cfg(feature = "openhuman")]
+use crate::harness::built_in::run_turn::HarnessRunTurn;
+#[cfg(feature = "openhuman")]
 use crate::harness::provider::{HostedProviderConfig, TenantProvider};
 #[cfg(feature = "openhuman")]
 use crate::harness::router::HarnessRouter;
-#[cfg(feature = "openhuman")]
-use crate::harness::built_in::run_turn::HarnessRunTurn;
 #[cfg(feature = "openhuman")]
 use crate::harness::{HarnessBrain, HarnessDeps};
 use crate::openhuman::rpc::OpenHumanRpc;
@@ -42,8 +42,6 @@ use crate::openhuman::{OpenHumanChannelAdapter, OpenHumanToolProvider};
 use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
-#[cfg(feature = "openhuman")]
-use crate::runtime::delegation::RunTurn;
 use crate::ports::types::{
     CompanyId, CompanyRecord, OverlayWorkflow, PolicyOverride, SecretValue, TemplateProvenance,
 };
@@ -53,6 +51,8 @@ use crate::ports::{
     SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore,
     WorkspaceStore,
 };
+#[cfg(feature = "openhuman")]
+use crate::runtime::delegation::RunTurn;
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
 use crate::ports::ScheduleFireStore;
@@ -2663,39 +2663,36 @@ impl RuntimeBuilder {
                             // lane plus each named lane, indexed by agent. Shared
                             // by the brain and the workflow runner so they cannot
                             // disagree about which agent lands on which engine.
-                            let default_lane: Arc<dyn RunTurn> = Arc::new(
-                                HarnessRunTurn::new(pool.clone(), Arc::new(deps.clone())),
-                            );
-                            let turn: Arc<dyn RunTurn> =
-                                if lanes.lanes.is_empty() && lanes.unavailable.is_empty() {
-                                    default_lane
-                                } else {
-                                    let default_harness = record.manifest.default_harness_id();
-                                    let bindings: HashMap<String, String> = record
-                                        .manifest
-                                        .agents
-                                        .iter()
-                                        .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
-                                        .collect();
-                                    Arc::new(HarnessRouter::from_lanes(
-                                        &default_harness,
-                                        default_lane,
-                                        &lanes.lanes,
-                                        &lanes.unavailable,
-                                        &bindings,
-                                    ))
-                                };
+                            let default_lane: Arc<dyn RunTurn> =
+                                Arc::new(HarnessRunTurn::new(pool.clone(), Arc::new(deps.clone())));
+                            let turn: Arc<dyn RunTurn> = if lanes.lanes.is_empty()
+                                && lanes.unavailable.is_empty()
+                            {
+                                default_lane
+                            } else {
+                                let default_harness = record.manifest.default_harness_id();
+                                let bindings: HashMap<String, String> = record
+                                    .manifest
+                                    .agents
+                                    .iter()
+                                    .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
+                                    .collect();
+                                Arc::new(HarnessRouter::from_lanes(
+                                    &default_harness,
+                                    default_lane,
+                                    &lanes.lanes,
+                                    &lanes.unavailable,
+                                    &bindings,
+                                ))
+                            };
 
                             // Workflow agent nodes route through the shared
                             // router, so a workflow node addressing a named-lane
                             // agent lands on that lane's engine instead of the
                             // default pool.
-                            let runner: Arc<dyn WorkflowRunner> =
-                                Arc::new(HarnessWorkflowRunner::new(
-                                    turn,
-                                    deps.clone(),
-                                    record.clone(),
-                                ));
+                            let runner: Arc<dyn WorkflowRunner> = Arc::new(
+                                HarnessWorkflowRunner::new(turn, deps.clone(), record.clone()),
+                            );
                             // Issue #67: fill the shared handle on `deps` (a clone
                             // of which the runner holds, and which moves into the
                             // brain below) so the orchestrator's `run_workflow` tool

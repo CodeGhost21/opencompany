@@ -631,7 +631,11 @@ impl Tool for WorkspaceRenameTool {
                         node = echo_path(&entry.path),
                     )));
                 }
-                match index.by_id.get(cursor).and_then(|e| e.node.parent_id.as_deref()) {
+                match index
+                    .by_id
+                    .get(cursor)
+                    .and_then(|e| e.node.parent_id.as_deref())
+                {
                     Some(parent_id) => cursor = parent_id,
                     None => break,
                 }

@@ -98,10 +98,7 @@ pub async fn run_workflow(
     // lane over that pool. Kept as its own entrypoint so the many single-pool
     // tests (and any single-harness caller) need not hand-assemble a router.
     let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
-        crate::harness::built_in::run_turn::HarnessRunTurn::new(
-            pool,
-            Arc::new(deps.clone()),
-        ),
+        crate::harness::built_in::run_turn::HarnessRunTurn::new(pool, Arc::new(deps.clone())),
     );
     run_workflow_lane_aware(turn, deps, record, workflow, input, ctx).await
 }

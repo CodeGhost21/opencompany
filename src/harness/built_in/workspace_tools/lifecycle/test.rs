@@ -623,7 +623,11 @@ async fn a_folder_cannot_be_moved_into_its_own_subfolder() {
     let home = own_home("acme").await;
     let mine = home.home_id().await;
     home.store
-        .create(&home.company, &folder("f-deep", "deep", Some("f-archive")), None)
+        .create(
+            &home.company,
+            &folder("f-deep", "deep", Some("f-archive")),
+            None,
+        )
         .await
         .unwrap();
 

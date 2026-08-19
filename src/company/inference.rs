@@ -966,9 +966,16 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(decl.base_url, "https://attacker.example/v1");
-        assert!(!decl.is_proxied(), "an arbitrary endpoint is not the subscription");
+        assert!(
+            !decl.is_proxied(),
+            "an arbitrary endpoint is not the subscription"
+        );
         assert_eq!(decl.telemetry_slug(), "openrouter");
-        assert_eq!(bearer(&decl).await, None, "the platform credential stays home");
+        assert_eq!(
+            bearer(&decl).await,
+            None,
+            "the platform credential stays home"
+        );
     }
 
     /// A committed manifest still saying `provider = "managed"` resolves as

@@ -73,6 +73,17 @@ pub mod embeddings;
 /// build — the console's Hosting settings write them whether or not this
 /// harness exists to use them.
 pub mod hosting;
+/// End-to-end proof of issue #988: a turn really does get
+/// [`MAX_TOOL_ITERATIONS`](build::MAX_TOOL_ITERATIONS) tool rounds instead of the
+/// vendored ten, and a budget-armed turn's in-turn
+/// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts it when it
+/// outruns its money — distinguishably from an iteration-cap pause. Test-only.
+///
+/// Declared here rather than at `crate::harness` because it reads
+/// `CompanyAgent`'s private `agent` field (the vendored session) to ask
+/// `last_turn_hit_cap` — a child of `built_in`, not of the re-exporting parent.
+#[cfg(test)]
+mod iteration_cap_turn_test;
 pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;
@@ -151,17 +162,6 @@ pub mod workflow_refs;
 #[cfg(test)]
 mod workspace_provision_turn_test;
 pub mod workspace_tools;
-/// End-to-end proof of issue #988: a turn really does get
-/// [`MAX_TOOL_ITERATIONS`](build::MAX_TOOL_ITERATIONS) tool rounds instead of the
-/// vendored ten, and a budget-armed turn's in-turn
-/// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts it when it
-/// outruns its money — distinguishably from an iteration-cap pause. Test-only.
-///
-/// Declared here rather than at `crate::harness` because it reads
-/// `CompanyAgent`'s private `agent` field (the vendored session) to ask
-/// `last_turn_hit_cap` — a child of `built_in`, not of the re-exporting parent.
-#[cfg(test)]
-mod iteration_cap_turn_test;
 /// End-to-end proof that the #237 workspace tools are reachable from a real
 /// turn, with only the model's choices stubbed. Test-only.
 #[cfg(test)]
