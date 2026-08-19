@@ -1606,6 +1606,123 @@ async fn a_stale_assignee_does_not_shield_the_card_from_the_question() {
     );
 }
 
+/// Seeds an overlay teammate onto the stored record, the way the console's
+/// `POST …/team` route and the orchestrator's `add_agent` tool both do.
+async fn add_overlay_agent(runtime: &Arc<CompanyRuntime>, id: &str, role: &str, description: &str) {
+    let mut record = runtime
+        .store()
+        .load(runtime.id())
+        .await
+        .expect("load")
+        .expect("record");
+    record
+        .overlay_agents
+        .push(crate::ports::types::OverlayAgent {
+            id: id.to_string(),
+            name: id.to_string(),
+            role: role.to_string(),
+            description: Some(description.to_string()),
+            tools: Vec::new(),
+        });
+    runtime.store().save(&record).await.expect("save");
+}
+
+/// The planner is shown the roster the company actually runs, not the half of
+/// it the manifest declares (CodeRabbit on #1157).
+///
+/// A teammate reaches the roster from four places and only two of them are
+/// manifest rows. `assignee::resolve` has always accepted the other two, so a
+/// runtime teammate was a name the host would honour and the planner had never
+/// heard of — it could not be proposed, and since #1106 could not be one of the
+/// candidates a person is asked to choose between.
+#[tokio::test]
+async fn the_prompt_carries_runtime_teammates_and_desks_not_just_manifest_ones() {
+    let model = ScriptedModel::replying(CLEAN_PLAN);
+    let (_home, runtime) = runtime_with(Arc::clone(&model)).await;
+    add_overlay_agent(
+        &runtime,
+        "social_manager",
+        "Social Media Manager",
+        "Runs the accounts",
+    )
+    .await;
+
+    let mut record = runtime.store().load(runtime.id()).await.unwrap().unwrap();
+    record.overlay_desks.push(crate::ports::types::OverlayDesk {
+        id: "growth".to_string(),
+        name: "Growth".to_string(),
+        description: None,
+        members: vec!["social_manager".to_string()],
+    });
+    runtime.store().save(&record).await.unwrap();
+
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-27", ""))
+        .await
+        .unwrap();
+    run_planning_pass(Arc::clone(&runtime), "t-27".to_string()).await;
+
+    let prompt = model.last_prompt();
+    assert!(
+        prompt.contains("`social_manager`"),
+        "an operator- or orchestrator-added teammate is on the roster the planner reads:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("Social Media Manager"),
+        "with its role, which is what the model judges fit from:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("desk `growth`"),
+        "and an operator-created desk is a nominatable target too:\n{prompt}"
+    );
+    // Still there, unchanged — this widens the roster, it does not replace it.
+    assert!(prompt.contains("`maya`"), "{prompt}");
+}
+
+/// The case #1106 actually reports: two teammates who overlap, where one of them
+/// was added at runtime. No shipped bundle carries such a pair, so this is the
+/// shape the real defect had — and before the roster widened, the runtime half
+/// could not be named at all.
+#[tokio::test]
+async fn a_manifest_teammate_and_a_runtime_one_can_be_the_ambiguous_pair() {
+    let reply = r#"{"description":"do it","steps":[],"prerequisites":[],"risks":[],
+        "verification":"v","scope":"s","assigneeCandidates":[
+          {"id":"maya","reason":"writes the company's prose"},
+          {"id":"social_manager","reason":"owns the accounts it would be posted to"}]}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    add_overlay_agent(
+        &runtime,
+        "social_manager",
+        "Social Media Manager",
+        "Runs the accounts",
+    )
+    .await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-28", ""))
+        .await
+        .unwrap();
+
+    run_planning_pass(Arc::clone(&runtime), "t-28".to_string()).await;
+
+    let after = read(&runtime, "t-28").await;
+    assert_eq!(after.column, COLUMN_TODO, "it parks rather than picking");
+    assert_eq!(after.assignee, "");
+    let ids: Vec<String> = after
+        .plan
+        .expect("plan")
+        .assignee_candidates
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["maya".to_string(), "social_manager".to_string()],
+        "the runtime teammate survives resolution exactly like the manifest one"
+    );
+}
+
 /// Direct unit coverage of the resolver's caps and drops, so the rules hold
 /// independently of what any one scripted model happens to emit.
 #[test]

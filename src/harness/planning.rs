@@ -747,7 +747,7 @@ impl Evidence {
         assignee::resolve(&self.record, key).canonical().is_some()
     }
 
-    /// The manifest teammate a resolved assignee ultimately routes work to, for
+    /// The roster teammate a resolved assignee ultimately routes work to, for
     /// the permission check.
     ///
     /// A **desk** resolves to its lead, deliberately: the lead is who actually
@@ -755,8 +755,17 @@ impl Evidence {
     /// work can happen. Checking "the desk" would be checking nothing.
     ///
     /// `None` — and therefore an honest `unknown` verdict — for a desk with no
-    /// lead yet, and for an overlay teammate, which carries no manifest `tools`
-    /// list to resolve grants from.
+    /// lead yet.
+    ///
+    /// It used to answer `None` for an overlay teammate too, on the grounds that
+    /// one carried no `tools` list to resolve grants from. That stopped being
+    /// true at issue #661 / L5, which gave [`OverlayAgent`] its own grant, and
+    /// [`gather_evidence`] now resolves it through the same
+    /// `agent_effective_grants` as a manifest agent. So a runtime teammate gets a
+    /// real permission verdict rather than a blanket `unknown` — the same answer
+    /// the roster builder would give, which is the point.
+    ///
+    /// [`OverlayAgent`]: crate::ports::types::OverlayAgent
     fn working_teammate(&self, key: &str) -> Option<&TeammateBrief> {
         let resolution = assignee::resolve(&self.record, key);
         let working = resolution.working_agent()?;
@@ -799,7 +808,29 @@ async fn gather_evidence(
         })?;
 
     let allow = record.manifest.tools.allow.clone();
-    let teammates: Vec<TeammateBrief> = record
+    // The roster the company actually runs, not the half of it the manifest
+    // declares (issue #1106, CodeRabbit on #1157).
+    //
+    // A teammate reaches the roster from four places — the global baseline, the
+    // company bundle, the console's `POST …/team`, and the orchestrator's own
+    // `add_agent` — and only the first two are manifest `[[agent]]` rows. Reading
+    // `manifest.agents` alone showed the planner a roster that
+    // `assignee::resolve` would happily accept names from and the planner had
+    // never been told about, so a runtime teammate could not be proposed, could
+    // not be named an assignee prerequisite, and — since #1106 — could not be one
+    // of the candidates a person is asked to choose between. That is exactly the
+    // case #1106 reports: no shipped bundle carries two teammates who overlap the
+    // way its DevRel/social pair does, so at least one of them was added here.
+    //
+    // Manifest first, then every overlay id the manifest does not already claim —
+    // the same precedence and the same skip rule `harness::build_roster` uses to
+    // materialise the live roster, so what the planner is shown is what will run.
+    //
+    // Grants resolve through the same `agent_effective_grants` as a manifest
+    // agent: an overlay's own `tools` list (issue #661 / L5), or the standard
+    // company-wide grant when it is empty, exactly as an omitted manifest `tools`
+    // line means.
+    let mut teammates: Vec<TeammateBrief> = record
         .manifest
         .agents
         .iter()
@@ -810,12 +841,44 @@ async fn gather_evidence(
             grants: crate::runtime::builder::agent_effective_grants(&allow, &a.tools),
         })
         .collect();
+    teammates.extend(
+        record
+            .overlay_agents
+            .iter()
+            .filter(|overlay| !record.manifest.agents.iter().any(|a| a.id == overlay.id))
+            .map(|overlay| TeammateBrief {
+                id: overlay.id.clone(),
+                role: overlay.role.clone(),
+                description: overlay.description.clone(),
+                grants: crate::runtime::builder::agent_effective_grants(&allow, &overlay.tools),
+            }),
+    );
 
+    // Every desk the company has, with the members it actually has.
+    //
+    // `effective_desk_members` rather than the manifest's declared list: it is
+    // the shared source of truth the REST `list_desks` handler and the harness
+    // `desk_lead` resolver both read, so it carries operator-added members and
+    // the operator's ordering — and ordering is load-bearing here, because the
+    // first member is the desk's lead and the lead is who a desk assignment
+    // actually routes work to.
     let desks: Vec<(String, Vec<String>)> = record
         .manifest
         .group_chats
         .iter()
-        .map(|g| (g.id.clone(), g.members.clone()))
+        .map(|g| g.id.clone())
+        .chain(record.overlay_desks.iter().map(|d| d.id.clone()))
+        .fold(Vec::new(), |mut acc: Vec<String>, id| {
+            if !acc.contains(&id) {
+                acc.push(id);
+            }
+            acc
+        })
+        .into_iter()
+        .map(|id| {
+            let members = record.effective_desk_members(&id);
+            (id, members)
+        })
         .collect();
 
     // The SAME projection `GET …/connections` builds (issue #316 already made
@@ -1268,7 +1331,10 @@ fn evidence_prompt(e: &Evidence) -> String {
 
     out.push_str("\n## Roster\n");
     if e.teammates.is_empty() {
-        out.push_str("- (no teammates on the manifest roster)\n");
+        // "the roster", not "the manifest roster": since #1106 this list is the
+        // effective roster, so an empty one means the company has nobody at all
+        // rather than nobody *declared*.
+        out.push_str("- (no teammates on the roster)\n");
     }
     for t in &e.teammates {
         let grants = if t.grants.is_empty() {
