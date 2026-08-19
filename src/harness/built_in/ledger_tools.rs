@@ -155,12 +155,24 @@ pub fn ledger_brief(registry: &crate::ledger::Registry) -> String {
     brief
 }
 
-/// Resolves a slug, or an error naming the ones that exist.
-async fn spec_for(ctx: &Ledgers, arguments: &Value) -> Result<LedgerSpec, String> {
+/// Resolves a slug the agent may use, or an error naming the ones it may not.
+///
+/// Access is checked on the **raw** slug before the registry is opened, so an
+/// agent without a grant never learns that a ledger exists: the refusal is the
+/// same whether the ledger is real or not. The registry's "here are all the
+/// slugs" error is only reachable by an agent whose grant already names the
+/// ledger.
+async fn spec_for(
+    ctx: &Ledgers,
+    arguments: &Value,
+    grants: &Option<Vec<LedgerGrant>>,
+    need: LedgerAccess,
+) -> Result<LedgerSpec, String> {
     let slug = text(arguments, "ledger");
     if slug.is_empty() {
         return Err("Name the `ledger` to use. `list_ledgers` names them all.".to_string());
     }
+    require_access(grants, &slug, need)?;
     let registry = ledgers::registry(ctx)
         .await
         .map_err(|error| format!("Could not read this company's ledgers: {error}."))?;
