@@ -879,15 +879,26 @@ export function AppShell({
    * which is exactly the recovery a slept tab needs.
    */
   useEffect(() => {
-    const watching = Object.entries(openTurns).filter(([, t]) => t.turnId);
+    // Every armed turn on every thread, not one per thread: a second detached
+    // send queues a row behind the running one, and both have a reply the
+    // operator is waiting on (issue #1000). A turn with no row (`turnId`
+    // absent) still cannot be watched and is skipped, as before.
+    const watching = Object.entries(openTurns).flatMap(([threadId, turns]) =>
+      turns.filter((t) => t.turnId).map((t) => [threadId, t] as const),
+    );
     if (watching.length === 0) return;
     let cancelled = false;
 
-    const settle = (threadId: string) => {
+    const settle = (threadId: string, turnId: string) => {
       setOpenTurns((prev) => {
-        if (!(threadId in prev)) return prev;
+        const turns = prev[threadId];
+        if (!turns) return prev;
+        // Drop just this turn; a queued sibling behind it stays watched, so
+        // its reply is still delivered when it settles in turn.
+        const rest = turns.filter((t) => t.turnId !== turnId);
         const next = { ...prev };
-        delete next[threadId];
+        if (rest.length) next[threadId] = rest;
+        else delete next[threadId];
         return next;
       });
       // Deliberately not awaited here, and deliberately not written inline —
@@ -903,15 +914,20 @@ export function AppShell({
           .then(({ run }) => {
             if (cancelled) return;
             if (run.phase === "terminal") {
-              settle(threadId);
+              settle(threadId, turn.turnId!);
               return;
             }
             // Still open: keep the queued/working distinction honest. `pending`
             // means it has not taken the per-company lock yet.
             const queued = run.status === "pending";
             setOpenTurns((prev) =>
-              prev[threadId] && prev[threadId].queued !== queued
-                ? { ...prev, [threadId]: { ...prev[threadId], queued } }
+              prev[threadId]?.some((t) => t.turnId === turn.turnId && t.queued !== queued)
+                ? {
+                    ...prev,
+                    [threadId]: prev[threadId].map((t) =>
+                      t.turnId === turn.turnId ? { ...t, queued } : t,
+                    ),
+                  }
                 : prev,
             );
           })
@@ -924,7 +940,8 @@ export function AppShell({
             // genuinely gone it will keep answering and the row eventually
             // settles through whatever terminal signal it does answer.
             if (cancelled) return;
-            if (err instanceof ApiError && err.status === 404) settle(threadId);
+            if (err instanceof ApiError && err.status === 404 && turn.turnId)
+              settle(threadId, turn.turnId);
           });
       }
     };
