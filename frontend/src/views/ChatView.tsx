@@ -786,7 +786,7 @@ export function ChatView({
             kind: "partial",
             name: fields.name,
             missed: "their inbox couldn't be switched on.",
-            fix: "Add it from the member's actions menu.",
+            fix: "Add it from the teammate's actions menu.",
           };
         }
       }

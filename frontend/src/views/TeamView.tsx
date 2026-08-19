@@ -355,11 +355,11 @@ export function TeamView({
           <div className="space-y-1">
             <h2 className="text-2xl font-semibold tracking-tight">Team</h2>
             <p className="text-sm text-muted-foreground">
-              The agents that make up your company. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
+              The teammates that make up your company. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
             </p>
           </div>
           <Button onClick={() => setAddOpen(true)}>
-            <UserPlus className="size-4" /> Add member
+            <UserPlus className="size-4" /> Add teammate
           </Button>
         </div>
 
@@ -421,7 +421,7 @@ export function TeamView({
               className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
             >
               <Plus className="size-5" />
-              Define an agent
+              Define a teammate
             </button>
           </div>
         )}
@@ -537,7 +537,7 @@ function MemberCard({
           )}
           <DropdownMenu>
             <DropdownMenuTrigger
-              render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Member actions" />}
+              render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
             >
               <MoreHorizontal className="size-4" />
             </DropdownMenuTrigger>
@@ -545,7 +545,7 @@ function MemberCard({
               {onOpen && (
                 <>
                   <DropdownMenuItem onClick={onOpen} data-testid="team-open-agent">
-                    View agent
+                    View teammate
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                 </>
@@ -581,7 +581,7 @@ function MemberCard({
         <DailyBudgetLine member={member} setByLabel={setByLabel} />
         <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3">
           <Badge variant="secondary" className="gap-1">
-            <Sparkles className="size-3" /> Agent
+            <Sparkles className="size-3" /> Teammate
           </Badge>
           <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
             <Mail className="size-3.5" />
@@ -589,7 +589,7 @@ function MemberCard({
             <Switch
               checked={inboxOn}
               onCheckedChange={onToggleInbox}
-              aria-label="Give this agent an inbox"
+              aria-label="Give this teammate an inbox"
               data-testid="team-inbox-toggle"
             />
           </label>
@@ -729,7 +729,7 @@ function AddMemberDialog({
   canSetBudget: boolean;
 }) {
   // The same three authored fields the detail view edits, held in the same
-  // shape (issue #264) so "Define an agent" and "Edit agent" cannot drift into
+  // shape (issue #264) so "Define a teammate" and "Edit teammate" cannot drift into
   // two different sets of labels for one set of values.
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft);
   const [inbox, setInbox] = useState(false);
@@ -772,7 +772,7 @@ function AddMemberDialog({
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Define an agent</DialogTitle>
+          <DialogTitle>Define a teammate</DialogTitle>
           <DialogDescription>Add a teammate to your company&apos;s roster.</DialogDescription>
         </DialogHeader>
         <AgentFields
@@ -798,9 +798,9 @@ function AddMemberDialog({
         )}
         <label className="flex items-center justify-between rounded-lg border p-3">
           <span className="flex items-center gap-2 text-sm">
-            <Mail className="size-4 text-muted-foreground" /> Give this agent an inbox
+            <Mail className="size-4 text-muted-foreground" /> Give this teammate an inbox
           </span>
-          <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this agent an inbox" />
+          <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this teammate an inbox" />
         </label>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
@@ -810,7 +810,7 @@ function AddMemberDialog({
             onClick={submit}
             disabled={!draft.name.trim() || !draft.role.trim() || budgetInvalid}
           >
-            Add member
+            Add teammate
           </Button>
         </DialogFooter>
       </DialogContent>

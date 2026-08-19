@@ -1144,7 +1144,7 @@ export function WorkflowsView({
           // sent — which is the opposite of what the operator intended.
           toast.error("This host ran the workflow for real — it doesn't support test runs.", {
             description:
-              "Your test run executed real effects (agent turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
+              "Your test run executed real effects (teammate turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
           });
         } else {
           toast.success(dryRun ? "Test run complete — nothing was sent." : "Workflow ran.");
@@ -2420,7 +2420,7 @@ export function WorkflowsView({
                 <p>
                   A workflow runs a sequence of steps on a schedule or on demand: a{" "}
                   <span className="font-medium text-foreground">trigger</span> starts it,{" "}
-                  <span className="font-medium text-foreground">agents</span> and{" "}
+                  <span className="font-medium text-foreground">teammates</span> and{" "}
                   <span className="font-medium text-foreground">tools</span> do the work,
                   and an <span className="font-medium text-foreground">output</span> step
                   reports the result somewhere.

@@ -318,7 +318,7 @@ const memberPane = (page: Page) => page.getByRole("complementary").last();
  * chart, and a blind click would close what a previous call opened.
  */
 async function openMemberPane(page: Page) {
-  const toggle = page.getByRole("button", { name: /members$/i });
+  const toggle = page.getByRole("button", { name: /teammates$/i });
   if ((await toggle.getAttribute("aria-pressed")) !== "true")
     await toggle.click();
   await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
@@ -490,7 +490,7 @@ test("#839 creates a teammate on a selected desk and persists it", async ({
   await dialog.getByLabel("Name").fill("Babbage");
   await dialog.getByLabel("Role").fill("Platform Engineer");
   await dialog.getByLabel("What they do").fill("Builds the platform");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
   await expect(growth).toContainText("Babbage");
   expect(
@@ -518,7 +518,7 @@ test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("No Desk");
   await dialog.getByLabel("Role").fill("Roaming Engineer");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
   await expect(
     page.getByRole("heading", { name: "Not on a desk" }),
@@ -538,7 +538,7 @@ test("#839 refuses a company-page teammate add when the host has no team write p
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Not Saved");
   await dialog.getByLabel("Role").fill("Unavailable");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
   await expect(toasts(page)).toContainText("can't create teammates");
   await expect(chart(page).locator("text=Not Saved")).toHaveCount(0);
@@ -554,7 +554,7 @@ test("#1099 a teammate added from the company page is confirmed by name", async 
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Katherine");
   await dialog.getByLabel("Role").fill("Navigator");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
   // The whole of #1099 on this surface: the operator is told, by name, rather
   // than left to infer the add from a chart that repaints a moment later.
@@ -617,7 +617,7 @@ test("#839 a teammate created but not placed is still on the chart to place by h
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Hopper");
   await dialog.getByLabel("Role").fill("Compiler");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
   const halfLanded = toasts(page).first();
   await expect(halfLanded).toContainText("couldn't be added to that desk");
