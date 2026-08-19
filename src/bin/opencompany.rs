@@ -1337,22 +1337,6 @@ async fn async_main() -> Result<()> {
                 // regardless, since the registry only holds locally-loaded ones).
                 if let Some(ownership) = &handles.ownership {
                     let self_tenant = state.config().tenant_namespace.clone();
-                    // Read list() BEFORE owners() (issue #1077): provisioning
-                    // writes the owner row before the company (#1050), so a
-                    // provision crossing the two reads lands as a benign dangling
-                    // owner row rather than an alarming unowned company.
-                    let companies = match handles.company.list().await {
-                        Ok(c) => Some(c),
-                        // A failed listing must not abort a boot that would
-                        // otherwise succeed: this is a diagnostic, and the server
-                        // is perfectly able to serve every company whose ownership
-                        // *is* intact without it.
-                        Err(e) => {
-                            eprintln!("warning: could not check company ownership: {e}");
-                            None
-                        }
-                    };
-                    let owners = ownership.owners().await?;
                     // Issue #1077: report companies orphaned from their tenant.
                     //
                     // A company whose owner row is missing is unreachable by its
@@ -1363,43 +1347,59 @@ async fn async_main() -> Result<()> {
                     //
                     // Gated on tenant_namespace: only tenant-namespace mode writes
                     // durable owner rows at all, and without it every company
-                    // would appear orphaned on every boot.
+                    // would appear orphaned on every boot. The gate also spares
+                    // non-namespaced deployments the whole-collection scan the
+                    // report needs.
                     //
-                    // Filtered to this workload's own tenant: in shared-single-DB
-                    // the `owners` collection holds every tenant's rows, and
-                    // printing them all to one tenant pod's stderr would leak
-                    // other tenants' company ids and tenant strings.
-                    // `opencompany orphans` is the unfiltered, platform-scoped
-                    // form.
-                    if let Some(me) = &self_tenant {
-                        if let Some(companies) = &companies {
-                            let prefix = format!("{me}--");
-                            let report =
-                                opencompany::app::find_orphans(companies, &owners);
-                            let unowned: Vec<_> = report
-                                .unowned
-                                .into_iter()
-                                .filter(|c| c.id.as_ref().starts_with(&prefix))
-                                .collect();
-                            let dangling: Vec<_> = report
-                                .dangling
-                                .into_iter()
-                                .filter(|d| {
-                                    opencompany::app::canonical_tenant(&d.tenant)
-                                        == opencompany::app::canonical_tenant(me)
-                                })
-                                .collect();
-                            let filtered = opencompany::app::OrphanReport {
-                                unowned,
-                                dangling,
-                            };
-                            if !filtered.is_empty() {
-                                eprintln!(
-                                    "warning: ownership rows and companies disagree \
-                                     (`opencompany orphans` for this report)\n{}",
-                                    filtered.to_text()
-                                );
+                    // Read list() BEFORE owners() (issue #1077): provisioning
+                    // writes the owner row before the company (#1050), so a
+                    // provision crossing the two reads lands as a benign dangling
+                    // owner row rather than an alarming unowned company.
+                    let companies = if self_tenant.is_some() {
+                        match handles.company.list().await {
+                            Ok(c) => Some(c),
+                            // A failed listing must not abort a boot that would
+                            // otherwise succeed: this is a diagnostic, and the
+                            // server is perfectly able to serve every company
+                            // whose ownership *is* intact without it.
+                            Err(e) => {
+                                eprintln!("warning: could not check company ownership: {e}");
+                                None
                             }
+                        }
+                    } else {
+                        None
+                    };
+                    let owners = ownership.owners().await?;
+                    if let (Some(me), Some(companies)) = (&self_tenant, &companies) {
+                        // Filtered to this workload's own tenant: in
+                        // shared-single-DB the `owners` collection holds every
+                        // tenant's rows, and printing them all to one tenant
+                        // pod's stderr would leak other tenants' company ids and
+                        // tenant strings. `opencompany orphans` is the
+                        // unfiltered, platform-scoped form.
+                        let prefix = format!("{me}--");
+                        let report = opencompany::app::find_orphans(companies, &owners);
+                        let unowned: Vec<_> = report
+                            .unowned
+                            .into_iter()
+                            .filter(|c| c.id.as_ref().starts_with(&prefix))
+                            .collect();
+                        let dangling: Vec<_> = report
+                            .dangling
+                            .into_iter()
+                            .filter(|d| {
+                                opencompany::app::canonical_tenant(&d.tenant)
+                                    == opencompany::app::canonical_tenant(me)
+                            })
+                            .collect();
+                        let filtered = opencompany::app::OrphanReport { unowned, dangling };
+                        if !filtered.is_empty() {
+                            eprintln!(
+                                "warning: ownership rows and companies disagree \
+                                 (`opencompany orphans` for this report)\n{}",
+                                filtered.to_text()
+                            );
                         }
                     }
                     for (id, tenant) in owners {
