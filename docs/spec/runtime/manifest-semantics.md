@@ -214,7 +214,7 @@ each page under the 500-line cap.
     `unlimited`; a company opts in per-namespace with
     `token_budgets = { media = N }`. Every generation additionally **parks for
     operator approval** before the backend bills it, and the whole family is
-    compiled out unless the build enables the `media` feature. With no managed
+    compiled out unless the build enables the `media` feature. With no platform
     credential configured, a `media` grant wires no tools (fail-closed). The
     Usage view surfaces a dedicated media status row (active / awaiting
     credential / not granted / not in this build).
