@@ -58,6 +58,46 @@ fn console_dir_from_env() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+/// Stamps the cache policy the console's own file naming already implies.
+///
+/// The bundle is content-hashed: `index.html` names `index-<hash>.js`, and a
+/// build that changes the bytes changes the name. That makes the assets safe to
+/// keep forever and makes the shell the one file that must never be kept — it
+/// is the only thing that knows which hashes are current.
+///
+/// Without this the shell was served with an `etag` and no `cache-control`, so
+/// browsers applied heuristic freshness and held it across a deploy. The held
+/// shell asks for chunks the new image no longer contains; those requests fall
+/// through to the SPA fallback and answer with `index.html`, so the dynamic
+/// import receives HTML, throws, and unmounts the app — a blank page with no
+/// error anywhere a user can see it (issue #979).
+///
+/// Keyed on the response's own content type rather than the request path,
+/// because the SPA fallback serves the shell at paths that look like anything
+/// at all — including, in the failure above, paths under `/assets/`.
+fn cache_console_response(mut response: Response) -> Response {
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderValue};
+
+    let is_html = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
+
+    // `no-cache` still allows the browser to keep the file; it requires a
+    // revalidation before reuse, which is what makes a deploy visible on the
+    // very next request. `no-store` would be stricter and slower for no gain.
+    let policy = if is_html {
+        "no-cache"
+    } else {
+        "public, max-age=31536000, immutable"
+    };
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static(policy));
+    response
+}
+
 /// Builds the Axum router, mounting the operator console at `/` when
 /// `OPENCOMPANY_CONSOLE_DIR` is configured.
 pub fn router(state: AppState) -> Router {
@@ -74,6 +114,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::operator::router())
         .merge(crate::server::ops::router())
         .merge(crate::server::hooks::router())
+        .merge(crate::server::hooks_chargebee::router())
         .merge(crate::server::provision::router())
         .merge(crate::server::setup::router())
         .merge(crate::server::feedback::router())
@@ -113,7 +154,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
                         return StatusCode::NOT_FOUND.into_response();
                     }
                     match serve.oneshot(request).await {
-                        Ok(response) => response.into_response(),
+                        Ok(response) => cache_console_response(response.into_response()),
                         Err(err) => match err {},
                     }
                 }
@@ -202,13 +243,19 @@ impl Serving {
         self.listener.local_addr()
     }
 
-    /// Serves until the process ends or the task is dropped.
+    /// Serves until a termination signal arrives (see [`serve_on`]) or the task
+    /// is dropped.
     pub async fn run(self) -> Result<()> {
         serve_on(self.listener, self.state).await
     }
 }
 
-/// Serves on a listener the caller already bound.
+/// Serves on a listener the caller already bound, until a termination signal.
+///
+/// Returns `Ok(())` on a graceful shutdown, so the CLI's `serve` exits `0` on a
+/// rollout rather than reporting a failure it did not have. What "graceful"
+/// means here — and what it deliberately does not wait for — is spelled out on
+/// [`serve_on_until`].
 ///
 /// The one production serving path — `bind`/`serve` and the desktop app's own
 /// [`start_local`](crate::desktop::start_local) both end up here, so there is
@@ -227,11 +274,120 @@ impl Serving {
 /// loopback, so the peer this process observes reads as loopback regardless of
 /// where its own caller actually was).
 pub async fn serve_on(listener: TcpListener, state: AppState) -> Result<()> {
-    axum::serve(
+    serve_on_until(listener, state, crate::server::shutdown::signal()).await
+}
+
+/// [`serve_on`] with the termination signal supplied by the caller.
+///
+/// Exists for tests: a test cannot raise a real `SIGTERM` at its own process
+/// without every *other* test in the binary receiving it too, and the thing
+/// worth proving here is what happens *after* the signal, not that tokio
+/// delivers one.
+///
+/// ## The shutdown sequence
+///
+/// On the signal, in order:
+///
+/// 1. Every registered company stops accepting new cycles and the ones in
+///    flight are waited on, bounded by
+///    [`shutdown::grace_from_env`](crate::server::shutdown::grace_from_env).
+///    The server is deliberately **still serving** through this: the console's
+///    event stream is how an operator watches the turn land, and cutting it at
+///    the signal would hide the very work the drain exists to preserve. New
+///    cycles are refused with `503 Quiescing` in the meantime, which is what
+///    "stop accepting new work" means for a host whose work does not arrive on
+///    the connection it will be done on.
+/// 2. The listener stops accepting and open connections are given
+///    [`CONNECTION_GRACE`](crate::server::shutdown::CONNECTION_GRACE) to finish
+///    writing.
+/// 3. The process returns regardless. This is the ceiling that matters: the
+///    console's event stream never ends on its own, so waiting for connections
+///    to close on their own terms would hold the pod open until the kubelet's
+///    `SIGKILL` — trading a clean exit for the exact abrupt one this is here to
+///    remove.
+///
+/// Step 2's clock starts when the drain *returns*, not at the signal, so an idle
+/// host with an open event stream exits in about `CONNECTION_GRACE` rather than
+/// sitting out the whole bound. Total time from signal to exit is therefore at
+/// most `grace + CONNECTION_GRACE` — the number the pod's
+/// `terminationGracePeriodSeconds` has to stay above.
+///
+/// `/healthz` is untouched. Nothing in this path runs before the signal, and the
+/// signal only arrives at the end of a pod's life — the manager's
+/// wake-on-request proxy blocks on that endpoint during *boot*, which this
+/// cannot reach.
+pub async fn serve_on_until<S>(listener: TcpListener, state: AppState, signal: S) -> Result<()>
+where
+    S: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_on_until_with_grace(
+        listener,
+        state,
+        signal,
+        crate::server::shutdown::grace_from_env(),
+    )
+    .await
+}
+
+/// [`serve_on_until`] with the drain bound supplied by the caller.
+///
+/// Split out so a test can prove the ceiling without waiting the real
+/// twenty-five seconds for it — and without mutating process environment, which
+/// no test can do safely in a binary whose other tests share the process.
+pub(crate) async fn serve_on_until_with_grace<S>(
+    listener: TcpListener,
+    state: AppState,
+    signal: S,
+    grace: std::time::Duration,
+) -> Result<()>
+where
+    S: std::future::Future<Output = ()> + Send + 'static,
+{
+    use std::future::IntoFuture;
+
+    let drain_state = state.clone();
+    // Starts the ceiling's clock when the *drain* returns, not at the signal.
+    //
+    // Timing it from the signal instead would make the connection window
+    // whatever the drain left over — up to the whole of `grace` on an idle host
+    // — so a tenant with nothing in flight but an open event stream would sit
+    // there for the full bound before exiting. That is the rollout latency this
+    // whole change exists to reduce. Drained-then-two-seconds keeps the worst
+    // case identical (`grace` + `CONNECTION_GRACE`, since `drain` is itself
+    // bounded by `grace`) while letting the common case go quickly.
+    let (drained_tx, drained_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutting_down = async move {
+        signal.await;
+        crate::server::shutdown::arm_force_exit_on_second_signal();
+        crate::server::shutdown::drain(&drain_state, grace).await;
+        let _ = drained_tx.send(());
+    };
+
+    // `into_future` because `WithGracefulShutdown` is `IntoFuture`, not
+    // `Future`, and the ceiling below has to race a *pinned* server future.
+    let serving = axum::serve(
         listener,
         router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .await?;
+    .with_graceful_shutdown(shutting_down)
+    .into_future();
+    tokio::pin!(serving);
+    // `Err` means the sender was dropped, which can only happen once the serve
+    // future is gone — at which point the other arm has already won.
+    let ceiling = async {
+        if drained_rx.await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        tokio::time::sleep(crate::server::shutdown::CONNECTION_GRACE).await;
+    };
+
+    tokio::select! {
+        served = &mut serving => served?,
+        () = ceiling => tracing::warn!(
+            "connections were still open {}s after the drain finished; exiting anyway",
+            crate::server::shutdown::CONNECTION_GRACE.as_secs()
+        ),
+    }
     Ok(())
 }
 
@@ -263,7 +419,8 @@ mod tests {
     use super::*;
     use crate::AppConfig;
 
-    /// Writes a minimal console tree (just `index.html`) into a temp dir.
+    /// Writes a minimal console tree — the shell plus one hashed asset, which
+    /// is the shape the cache policy distinguishes between.
     fn console_fixture() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -271,8 +428,23 @@ mod tests {
             "<!doctype html><title>console</title>",
         )
         .unwrap();
+        std::fs::create_dir(dir.path().join("assets")).unwrap();
+        std::fs::write(
+            dir.path().join("assets").join("index-abc123.js"),
+            "export const x = 1;\n",
+        )
+        .unwrap();
         let path = dir.path().to_path_buf();
         (dir, path)
+    }
+
+    fn cache_control(response: &axum::response::Response) -> &str {
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .expect("the console fallback stamps a cache policy on every response")
+            .to_str()
+            .unwrap()
     }
 
     async fn body_text(response: axum::response::Response) -> String {
@@ -312,6 +484,71 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("<title>console</title>"));
+    }
+
+    #[tokio::test]
+    async fn the_shell_is_never_kept_without_revalidating() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        for path in ["/", "/some/spa/route"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(cache_control(&response), "no-cache", "for {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hashed_asset_is_kept_forever() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/index-abc123.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            cache_control(&response),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    /// The failure that made issue #979 a blank page rather than a 404: a
+    /// stale shell asks for a chunk this build does not have, the SPA fallback
+    /// answers with `index.html`, and the browser is handed HTML where it
+    /// expected a module. Whatever else that response is, it must not be
+    /// cached as though it were the immutable asset it was addressed as —
+    /// which is why the policy is keyed on what came back, not what was asked
+    /// for.
+    #[tokio::test]
+    async fn a_missing_chunk_answers_with_the_shell_and_is_not_kept() {
+        let (_guard, dir) = console_fixture();
+        let app = router_with_console(AppState::new(AppConfig::default()), Some(dir));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/KnowledgeGraph-fromlastbuild.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(cache_control(&response), "no-cache");
         assert!(body_text(response).await.contains("<title>console</title>"));
     }
 
@@ -531,5 +768,60 @@ mod tests {
             "the home path must not appear in /spec: {rendered}"
         );
         assert!(!rendered.contains("mongodb://"), "no connection strings");
+    }
+
+    #[tokio::test]
+    async fn spec_reports_the_default_memory_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        let body = spec_body(state).await;
+        // No overlay: the base storage backend serves memory, so there is no
+        // separate engine to name.
+        assert_eq!(body["memory"]["backend"], "store");
+        assert!(body["memory"]["driver_id"].is_null());
+        assert_eq!(body["memory"]["capabilities"], serde_json::json!([]));
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[tokio::test]
+    async fn spec_names_the_bound_memory_engine_but_never_its_endpoint_or_key() {
+        // The acceptance criterion from issue #914: `driver_id` is safe to
+        // surface, the URL and the credential are not — and `/spec` is
+        // unauthenticated, so this is the route where that matters most.
+        const KEY: &str = "sk-memory-super-secret-value";
+        const ENDPOINT: &str = "https://memory.internal.example";
+
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = crate::store::open_memory_overlay(&crate::store::StorageSettings {
+            memory_backend: crate::store::MemoryBackend::Remote,
+            memory_driver: Some("supermemory".to_string()),
+            memory_url: Some(ENDPOINT.to_string()),
+            memory_api_key: Some(KEY.to_string()),
+            allow_unproven_remote: true,
+            ..Default::default()
+        })
+        .expect("a fully configured remote engine binds")
+        .expect("remote yields an overlay");
+
+        let state = AppState::new(AppConfig::default())
+            .with_home(dir.path().to_path_buf())
+            .with_memory_overlay(overlay);
+
+        let body = spec_body(state).await;
+        assert_eq!(body["memory"]["backend"], "remote");
+        assert_eq!(body["memory"]["driver_id"], "supermemory");
+        // The mandatory three a hosted adapter advertises, so an operator can
+        // see the tree/graph families it does not have.
+        let caps = body["memory"]["capabilities"].to_string();
+        assert!(caps.contains("core"), "{caps}");
+        assert!(caps.contains("recall"), "{caps}");
+        assert!(caps.contains("portability"), "{caps}");
+
+        let rendered = body.to_string();
+        assert!(!rendered.contains(KEY), "/spec leaked the memory key");
+        assert!(
+            !rendered.contains("memory.internal.example"),
+            "/spec leaked the memory endpoint: {rendered}"
+        );
     }
 }

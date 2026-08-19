@@ -23,7 +23,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { approvedByRuntimeLine, approvedLine } from "@/lib/approval-wording";
-import { approvalSummary, grantHeadline, timeAgo, toolAction } from "@/lib/language";
+import { approvalSummary, grantHeadline, timeAgo, toolAction, untilLabel } from "@/lib/language";
+import { approvalsForTask } from "@/lib/task-approvals";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
 
@@ -76,12 +77,30 @@ interface Props {
   client: OpenCompanyClient;
   company: string | null;
   feed: CompanyFeed;
+  /**
+   * `#/approvals/<taskId>` — narrow the queue to one board card (issue #883).
+   *
+   * Arrives unvalidated, as every hash sub-page does. An id matching nothing
+   * parked is a legitimate state rather than an error: the operator followed a
+   * blocked card's Review link and the last of its approvals was decided on the
+   * way, which is the flow working. It renders as "this card is clear" with a
+   * way back to the whole queue, never as the generic "nothing needs you" —
+   * those are different facts and only one of them is about the whole company.
+   */
+  sub?: string | null;
   onResolved: (systemLine: string) => void;
   onGoToConversation: () => void;
 }
 
 /** The approvals inbox: the few things the company parked for the operator. */
-export function ApprovalsView({ client, company, feed, onResolved, onGoToConversation }: Props) {
+export function ApprovalsView({
+  client,
+  company,
+  feed,
+  sub,
+  onResolved,
+  onGoToConversation,
+}: Props) {
   // Issue #373: in-flight state is per approval, not a single module-wide slot.
   //
   // Approving is not a quick write — the host mints a grant and re-dispatches
@@ -96,6 +115,32 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
   // is doing it" vs "recorded"), and the card says which one it is waiting on.
   const [inFlight, setInFlight] = useState<ReadonlyMap<string, Verdict>>(() => new Map());
   const { approvals, now } = feed;
+  /**
+   * The card the queue is narrowed to, or `null` for the whole queue (#883).
+   *
+   * Decoded because the shell percent-encodes the id into the hash; a malformed
+   * escape throws `URIError`, and a broken link must fall back to the full queue
+   * rather than blank the page.
+   */
+  const focusTaskId = useMemo(() => {
+    if (!sub) return null;
+    try {
+      return decodeURIComponent(sub);
+    } catch {
+      return null;
+    }
+  }, [sub]);
+  /**
+   * The rows on screen. Every other derivation below — the batch totals, the
+   * asker names, the decide path — deliberately stays on the **full** queue:
+   * a batch's "1 of 3 from this turn" counts what the turn parked, and filtering
+   * the count with the view would turn a batch of three into a batch of one and
+   * tell the operator the opposite of the truth.
+   */
+  const visible = useMemo(
+    () => (focusTaskId === null ? approvals : approvalsForTask(approvals, focusTaskId)),
+    [approvals, focusTaskId],
+  );
   const askerNames = useAskerNames(client, company, approvals);
   const { grants, granterNames, refreshGrants } = useStandingGrants(client, company);
   /**
@@ -217,19 +262,48 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl px-4 py-6">
-        {approvals.length === 0 ? (
-          <EmptyApprovals onGoToConversation={onGoToConversation} />
+        {/* Issue #883: the filter says so, and offers the way out of itself.
+            A narrowed queue that looked identical to the whole one would make a
+            decided-elsewhere approval look like it had vanished. */}
+        {focusTaskId !== null && (
+          <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-2 text-xs">
+            <span className="min-w-0 text-muted-foreground">
+              Showing only what one board card is waiting on.
+            </span>
+            <a
+              href="#/approvals"
+              className="shrink-0 font-medium underline-offset-2 hover:underline"
+            >
+              Show all
+            </a>
+          </div>
+        )}
+        {visible.length === 0 ? (
+          focusTaskId !== null ? (
+            <ClearedForTask />
+          ) : (
+            <EmptyApprovals onGoToConversation={onGoToConversation} />
+          )
         ) : (
           <>
             <div className="mb-4 flex items-baseline justify-between">
               <h2 className="text-sm font-medium text-muted-foreground">
-                {approvals.length === 1
+                {visible.length === 1
                   ? "1 thing needs your approval"
-                  : `${approvals.length} things need your approval`}
+                  : `${visible.length} things need your approval`}
               </h2>
             </div>
+            {/* #971: nothing may vanish unannounced. Requests now age out on
+                their own, so the queue says so once, up front — mirroring the
+                standing-permissions section's "Each one expires on its own"
+                below. Each card carries its own deadline; this is the sentence
+                that stops that deadline being a surprise. */}
+            <p className="mb-3 text-xs text-muted-foreground">
+              Each one has a deadline. Anything still undecided by then is
+              declined on its own, and the work behind it moves on.
+            </p>
             <div className="flex flex-col gap-3">
-              {approvals.map((a) => (
+              {visible.map((a) => (
                 <ApprovalCard
                   key={a.id}
                   approval={a}
@@ -440,15 +514,6 @@ function granterLabel(g: StandingGrant, granterNames: Map<string, string>): stri
   return granterNames.get(g.granted_by.id) ?? "someone with admin access";
 }
 
-/** "in 42m" / "in 6h" / "in 3d" — how long a permission has left. */
-function untilLabel(atMillis: number, now: number): string {
-  const mins = Math.max(0, Math.round((atMillis - now) / 60_000));
-  if (mins < 60) return `in ${mins}m`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `in ${hours}h`;
-  return `in ${Math.round(hours / 24)}d`;
-}
-
 /**
  * One parked approval, told in full (#372).
  *
@@ -496,7 +561,7 @@ function ApprovalCard({
   // No cross-card dimming: another card being decided is not this card's
   // business, and treating it as such is the visual half of the #373 bug.
   return (
-    <Card>
+    <Card data-approval-id={a.id}>
       <CardContent className="flex flex-col gap-3 py-4">
         <ApprovalHeadline
           approval={a}
@@ -651,6 +716,32 @@ function WorkflowContentReview({ approval }: { approval: ApprovalSummary }) {
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * A filtered queue with nothing left in it (issue #883).
+ *
+ * Deliberately not {@link EmptyApprovals}. That one says "nothing is waiting on
+ * you", which is a claim about the *whole company* — and here it would be said
+ * while other cards' approvals sit one click away, unread. The two states also
+ * mean opposite things to the operator who arrived from a blocked card: this
+ * one says the card is free to resume, which is the answer they came for.
+ */
+function ClearedForTask() {
+  return (
+    <div className="mt-16 flex flex-col items-center gap-3 text-center">
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-status-done-soft text-status-done-text">
+        <ShieldCheck className="size-6" />
+      </div>
+      <div className="space-y-1">
+        <p className="font-medium">This card is clear</p>
+        <p className="max-w-sm text-sm text-muted-foreground">
+          Nothing it parked is still waiting on you. Other cards may still have
+          approvals of their own — use <span className="font-medium">Show all</span> to see them.
+        </p>
+      </div>
     </div>
   );
 }

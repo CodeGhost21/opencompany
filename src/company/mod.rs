@@ -32,11 +32,19 @@ pub mod copilot;
 // How this instance obtains its TinyHumans credential (projected, rotating
 // platform token vs a static key). Always compiled: the answer decides whether a
 // company can think at all, in every build.
+pub mod billing;
 pub mod credentials;
 pub mod dns;
+pub mod hosting;
 pub mod inference;
+/// Dynamic ledgers: the one place a ledger is read, written, declared or
+/// retired. Every surface routes through it, because the rules that matter —
+/// only a person deletes, a close says why, the derived file follows the
+/// write — only hold if exactly one code path enforces them.
+pub mod ledgers;
 mod manifest;
 pub mod mcp;
+pub mod paypal;
 // Console MCP OAuth (issue #90): discovery + PKCE + DCR + token exchange for the
 // per-tenant browser sign-in flow. Needs the vendored `oh::mcp::config_servers` discovery
 // primitive + `uuid`/`base64`/`url`, so it links only under the `mcp` feature.
@@ -112,19 +120,22 @@ pub use manifest::{DELEGATES_TO_WILDCARD, LEGACY_MANIFEST_FILE, Located, MANIFES
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 pub use types::{
     Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, ComposioTools,
-    Connection, DEFAULT_ALWAYS_APPROVE, DEFAULT_MAX_DELEGATION_DEPTH, DEFAULT_MAX_IN_FLIGHT_RUNS,
-    DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES, GroupChat, INFERENCE_PROVIDERS,
-    INFERENCE_TIERS, Inference, KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, McpServer,
-    ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROMPT_CLASSES,
-    PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule, Skill, TIERS,
-    TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit, grants_repo_explicit,
-    grants_repo_write_explicit, grants_search_explicit, grants_workspace_write_explicit,
-    orchestrator_id,
+    Connection, ContextAccess, ContextEntry, DEFAULT_ALWAYS_APPROVE, DEFAULT_MAX_DELEGATION_DEPTH,
+    DEFAULT_MAX_IN_FLIGHT_RUNS, DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES, GroupChat,
+    INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference, KNOWN_CHANNELS, LedgerAccess, LedgerGrant,
+    MAX_DELEGATION_DEPTH_BOUNDS, McpServer, ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS,
+    POLICY_MODES, PROMPT_CLASSES, PROMPT_FILE_BUDGET_CHARS, PROVISIONED_POLICY_MODE, Place, Plan,
+    Policy, Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_chargebee_explicit,
+    grants_composio_explicit, grants_hosting_explicit, grants_media_explicit,
+    grants_paypal_explicit, grants_repo_explicit, grants_repo_write_explicit,
+    grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
+    STAGELESS_SCHEDULE_REFUSAL, STAGELESS_WORKFLOW_NOTICE, UNDELIVERABLE_SCHEDULE_REFUSAL,
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
-    WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef, list_source_workflows,
-    list_workflows_union, load_company_workflows, load_workflow_union, parse_workflow,
+    WorkflowFile, WorkflowNodeDef, WorkflowNodeKind, WorkflowRetryDef, destination_is_reachable,
+    list_source_workflows, list_workflows_union, list_workflows_with_globals,
+    load_company_workflows, load_workflow_union, load_workflow_with_globals, parse_workflow,
 };
 // Crate-internal only: the workflow creator (issue #69) builds a `RawWorkflow`
 // from its request body, renders it to TOML, and re-parses it through
@@ -149,11 +160,12 @@ pub(crate) use workflow_create::{
     update_company_workflow, workflow_version,
 };
 // Issue #580: the builder pass's courtesy validation, gated with the harness
-// builder that is its only caller. Issue #753 adds `workflow_callable_tool_slugs`
-// on the same footing — the create-time copilot's tool grounding.
+// builder that is its only caller. Issue #753 adds the copilot's tool grounding
+// on the same footing, split by #874 into the effective set a proposal may name
+// and the granted-but-unwired remainder that is reported, not offered.
 #[cfg(feature = "openhuman")]
 pub(crate) use workflow_create::{
-    courtesy_validate_draft, workflow_callable_tool_slugs, workflow_effective_tool_slugs,
+    courtesy_validate_draft, workflow_effective_tool_slugs,
     workflow_granted_but_unwired_tool_slugs, workflow_graph_from_spec, workflow_spec_from_graph,
 };
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};

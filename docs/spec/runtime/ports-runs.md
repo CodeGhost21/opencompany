@@ -4,11 +4,21 @@ The attempt record behind the Task Detail **Attempts** tab. Part of the port
 contracts indexed by [ports.md](ports.md); the console-surface stores it sits
 alongside are in [ports-console.md](ports-console.md).
 
-One attempt at a task, and its trace (`src/ports/runs.rs`). A `RunRecord`
-carries the task and agent it belongs to, its 1-based `attempt` ordinal, a
-status, the cost it accrued, and — on failure — why. A `RunStepRecord` is one
-entry of its trace, keyed `(run_id, step_seq)` on a run-scoped dense counter
-rather than an `EventSeq`.
+One attempt at work, and its trace (`src/ports/runs.rs`). A `RunRecord`
+carries the agent it belongs to, its 1-based `attempt` ordinal, a status, the
+cost it accrued, and — on failure — why. A `RunStepRecord` is one entry of its
+trace, keyed `(run_id, step_seq)` on a run-scoped dense counter rather than an
+`EventSeq`.
+
+Since issue #983 the **card is optional** (`task_id: Option<String>`) and a
+`chat_id` sits beside it, because a chat turn is an attempt at work that
+frequently opens no card. A card-less run is always `attempt` 1 — with no card
+there is nothing for a second attempt to be the second of — and it never answers
+a per-card filter, which is what keeps the Attempts tab honest (see below). Both
+fields are `#[serde(default, skip_serializing_if = "Option::is_none")]`, so a row
+written before them loads and a dispatch row serializes byte-identically; the
+sqlite mirror column needed a table rebuild to drop its `NOT NULL`, run
+idempotently on open.
 
 ```rust
 pub trait RunStore: Send + Sync {
@@ -132,6 +142,38 @@ untagged one serializes byte-identically to how it did before.
 Old `RunRecord`s are never synthesised from historical `AgentReply` events:
 fabricating identity for attempts nobody recorded would be worse than a
 pre-existing card honestly showing zero of them.
+
+### A chat turn does get a row — and still not a card's attempt (#806, #983)
+
+Issue #806 refused to synthesise a run **for a card**, so that a turn which
+authored something inline (`create_workflow`, say) could hang a `TaskOutput` off
+it. That would have made the Attempts tab claim work was attempted at a card
+when none was. `TaskOutput` names *what produced it* as a closed set instead —
+`TaskOutputSource::Run` or `TaskOutputSource::ChatTurn` — which keeps "every card
+in Done links to what it produced" (#339) true without weakening what a run
+means.
+
+Issue #983 mints a row for the **turn itself**, prospectively, and that is a
+different claim: the turn *is* a work attempt, it has a status worth reading, and
+before this nothing durable recorded that one was owed — so a turn killed with
+the pod left no trace at all. The two coexist because the row names no card:
+`RunFilter::for_task` does not match an absent `task_id`, so a chat turn never
+appears in `GET …/tasks/{task_id}` → `runs[]` and the Attempts tab is exactly
+what #806 left it as. The turn is reachable through the company-wide
+`GET …/runs`, and by desk through its `chat_id`.
+
+`create_run` at accept, `begin_run` once the cycle holds the per-company serial
+lock, `finish_run` when the turn settles. That placement is deliberate: `Pending`
+therefore means *queued behind other turns* and `Running` means *owns the lock*,
+which is the distinction an operator on a busy company needs. Reusing this store
+is what makes the feature small — transition legality, the step trace,
+`list_stale_active` and `reap_orphaned_runs` all apply unchanged, and the boot
+reaper's proof (a turn is a process-local spawn, one process owns the journal,
+turns serialise on one mutex) holds for a chat turn verbatim.
+
+Old `RunRecord`s are still never synthesised from historical events. See
+[ports-state.md](ports-state.md) for the task record itself; a card a chat turn
+opens now carries that turn's id in `origin_run_id`.
 
 ## Reading runs back
 

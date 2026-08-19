@@ -25,8 +25,10 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
+use crate::ledger::{LedgerEvent, LedgerSpec};
 use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
+use crate::ports::ledgers::LedgerStore;
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::now_millis;
 use crate::ports::run_output::{
@@ -109,6 +111,98 @@ impl TaskStore for FsOps {
         }
         write_atomic(&path, &serde_json::to_string(&tasks)?).await?;
         Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LedgerStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl LedgerStore for FsOps {
+    async fn list_specs(&self, company: &CompanyId) -> Result<Vec<LedgerSpec>> {
+        load_json_vec::<LedgerSpec>(&self.bundle(company).ledgers_json()).await
+    }
+
+    async fn put_spec(&self, company: &CompanyId, spec: &LedgerSpec) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.ledgers_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut specs = load_json_vec::<LedgerSpec>(&path).await?;
+        match specs.iter_mut().find(|held| held.slug == spec.slug) {
+            Some(existing) => *existing = spec.clone(),
+            None => specs.push(spec.clone()),
+        }
+        write_atomic(&path, &serde_json::to_string(&specs)?).await
+    }
+
+    async fn delete_spec(&self, company: &CompanyId, slug: &str) -> Result<bool> {
+        let path = self.bundle(company).ledgers_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut specs = load_json_vec::<LedgerSpec>(&path).await?;
+        let before = specs.len();
+        specs.retain(|spec| spec.slug != slug);
+        if specs.len() == before {
+            return Ok(false);
+        }
+        // The event log is deliberately untouched. See `LedgerStore::delete_spec`.
+        write_atomic(&path, &serde_json::to_string(&specs)?).await?;
+        Ok(true)
+    }
+
+    async fn append(&self, company: &CompanyId, event: &LedgerEvent) -> Result<()> {
+        let bundle = self.bundle(company);
+        let dir = bundle.ledgers_dir();
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|source| io_err(&dir, source))?;
+        // One `write_all` of one complete line under `O_APPEND`: concurrent
+        // writers interleave whole lines and never halves of one, so no lock is
+        // needed here at all.
+        append_line(
+            &bundle.ledger_events_jsonl(&event.ledger),
+            &serde_json::to_string(event)?,
+        )
+        .await
+    }
+
+    async fn events(&self, company: &CompanyId, ledger: &str) -> Result<Vec<LedgerEvent>> {
+        read_jsonl::<LedgerEvent>(&self.bundle(company).ledger_events_jsonl(ledger)).await
+    }
+
+    async fn purge_entry(&self, company: &CompanyId, ledger: &str, entry: &str) -> Result<bool> {
+        let path = self.bundle(company).ledger_events_jsonl(ledger);
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let events = read_jsonl::<LedgerEvent>(&path).await?;
+        let kept: Vec<&LedgerEvent> = events.iter().filter(|held| held.id != entry).collect();
+        if kept.len() == events.len() {
+            return Ok(false);
+        }
+        // Rewritten rather than tombstoned: this is the one operation that is
+        // meant to leave nothing behind, and a tombstone that still carried the
+        // row's text would make "deleted" mean "hidden from one renderer".
+        let mut body = String::new();
+        for event in kept {
+            body.push_str(&serde_json::to_string(event)?);
+            body.push('\n');
+        }
+        write_atomic(&path, &body).await?;
+        Ok(true)
+    }
+
+    async fn purge_ledger(&self, company: &CompanyId, ledger: &str) -> Result<bool> {
+        let path = self.bundle(company).ledger_events_jsonl(ledger);
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(io_err(&path, error)),
+        }
     }
 }
 
@@ -704,18 +798,26 @@ impl RunStore for FsOps {
                 spec.id
             )));
         }
-        let attempt = runs
-            .iter()
-            .filter(|r| r.task_id == spec.task_id)
-            .map(|r| r.attempt)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
+        // A card-less run (issue #983) is always attempt 1: the ordinal counts
+        // attempts *at a card*, and with no card there is nothing for a second
+        // attempt to be the second of. Folding them all into one anonymous
+        // bucket would make every chat turn the Nth attempt at nothing.
+        let attempt = match &spec.task_id {
+            Some(task_id) => runs
+                .iter()
+                .filter(|r| r.task_id.as_deref() == Some(task_id.as_str()))
+                .map(|r| r.attempt)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            None => 1,
+        };
         let run = RunRecord {
             id: spec.id,
             company: company.clone(),
             task_id: spec.task_id,
             agent_id: spec.agent_id,
+            chat_id: spec.chat_id,
             attempt,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2239,6 +2341,14 @@ mod test {
         conformance::assert_run_store(Arc::new(FsOps::new(&root))).await;
     }
 
+    /// A run row written before `task_id` could be absent still loads
+    /// (issue #983). Backend-independent — see the assertion's own docs — so it
+    /// is driven from the one backend every lane builds.
+    #[test]
+    fn conformance_legacy_run_row_loads() {
+        conformance::assert_legacy_run_row_loads();
+    }
+
     #[tokio::test]
     async fn conformance_workflow_revision_store() {
         let root_dir = tmp_root();
@@ -2348,6 +2458,13 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_workspace_folder_claims(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_sibling_names() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_sibling_names(Arc::new(FsOps::new(&root))).await;
     }
 
     /// Issue #887, and the backend the case was written against: this is the

@@ -48,7 +48,7 @@ use crate::Result;
 use crate::company::CompanyManifest;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
+use crate::ports::events::{EventLog, EventStreamItem, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::login_codes::LoginCodeRecord;
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
@@ -266,7 +266,7 @@ impl MongoStore {
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
         // See `unique_partial`.
-        let plans: [(&str, IndexModel); 32] = [
+        let plans: [(&str, IndexModel); 35] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -278,6 +278,14 @@ impl MongoStore {
             ("inbox_meta", unique(doc! {"company_id": 1, "key": 1})),
             ("tasks", unique(doc! {"company_id": 1, "task_id": 1})),
             ("facts", unique(doc! {"company_id": 1, "fact_id": 1})),
+            ("ledger_specs", unique(doc! {"company_id": 1, "slug": 1})),
+            // Not unique on the entry: many events fold into one row.
+            // `seq` is the fold's ordering, so it is unique per company.
+            ("ledger_events", unique(doc! {"company_id": 1, "seq": 1})),
+            (
+                "ledger_events",
+                nonunique(doc! {"company_id": 1, "ledger": 1, "seq": 1}),
+            ),
             ("usage_samples", unique(doc! {"company_id": 1, "seq": 1})),
             ("skill_state", unique(doc! {"company_id": 1, "slug": 1})),
             (
@@ -529,7 +537,9 @@ impl CompanyStore for MongoStore {
         else {
             return Ok(None);
         };
-        let manifest: CompanyManifest = toml::from_str(&get_str(&company, "manifest_toml")?)
+        // `from_stored_toml` applies the global baseline — see
+        // `CompanyManifest::apply_globals`.
+        let manifest = CompanyManifest::from_stored_toml(&get_str(&company, "manifest_toml")?)
             .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
 
         let mut cursor = self
@@ -722,15 +732,17 @@ impl EventLog for MongoStore {
         Ok(out)
     }
 
-    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
         let rx = self.sender_for(id).subscribe();
         let stream = futures::stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => return Some((event, rx)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return None,
+            // Each call to this closure produces exactly one item and hands the
+            // receiver back as continuation state, so there is no loop here.
+            match rx.recv().await {
+                Ok(event) => Some((EventStreamItem::Event(event), rx)),
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    Some((EventStreamItem::Gap { missed }, rx))
                 }
+                Err(broadcast::error::RecvError::Closed) => None,
             }
         });
         Box::pin(stream)
@@ -1203,6 +1215,108 @@ impl crate::ports::tasks::TaskStore for MongoStore {
         let res = self
             .collection("tasks")
             .delete_one(doc! {"company_id": company.as_ref(), "task_id": id})
+            .await
+            .map_err(mongo_err)?;
+        Ok(res.deleted_count > 0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LedgerStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::ledgers::LedgerStore for MongoStore {
+    async fn list_specs(&self, company: &CompanyId) -> Result<Vec<crate::ledger::LedgerSpec>> {
+        let mut cursor = self
+            .collection("ledger_specs")
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"slug": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(serde_json::from_str(&get_str(&doc, "spec_json")?)?);
+        }
+        Ok(out)
+    }
+
+    async fn put_spec(&self, company: &CompanyId, spec: &crate::ledger::LedgerSpec) -> Result<()> {
+        self.collection("ledger_specs")
+            .update_one(
+                doc! {"company_id": company.as_ref(), "slug": &spec.slug},
+                doc! {"$set": { "spec_json": serde_json::to_string(spec)? }},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
+
+    async fn delete_spec(&self, company: &CompanyId, slug: &str) -> Result<bool> {
+        // The events stay. See `LedgerStore::delete_spec`.
+        let res = self
+            .collection("ledger_specs")
+            .delete_one(doc! {"company_id": company.as_ref(), "slug": slug})
+            .await
+            .map_err(mongo_err)?;
+        Ok(res.deleted_count > 0)
+    }
+
+    async fn append(&self, company: &CompanyId, event: &crate::ledger::LedgerEvent) -> Result<()> {
+        // A company-wide counter rather than a per-ledger one. The fold only
+        // needs the order *within* a ledger, and one counter per company is one
+        // document to contend on instead of one per axis — while still giving a
+        // total order the console can read across ledgers.
+        let seq = self.next_seq(company, "ledger_events").await?;
+        self.collection("ledger_events")
+            .insert_one(doc! {
+                "company_id": company.as_ref(),
+                "seq": seq as i64,
+                "ledger": &event.ledger,
+                "entry_id": &event.id,
+                "event_json": serde_json::to_string(event)?,
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
+
+    async fn events(
+        &self,
+        company: &CompanyId,
+        ledger: &str,
+    ) -> Result<Vec<crate::ledger::LedgerEvent>> {
+        let mut cursor = self
+            .collection("ledger_events")
+            .find(doc! {"company_id": company.as_ref(), "ledger": ledger})
+            .sort(doc! {"seq": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(serde_json::from_str(&get_str(&doc, "event_json")?)?);
+        }
+        Ok(out)
+    }
+
+    async fn purge_entry(&self, company: &CompanyId, ledger: &str, entry: &str) -> Result<bool> {
+        let res = self
+            .collection("ledger_events")
+            .delete_many(doc! {
+                "company_id": company.as_ref(),
+                "ledger": ledger,
+                "entry_id": entry,
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(res.deleted_count > 0)
+    }
+
+    async fn purge_ledger(&self, company: &CompanyId, ledger: &str) -> Result<bool> {
+        let res = self
+            .collection("ledger_events")
+            .delete_many(doc! {"company_id": company.as_ref(), "ledger": ledger})
             .await
             .map_err(mongo_err)?;
         Ok(res.deleted_count > 0)
@@ -1943,15 +2057,23 @@ impl crate::ports::runs::RunStore for MongoStore {
         // usage sequences use, keyed per card — so concurrent creates cannot
         // collide even across processes. `next_seq` is 0-based; attempts are
         // 1-based (`Attempt 1` is the first).
-        let attempt = self
-            .next_seq(company, &format!("run:{}", spec.task_id))
-            .await?
-            .saturating_add(1);
+        // A card-less run (issue #983) is always attempt 1 — see the fs
+        // backend's `create_run` for why the ordinal is not shared across them,
+        // and note that a shared counter here would be worse still: it is
+        // durable, so every chat turn a company ever ran would keep counting up.
+        let attempt = match &spec.task_id {
+            Some(task_id) => self
+                .next_seq(company, &format!("run:{task_id}"))
+                .await?
+                .saturating_add(1),
+            None => 1,
+        };
         let run = RunRecord {
             id: spec.id,
             company: company.clone(),
             task_id: spec.task_id,
             agent_id: spec.agent_id,
+            chat_id: spec.chat_id,
             attempt: attempt as u32,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -1980,7 +2102,7 @@ impl crate::ports::runs::RunStore for MongoStore {
             .insert_one(doc! {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
-                "task_id": &run.task_id,
+                "task_id": run.task_id.as_deref(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
                 "created_ms": run.created_at_millis as i64,
@@ -2016,7 +2138,7 @@ impl crate::ports::runs::RunStore for MongoStore {
             .update_one(
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
-                    "task_id": &run.task_id,
+                    "task_id": run.task_id.as_deref(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
                     "created_ms": run.created_at_millis as i64,
@@ -2996,7 +3118,20 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         self.collection("workspace_nodes")
             .insert_one(document)
             .await
-            .map_err(mongo_err)?;
+            // Issue #894: the index refusing a second file at one path is a
+            // *contract* outcome, not a storage fault. It reached callers as
+            // `Store("mongodb error: E11000 …")` — a 500 carrying a driver
+            // string — where fs and SQLite both answer `Conflict`. The users
+            // -email index has been mapped this way since it was added.
+            .map_err(|e| {
+                if is_duplicate_key(&e) {
+                    OpenCompanyError::Conflict(crate::ports::workspace::duplicate_file_refusal(
+                        &node.name,
+                    ))
+                } else {
+                    mongo_err(e)
+                }
+            })?;
         Ok(())
     }
 
@@ -3142,7 +3277,16 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         self.collection("workspace_nodes")
             .insert_one(document)
             .await
-            .map_err(mongo_err)?;
+            // Issue #894, as in `create`.
+            .map_err(|e| {
+                if is_duplicate_key(&e) {
+                    OpenCompanyError::Conflict(crate::ports::workspace::duplicate_file_refusal(
+                        &node.name,
+                    ))
+                } else {
+                    mongo_err(e)
+                }
+            })?;
         // The stamped node, so the digest a caller records can only have come
         // from the store (issue #668).
         Ok(node)
@@ -4232,6 +4376,13 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_event_subscription_surfaces_gap() {
+        let Some(s) = store().await else { return };
+        conformance::assert_event_subscription_surfaces_gap(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
     async fn conformance_event_read_before() {
         let Some(s) = store().await else { return };
         conformance::assert_event_read_before(s.clone()).await;
@@ -4362,6 +4513,13 @@ mod test {
     async fn conformance_workspace_store() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workspace_sibling_names() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_sibling_names(s.clone()).await;
         drop_db(&s).await;
     }
 

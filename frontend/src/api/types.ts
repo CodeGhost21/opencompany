@@ -67,6 +67,7 @@ export type TurnStepFailure =
   | "unauthorized"
   | "missing_permission"
   | "missing_app"
+  | "not_found"
   | "timeout"
   | "unavailable"
   | "failed";
@@ -115,6 +116,7 @@ export const STEP_FAILURE_LABEL: Record<TurnStepFailure, string> = {
   unauthorized: "Unauthorized",
   missing_permission: "Missing permission",
   missing_app: "App unavailable",
+  not_found: "Not found",
   timeout: "Timed out",
   unavailable: "Service unavailable",
   failed: "Failed",
@@ -296,7 +298,39 @@ export interface ApprovalSummary {
   /** The parked effect's dotted kind, e.g. "payment.send". */
   kind: string;
   amount_usd: number | null;
+  /**
+   * Epoch-millis the effect was parked — stamped in the same turn that composed
+   * its arguments, so it dates the **payload**, not the queue (#1024).
+   */
   at_millis: number;
+  /**
+   * Epoch-millis this approval default-denies if nobody decides it (#971) —
+   * `at_millis` plus the company's approval deadline
+   * (`[policy].approval_ttl_hours`, 24 hours by default).
+   *
+   * **Never recompute it.** The host projects it from the gate that actually
+   * enforces the deadline; a console that added its own 24 hours to
+   * `at_millis` would show a deadline nothing enforces, and an operator would
+   * act on "in 3h" and be refused.
+   *
+   * Optional because a host may predate the field. Absent means "this host
+   * does not report deadlines" — render the card exactly as before rather
+   * than guessing one.
+   */
+  expires_at_millis?: number | null;
+  /**
+   * The host's consequence group for the parked effect (#1024).
+   *
+   * Derived server-side from the tool **and its arguments**, so a
+   * `composio_execute` carrying `GMAIL_SEND_EMAIL` arrives as `"send"` rather
+   * than as the catch-all its tool name alone implies. It cannot be computed
+   * here: for a harness tool call `kind` is the tool name, so a console keying
+   * on `kind` would miss exactly the outbound sends this marks.
+   *
+   * Optional, and that is how an old host degrades: no field, no age label,
+   * exactly the pre-#1024 card.
+   */
+  group?: "spend" | "send" | "sign" | "publish" | "hire" | "identity" | "other";
   /**
    * Which board task this approval was parked for (#333). Mirrors `TaskLink` in
    * `src/runtime/journal.rs`.
@@ -374,6 +408,29 @@ export interface ApprovalSummary {
    * alone, exactly as every approval did before this shipped.
    */
   thread?: string | null;
+  /**
+   * Which **workflow run** parked this approval (#880) — the run's correlation
+   * id, the same value `WorkflowRunResult.runId` carries back to the console
+   * that pressed Run.
+   *
+   * The join, and the only one there is: it is what lets a second surface — the
+   * run drawer (#1002) — show the cards *this* run is held on without the host
+   * growing a run-scoped approvals route. Compare it for equality and nothing
+   * else; like every other id here it never reaches the screen.
+   *
+   * **Absent is not "unknown", it is "no workflow run behind this card"** — a
+   * chat turn, a scheduler tick, a task attempt. The host stamps it only for an
+   * *unlinked* park that carries a run id, precisely because `Effect::run_id`
+   * also carries task-attempt ids that must never be read as a workflow run
+   * (`workflow_run_of` in `src/company/runtime.rs`). Absent on a host predating
+   * the field too, and both must read the same way: such a card belongs to the
+   * Approvals page alone, exactly as every approval did before this shipped.
+   *
+   * Snake-case because the REST projection is
+   * (`ApprovalSummary::workflow_run_id` in `src/runtime/types.rs`); the GraphQL
+   * schema camel-cases the same field, and this console reads REST.
+   */
+  workflow_run_id?: string | null;
   /**
    * Which turn's gated calls this one belongs to (#842) — an opaque key shared
    * by every approval a single agent turn parked.
@@ -802,13 +859,11 @@ export interface InboxMessageDto {
  *   by the Composio plane, which brokers through it. The native OAuth catalog
  *   does **not** route through the company key today, so this value does not
  *   appear on a native-only provider — see `api/credential.ts`.
- * - `static` — a token this company already stored, or this host's own
- *   registered provider application (the self-hosted hatch). The handshake
- *   works; the console stopped offering it in issue #822, because what it
- *   stores is read by no agent tool (#396). So this tier now says what the host
- *   *could* do, and `connectRoute` (`lib/connections.ts`) routes such a
- *   provider through Composio or reports it unavailable.
- * - `none` — neither, so no Connect can succeed on this host.
+ * - `static` — a legacy native OAuth token this company already stored. It is
+ *   visible and revocable, but no agent can use it.
+ * - `none` — neither. A registered native provider application also lands
+ *   here: its start route is a dated 410 retirement bridge (issue #838), not a
+ *   connection route.
  */
 export type ConnectionCredentialSource = "attested" | "company" | "static" | "none";
 
@@ -847,12 +902,6 @@ export interface ConnectionState {
   unverified?: boolean;
 }
 
-/** Response of `POST .../connections/{provider}/start`: where to send the user. */
-export interface ConnectionStart {
-  /** The provider's OAuth authorize URL to redirect the operator to. */
-  url: string;
-}
-
 /** The coarse health tier of an MCP server, from a probe. */
 export type McpStatus = "ok" | "needs_config" | "error" | "unknown";
 
@@ -868,6 +917,23 @@ export interface McpHealth {
   checkedAtMillis: number;
   /** A stable auth-failure reason code, when the status is a credential problem. */
   authHint?: string;
+}
+
+/**
+ * One roster agent named on a console coverage line — {@link
+ * McpServer.reachableBy} ("Reachable by") and the repositories card's
+ * `grantedAgents` ("Readable by"), both computed from one roster walk on the
+ * host.
+ *
+ * `name` is the display label the rest of the console uses for that teammate (a
+ * manifest teammate's role, an operator-added teammate's name) and is the only
+ * thing worth showing a reader: an operator-added teammate's `id` is a minted
+ * internal string, which both lines used to print raw (issue #931). The id is
+ * still carried so a client can key or link on it.
+ */
+export interface RosterAgent {
+  id: string;
+  name: string;
 }
 
 /**
@@ -888,16 +954,18 @@ export interface McpServer {
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;
   /**
-   * Ids of the company's agents whose effective tool grants cover this server —
-   * who can actually call it (issue #568). On an **enabled** server an empty
-   * array means no teammate can reach it, a probable misconfiguration the
-   * console flags loudly. A **disabled** server is always empty (the harness
-   * hands out no tool for it whatever the grants say), so the console reads the
-   * empty case against `enabled` and stays quiet there. Optional only for
-   * forward-compat with an older backend that does not send the field;
-   * `undefined` (unknown) is treated differently from `[]` (known-empty).
+   * The company's agents whose effective tool grants cover this server — who can
+   * actually call it (issue #568). On an **enabled** server an empty array means
+   * no teammate can reach it, a probable misconfiguration the console flags
+   * loudly. A **disabled** server is always empty (the harness hands out no tool
+   * for it whatever the grants say), so the console reads the empty case against
+   * `enabled` and stays quiet there. Optional only for forward-compat with an
+   * older backend that does not send the field; `undefined` (unknown) is treated
+   * differently from `[]` (known-empty).
+   *
+   * Render {@link RosterAgent.name}, never the id (issue #931).
    */
-  reachableBy?: string[];
+  reachableBy?: RosterAgent[];
   /** The last recorded (scrubbed) probe outcome, when the server has been probed. */
   health?: McpHealth;
 }
@@ -1074,6 +1142,8 @@ export interface UsagePointDto {
 export interface AgentTokensDto {
   name: string;
   tokens: number;
+  /** Source-currency USD, absent when role-redacted. */
+  costUsd?: number;
 }
 
 /** OAuth-connected calls counted for one provider over the window. */
@@ -1087,7 +1157,7 @@ export interface UsageTotalsDto {
   inputTokens: number;
   outputTokens: number;
   tokens: number;
-  costUsd: number;
+  costUsd?: number;
   oauthCalls: number;
   connections: number;
   /**
@@ -1114,6 +1184,8 @@ export interface UsageDto {
   /** OAuth calls per provider, highest first (empty until Phase 2 emit). */
   byProvider: ProviderCallsDto[];
   totals: UsageTotalsDto;
+  /** Positive cost exists but is hidden from this role. */
+  costHidden?: boolean;
 }
 
 /** Spend rolled up by prosumer category (`GET .../finances`). */

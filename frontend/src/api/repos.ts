@@ -13,6 +13,7 @@
 
 import type { OpenCompanyClient } from "./client";
 import { expectList } from "./mcp";
+import type { RosterAgent } from "./types";
 
 /** One bound repository, as the host reports it. Never carries a credential. */
 export interface Repo {
@@ -54,8 +55,10 @@ export interface RepoList {
    * and nobody is allowed to open them, which is a silent misconfiguration the
    * card names rather than leaves for an operator to discover by asking an
    * agent.
+   *
+   * Render {@link RosterAgent.name}, never the id (issue #931).
    */
-  grantedAgents: string[];
+  grantedAgents: RosterAgent[];
 }
 
 /** A mutating route's body. `repo` is absent on revoke. */
@@ -91,7 +94,7 @@ export async function listRepos(
     // An older host that predates the field sends nothing, and "nobody" is the
     // safe reading: it prompts an operator to check the grant rather than
     // reassuring them that somebody can read the code.
-    grantedAgents: expectList<string>(record.grantedAgents ?? [], "granted agent list"),
+    grantedAgents: expectList<RosterAgent>(record.grantedAgents ?? [], "granted agent list"),
   };
 }
 

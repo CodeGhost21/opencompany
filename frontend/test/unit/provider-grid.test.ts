@@ -11,7 +11,12 @@ import { describe, expect, it } from "vitest";
 
 import type { ComposioConnectedAccount, ComposioToolkitEntry } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
-import { buildGridProviders, disconnectRouteFor } from "@/lib/provider-grid";
+import {
+  accountSummary,
+  buildGridProviders,
+  disconnectRouteFor,
+  tallyAccounts,
+} from "@/lib/provider-grid";
 import { CONNECTION_PROVIDERS, type ComposioReach } from "@/lib/connections";
 
 /** A host where Composio is live and everything is reachable (open mode). */
@@ -99,8 +104,8 @@ describe("buildGridProviders", () => {
     const tile = bySlug(providers, "googlecalendar");
     expect(tile.connected).toBe(true);
     // The host id stays distinct from the Composio slug: one is what
-    // `startConnection`/`disconnectConnection` take, the other is what
-    // `composio/authorize` takes, and sending either to the other's route fails.
+    // `disconnectConnection` takes for a historical credential, the other is
+    // what `composio/authorize` takes, and sending either to the other's route fails.
     expect(tile.providerId).toBe("google-calendar");
   });
 
@@ -419,5 +424,72 @@ describe("disconnect routing", () => {
     const tile = bySlug(providers, "gmail");
     expect(tile.account).toBeUndefined();
     expect(tile.accounts).toHaveLength(2);
+  });
+});
+
+// The one rule for counting accounts (issue #923).
+//
+// The bug these pin is #582's shape one level down. #582 removed a second
+// *grid*; this is two rules meeting inside the surviving one. The tile printed
+// `accounts.length` — every account, whatever its state — under a badge gated
+// on `connected`, which the host sets when at least one account is `ACTIVE`.
+// The two reads disagreed in both directions on one screen, and the account
+// list two inches below the grid showed the operator that they did.
+//
+// The counts below are the three rows the issue reported, verbatim.
+describe("accountSummary", () => {
+  function acct(id: string, connected: boolean): ComposioConnectedAccount {
+    return { id, status: connected ? "ACTIVE" : "INITIATED", connected };
+  }
+
+  it("counts only the accounts an agent can act as", () => {
+    // Gmail as reported: one ACTIVE, five INITIATED. The grid said "6 accounts
+    // connected" — it counted the five that no agent can use.
+    const gmail = [
+      acct("g1", true),
+      acct("g2", false),
+      acct("g3", false),
+      acct("g4", false),
+      acct("g5", false),
+      acct("g6", false),
+    ];
+    expect(tallyAccounts(gmail)).toEqual({ live: 1, pending: 5 });
+    expect(accountSummary(gmail)).toBe("1 account connected");
+
+    // GitHub as reported: three ACTIVE, two INITIATED. The grid said five.
+    const github = [
+      acct("h1", true),
+      acct("h2", true),
+      acct("h3", true),
+      acct("h4", false),
+      acct("h5", false),
+    ];
+    expect(tallyAccounts(github)).toEqual({ live: 3, pending: 2 });
+    expect(accountSummary(github)).toBe("3 accounts connected");
+  });
+
+  it("says a provider holds accounts even when none of them is usable", () => {
+    // Notion as reported: three INITIATED, none ACTIVE. The grid collapsed this
+    // to "not connected" — directly above the three accounts it listed. An
+    // account mid-handshake is not the absence of an account, which is the
+    // distinction the issue's Expected asks the grid to keep.
+    const notion = [acct("n1", false), acct("n2", false), acct("n3", false)];
+    expect(tallyAccounts(notion)).toEqual({ live: 0, pending: 3 });
+    expect(accountSummary(notion)).toBe("3 accounts, none connected");
+    expect(accountSummary(notion)).not.toBe("not connected");
+  });
+
+  it("leaves the wording to the caller when the host sent no accounts", () => {
+    // A host predating #404 answers without `accounts` while still reporting
+    // the toolkit connected. `null` is what lets the tile keep saying
+    // "connected via composio" rather than inventing a count of zero.
+    expect(accountSummary(undefined)).toBeNull();
+    expect(accountSummary([])).toBeNull();
+    expect(tallyAccounts(undefined)).toEqual({ live: 0, pending: 0 });
+  });
+
+  it("uses the singular for one of each", () => {
+    expect(accountSummary([acct("a", true)])).toBe("1 account connected");
+    expect(accountSummary([acct("a", false)])).toBe("1 account, not connected");
   });
 });

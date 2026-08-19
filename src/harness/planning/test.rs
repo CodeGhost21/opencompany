@@ -226,6 +226,62 @@ fn evidence() -> Evidence {
     }
 }
 
+/// Issue #982: the gate keeps its promise now that the assignee it is being
+/// handed usually came from the operator addressing a thread.
+///
+/// The pairing is the test. A blank card takes the planner's content-derived
+/// guess — which is the behaviour every unaddressed card still wants — and a
+/// card that already names somebody keeps them even when the planner proposed a
+/// different, perfectly plausible teammate. That second row is the whole of the
+/// bug: the addressee is written before the pass runs, so the pass has to be the
+/// thing that does not overwrite it.
+#[test]
+fn the_gate_fills_a_blank_assignee_and_never_overrules_one() {
+    assert_eq!(
+        settled_assignee("", Some("maya".to_string())).as_deref(),
+        Some("maya"),
+        "a blank card is what the planner's proposal is for"
+    );
+    assert_eq!(
+        settled_assignee("sam", Some("maya".to_string())).as_deref(),
+        Some("sam"),
+        "an assignee the operator chose outranks a content match"
+    );
+    assert_eq!(
+        settled_assignee("sam", None).as_deref(),
+        Some("sam"),
+        "…and stands on its own when the planner proposed nobody"
+    );
+    assert_eq!(
+        settled_assignee("", None),
+        None,
+        "nobody either way still blocks, exactly as before"
+    );
+}
+
+/// …and the assignee a chat card now arrives with is one the gate accepts, so
+/// nothing newly settles as blocked.
+///
+/// Both shapes the chat route can write are checked: a teammate id, and a
+/// **desk** id, which is what a desk-addressed message opens its card with.
+#[test]
+fn an_addressed_chat_cards_assignee_passes_the_gates_validity_check() {
+    let e = evidence();
+    assert_eq!(e.card_assignee, "maya", "the fixture card names a teammate");
+    assert!(
+        e.assignee_is_valid(&e.card_assignee),
+        "a teammate-addressed card dispatches rather than blocking"
+    );
+    assert!(
+        e.assignee_is_valid("studio"),
+        "a desk-addressed card carries the desk id, and that is valid too"
+    );
+    assert!(
+        !e.assignee_is_valid("nobody_by_that_name"),
+        "…and the check still refuses a name nobody answers to"
+    );
+}
+
 fn claim(kind: PrereqKind, name: &str) -> PrereqClaim {
     PrereqClaim {
         kind,
@@ -938,6 +994,7 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         origin_chat_id: None,
         parent_task_id: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         // A card entering Planning has never run, so it has produced nothing
@@ -1252,12 +1309,14 @@ async fn a_plan_fills_a_blank_assignee_but_never_reassigns_one() {
 /// silence that has to keep being true.
 #[tokio::test]
 async fn a_re_plan_does_not_erase_what_an_earlier_attempt_produced() {
-    use crate::ports::tasks::TaskOutput;
+    use crate::ports::tasks::{TaskOutput, TaskOutputSource};
 
     let (_home, runtime) = runtime_with(ScriptedModel::replying(CLEAN_PLAN)).await;
     let produced = TaskOutput {
-        run_id: "run-7".to_string(),
-        attempt: Some(2),
+        source: TaskOutputSource::Run {
+            run_id: "run-7".to_string(),
+            attempt: Some(2),
+        },
         at_millis: 1_000,
         artifacts: Vec::new(),
         workflows: Vec::new(),

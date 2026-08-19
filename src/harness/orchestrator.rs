@@ -67,7 +67,8 @@ use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
     Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile,
-    WorkflowNodeKind, create_company_workflow, list_workflows_union, load_workflow_union,
+    WorkflowNodeKind, create_company_workflow, list_workflows_with_globals,
+    load_workflow_with_globals,
 };
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;
@@ -1446,11 +1447,18 @@ impl Tool for QueryCompanyTool {
             .as_ref()
             .map(|r| r.overlay_workflows.clone())
             .unwrap_or_default();
-        let mut workflows: Vec<(String, String)> =
-            list_workflows_union(self.workflow_source_dir.as_deref(), &overlay_workflows)
-                .into_iter()
-                .map(|f| (f.id, f.name))
-                .collect();
+        let globals_disable = record
+            .as_ref()
+            .map(|r| r.manifest.globals.disable.clone())
+            .unwrap_or_default();
+        let mut workflows: Vec<(String, String)> = list_workflows_with_globals(
+            self.workflow_source_dir.as_deref(),
+            &overlay_workflows,
+            &globals_disable,
+        )
+        .into_iter()
+        .map(|f| (f.id, f.name))
+        .collect();
         let mut seen: std::collections::HashSet<String> =
             workflows.iter().map(|(id, _)| id.clone()).collect();
         if let Some(record) = &record {
@@ -1565,6 +1573,21 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn summarize_event(event: &CompanyEvent) -> String {
     match event {
         CompanyEvent::OperatorMessage { .. } => "operator message".to_string(),
+        // Issue #983. Structural only, like every arm here: the turn id, which
+        // is a minted identifier, and nothing else. Neither the desk nor the
+        // failure reason is named — the desk is operator-authored free text on
+        // an overlay-created chat, and the reason is our own prose about the
+        // host, which is exactly what a non-sensitive one-liner should not
+        // carry.
+        CompanyEvent::TurnStarted { turn_id, .. } => format!("turn accepted: {turn_id}"),
+        CompanyEvent::TurnFailed { turn_id, .. } => format!("turn unanswered: {turn_id}"),
+        // Issue #1015. Structural only: the minted id and the status word, a
+        // fixed vocabulary. The failure reason is our own prose about the host
+        // and is tenant-scoped, so it stays off this surface exactly as
+        // `TurnFailed`'s does.
+        CompanyEvent::RunStatusChanged { run_id, to, .. } => {
+            format!("attempt {run_id}: {to}")
+        }
         CompanyEvent::AgentReply { agent_id, .. } => format!("reply from {agent_id}"),
         CompanyEvent::TaskDispatched { task_id, .. } => format!("task dispatched: {task_id}"),
         // Issue #464. Structural only, like every arm here: the id, the change
@@ -3476,8 +3499,10 @@ impl Tool for RunWorkflowTool {
         // Load the saved graph from the seed ∪ overlay union, so a workflow the
         // console (or this agent) created on a hosted tenant runs the same as a
         // committed one.
-        let overlays = match self.store.load(&self.company).await {
-            Ok(record) => record.map(|r| r.overlay_workflows).unwrap_or_default(),
+        let (overlays, globals_disable) = match self.store.load(&self.company).await {
+            Ok(record) => record
+                .map(|r| (r.overlay_workflows, r.manifest.globals.disable))
+                .unwrap_or_default(),
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: record load failed");
                 return Ok(ToolResult::error(format!(
@@ -3488,7 +3513,12 @@ impl Tool for RunWorkflowTool {
         // Mirror the REST run route: an id neither source has is a clean
         // "unknown id" rather than a raw read error (which would also leak the
         // on-disk path into agent-visible text).
-        let file = match load_workflow_union(self.source_dir.as_deref(), &overlays, &wid) {
+        let file = match load_workflow_with_globals(
+            self.source_dir.as_deref(),
+            &overlays,
+            &globals_disable,
+            &wid,
+        ) {
             Ok(file) => file,
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: load failed");
@@ -3641,13 +3671,21 @@ impl Tool for RunWorkflowTool {
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: run failed");
                 if let Some(events) = self.events.as_ref() {
+                    let message = err.to_string();
                     crate::runtime::record_run_finished(
                         events,
                         &self.company,
                         &wid,
                         false,
                         &ctx.run_id,
-                        Err(err.to_string().as_str()),
+                        // Issue #1008: an agent-started run journals what it did
+                        // before it broke on exactly the same terms as a console
+                        // or scheduled one — the three entry points share this
+                        // helper so their history cannot drift.
+                        Err(crate::runtime::FailedRun {
+                            error: message.as_str(),
+                            partial: err.partial_run(),
+                        }),
                     )
                     .await;
                 }
@@ -4476,6 +4514,9 @@ impl Tool for CreateWorkflowTool {
                 let detail = match &err {
                     OpenCompanyError::InvalidRequest(message)
                     | OpenCompanyError::Conflict(message) => message.clone(),
+                    // A structured workflow rejection (issue #1016) carries the
+                    // joined problem text via `Display`, so the agent reads why.
+                    OpenCompanyError::WorkflowInvalid { .. } => err.to_string(),
                     _ => "the company couldn't save it right now; try again.".to_string(),
                 };
                 Ok(ToolResult::error(format!(
@@ -4577,6 +4618,7 @@ mod tests {
 
     fn agent(id: &str, tier: Option<&str>) -> ManifestAgent {
         ManifestAgent {
+            global: false,
             id: id.to_string(),
             role: "Role".to_string(),
             description: None,
@@ -4589,6 +4631,8 @@ mod tests {
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         }
     }
 
@@ -6287,7 +6331,10 @@ members = ["legal_counsel"]
                     .cloned()
                     .collect())
             }
-            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
                 Box::pin(stream::empty())
             }
         }
@@ -6389,7 +6436,10 @@ members = ["legal_counsel"]
                     .cloned()
                     .collect())
             }
-            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
                 Box::pin(stream::empty())
             }
         }
@@ -6679,7 +6729,11 @@ members = ["legal_counsel"]
         let out = result.output_for_llm(true);
         assert!(out.contains("No durable facts recorded"), "{out}");
         assert!(out.contains("No recent activity"), "{out}");
-        assert!(out.contains("No saved workflows"), "{out}");
+        // Not "no saved workflows" any more: the global baseline ships graphs
+        // every company has, wired store or not.
+        for workflow in crate::globals::workflows() {
+            assert!(out.contains(&workflow.id), "{out}");
+        }
     }
 
     /// Regression: a saved workflow (on disk) and an operator-added overlay

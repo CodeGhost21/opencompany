@@ -15,6 +15,30 @@ use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
+/// The workflow summaries a company itself has: the global baseline is listed
+/// in every company, and these tests are about the company's own graphs.
+///
+/// This is an **id heuristic**, not provenance: `WorkflowSummary` carries no
+/// `global` flag over GraphQL, so a row is classified as "the baseline's" by
+/// whether its id matches one of `crate::globals::workflows()`. A company
+/// definition of the *same* id supersedes the global one (see
+/// `crate::company::list_workflows_with_globals`) and would be wrongly
+/// excluded here — none of the fixtures below give a company workflow an id
+/// that collides with a global, so that gap does not fire in this suite, but
+/// see `graphql_lists_a_company_override_of_a_global_id_by_its_own_content`
+/// for the same-id case asserted directly, without this helper.
+pub(crate) fn own_workflows(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .as_array()
+        .expect("summaries")
+        .iter()
+        .filter(|row| {
+            let id = row["id"].as_str().unwrap_or_default();
+            !crate::globals::workflows().iter().any(|w| w.id == id)
+        })
+        .collect()
+}
+
 pub(crate) fn home() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("opencompany-gql-")
@@ -217,11 +241,22 @@ async fn team_lists_manifest_teammates() {
         r#"{"query":"{ company(id:\"acme\"){ team { id role name inboxEnabled } } }"}"#,
     )
     .await;
+    // The global baseline is appended to every roster; this test is about the
+    // company's own teammate, so it reads the row rather than the whole list.
     let team = value["data"]["company"]["team"].as_array().unwrap();
-    assert_eq!(team.len(), 1);
-    assert_eq!(team[0]["id"], "maya");
-    assert_eq!(team[0]["role"], "Marketing Lead");
-    assert!(team[0]["name"].is_null());
+    let maya = team
+        .iter()
+        .find(|row| row["id"] == "maya")
+        .expect("maya is on the roster");
+    assert_eq!(maya["role"], "Marketing Lead");
+    assert!(maya["name"].is_null());
+    for global in crate::globals::agents() {
+        assert!(
+            team.iter().any(|row| row["id"] == global.id.as_str()),
+            "the baseline teammate `{}` is missing from the roster",
+            global.id
+        );
+    }
 }
 
 /// Issue #343: the GraphQL roster resolves the **effective** cap and its
@@ -791,6 +826,7 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -893,7 +929,7 @@ async fn empty_surfaces_resolve_to_empty_lists() {
         .map(|node| node["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["Agents", "maya"]);
+    assert_eq!(names, vec!["Agents", "README.md", "maya", "secrets"]);
     let root = tree
         .iter()
         .find(|node| node["name"] == serde_json::json!("Agents"))
@@ -908,7 +944,9 @@ async fn empty_surfaces_resolve_to_empty_lists() {
     assert_eq!(folder["createdBy"]["agentId"], "maya");
     assert_eq!(company["inboxes"].as_array().unwrap().len(), 0);
     assert_eq!(company["skills"].as_array().unwrap().len(), 0);
-    assert_eq!(company["workflows"].as_array().unwrap().len(), 0);
+    // The global baseline is listed in every company, so "empty" here means the
+    // company has no graphs of its own.
+    assert_eq!(own_workflows(&company["workflows"]).len(), 0);
 }
 
 #[tokio::test]
@@ -1307,7 +1345,7 @@ async fn workflows_resolve_from_the_record_overlay_with_no_source_dir() {
     )
     .await;
     let company = &value["data"]["company"];
-    let summaries = company["workflows"].as_array().expect("summaries");
+    let summaries = own_workflows(&company["workflows"]);
     assert_eq!(summaries.len(), 1, "value: {value}");
     assert_eq!(summaries[0]["id"], "hosted");
     // The real name from the overlay body, not the id fallback.
@@ -1391,9 +1429,7 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
         r#"{"query":"{ company(id:\"acme\"){ workflows { id name enabled } } }"}"#,
     )
     .await;
-    let summaries = value["data"]["company"]["workflows"]
-        .as_array()
-        .expect("summaries");
+    let summaries = own_workflows(&value["data"]["company"]["workflows"]);
     assert_eq!(summaries.len(), 1, "value: {value}");
     assert_eq!(summaries[0]["id"], "orphan");
     assert_eq!(summaries[0]["name"], "Orphan Flow");
@@ -1425,11 +1461,172 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
         .iter()
         .map(|row| row["id"].as_str().unwrap())
         .collect();
-    let gql_ids: Vec<&str> = summaries
+    // Both sides unfiltered here: the point of this assertion is that the two
+    // surfaces answer with the same id set, baseline graphs included.
+    let gql_ids: Vec<&str> = value["data"]["company"]["workflows"]
+        .as_array()
+        .expect("summaries")
         .iter()
         .map(|row| row["id"].as_str().unwrap())
         .collect();
     assert_eq!(rest_ids, gql_ids, "REST and GraphQL disagree on the id set");
+}
+
+/// A company workflow whose id collides with a global's must win — checked by
+/// its own distinguishing content, not by `own_workflows`' id heuristic, which
+/// would misclassify this exact row as "the baseline's" because the ids match.
+///
+/// This is the case the `own_workflows` doc comment calls out directly: a
+/// company definition of the same id as a global supersedes it (see
+/// `crate::company::list_workflows_with_globals`), so `Company.workflows` must
+/// list exactly one row for that id, carrying the company's own name.
+#[tokio::test]
+async fn graphql_lists_a_company_override_of_a_global_id_by_its_own_content() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    let taken = crate::globals::workflows()[0].id.clone();
+
+    let store = FsCompanyStore::new(home.to_path_buf());
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: vec![crate::ports::types::OverlayWorkflow {
+                id: taken.clone(),
+                toml: format!(
+                    "id = \"{taken}\"\nname = \"Ours, Not The Baseline's\"\n\
+                     [[node]]\nid = \"n1\"\nkind = \"trigger\"\nname = \"Start\"\n\
+                     [[node]]\nid = \"n2\"\nkind = \"output\"\nname = \"Done\"\n\
+                     [[edge]]\nfrom = \"n1\"\nto = \"n2\"\n"
+                ),
+            }],
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    state.registry().insert(id, Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ workflows { id name } } }"}"#,
+    )
+    .await;
+    let summaries = value["data"]["company"]["workflows"].as_array().unwrap();
+    let matching: Vec<&serde_json::Value> = summaries
+        .iter()
+        .filter(|row| row["id"] == taken.as_str())
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "the shadowed global must not be listed alongside the override: {value}"
+    );
+    assert_eq!(
+        matching[0]["name"], "Ours, Not The Baseline's",
+        "the company's own definition must win, not the global's: {value}"
+    );
+}
+
+/// A company that opts out of a global workflow via `[globals].disable` must
+/// neither list it in `Company.workflows` nor resolve it through
+/// `Company.workflow(id)` — the same contract `crate::globals::test`'s
+/// `a_disabled_global_workflow_neither_lists_nor_loads` pins at the pure
+/// `list_workflows_with_globals` / `load_workflow_with_globals` layer, checked
+/// here through the actual GraphQL resolvers (`resolve_summaries` /
+/// `resolve_one`) instead of calling those functions directly.
+#[tokio::test]
+async fn graphql_hides_a_company_disabled_global_workflow() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let id = CompanyId::new("acme");
+    let dropped = crate::globals::workflows()[0].id.clone();
+    let kept = crate::globals::workflows()[1].id.clone();
+
+    let disabling_manifest: CompanyManifest = toml::from_str(&format!(
+        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\n\
+         [globals]\ndisable = [\"workflow:{dropped}\"]\n"
+    ))
+    .unwrap();
+
+    let store = FsCompanyStore::new(home.to_path_buf());
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: disabling_manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), disabling_manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default()).with_home(home.to_path_buf());
+    state.registry().insert(id, Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+    let value = query(
+        router(state),
+        &format!(
+            r#"{{"query":"{{ company(id:\"acme\"){{ workflows {{ id }} dropped: workflow(id:\"{dropped}\"){{ id }} kept: workflow(id:\"{kept}\"){{ id }} }} }}"}}"#
+        ),
+    )
+    .await;
+    let company = &value["data"]["company"];
+    let ids: Vec<&str> = company["workflows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&dropped.as_str()),
+        "the disabled global must not be listed: {value}"
+    );
+    assert!(
+        ids.contains(&kept.as_str()),
+        "an unrelated global must still be listed: {value}"
+    );
+    assert!(
+        company["dropped"].is_null(),
+        "the disabled global must not resolve by id either: {value}"
+    );
+    assert!(
+        !company["kept"].is_null(),
+        "an unrelated global must still resolve by id: {value}"
+    );
 }
 
 /// `Company.workspaceSearch` (issue #607), over the same shared helper the REST

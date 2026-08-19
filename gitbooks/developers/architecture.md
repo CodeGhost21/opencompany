@@ -53,7 +53,8 @@ src/bin/opencompany.rs  CLI entrypoint
 companies/              Business definitions (a company.toml + docs each)
 frontend/               Company-agnostic operator console (Vite + React)
 vendor/openhuman/       OpenHuman git submodule
-vendor/tinyagents/      TinyAgents git submodule
+vendor/openhuman/vendor/tinyagents/
+                        TinyAgents inherited from OpenHuman
 ```
 
 ## Design goals

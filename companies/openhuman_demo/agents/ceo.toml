@@ -6,4 +6,4 @@ description = "Sets direction, answers about the company, and delegates the work
 tier = "orchestrator"
 # `workspace.read` is read-only by design: writes need a bare `workspace` or an
 # explicit `workspace.write`, so this cannot silently overwrite operator notes.
-tools = ["mcp:*", "workspace.read"]
+tools = ["mcp:*", "workspace.read", "chargebee", "paypal"]

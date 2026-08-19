@@ -252,6 +252,8 @@ fn build_brain(
 ) -> (HarnessBrain, Arc<FsOps>) {
     let ops = Arc::new(FsOps::new(dir));
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
             base_url,
             credential: Credential::from_value("stub-key"),
@@ -264,6 +266,7 @@ fn build_brain(
         // The agent workspaces hang off here. Nothing has created a single
         // directory under it — that is the precondition under test.
         workspace_root: dir.join("harness"),
+        workspace_git_enabled: false,
         audit_root: dir.join("harness"),
         model_override: Some("stub-model".to_string()),
         tasks: Some(ops.clone()),
@@ -291,6 +294,11 @@ fn build_brain(
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
+        hosting: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: None,
@@ -319,6 +327,7 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,

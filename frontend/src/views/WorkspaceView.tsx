@@ -73,6 +73,8 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { rosterDisplayName, rosterNameMap, type RosterNames } from "@/lib/roster-names";
+import { fromDto } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import {
   applyRepair,
@@ -118,6 +120,8 @@ interface Props {
    * exactly its old refresh-and-refocus behaviour.
    */
   event?: WorkspaceEvent | null;
+  /** Bumped when incremental event delivery cannot be trusted (#1011). */
+  refreshTick?: number;
   /**
    * A node to open on arrival (issue #552), from the `#/workspace/<nodeId>`
    * hash segment the Artifacts tab's "Open in workspace" link sets.
@@ -331,13 +335,17 @@ function message(e: unknown, fallback: string): string {
  * (#326), and there is no live push, so a write that lands while the tab is open
  * appears on refresh/refocus rather than instantly (#327).
  */
-export function WorkspaceView({ client, company, event, initialNodeId }: Props) {
+export function WorkspaceView({ client, company, event, refreshTick = 0, initialNodeId }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [nodes, setNodes] = useState<FsNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The roster names the `Agents/` folders resolve against (issue #973). Best
+  // effort and never blocking: a host predating the roster route 404s, and the
+  // tree simply falls back to the raw ids it has always shown.
+  const [rosterNames, setRosterNames] = useState<RosterNames>(() => new Map());
 
   const [openId, setOpenId] = useState<string | null>(null);
   const [openFile, setOpenFile] = useState<WorkspaceFile | null>(null);
@@ -392,6 +400,7 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   const treeGen = useRef(0);
   const fileGen = useRef(0);
   const searchGen = useRef(0);
+  const rosterGen = useRef(0);
   // Whether the explorer's initial folder expansion has happened yet, so a later
   // refresh never re-opens folders the operator collapsed.
   const expandedSeeded = useRef(false);
@@ -438,6 +447,24 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     },
     [client, company],
   );
+
+  /* ---- roster names (#973) ---- */
+
+  // Best effort, and deliberately separate from `loadTree`: a host with no
+  // roster route (or a request that simply fails) must not stop the workspace
+  // itself from loading — it only means the `Agents/` folders keep showing raw
+  // ids, exactly as they did before this issue.
+  const loadRoster = useCallback(async () => {
+    const mine = ++rosterGen.current;
+    try {
+      const team = await client.listTeam(company);
+      if (mine !== rosterGen.current) return;
+      setRosterNames(rosterNameMap(team.map(fromDto)));
+    } catch {
+      if (mine !== rosterGen.current) return;
+      setRosterNames(new Map());
+    }
+  }, [client, company]);
 
   /* ---- search (#607) ---- */
 
@@ -509,12 +536,18 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     // be saved into the wrong workspace is worse than no offer at all.
     setRescued(null);
     setExpanded(new Set());
+    // Another company's roster is another set of names; carrying the old map
+    // across a switch would resolve this company's ids against that one's
+    // teammates.
+    setRosterNames(new Map());
     void loadTree();
+    void loadRoster();
     return () => {
       treeGen.current++;
       fileGen.current++;
+      rosterGen.current++;
     };
-  }, [loadTree]);
+  }, [loadTree, loadRoster]);
 
   /* ---- the open note ---- */
 
@@ -688,6 +721,15 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     // Read does not replay the last frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [event?.tick]);
+
+  // A stream gap (or a stream that never reached OPEN) names no single node.
+  // Re-read the canonical tree without disturbing the open editor; the normal
+  // event path above remains responsible for payload-specific handling.
+  useEffect(() => {
+    if (refreshTick === 0) return;
+    void loadTree({ silent: true });
+    if (searchQuery) void runSearch(searchQuery);
+  }, [refreshTick, loadTree, runSearch, searchQuery]);
 
   /**
    * The open note stopped existing while the pane held it.
@@ -1260,6 +1302,7 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
               depth={0}
               expanded={expanded}
               openId={openId}
+              rosterNames={rosterNames}
               onToggle={toggle}
               onOpen={(id) => void open(id)}
               onRename={(node) => setPrompt({ mode: "rename", node })}
@@ -1485,6 +1528,8 @@ interface TreeProps {
   depth: number;
   expanded: Set<string>;
   openId: string | null;
+  /** id -> display name for roster ids (issue #973). See {@link isAgentsFolder}. */
+  rosterNames: RosterNames;
   onToggle: (id: string) => void;
   onOpen: (id: string) => void;
   onRename: (node: FsNode) => void;
@@ -1492,11 +1537,43 @@ interface TreeProps {
   onDelete: (node: FsNode) => void;
 }
 
+/**
+ * Whether `folder` is the workspace's `Agents/` root — the one folder whose
+ * direct children are named by roster id rather than anything an operator
+ * chose (issue #973). Root-scoped (`parentId === null`) so a note or folder an
+ * operator names "Agents" somewhere else in the tree is never mistaken for it.
+ */
+function isAgentsFolder(folder: FsNode | undefined): boolean {
+  return folder?.kind === "folder" && folder.name === "Agents" && folder.parentId === null;
+}
+
+/**
+ * `Agents/`'s children, sorted by display name rather than the lexical id
+ * {@link childrenOf} sorts everywhere else (issue #973). The pre-#686 ULID ids
+ * all sort before every readable slug under the plain id ordering, which is
+ * not an order an operator can read anything into.
+ */
+function sortRosterFolders(items: FsNode[], names: RosterNames): FsNode[] {
+  return [...items].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
+    // Only a roster folder's name is an id worth resolving. A direct file
+    // under `Agents/` is unusual but not impossible, and its raw name could
+    // coincidentally collide with a roster id — that must not reorder it by
+    // a display name it was never given one for.
+    return a.kind === "folder"
+      ? rosterDisplayName(a.name, names).localeCompare(rosterDisplayName(b.name, names))
+      : a.name.localeCompare(b.name);
+  });
+}
+
 function Tree(props: TreeProps) {
   const items = childrenOf(props.nodes, props.parentId);
+  const ordered = isAgentsFolder(nodeById(props.nodes, props.parentId))
+    ? sortRosterFolders(items, props.rosterNames)
+    : items;
   return (
     <>
-      {items.map((node) => (
+      {ordered.map((node) => (
         <TreeRow key={node.id} node={node} {...props} />
       ))}
     </>
@@ -1551,10 +1628,17 @@ function sameOrigin(a: WorkspaceOrigin, b: WorkspaceOrigin): boolean {
 }
 
 function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
-  const { depth, expanded, openId, onToggle, onOpen } = props;
+  const { depth, expanded, openId, onToggle, onOpen, nodes, rosterNames } = props;
   const isFolder = node.kind === "folder";
   const isOpen = expanded.has(node.id);
   const active = node.id === openId;
+  // A direct child of `Agents/` is named by roster id — its real folder path,
+  // and the identity every artifact it holds is stamped with — but an operator
+  // recognizes the teammate by name, not by that id (issue #973). The id stays
+  // the label everywhere else in the tree: it is only ever a roster id one
+  // level below `Agents/`.
+  const isRosterFolder = isFolder && isAgentsFolder(nodeById(nodes, node.parentId));
+  const displayName = isRosterFolder ? rosterDisplayName(node.name, rosterNames) : node.name;
 
   return (
     <>
@@ -1577,7 +1661,9 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           ) : (
             <FileText className="ml-3.5 size-4 shrink-0 text-muted-foreground" />
           )}
-          <span className="truncate">{isFolder ? node.name : titleOf(node)}</span>
+          <span className="truncate" title={isRosterFolder ? node.name : undefined}>
+            {isFolder ? displayName : titleOf(node)}
+          </span>
           {/* Agent-created nodes get a marker in the tree itself, so "what has
               the company been writing" is answerable by scanning rather than by
               opening each note. Only the agent case — badging the operator's

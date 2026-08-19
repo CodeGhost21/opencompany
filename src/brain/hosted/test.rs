@@ -498,11 +498,9 @@ fn manifest(policy_mode: &str) -> CompanyManifest {
 /// finishes booting (issue #327).
 ///
 /// Boot lays down the reserved workspace roots, and since #327 the workspace
-/// store announces its own writes — so one `WorkspaceChanged` per root is
-/// journalled before any operator message arrives. Derived from `SYSTEM_ROOTS`
-/// rather than written as a literal, so adding a root cannot silently
-/// desynchronise the scripted cycle id below from the one the runtime computes.
-const BOOT_JOURNAL_EVENTS: u64 = crate::company::workspace_scaffold::SYSTEM_ROOTS.len() as u64;
+/// store announces its own writes — one `WorkspaceChanged` per root, plus the
+/// explanatory `secrets/README.md`, is journalled before any operator message.
+const BOOT_JOURNAL_EVENTS: u64 = crate::company::workspace_scaffold::SYSTEM_ROOTS.len() as u64 + 1;
 
 /// The deterministic first-cycle id a real runtime for `Acme` produces: the
 /// company id slugs to `acme`, and the first *cycle* event lands at the first
@@ -681,7 +679,7 @@ async fn e2e_reported_usage_lands_on_the_usage_meter() {
         record
             .ledger
             .iter()
-            .any(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND && e.amount_usd == 0.042)
+            .any(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND && e.amount_usd == -0.042)
     );
 }
 

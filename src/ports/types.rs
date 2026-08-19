@@ -276,6 +276,108 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         deliverable: Option<crate::ports::tasks::TaskDeliverable>,
     },
+    /// A turn was **accepted** for an operator message (issue #983) — the
+    /// transcript line that says the company took the work on.
+    ///
+    /// # Why this is not the run row
+    ///
+    /// Stage 1 mints a [`RunRecord`](crate::ports::runs::RunRecord) for the same
+    /// turn, and the two answer different questions. The row answers *status* —
+    /// pending, running, failed, what it cost — and is read by a poll. This is
+    /// the *transcript*: the log is the one place a reader reconstructs what
+    /// happened in a conversation from, and "a turn was accepted for this
+    /// message" cannot be inferred from the log without it. An
+    /// [`OperatorMessage`](Self::OperatorMessage) with no reply after it is
+    /// indistinguishable from a chatter message that legitimately produced none,
+    /// so the absence of an answer is not evidence of a lost turn — until this
+    /// event makes the acceptance explicit.
+    ///
+    /// **Structural only.** No message text: the text is already on the
+    /// `OperatorMessage` this brackets, and putting it here would be a second
+    /// copy to redact.
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    TurnStarted {
+        /// The turn's id — the same id its
+        /// [`RunRecord`](crate::ports::runs::RunRecord) is keyed on, so a
+        /// transcript line and a status row join without a second scheme.
+        turn_id: String,
+        /// The desk / chat thread the message was addressed to.
+        chat_id: String,
+        /// The message being replied to, when the turn answers a thread reply —
+        /// the same sequence position
+        /// [`OperatorMessage::parent`](Self::OperatorMessage) carries.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<EventSeq>,
+        /// Who asked, mirroring
+        /// [`OperatorMessage`](Self::OperatorMessage)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A turn that was accepted did not produce an answer (issue #983).
+    ///
+    /// The closing bracket of [`TurnStarted`](Self::TurnStarted), written by the
+    /// turn itself when its cycle errors and by the boot sweep
+    /// ([`crate::runtime::sweep_interrupted_turns`]) for a turn the host died
+    /// under. Without it a turn killed with the pod is permanent silence: the
+    /// question is in the transcript, no answer ever follows it, and nothing
+    /// says why.
+    TurnFailed {
+        /// The turn this settles — the id its
+        /// [`TurnStarted`](Self::TurnStarted) carries.
+        turn_id: String,
+        /// Why, in plain language. Tenant-scoped like
+        /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished), and
+        /// deliberately **not** projected onto the operator SSE stream.
+        error: String,
+    },
+    /// One task attempt changed status (issue #1015).
+    ///
+    /// **The whole status machine, from one seam.** Emitted by the store
+    /// decorator that wraps `put_run` — the single write primitive every
+    /// [`RunStatus`](crate::ports::runs::RunStatus) change passes through, since
+    /// `begin_run` and `finish_run` are trait defaults that call it and no
+    /// backend overrides either. So the frame cannot be missed by adding a
+    /// caller, which is what makes this a complete surface rather than a partial
+    /// one.
+    ///
+    /// That matters most for the path the obvious seam misses:
+    /// [`reap_orphaned_runs`](crate::ports::runs::reap_orphaned_runs) settles
+    /// crash-killed runs by calling `finish_run` **directly**, never through the
+    /// cycle. Emitting from the cycle's call sites would leave exactly those
+    /// runs — the ones whose visibility the reaper exists to provide —
+    /// transitioning in silence.
+    ///
+    /// **Not [`TurnStarted`](Self::TurnStarted)/[`TurnFailed`](Self::TurnFailed)**,
+    /// though `turn_id` and this `run_id` are the same key. Those two are
+    /// appended only on the chat HTTP path and bracket an
+    /// [`OperatorMessage`](Self::OperatorMessage); firing one for a task attempt
+    /// would put a turn in the chat transcript that no one took.
+    ///
+    /// Additive: a new `kind`, absent from every journal written before it.
+    RunStatusChanged {
+        /// The attempt's id — the same id
+        /// [`RunRecord::id`](crate::ports::runs::RunRecord::id) is keyed on.
+        run_id: String,
+        /// The card this attempt is at, when it is a task attempt rather than a
+        /// chat turn. Absent for a chat turn, which belongs to no card.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        /// The attempt ordinal at that card — `1` for the first.
+        attempt: u32,
+        /// The status moved from. Absent when the row is being minted, which is
+        /// the one write with no prior state rather than a transition.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        /// The status moved to.
+        to: String,
+        /// Why, on a failure. Tenant-scoped like
+        /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished) and
+        /// deliberately **not** projected onto the operator SSE stream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// An inbound webhook fired.
     WebhookReceived {
         /// The channel the webhook arrived on.
@@ -1314,6 +1416,9 @@ impl CompanyEvent {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::OperatorMessage { .. } => "OperatorMessage",
+            Self::TurnStarted { .. } => "TurnStarted",
+            Self::TurnFailed { .. } => "TurnFailed",
+            Self::RunStatusChanged { .. } => "RunStatusChanged",
             Self::WebhookReceived { .. } => "WebhookReceived",
             Self::ScheduleFired { .. } => "ScheduleFired",
             Self::A2aTaskReceived { .. } => "A2aTaskReceived",
@@ -1410,9 +1515,45 @@ impl CompanyEvent {
             // history is not kept here at all: for a published deliverable it
             // lives on the artifact chain (#552), and for an ordinary note it
             // is not kept anywhere, which pruning this does not change.
-            | Self::WorkspaceChanged { .. } => Prunable,
+            // Issue #1015, put through the three questions above rather than
+            // swept in beside its neighbours.
+            //
+            // Is it evidence? No — the `RunRecord` is the record of an attempt's
+            // status, and this frame carries no state the row does not already
+            // hold; it says "the row moved". Does anything point at it? No: it
+            // is joined by `run_id`, which pruning does not disturb, and nothing
+            // is addressed by its sequence. Does anything read it back? No boot
+            // fold consults it — `reap_orphaned_runs` reads the *rows*, by
+            // status, which is why it can settle runs this frame never covered.
+            //
+            // And it is high-volume machine exhaust by construction: several
+            // frames per attempt, one per transition, on every card and every
+            // chat turn. Its entire meaning is "re-read this run", and it is
+            // worthless once the console has.
+            | Self::RunStatusChanged { .. }
+            | Self::WorkspaceChanged { .. }
+            // Issue #983, and classified deliberately rather than swept in with
+            // its neighbours — the doc above asks for all three questions.
+            //
+            // Is it evidence? No: it says a turn was accepted, and what the turn
+            // did is on its `AgentReply`, its `TurnFailed`, or its run row — all
+            // of which outlive it. Does anything point at it? No: nothing is
+            // addressed by its sequence the way a reaction or a redaction
+            // tombstone addresses a chat message; the turn is joined by
+            // `turn_id`, which pruning does not disturb. Does anything read it
+            // back? The boot sweep does — and only for turns *this* host left
+            // open, which by construction predate no retention pass, since a
+            // pass runs on a live company and the sweep runs before one is.
+            //
+            // What it is instead is one frame per operator message on a
+            // high-traffic desk, whose meaning is entirely spent once the turn
+            // settles. `TurnFailed` is Permanent below for the opposite reason:
+            // it is the only record that a question was accepted and never
+            // answered.
+            | Self::TurnStarted { .. } => Prunable,
 
             Self::OperatorMessage { .. }
+            | Self::TurnFailed { .. }
             | Self::WebhookReceived { .. }
             | Self::ScheduleFired { .. }
             | Self::A2aTaskReceived { .. }
@@ -2012,7 +2153,28 @@ pub struct ReplyTo {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutboundMessage {
     /// The channel to emit on.
+    ///
+    /// A **destination**, never an author. Issue #885: all three
+    /// [`AgentReply`](CompanyEvent::AgentReply) writers used to copy this into
+    /// `agent_id`, whose contract is "the agent that produced the reply" — so
+    /// every bubble emitted on the operator channel was journaled as though the
+    /// operator had written it, permanently. Use [`agent`](Self::agent) for who
+    /// spoke; this only says where it goes.
     pub channel: String,
+    /// The roster teammate that produced this message (issue #885).
+    ///
+    /// `None` for a message no agent authored — a system notice, a scheduler
+    /// tick, a channel-level ack — and for every producer that does not know
+    /// its responder. A writer journaling an `AgentReply` falls back to
+    /// [`channel`](Self::channel) when this is absent, which is exactly the
+    /// pre-#885 behaviour, so nothing regresses on a path that has not been
+    /// taught to fill it in.
+    ///
+    /// Additive on the wire: omitted when absent, so the POST `/chat` body and
+    /// every stored record round-trip byte-identically for a producer that
+    /// sets nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// The message text.
     pub text: String,
     /// The visible processing steps behind this bubble — the agent's tool calls,
@@ -2279,7 +2441,20 @@ pub enum TurnStepFailure {
     /// The host lacks an operating-system permission the call needed.
     MissingPermission,
     /// A program or application the call needed is not available.
+    ///
+    /// Only ever claimed for a call that could actually invoke an external
+    /// program. A path-reading tool that runs in this process has no app to
+    /// install, so its "not there" is [`NotFound`](Self::NotFound) — see
+    /// [`crate::harness::steps`] (issue #924).
     MissingApp,
+    /// The file, folder, or bundled resource the call named does not exist.
+    ///
+    /// Distinct from [`MissingApp`](Self::MissingApp) because the remedy is
+    /// different in kind: a missing path is fixed by naming a different path,
+    /// not by installing software. Both arrive as one `ENOENT` from the
+    /// operating system, and telling a server operator to "install or open the
+    /// app" when a note is simply absent is unactionable (issue #924).
+    NotFound,
     /// The call ran past its deadline and was stopped.
     Timeout,
     /// A service the call depends on — an upstream API, or the model provider —
@@ -3222,6 +3397,11 @@ impl CompanyRecord {
             // for the tier and the always-ask list, and a spend threshold whose
             // console control does not exist would be a field nothing can write.
             auto_approve_under_usd: manifest.auto_approve_under_usd,
+            // Same reasoning for the approval deadline (issue #971): the knob is
+            // a manifest one, so the override carries the manifest's answer
+            // through unchanged rather than gaining a field no console control
+            // writes.
+            approval_ttl_hours: manifest.approval_ttl_hours,
         }
     }
 
@@ -3567,6 +3747,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
@@ -3582,6 +3763,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "done".to_string(),
             steps: vec![TurnStep {
                 kind: TurnStepKind::Note,
@@ -3607,6 +3789,7 @@ mod test {
             message_id: None,
             task_id: None,
             channel: "operator".to_string(),
+            agent: None,
             text: "hi".to_string(),
             steps: Vec::new(),
             reply_to: None,
@@ -3625,6 +3808,7 @@ mod test {
             message_id: None,
             task_id: Some("t-42".to_string()),
             channel: "operator".to_string(),
+            agent: None,
             text: "opened one".to_string(),
             steps: Vec::new(),
             reply_to: None,

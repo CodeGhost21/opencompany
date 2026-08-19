@@ -8,6 +8,7 @@
 // operator their setup is fine when no agent can read a line of code.
 
 import type { Repo } from "@/api/repos";
+import type { RosterAgent } from "@/api/types";
 
 /** What the card should tell the operator about their setup. */
 export type RepoNotice =
@@ -23,7 +24,7 @@ export interface RepoCoverageInput {
   /** The bindings the host returned. */
   repos: Repo[];
   /** The roster agents whose effective grants include `repo`. */
-  grantedAgents: string[];
+  grantedAgents: RosterAgent[];
   /**
    * Whether the company manifest explicitly grants `repo`.
    *
@@ -39,8 +40,12 @@ export interface RepoCoverageInput {
 export interface RepoCoverage {
   /** Which mismatch to name, if any. */
   notice: RepoNotice;
-  /** Who can open a checkout. Empty when nobody can. */
-  readableBy: string[];
+  /**
+   * Who can open a checkout. Empty when nobody can.
+   *
+   * Print each one's `name`, never its id (issue #931).
+   */
+  readableBy: RosterAgent[];
 }
 
 /**

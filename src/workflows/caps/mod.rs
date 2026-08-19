@@ -54,6 +54,9 @@ mod http;
 mod resolver;
 mod state;
 mod tools;
+/// Issue #849: how much upstream output one agent node's turn may carry, and
+/// what to say when a provider refuses the turn on its context window anyway.
+mod upstream;
 
 use std::sync::Arc;
 
@@ -75,9 +78,16 @@ use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
 use self::tools::WorkflowToolInvoker;
 pub(crate) use self::tools::{
-    WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, wired_workflow_namespaces, workflow_tool_info,
-    workflow_tool_wiring,
+    MissingReason, WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_NAMESPACES, WorkflowToolInfo,
+    WorkflowToolWiring, grants_workflow_namespace, workflow_tool_info, workflow_tool_wiring,
 };
+/// Issue #849: the ceiling on what one agent node's turn carries from upstream.
+/// Re-exported so the end-to-end fan-in proof
+/// ([`agent_upstream_input_test`](crate::workflows::agent_upstream_input_test))
+/// asserts against the shipped number rather than a copy of it — which is the
+/// only caller outside this module, hence the `cfg`.
+#[cfg(test)]
+pub(crate) use self::upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
 // `WORKFLOW_TOOL_SLUGS` stays module-private to `tools` since #813: the catalogue
 // (`WORKFLOW_TOOL_CATALOG`) is what callers ground and validate against, and the
 // slug table is now only its in-module pinning cross-check.
@@ -218,7 +228,9 @@ pub async fn build_capabilities(
         );
         (
             Arc::new(dry_run::DryRunTools::new(grants, wiring.clone())),
-            Arc::new(dry_run::DryRunHttp),
+            Arc::new(dry_run::DryRunHttp::new(
+                record.manifest.tools.web_allowed_domains.clone(),
+            )),
             Arc::new(NoopState),
             Some(Arc::new(dry_run::DryRunAgent)),
         )
@@ -381,6 +393,13 @@ pub async fn build_capabilities(
         // already-settled ticket for a downstream `gate`; real overlap belongs
         // in the later concurrency adoption phase.
         tasks: None,
+        // New in a later tinyflows 0.8.x: `approval` nodes can push a request
+        // at a host-registered `ApprovalProvider`. `None` here leaves the
+        // fallback behaviour intact — an `approval` node still pauses the run
+        // for the host to settle through `engine::resume`; wiring a provider
+        // that proactively notifies a reviewer is a separate policy decision
+        // this repo has not made.
+        approvals: None,
     })
 }
 
@@ -864,7 +883,7 @@ impl HarnessAgentRunner {
     /// No differencing is needed to know which requests are "ours": the bucket
     /// is already run-scoped ([`ApprovalScope::Run`], issue #439), so everything
     /// the drain returns was queued by this run's own turn.
-    async fn park_gated_calls(&self, node_id: Option<&str>) -> ParkedCalls {
+    async fn park_gated_calls(&self, node_id: Option<&str>, node_turn: &str) -> ParkedCalls {
         let mut summary = ParkedCalls::default();
         let mut rows: Vec<crate::ports::WorkflowRunApprovalRow> = Vec::new();
         let row = |tool: Option<String>,
@@ -985,6 +1004,18 @@ impl HarnessAgentRunner {
                     request.effect,
                     crate::runtime::journal::TaskLink::Unlinked,
                     None,
+                    // Issue #899 (Stage 1): the per-(run, node) continuation turn
+                    // key. Issue #978 deliberately passed `None` here because a
+                    // tool-call-shaped card (`ApprovalPolicy::effect_for` stamps
+                    // an `agent`) only ever minted a grant on approve and nothing
+                    // re-dispatched the run — the run settled Blocked and stayed
+                    // there. Keying the node's calls as one batch is what lets the
+                    // resolve path re-dispatch the run once, when the last of them
+                    // is decided (the runner's stash carries the workflow id and
+                    // trigger input the spawn needs). The grant is still minted, so
+                    // the identical call passes on the re-run; a diverging re-run
+                    // re-asks, which Stage 2 closes.
+                    Some(node_turn.to_string()),
                 )
                 .await
             {
@@ -1056,7 +1087,32 @@ impl AgentRunner for HarnessAgentRunner {
         // dropped (a `agent -> agent` pipeline's second teammate saw nothing).
         // The static `prompt` still leads (`message_from_request`); the upstream
         // input is appended under a labelled heading, then the #154 run topic.
-        let instruction = append_upstream_input(&message_from_request(&request), &request);
+        //
+        // Issue #849: bounded on the way in. Nothing used to limit what a fan-in
+        // folded here, so three `web_fetch` payloads were concatenated verbatim
+        // and the turn intermittently died on a provider context-window 400 —
+        // after the fetches were already paid for. The budget is applied before
+        // the request is composed, so the boundary is decided by us rather than
+        // discovered by the provider.
+        let budget = upstream::budget_chars(
+            self.deps
+                .provider
+                .profile()
+                .and_then(|profile| profile.max_input_tokens),
+        );
+        let (instruction, upstream_report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+        if let Some(notice) = upstream_report.notice() {
+            tracing::warn!(
+                company = %self.company,
+                workflow = %self.workflow_id,
+                run_id = %self.run_id,
+                agent = agent_ref,
+                budget,
+                "workflow agent node: upstream input exceeded this step's budget and was truncated"
+            );
+            self.notices.push(notice);
+        }
         let message = compose_turn_message(&instruction, self.run_request.as_deref());
         // Issue #881: which node this is. `translate` writes it in the
         // first-class config layer beside `agent_ref` (config cannot shadow
@@ -1069,6 +1125,17 @@ impl AgentRunner for HarnessAgentRunner {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
             .map(str::to_string);
+        // Issue #899 (Stage 1): the continuation turn key every gated call this
+        // node parks will share, so approving them re-dispatches the run once —
+        // the whole hole this closes. Keyed on the block's RESOLVED node id (the
+        // graph node when there is one, else the agent ref), which is exactly the
+        // id the runner's block-settle stashes under, so the two agree by
+        // construction. `park_gated_calls` arms `ContinuationQueue` with it via
+        // `park_and_journal`; the runner arms the sibling stash that carries the
+        // workflow id and trigger input the release needs.
+        let lineage_node = node_id.clone().unwrap_or_else(|| agent_ref.to_string());
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, &lineage_node);
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
@@ -1122,7 +1189,9 @@ impl AgentRunner for HarnessAgentRunner {
             // reclassifying it as "blocked" would hide one behind an approval
             // nobody has answered.
             let parked = claim
-                .scoped(Box::pin(self.park_gated_calls(node_id.as_deref())))
+                .scoped(Box::pin(
+                    self.park_gated_calls(node_id.as_deref(), &node_turn),
+                ))
                 .await;
             // Issue #661 (M5): likewise on both arms, and for the same reason. A
             // turn that failed after calling `spawn_task` had already been told the
@@ -1132,8 +1201,17 @@ impl AgentRunner for HarnessAgentRunner {
             (outcome, parked)
         });
         let (outcome, parked) = self.board_claim.scoped(turn).await;
-        let outcome = outcome
-            .map_err(|e| EngineError::Capability(format!("harness agent '{agent_ref}': {e}")))?;
+        // Issue #849: a provider context-window refusal reaches the operator as
+        // the run's error text, and the vendor's own wording ("Please start a
+        // new chat") is unfollowable in a workflow — there is no chat and no
+        // button. Rewrite that one class into what is actually too big and what
+        // to do about it, keeping the provider's words at the end. Every other
+        // failure passes through exactly as before.
+        let outcome = outcome.map_err(|e| {
+            let raw = e.to_string();
+            let reported = upstream::context_overflow_advice(&raw).unwrap_or(raw);
+            EngineError::Capability(format!("harness agent '{agent_ref}': {reported}"))
+        })?;
 
         // ── Issue #881: a node whose deliverable was parked is BLOCKED ───────
         //
@@ -1228,8 +1306,9 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
     }
     format!(
         "workflow node '{node}' is blocked: {tools} needed approval before {agent_ref} could \
-         finish, so the node produced no deliverable and nothing after it ran. {}. Approving \
-         does not continue this run — decide the card, then run the workflow again.",
+         finish, so the node produced no deliverable and nothing after it ran. {}. Approving the \
+         card continues this run automatically; because approving re-runs the agent's turn, a \
+         changed decision may ask again.",
         what.join("; ")
     )
 }
@@ -1267,20 +1346,37 @@ const UPSTREAM_INPUT_HEADING: &str = "## Input from the previous step";
 /// A single-agent workflow with no predecessor therefore composes exactly the
 /// message it did before #782, never a dangling empty heading. `message` shape is
 /// then decided by [`compose_turn_message`] alone, as before.
-fn append_upstream_input(instruction: &str, request: &Value) -> String {
-    let Some(section) = request.get("input").and_then(render_upstream_input) else {
-        return instruction.to_string();
+///
+/// # Bounded (issue #849)
+///
+/// `budget` is the most upstream text this turn may carry, and it is enforced
+/// here rather than discovered by the provider. The returned
+/// [`UpstreamReport`](upstream::UpstreamReport) says what the budget did — it is
+/// empty of truncations for nearly every run, and the caller raises an operator
+/// notice only when it is not.
+fn append_upstream_input(
+    instruction: &str,
+    request: &Value,
+    budget: usize,
+) -> (String, upstream::UpstreamReport) {
+    let Some((section, report)) = request
+        .get("input")
+        .and_then(|input| render_upstream_input(input, budget))
+    else {
+        return (instruction.to_string(), upstream::UpstreamReport::default());
     };
     let instruction = instruction.trim_end();
-    if instruction.is_empty() {
+    let folded = if instruction.is_empty() {
         format!("{UPSTREAM_INPUT_HEADING}\n{section}")
     } else {
         format!("{instruction}\n\n{UPSTREAM_INPUT_HEADING}\n{section}")
-    }
+    };
+    (folded, report)
 }
 
 /// Renders the upstream envelope(s) an agent node received (`request["input"]`,
-/// the resolved `=items` set) into the text the agent reads.
+/// the resolved `=items` set) into the text the agent reads, bounded to `budget`
+/// characters in total (issue #849).
 ///
 /// Each predecessor item is a stable `{ json, text, raw }` envelope (see the
 /// tinyflows `envelope` module), so the human-readable `text` (an upstream
@@ -1289,16 +1385,39 @@ fn append_upstream_input(instruction: &str, request: &Value) -> String {
 /// Multiple predecessors — a fan-in (`merge -> agent`) or several edges into one
 /// agent — are all rendered, separated by a rule, so none is lost.
 ///
+/// # Why the bound lives here and not at the `tool_call` node's own output
+///
+/// This is the **join**, and it is the only place the whole set is visible at
+/// once. A cap at a `tool_call` node's output would bound each fetch separately
+/// and still let three bounded fetches sum to an oversized turn, and it would
+/// have to spend its cap blind to how many siblings were about to arrive. It
+/// would also miss every other producer — an upstream *agent* node's reply is
+/// unbounded in exactly the same way, and a `transform` node can manufacture a
+/// large payload from a small one. Bounding at the join covers a single enormous
+/// `web_fetch` and a three-way fan-in with one rule: the same
+/// [`allocate_fairly`](upstream::allocate_fairly) call handles one source and N.
+///
 /// Returns `None` when nothing is renderable — an empty set, all-`null` items, or
 /// empty containers — which is what keeps the no-upstream path byte-identical.
-fn render_upstream_input(input: &Value) -> Option<String> {
+fn render_upstream_input(
+    input: &Value,
+    budget: usize,
+) -> Option<(String, upstream::UpstreamReport)> {
     let items: Vec<&Value> = match input {
         Value::Array(items) => items.iter().collect(),
         Value::Null => return None,
         other => vec![other],
     };
     let rendered: Vec<String> = items.into_iter().filter_map(render_upstream_item).collect();
-    (!rendered.is_empty()).then(|| rendered.join("\n\n---\n\n"))
+    if rendered.is_empty() {
+        return None;
+    }
+
+    // Composition, budgeting and the markers that account for both live together
+    // in `upstream`, so the guarantee — the section is never longer than `budget`,
+    // *including* every marker and separator — is one function's postcondition
+    // rather than a property spread across this loop and that module.
+    Some(upstream::bound_sections(&rendered, budget))
 }
 
 /// Renders one upstream item into the text an agent reads.
@@ -1599,7 +1718,11 @@ mod tests {
                 }
             })
             .await;
-        claim.scoped(runner.park_gated_calls(Some("work"))).await;
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+        claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
         (notices.take(), queue)
     }
 
@@ -1709,6 +1832,19 @@ mod tests {
 
     // ── Issue #782: the upstream node's output reaches the next agent's turn ──
 
+    /// [`append_upstream_input`] under the shipped budget, keeping the #782
+    /// tests reading about *what reaches the turn* rather than about the #849
+    /// budget they are all far below. The truncation report those calls discard
+    /// has its own tests below.
+    fn folded(request: &Value) -> String {
+        append_upstream_input(
+            &message_from_request(request),
+            request,
+            upstream::DEFAULT_UPSTREAM_BUDGET_CHARS,
+        )
+        .0
+    }
+
     /// The headline. An `agent -> agent` pipeline's second teammate must receive
     /// the first's output. `translate` binds `input = "=items"`, the engine
     /// resolves it to the predecessor envelope, and this proves the runner folds
@@ -1722,7 +1858,7 @@ mod tests {
             "prompt": "Write the launch post.",
             "input": [{ "json": {}, "text": "The analyst found a 20% MoM jump.", "raw": {} }],
         });
-        let message = append_upstream_input(&message_from_request(&request), &request);
+        let message = folded(&request);
         // The node's own instruction still leads.
         assert!(message.starts_with("Write the launch post."), "{message}");
         // …the upstream output is present, under its heading…
@@ -1746,7 +1882,7 @@ mod tests {
                 { "json": {}, "text": "Predecessor B: sentiment is positive.", "raw": {} },
             ],
         });
-        let message = append_upstream_input(&message_from_request(&request), &request);
+        let message = folded(&request);
         assert!(
             message.contains("Predecessor A: market is up."),
             "first predecessor missing: {message}"
@@ -1766,7 +1902,7 @@ mod tests {
             "prompt": "Summarise the fetch.",
             "input": [{ "json": { "rows": 3 }, "text": null, "raw": { "rows": 3 } }],
         });
-        let message = append_upstream_input(&message_from_request(&request), &request);
+        let message = folded(&request);
         assert!(message.contains(UPSTREAM_INPUT_HEADING), "{message}");
         assert!(
             message.contains("\"rows\""),
@@ -1795,13 +1931,13 @@ mod tests {
             }
             let request = Value::Object(request);
             assert_eq!(
-                append_upstream_input(&message_from_request(&request), &request),
+                folded(&request),
                 base,
                 "input {input:?} must not alter the message or add an empty heading"
             );
             // And the whole composition (including the #154 run topic) is
             // unchanged from what `compose_turn_message` alone would produce.
-            let instruction = append_upstream_input(&message_from_request(&request), &request);
+            let instruction = folded(&request);
             assert_eq!(
                 compose_turn_message(&instruction, Some("ship dark mode")),
                 compose_turn_message(base, Some("ship dark mode")),
@@ -1819,13 +1955,236 @@ mod tests {
             "prompt": "Write the post.",
             "input": [{ "json": {}, "text": "ANALYST_SAID_THIS", "raw": {} }],
         });
-        let instruction = append_upstream_input(&message_from_request(&request), &request);
+        let instruction = folded(&request);
         let message = compose_turn_message(&instruction, Some("dark mode launch"));
         assert!(message.starts_with("Write the post."), "{message}");
         assert!(message.contains(UPSTREAM_INPUT_HEADING), "{message}");
         assert!(message.contains("ANALYST_SAID_THIS"), "{message}");
         assert!(message.contains("Request for this run:"), "{message}");
         assert!(message.contains("dark mode launch"), "{message}");
+    }
+
+    // ── Issue #849: nothing may hand an agent node an unbounded payload ──
+    //
+    // Driven by synthetic oversized payloads, never by a live page: the reported
+    // failure is intermittent *because* it depends on how much text a sports
+    // section happened to return that minute, so a test that reproduced it that
+    // way would be a coin flip too.
+
+    /// One predecessor envelope carrying `chars` characters of page-like text —
+    /// the shape a `web_fetch` `tool_call` node emits (its non-JSON output is
+    /// wrapped as `{"text": …}`, which the tinyflows envelope lifts to `text`).
+    fn source_envelope(marker: &str, chars: usize) -> Value {
+        let body = format!("{marker}{}", "x".repeat(chars.saturating_sub(marker.len())));
+        json!({ "json": { "text": body.clone() }, "text": body, "raw": { "text": body } })
+    }
+
+    /// How much slack above the budget the markers, the heading and the section
+    /// rules are allowed to add. They sit **outside** the budget deliberately —
+    /// the budget exists to bound upstream *text*, and letting our own accounting
+    /// compete for room would mean the truncation marker could itself be the
+    /// thing squeezed out (the reasoning `memory_loop`'s skipped-hit marker
+    /// arrived at first).
+    const MARKER_SLACK: usize = 2_000;
+
+    /// The reported shape: three fetched sources fan in to one ranking agent.
+    /// Every source must still be represented, the turn must be bounded, and
+    /// every cut must be visible.
+    #[test]
+    fn a_three_way_fan_in_is_bounded_and_no_source_is_lost() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let request = json!({
+            "prompt": "Rank today's stories.",
+            "input": [
+                source_envelope("SOURCE_ONE", 200_000),
+                source_envelope("SOURCE_TWO", 200_000),
+                source_envelope("SOURCE_THREE", 200_000),
+            ],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(
+            message.chars().count() <= budget + MARKER_SLACK,
+            "600k characters of upstream input must not reach a turn: {} characters",
+            message.chars().count()
+        );
+        // …and every source is still *there*, which is what separates a bound
+        // from "drop everything after the first".
+        for marker in ["SOURCE_ONE", "SOURCE_TWO", "SOURCE_THREE"] {
+            assert!(message.contains(marker), "{marker} was lost entirely");
+        }
+        // Each cut is visible to the agent.
+        assert_eq!(
+            message.matches("TRUNCATED BY OPENCOMPANY").count(),
+            3,
+            "every truncated source carries its own marker: {message}"
+        );
+        assert!(message.contains("source 3 of 3"), "{message}");
+
+        // …and to the operator.
+        assert_eq!(report.sources.len(), 3);
+        assert!(report.truncated_any());
+        let notice = report.notice().expect("the operator is told");
+        assert!(notice.contains("3 sources"), "{notice}");
+        assert!(notice.contains("3 of them were truncated"), "{notice}");
+    }
+
+    /// The "is it only a fan-in?" question, answered: it is not. A **single**
+    /// enormous `web_fetch` into one agent runs the same unbounded path, and the
+    /// bound at the join covers it with no second rule.
+    #[test]
+    fn a_single_enormous_source_is_bounded_too() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let request = json!({
+            "prompt": "Summarise this page.",
+            "input": [source_envelope("ONLY_SOURCE", 500_000)],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(
+            message.chars().count() <= budget + MARKER_SLACK,
+            "a single 500k-character page must not reach a turn whole: {} characters",
+            message.chars().count()
+        );
+        assert!(message.contains("ONLY_SOURCE"), "the source still arrives");
+        assert!(message.contains("source 1 of 1"), "{message}");
+        assert_eq!(report.sources.len(), 1);
+        assert!(report.truncated_any());
+    }
+
+    /// A large sibling must not starve a small one — the fan-in failure mode a
+    /// flat per-source cap would not fix and a running total would make
+    /// order-dependent.
+    #[test]
+    fn a_short_source_survives_whole_beside_an_enormous_one() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let short = "SHORT_SOURCE: the wire service filed three lines today.";
+        let request = json!({
+            "prompt": "Rank today's stories.",
+            "input": [
+                source_envelope("HUGE_SOURCE", 400_000),
+                json!({ "json": {}, "text": short, "raw": {} }),
+            ],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(
+            message.contains(short),
+            "the short source must arrive intact, not be crowded out: {message}"
+        );
+        assert_eq!(
+            message.matches("TRUNCATED BY OPENCOMPANY").count(),
+            1,
+            "only the enormous source is cut: {message}"
+        );
+        assert_eq!(report.sources[1].produced, report.sources[1].kept);
+        assert!(report.sources[0].kept < report.sources[0].produced);
+    }
+
+    /// The overwhelmingly common run: everything fits, so the fold is exactly
+    /// what #782 produced and the operator is told nothing new.
+    #[test]
+    fn an_ordinary_fan_in_is_untouched_and_says_nothing() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let request = json!({
+            "prompt": "Combine the research.",
+            "input": [
+                { "json": {}, "text": "Predecessor A: market is up.", "raw": {} },
+                { "json": {}, "text": "Predecessor B: sentiment is positive.", "raw": {} },
+            ],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(!message.contains("TRUNCATED"), "{message}");
+        assert!(!report.truncated_any());
+        assert_eq!(report.notice(), None);
+        assert!(
+            message.contains("Predecessor A: market is up."),
+            "{message}"
+        );
+        assert!(
+            message.contains("Predecessor B: sentiment is positive."),
+            "{message}"
+        );
+    }
+
+    /// The bound survives composition: the marker is still in the message the
+    /// teammate is actually sent, alongside the node's instruction and the #154
+    /// run topic.
+    #[test]
+    fn the_truncation_marker_survives_into_the_composed_turn() {
+        let request = json!({
+            "prompt": "Rank today's stories.",
+            "input": [source_envelope("BIG_SOURCE", 200_000)],
+        });
+        let (instruction, _) = append_upstream_input(
+            &message_from_request(&request),
+            &request,
+            upstream::DEFAULT_UPSTREAM_BUDGET_CHARS,
+        );
+        let message = compose_turn_message(&instruction, Some("today's sport"));
+        assert!(message.starts_with("Rank today's stories."), "{message}");
+        assert!(message.contains("TRUNCATED BY OPENCOMPANY"), "{message}");
+        assert!(message.contains("Request for this run:"), "{message}");
+        assert!(message.contains("today's sport"), "{message}");
+    }
+
+    /// A thousand-way fan-in — a `split_out` over a large array is all it takes —
+    /// must not smuggle a thousand truncation markers past the budget. This is
+    /// the fold-level twin of `upstream`'s
+    /// `a_thousand_oversized_sources_stay_inside_the_budget`, driven through the
+    /// real envelope shape rather than pre-rendered strings, because that is the
+    /// path a graph actually takes.
+    #[test]
+    fn a_thousand_way_fan_in_cannot_smuggle_its_markers_past_the_budget() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let inputs: Vec<Value> = (0..1_000)
+            .map(|n| source_envelope(&format!("SOURCE_{n}"), 5_000))
+            .collect();
+        let request = json!({ "prompt": "Rank today's stories.", "input": inputs });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        // The section itself is bounded by `budget`; the message adds only the
+        // node's own instruction and the heading, which are not upstream text.
+        assert!(
+            message.chars().count() <= budget + MARKER_SLACK,
+            "5,000,000 characters of upstream input across 1,000 sources produced a {}-character \
+             turn",
+            message.chars().count()
+        );
+        assert_eq!(report.sources.len(), 1_000, "every input is accounted for");
+        let notice = report.notice().expect("the operator is told");
+        assert!(notice.contains("1000 sources"), "{notice}");
+    }
+
+    /// A source rendered as JSON (a `transform` / structured `tool_call` output,
+    /// which has no prose `text`) is bounded on the same path — the bound is on
+    /// what the turn carries, not on which node kind produced it.
+    #[test]
+    fn a_structured_source_is_bounded_on_the_same_path() {
+        let budget = upstream::DEFAULT_UPSTREAM_BUDGET_CHARS;
+        let rows: Vec<Value> = (0..20_000)
+            .map(|n| json!({ "headline": format!("story {n}"), "score": n }))
+            .collect();
+        let request = json!({
+            "prompt": "Rank these.",
+            "input": [{ "json": { "rows": rows }, "text": null, "raw": {} }],
+        });
+        let (message, report) =
+            append_upstream_input(&message_from_request(&request), &request, budget);
+
+        assert!(
+            message.chars().count() <= budget + MARKER_SLACK,
+            "a structured payload is bounded too: {} characters",
+            message.chars().count()
+        );
+        assert!(message.contains("TRUNCATED BY OPENCOMPANY"), "{message}");
+        assert!(report.truncated_any());
     }
 
     #[test]
@@ -1933,12 +2292,18 @@ mod tests {
         .await
         .expect("build_capabilities");
 
-        // http: the stub echoes without sending, carrying the marker.
+        // http: the stub reports without sending, carrying the marker.
+        //
+        // A *public* URL, deliberately. This case used to use `127.0.0.1`, which
+        // the real guard refuses — so it asserted that the dry slot answers `ok`
+        // for a target no real run can reach, pinning issue #1048's false green
+        // in place. The slot being the stub is what this test is about; whether a
+        // given target is refused is `dry_run`'s own suite.
         let http_out = caps
             .http
-            .request(json!({ "url": "http://127.0.0.1:9/" }), None)
+            .request(json!({ "url": "https://example.com/hook" }), None)
             .await
-            .expect("dry http never fails");
+            .expect("an allowed target is not refused by the dry stub");
         assert_eq!(
             http_out["dry_run"],
             json!(true),

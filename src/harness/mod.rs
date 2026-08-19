@@ -50,7 +50,21 @@ pub mod acp_run_turn;
 pub mod audit;
 pub mod brain;
 pub mod build;
+/// Issue #989 (Part 2a of #926): end-to-end proof that a **chat** turn which
+/// pauses at its tool-iteration cap runs the same #244 unpublished-work scan
+/// and nudge the task-dispatch path (`run_task`) already gets — and that a
+/// capped turn which wrote nothing is not nudged on top of it. Test-only.
+#[cfg(test)]
+mod cap_publish_test;
+/// Issue #926: end-to-end proof that a turn which exhausts its tool-iteration
+/// budget pauses **visibly** — the flag is read, the operator gets a second
+/// bubble saying so, and the notice never reaches memory. Test-only.
+#[cfg(test)]
+mod cap_turn_test;
 pub mod capability_budget;
+#[cfg(feature = "chargebee")]
+pub mod chargebee;
+mod checkpoint;
 pub mod composio;
 /// Issue #410: how a Composio action catalogue is narrowed and rendered for an
 /// agent, and why every cut it makes describes itself. Pure and un-gated (the
@@ -73,12 +87,26 @@ pub mod cost;
 /// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
 #[cfg(feature = "tinycortex")]
 pub mod embeddings;
+/// Hosting (TinyHosts): the per-company connection and the agent tools over it.
+/// The keys it reads live in `company::hosting`, which is compiled in every
+/// build — the console's Hosting settings write them whether or not this
+/// harness exists to use them.
+pub mod hosting;
+pub mod ledger_tools;
 pub mod lifecycle;
 pub mod mcp;
 pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
 pub mod orchestrator;
+/// Chargebee billing tools (issue #788), wired per company from its own
+/// SecretStore. Always compiled so the credential resolution and the fail-closed
+/// decision are testable at default features; only the tools are gated.
+/// PayPal wallet + transaction tools (issue #789), wired per company from its
+/// own SecretStore. Always compiled so credential resolution and the
+/// fail-closed decision are testable at default features.
+#[cfg(feature = "paypal")]
+pub mod paypal;
 /// Issue #337: the planning station — one tool-less model call per card entering
 /// `planning`, with the host gathering the evidence and verifying every
 /// prerequisite the model claims. See [`planning`].
@@ -199,6 +227,10 @@ pub struct HarnessDeps {
     /// Root under which per-agent workspace directories are created
     /// (`{root}/{company}/{agent}/workspace`).
     pub workspace_root: PathBuf,
+    /// Whether each private agent workspace is initialized as a Git repository
+    /// and checkpointed after tool calls. Host-level `[workspace]` config owns
+    /// this switch; false preserves the pre-checkpoint behavior exactly.
+    pub workspace_git_enabled: bool,
     /// The **instance data root** the shell audit sink hangs off, resolved
     /// through [`DataLayout::agent_audit_dir`](crate::store::DataLayout::agent_audit_dir)
     /// to `companies/<slug>/audit/<agent>/` (issue #775).
@@ -233,6 +265,23 @@ pub struct HarnessDeps {
     /// written either way, so an unwired artifact store loses nothing that
     /// existed previously.
     pub artifacts: Option<Arc<dyn ArtifactStore>>,
+    /// The company's ledgers, so an agent can read what has already been
+    /// decided, goaled or ruled out, record what it decides, and declare an axis
+    /// nobody anticipated. `None` builds no ledger tools at all — which is right
+    /// for a path with no company behind it, and is what every construction site
+    /// that predates them does.
+    pub ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
+    /// The company's ledgers as they stood when the agent was built, for the
+    /// prompt catalogue.
+    ///
+    /// Resolved to **data** before deps construction because `build_agent` is
+    /// synchronous, the same shape the MCP servers already take. A ledger
+    /// declared mid-run is therefore reachable by every tool immediately (the
+    /// `ledger` argument is checked against the live registry at call time) and
+    /// appears in the *prompt* only from the next build — which is the honest
+    /// limit: system prompts are assembled once, and nothing can retroactively
+    /// edit one already in flight.
+    pub ledger_registry: crate::ledger::Registry,
     /// The company's skill-delta store, so a built agent can see its effective
     /// skill set (company-dir skills ∪ operator deltas ∪ custom docs) as read
     /// tools + a prompt catalogue. `None` leaves the agent skill-less (the chat
@@ -416,6 +465,29 @@ pub struct HarnessDeps {
     /// else this instance's platform identity. With neither, no tools are wired —
     /// never a borrowed identity.
     pub composio: Option<composio::TenantComposio>,
+
+    /// The per-company Chargebee connection (issue #788). `None` (the default at
+    /// every construction site) fails closed — no billing tools are wired.
+    /// Resolved from that company's own secret store, never from the
+    /// environment: two companies on one host bill two different sites.
+    /// `HarnessPool::ensure` re-resolves it each turn, so a key set or rotated in
+    /// the console takes effect next turn with no restart.
+    #[cfg(feature = "chargebee")]
+    pub chargebee: Option<chargebee::TenantChargebee>,
+
+    /// The per-company PayPal connection (issue #789). `None` fails closed —
+    /// no wallet tools are wired. Resolved from that company's own secret store
+    /// and re-resolved each turn, like `chargebee`.
+    #[cfg(feature = "paypal")]
+    pub paypal: Option<paypal::TenantPaypal>,
+
+    /// The per-company hosting connection. `None` (the default at every
+    /// construction site) fails closed — no hosting tools are wired. Resolved
+    /// from that company's own secret store and re-resolved each turn, like
+    /// `chargebee`: two companies on one host deploy to two different hosting
+    /// accounts, and a deployment publishes files to the internet under the
+    /// account's own name.
+    pub hosting: Option<hosting::TenantHosting>,
     /// The MANAGED web-search backend (issue #238). `None` (the default at every
     /// construction site but the production runtime builder) **fails closed** —
     /// no `web_search` tool is wired and agents behave exactly as before.
@@ -500,6 +572,80 @@ pub struct HarnessDeps {
     pub checkouts: repo::CheckoutLedger,
 }
 
+/// A minimal [`HarnessDeps`] for tests that only care about **workflow-tool
+/// wiring**: which namespaces a `tool_call` can reach, and why the others cannot.
+///
+/// Only the inputs [`workflow_tool_wiring`](crate::workflows::caps) actually
+/// reads are parameters — the meter and plan (which resolve the capability
+/// filter per company and spend) and the static filter itself. `search` is
+/// pinned to `None`, because a deployment with no managed search backend is the
+/// shape issue #874 is about. Everything else is the cheapest inert default, so
+/// a test asserting on wiring does not have to name thirty fields that cannot
+/// affect the answer.
+///
+/// Shared rather than copied: the same fixture backs the runtime-level wiring
+/// tests and the `tool-slugs` route test, so both ask about one deployment shape.
+#[cfg(test)]
+pub(crate) fn workflow_wiring_deps(
+    runtime: &crate::CompanyRuntime,
+    meter: Option<Arc<dyn UsageMeter>>,
+    capabilities: toolbelt::CapabilityFilter,
+    plan: Option<capability_budget::CapabilityPlan>,
+) -> HarnessDeps {
+    HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
+        provider: Arc::new(provider::MockProvider::default()),
+        provider_slug: "mock".to_string(),
+        context: runtime.context.clone(),
+        store: runtime.store.clone(),
+        meter,
+        workspace_root: std::env::temp_dir(),
+        workspace_git_enabled: false,
+        audit_root: std::env::temp_dir(),
+        model_override: None,
+        tasks: None,
+        artifacts: None,
+        skills: None,
+        skills_source_dir: None,
+        skills_registry: Arc::from([]),
+        mcp_servers: Vec::new(),
+        default_mcp_servers: Vec::new(),
+        facts: None,
+        events: None,
+        delegations: orchestrator::DelegationQueue::default(),
+        workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+        mcp_failures: mcp_probe::McpFailureQueue::default(),
+        pending_publishes: publish::PendingPublishQueue::default(),
+        workflow_refs: workflow_refs::WorkflowRefQueue::default(),
+        run_outputs: orchestrator::RunOutputCache::default(),
+        run_output_store: None,
+        workflow_revisions: None,
+        approval_requests: policy::ApprovalRequestQueue::default(),
+        secrets: None,
+        web_allowed_domains: Vec::new(),
+        capabilities,
+        workflow_source_dir: None,
+        plan,
+        media: None,
+        composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
+        hosting: None,
+        // The staging shape in issue #874: `searchCredentialConfigured: false`.
+        search: None,
+        steer: crate::company::steer::InflightRegistry::default(),
+        run_supervisor: crate::runtime::RunSupervisor::default(),
+        delivery: None,
+        workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: repo::CheckoutLedger::default(),
+    }
+}
+
 /// One live openhuman agent, keyed by its manifest id.
 pub struct CompanyAgent {
     /// The manifest agent id.
@@ -573,6 +719,25 @@ pub struct TurnOutcome {
     /// The scrubbed, folded processing steps (empty for a memory-served or
     /// tool-less turn — the zero-steps tell).
     pub steps: Vec<TurnStep>,
+    /// Whether this turn **paused at its tool-iteration cap** rather than
+    /// finishing what it set out to do (issue #926).
+    ///
+    /// A capped turn is not an error and never has been: openhuman stops the
+    /// tool loop, makes one extra tools-disabled call asking the model for a
+    /// resumable "Done so far / Next steps" checkpoint, and returns that as an
+    /// ordinary `Ok(reply)`. So the reply reads like a finished answer, and
+    /// nothing in the text, the steps or the error channel distinguishes "I
+    /// answered you" from "I ran out of steps mid-task" — which is exactly what
+    /// the operator could not tell.
+    ///
+    /// Read from openhuman's public
+    /// [`Agent::last_turn_hit_cap`](oh::agent::Agent::last_turn_hit_cap) while
+    /// the agent lock is still held, the same under-lock idiom
+    /// [`read_turn_usage`] uses. `false` on every path that returns an outcome
+    /// **without** running a model turn (the two pre-turn budget refusals, the
+    /// ACP fold) — a refusal is not a pause, and labelling one as a cap hit
+    /// would tell the operator to reply "continue" to a turn that never ran.
+    pub hit_iteration_cap: bool,
 }
 
 impl CompanyAgent {
@@ -734,12 +899,45 @@ impl CompanyAgent {
         // still runs this cleanup before propagating, so the collector never
         // leaks.
         agent.set_on_progress(None);
+        // Issue #926: read the cap flag while the lock is still held, the same
+        // under-lock idiom `read_turn_usage` uses above. Not draining, so the
+        // retry path's second attempt simply overwrites the first's value —
+        // which is right: the outcome describes the attempt that produced the
+        // reply being returned.
+        let hit_iteration_cap = agent.last_turn_hit_cap();
         drop(agent);
         let events = collector.await.unwrap_or_default();
+        // The cap openhuman was actually enforcing, for the trace only. Taken
+        // from the last `IterationStarted` rather than from config, so the log
+        // reports the number the turn ran under instead of the one this crate
+        // believes it configured. Deliberately NOT plumbed into the operator
+        // notice: one notice can cover a responder turn, a desk turn and a
+        // relay turn, and naming one of their caps would be a number the
+        // operator cannot map back to anything.
+        let iteration_cap = events.iter().rev().find_map(|event| match event {
+            oh::agent::progress::AgentProgress::IterationStarted { max_iterations, .. } => {
+                Some(*max_iterations)
+            }
+            _ => None,
+        });
+        if hit_iteration_cap {
+            tracing::info!(
+                agent = %self.agent_id,
+                iteration_cap,
+                "[turn] paused at the tool-iteration cap; the reply is a resumable checkpoint, not a finished answer"
+            );
+        }
         let steps = steps::fold_steps(events);
 
         let reply = reply?;
-        Ok((TurnOutcome { reply, steps }, usages))
+        Ok((
+            TurnOutcome {
+                reply,
+                steps,
+                hit_iteration_cap,
+            },
+            usages,
+        ))
     }
 
     /// Classify one `agent.turn` result for the retry wrapper.
@@ -863,6 +1061,14 @@ pub struct HarnessPool {
     /// store wired the config is the static [`HarnessDeps::composio`], whose
     /// fingerprint never moves.
     composio_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the billing connections (Chargebee #788, PayPal #789) the
+    /// cached roster was built from, keyed by company.
+    ///
+    /// Without this axis a credential saved from the console reaches nothing
+    /// until a restart — the roster is cached, so `build_agent` is never called
+    /// again to notice it. That was live for both integrations until the tools
+    /// were observed missing from an agent whose settings page said "Connected".
+    billing_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// Fingerprint of the company's bound-repository set the cached roster was
     /// built from, keyed by company (issue #245). Drives repository freshness:
     /// [`ensure`](Self::ensure) re-reads the binding index from the
@@ -977,6 +1183,7 @@ impl HarnessPool {
             overlay_fingerprints: RwLock::new(HashMap::new()),
             capability_fingerprints: RwLock::new(HashMap::new()),
             composio_fingerprints: RwLock::new(HashMap::new()),
+            billing_fingerprints: RwLock::new(HashMap::new()),
             repo_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
@@ -1092,6 +1299,31 @@ impl HarnessPool {
         let composio_config = self.resolve_composio(company, deps).await;
         let composio_fp = composio::TenantComposio::fingerprint(&composio_config);
 
+        // Re-resolve + fingerprint the billing connections (#788, #789) for the
+        // same reason as Composio above: both are set from the console, so a
+        // roster that never re-reads them leaves an agent without billing tools
+        // on a company whose settings page reads "Connected".
+        #[cfg(feature = "chargebee")]
+        let chargebee_config = self.resolve_chargebee(company, deps).await;
+        #[cfg(feature = "paypal")]
+        let paypal_config = self.resolve_paypal(company, deps).await;
+        // The hosting credential is set from the same settings surface and goes
+        // stale the same way, so it rides the same axis.
+        let hosting_config = self.resolve_hosting(company, deps).await;
+        // A build without either feature has no billing axis to go stale on, so
+        // the fingerprint is a constant and this company never rebuilds on it.
+        let billing_fp = {
+            use std::hash::Hasher;
+            // Always written to: the hosting axis below is ungated.
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            #[cfg(feature = "chargebee")]
+            hasher.write_u64(chargebee::TenantChargebee::fingerprint(&chargebee_config));
+            #[cfg(feature = "paypal")]
+            hasher.write_u64(paypal::TenantPaypal::fingerprint(&paypal_config));
+            hasher.write_u64(hosting::TenantHosting::fingerprint(&hosting_config));
+            hasher.finish()
+        };
+
         // Re-read + fingerprint the company's bound repositories (issue #245):
         // one index document, read live, so a bind / rotate / revoke reaches the
         // agent on the next turn. Only companies that explicitly grant `repo`
@@ -1108,10 +1340,18 @@ impl HarnessPool {
         // surfaces until a restart (the regression). `build_roster`/`build_agent`
         // stay synchronous and fold these deltas into each agent's effective
         // skill set; the same Vec is reused for the rebuild below (no re-fetch).
-        let skill_deltas = match &deps.skills {
+        let mut skill_deltas = match &deps.skills {
             Some(store) => store.list(&company.id).await?,
             None => Vec::new(),
         };
+        // `[globals].disable = ["skill:…"]` reaches the effective set as a
+        // synthesized disabling delta rather than a second opt-out mechanism
+        // inside `EffectiveSkills`: the manifest and the console are then saying
+        // the same thing in the same vocabulary, and a disable always beats an
+        // enable there, so the company's own declaration wins over a console
+        // re-enable of a skill it opted out of.
+        skill_deltas.extend(globals_skill_disables(&company.manifest.globals.disable));
+        let skill_deltas = skill_deltas;
         let skill_fp = skill_delta_fingerprint(&skill_deltas);
 
         // Resolve the routed workspace documents (context routing) before the
@@ -1132,6 +1372,7 @@ impl HarnessPool {
             let overlay_fingerprints = self.overlay_fingerprints.read().await;
             let capability_fingerprints = self.capability_fingerprints.read().await;
             let composio_fingerprints = self.composio_fingerprints.read().await;
+            let billing_fingerprints = self.billing_fingerprints.read().await;
             let repo_fingerprints = self.repo_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
@@ -1143,6 +1384,7 @@ impl HarnessPool {
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
                 && capability_fingerprints.get(&company.id) == Some(&capability_fp)
                 && composio_fingerprints.get(&company.id) == Some(&composio_fp)
+                && billing_fingerprints.get(&company.id) == Some(&billing_fp)
                 && repo_fingerprints.get(&company.id) == Some(&repo_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
@@ -1167,6 +1409,15 @@ impl HarnessPool {
         // Install the freshly-resolved Composio config the same way, so a token
         // set/rotate/clear reaches the rebuilt agents (issue #110).
         fresh_deps.composio = composio_config;
+        #[cfg(feature = "chargebee")]
+        {
+            fresh_deps.chargebee = chargebee_config;
+        }
+        #[cfg(feature = "paypal")]
+        {
+            fresh_deps.paypal = paypal_config;
+        }
+        fresh_deps.hosting = hosting_config;
         // And the freshly-read bindings (issue #245), so a repository bound or
         // revoked in the console is what the rebuilt agents' tools resolve
         // against — including the descriptions that name what is bound.
@@ -1229,6 +1480,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), composio_fp);
+        self.billing_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), billing_fp);
         self.repo_fingerprints
             .write()
             .await
@@ -1324,6 +1579,111 @@ impl HarnessPool {
                 .await
             }
             None => deps.composio.clone(),
+        }
+    }
+
+    /// Re-reads the company's Chargebee connection from the secret store, so a
+    /// key saved or rotated in Settings → Billing reaches the agent on its next
+    /// turn rather than at the next restart (issue #788).
+    ///
+    /// Only companies that **explicitly** grant `chargebee` read at all. With no
+    /// secret store wired this keeps the boot-resolved
+    /// [`HarnessDeps::chargebee`] — which was itself resolved from *this*
+    /// company's secret store by the runtime builder, so the fallback cannot
+    /// reach another tenant's credential.
+    ///
+    /// A transient **read error** keeps that connection too, with a warning,
+    /// rather than un-wiring the billing tools — the same direction
+    /// [`Self::resolve_repo_bindings`] and [`Self::resolve_effective_mcp`]
+    /// degrade in, and the safe one here for a specific reason: a stale
+    /// Chargebee credential is refused by Chargebee, which the agent surfaces as
+    /// a tool error it can report, whereas a tool that has vanished is invisible
+    /// to the agent — it simply stops being able to invoice and says nothing.
+    /// An absent credential still resolves to `None`; only the error case holds.
+    #[cfg(feature = "chargebee")]
+    async fn resolve_chargebee(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<chargebee::TenantChargebee> {
+        if !crate::company::grants_chargebee_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.chargebee.clone();
+        };
+        match chargebee::TenantChargebee::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[chargebee] could not read the billing credential; keeping the last known \
+                     connection: {err}"
+                );
+                deps.chargebee.clone()
+            }
+        }
+    }
+
+    /// The hosting equivalent, for the same reasons.
+    ///
+    /// Only companies that **explicitly** grant `hosting` read at all: a
+    /// deployment publishes a company's files to the public internet and can
+    /// provision a database it is billed for, so the catch-all `*` does not
+    /// confer it.
+    ///
+    /// A transient read error keeps the last known connection with a warning,
+    /// like `chargebee` and for the same reason: a stale hosting key is refused
+    /// by the provider, which the agent surfaces as a tool error it can report,
+    /// whereas a tool that has vanished is invisible to the agent — it simply
+    /// stops being able to deploy and says nothing.
+    async fn resolve_hosting(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<hosting::TenantHosting> {
+        if !crate::company::grants_hosting_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.hosting.clone();
+        };
+        match hosting::TenantHosting::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[hosting] could not read the hosting credential; keeping the last known \
+                     connection: {err}"
+                );
+                deps.hosting.clone()
+            }
+        }
+    }
+
+    /// The PayPal equivalent (issue #789), for the same reasons.
+    #[cfg(feature = "paypal")]
+    async fn resolve_paypal(
+        &self,
+        company: &CompanyRecord,
+        deps: &HarnessDeps,
+    ) -> Option<paypal::TenantPaypal> {
+        if !crate::company::grants_paypal_explicit(&company.manifest.tools.allow) {
+            return None;
+        }
+        let Some(secrets) = &deps.secrets else {
+            return deps.paypal.clone();
+        };
+        match paypal::TenantPaypal::resolve(secrets, &company.id).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company.id,
+                    "[paypal] could not read the billing credential; keeping the last known \
+                     connection: {err}"
+                );
+                deps.paypal.clone()
+            }
         }
     }
 
@@ -1546,6 +1906,15 @@ impl HarnessPool {
         self.budget_fingerprints.read().await.get(company).copied()
     }
 
+    /// The current billing-connection fingerprint for a company (test-only), so
+    /// a credential-freshness test can assert the roster was rebuilt after a key
+    /// was saved or rotated in Settings → Billing rather than inferring it from
+    /// the tool list (issues #788, #789).
+    #[cfg(test)]
+    pub async fn billing_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.billing_fingerprints.read().await.get(company).copied()
+    }
+
     /// The current desk-scope fingerprint for a company (test-only), so a
     /// desk-scoping test can assert the roster was actually rebuilt after a
     /// ceiling or seating change rather than inferring it from a refused call.
@@ -1706,6 +2075,9 @@ impl HarnessPool {
                             return Some(TurnOutcome {
                                 reply: TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
                                 steps: Vec::new(),
+                                // No model call ran, so no cap was reached
+                                // (issue #926). A refusal is not a pause.
+                                hit_iteration_cap: false,
                             });
                         }
                     }
@@ -1949,6 +2321,9 @@ impl HarnessPool {
                                 return Ok(TurnOutcome {
                                     reply: agent_budget_exhausted_notice(agent_id, cap),
                                     steps: Vec::new(),
+                                    // No model call ran, so no cap was reached
+                                    // (issue #926). A refusal is not a pause.
+                                    hit_iteration_cap: false,
                                 });
                             }
                         }
@@ -2383,6 +2758,28 @@ fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
 /// (and drop live agent conversation state) whenever the store returned the
 /// same skills in a different row order. The full `custom_doc` body is hashed so
 /// an *edited* skill (same slug, new content) also triggers a rebuild. No
+/// The disabling [`SkillState`] deltas a company's `[globals].disable` implies.
+///
+/// One per `skill:<slug>` entry, and nothing else: an entry naming another kind
+/// is that kind's business, and manifest validation has already refused an entry
+/// naming nothing at all.
+pub(crate) fn globals_skill_disables(disable: &[String]) -> Vec<SkillState> {
+    disable
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("skill:"))
+        .map(|slug| SkillState {
+            slug: slug.to_string(),
+            enabled: false,
+            // The shared library is where these skills are authored, so that is
+            // what they are a delta over. The value is inert here in any case:
+            // this delta is synthesized per rebuild, never stored, and only its
+            // `enabled = false` is read.
+            source: crate::ports::SkillSource::Registry,
+            custom_doc: None,
+        })
+        .collect()
+}
+
 /// secrets are involved — a skill delta is operator-authored content.
 fn skill_delta_fingerprint(deltas: &[SkillState]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
@@ -2605,6 +3002,7 @@ pub(crate) fn build_roster(
 /// ([`build::persona_prompt`]).
 fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
     ManifestAgent {
+        global: false,
         id: overlay.id.clone(),
         role: overlay.role.clone(),
         description: overlay.description.clone(),
@@ -2625,6 +3023,8 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         prompt_files: Vec::new(),
         prompt_files_resolved: Vec::new(),
         classes: Vec::new(),
+        ledgers: None,
+        can_declare_ledgers: true,
     }
 }
 
@@ -3016,12 +3416,15 @@ description = "Builds the product."
         let meter = Arc::new(RecordingMeter::default());
         Fixture {
             deps: HarnessDeps {
+                ledgers: None,
+                ledger_registry: Default::default(),
                 provider: Arc::new(MockProvider::new("mock: ")),
                 provider_slug: "mock".to_string(),
                 context: Arc::new(MockContext::default()),
                 store: store.clone(),
                 meter: Some(meter.clone()),
                 workspace_root: dir.path().to_path_buf(),
+                workspace_git_enabled: false,
                 audit_root: dir.path().to_path_buf(),
                 model_override: None,
                 tasks: None,
@@ -3049,6 +3452,11 @@ description = "Builds the product."
                 plan: None,
                 media: None,
                 composio: None,
+                #[cfg(feature = "chargebee")]
+                chargebee: None,
+                #[cfg(feature = "paypal")]
+                paypal: None,
+                hosting: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 run_supervisor: crate::runtime::RunSupervisor::default(),
                 delivery: None,
@@ -3221,12 +3629,15 @@ description = "Builds the product."
         .unwrap();
 
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -3254,6 +3665,11 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -3908,12 +4324,15 @@ description = "Builds the product."
     fn scripted_agent(outcomes: Vec<Result<String, String>>) -> (Arc<CompanyAgent>, HarnessDeps) {
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(ScriptedProvider::new(outcomes)),
             provider_slug: "scripted".to_string(),
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -3941,6 +4360,11 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4086,12 +4510,15 @@ description = "Builds the product."
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4119,6 +4546,11 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4370,6 +4802,151 @@ description = "Builds the product."
         );
     }
 
+    // --- Billing-credential freshness (issues #788, #789) -------------------
+
+    /// Saving or rotating a key in Settings → Billing must reach the agent on
+    /// its next turn.
+    ///
+    /// The fingerprint is the observable that makes "no restart" testable: a
+    /// credential that fails to move it leaves the roster cached, and the agent
+    /// keeps authenticating with the old key — or holds no billing tools at all
+    /// — until the process restarts. That failure is invisible from the tool
+    /// list alone, which is why this asserts the fingerprint directly.
+    #[tokio::test]
+    #[cfg(feature = "chargebee")]
+    async fn ensure_rebuilds_when_a_chargebee_credential_is_saved_or_rotated() {
+        use crate::chargebee::types::{API_KEY_SECRET, SITE_SECRET};
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let dir = tempfile::tempdir().unwrap();
+        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        deps.secrets = Some(secrets.clone());
+
+        // The explicit grant is what opens this axis. A `*` wildcard does not
+        // confer it — see the module docs.
+        let mut rec = record();
+        rec.manifest.tools.allow = vec!["chargebee".to_string()];
+
+        let write = |key: &'static str, value: &'static str| {
+            let secrets = secrets.clone();
+            async move {
+                secrets
+                    .set(
+                        &CompanyId::new("acme"),
+                        key,
+                        crate::ports::types::SecretValue(value.to_string()),
+                    )
+                    .await
+                    .expect("write secret");
+            }
+        };
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("first ensure");
+        let unset = pool
+            .billing_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprint");
+
+        // Stability first, so every change assertion below cannot pass by
+        // coincidence.
+        pool.ensure(&rec, &deps).await.expect("redundant ensure");
+        assert_eq!(
+            pool.billing_fingerprint_of(&rec.id).await,
+            Some(unset),
+            "an unchanged credential must not move the fingerprint"
+        );
+
+        // Half a credential is not a connection, so it must not move either —
+        // the pair is meaningless apart.
+        write(SITE_SECRET, "acme-test").await;
+        pool.ensure(&rec, &deps).await.expect("half ensure");
+        assert_eq!(
+            pool.billing_fingerprint_of(&rec.id).await,
+            Some(unset),
+            "a site with no key is still no connection"
+        );
+
+        // Connect.
+        write(API_KEY_SECRET, "cb_first").await;
+        pool.ensure(&rec, &deps).await.expect("post-connect ensure");
+        let connected = pool
+            .billing_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprint");
+        assert_ne!(unset, connected, "saving a credential must rebuild");
+
+        // Rotate: same site, new key. This is the one a fingerprint over the
+        // site alone would miss, leaving the agent on the revoked key.
+        write(API_KEY_SECRET, "cb_rotated").await;
+        pool.ensure(&rec, &deps).await.expect("post-rotate ensure");
+        let rotated = pool
+            .billing_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprint");
+        assert_ne!(
+            connected, rotated,
+            "a rotation must rebuild even though the site is identical"
+        );
+
+        // Disconnect.
+        write(API_KEY_SECRET, "").await;
+        pool.ensure(&rec, &deps).await.expect("post-clear ensure");
+        assert_eq!(
+            pool.billing_fingerprint_of(&rec.id).await,
+            Some(unset),
+            "clearing the key must land back on the unconnected fingerprint"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "same company, rebuilt in place — not a new residency"
+        );
+    }
+
+    /// A company that does not explicitly grant `chargebee` never reads the
+    /// billing secrets, so this axis is inert for it — and a credential sitting
+    /// in its store confers nothing. Fail closed, as the module docs promise.
+    #[tokio::test]
+    #[cfg(feature = "chargebee")]
+    async fn a_company_without_the_chargebee_grant_never_moves_on_this_axis() {
+        use crate::chargebee::types::{API_KEY_SECRET, SITE_SECRET};
+
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
+        let dir = tempfile::tempdir().unwrap();
+        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        deps.secrets = Some(secrets.clone());
+
+        // A wildcard, deliberately: it must NOT confer billing.
+        let mut rec = record();
+        rec.manifest.tools.allow = vec!["*".to_string()];
+
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("first ensure");
+        let before = pool
+            .billing_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprint");
+
+        for (key, value) in [(SITE_SECRET, "acme-test"), (API_KEY_SECRET, "cb_key")] {
+            secrets
+                .set(
+                    &CompanyId::new("acme"),
+                    key,
+                    crate::ports::types::SecretValue(value.to_string()),
+                )
+                .await
+                .expect("write secret");
+        }
+
+        pool.ensure(&rec, &deps).await.expect("post-write ensure");
+        assert_eq!(
+            pool.billing_fingerprint_of(&rec.id).await,
+            Some(before),
+            "an ungranted company must not read the billing secrets, let alone rebuild on them"
+        );
+    }
+
     // --- Skill-delta freshness (issue #41) ----------------------------------
 
     /// An in-memory `SkillStateStore` whose delta set a test can mutate between
@@ -4604,12 +5181,15 @@ description = "Builds the product."
 
         let dir = tempfile::tempdir().unwrap();
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
             store: live_store.clone(),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4637,6 +5217,11 @@ description = "Builds the product."
             plan: None,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4776,12 +5361,15 @@ description = "Sets direction."
             total_budget: None,
         };
         let deps = HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(MockContext::default()),
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
             workspace_root: dir.path().to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4809,6 +5397,11 @@ description = "Sets direction."
             plan: Some(plan),
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
@@ -4833,10 +5426,12 @@ description = "Sets direction."
             before.contains(&"read_workspace_state".to_string()),
             "got {before:?}"
         );
-        assert!(
-            before.contains(&"memory_store".to_string()),
-            "intrinsic memory tool must be present: {before:?}"
-        );
+        // `memory_store`/`memory_recall` are currently withheld altogether
+        // (see `harness::build::memory_tools`'s doc comment) — openhuman
+        // removed the constructor seam that let either tool act on a
+        // company's own `ContextStore` rather than one shared,
+        // unconfigured store. `file_read` is this test's example of an
+        // intrinsic, ungated tool instead.
         assert!(
             before.contains(&"file_read".to_string()),
             "ungated files namespace must be present: {before:?}"
@@ -4883,10 +5478,6 @@ description = "Sets direction."
             "the whole shell namespace drops: {after:?}"
         );
         assert!(
-            after.contains(&"memory_store".to_string()),
-            "intrinsic memory tool survives gating: {after:?}"
-        );
-        assert!(
             after.contains(&"file_read".to_string()),
             "ungated files namespace survives gating: {after:?}"
         );
@@ -4929,12 +5520,15 @@ description = "Sets direction."
         plan: Option<crate::harness::capability_budget::CapabilityPlan>,
     ) -> HarnessDeps {
         HarnessDeps {
+            ledgers: None,
+            ledger_registry: Default::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context,
             store: Arc::new(RecordingStore::default()),
             meter,
             workspace_root: dir.to_path_buf(),
+            workspace_git_enabled: false,
             audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
@@ -4961,6 +5555,11 @@ description = "Sets direction."
             plan,
             media: None,
             composio: None,
+            #[cfg(feature = "chargebee")]
+            chargebee: None,
+            #[cfg(feature = "paypal")]
+            paypal: None,
+            hosting: None,
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
             run_supervisor: crate::runtime::RunSupervisor::default(),
@@ -5753,6 +6352,7 @@ budget_usd_daily = 0.0
             }];
         }
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -5765,6 +6365,8 @@ budget_usd_daily = 0.0
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
         let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
@@ -5869,6 +6471,7 @@ budget_usd_daily = 0.0
         let dir = tempfile::tempdir().expect("tempdir");
         let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
         let manifest_agent = ManifestAgent {
+            global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
             description: None,
@@ -5881,6 +6484,8 @@ budget_usd_daily = 0.0
             prompt_files: Vec::new(),
             prompt_files_resolved: Vec::new(),
             classes: Vec::new(),
+            ledgers: None,
+            can_declare_ledgers: true,
         };
         let agent = build::build_agent(
             &CompanyId::new("acme"),
@@ -5917,5 +6522,235 @@ budget_usd_daily = 0.0
             );
         }
         assert!(checked > 0, "no executable tool was on the belt to check");
+    }
+
+    // --- Per-company billing resolution (issues #788, #789) -----------------
+    //
+    // `resolve_chargebee` / `resolve_paypal` are what actually decide whether a
+    // company's agents get billing tools on a given turn — `HarnessPool::ensure`
+    // re-resolves them every turn, and `RuntimeBuilder::build` runs the same
+    // three-way decision once at boot. All three branches are silent when they
+    // go wrong: a dropped grant check wires tools the manifest never allowed, and
+    // a read error collapsed into "no credential" disconnects a working
+    // integration on one transient store hiccup.
+
+    /// A secret store that reads back what was seeded, or fails every read.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    #[derive(Default)]
+    struct BillingSecrets {
+        map: StdMutex<std::collections::HashMap<String, String>>,
+        fail: bool,
+    }
+
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    #[async_trait]
+    impl SecretStore for BillingSecrets {
+        async fn get(
+            &self,
+            _c: &CompanyId,
+            key: &str,
+        ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+            if self.fail {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "the secret store is unreachable".into(),
+                ));
+            }
+            Ok(self
+                .map
+                .lock()
+                .unwrap()
+                .get(key)
+                .map(|v| crate::ports::types::SecretValue(v.clone())))
+        }
+        async fn set(
+            &self,
+            _c: &CompanyId,
+            key: &str,
+            value: crate::ports::types::SecretValue,
+        ) -> crate::Result<()> {
+            self.map.lock().unwrap().insert(key.to_string(), value.0);
+            Ok(())
+        }
+    }
+
+    /// A company whose manifest allows exactly `grants`.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    fn record_granting(grants: &[&str]) -> CompanyRecord {
+        let mut rec = record();
+        rec.manifest.tools.allow = grants.iter().map(|g| g.to_string()).collect();
+        rec
+    }
+
+    /// The inert fixture deps, with a secret store and a "last known" connection.
+    #[cfg(any(feature = "chargebee", feature = "paypal"))]
+    fn billing_deps(dir: &std::path::Path, secrets: Arc<dyn SecretStore>) -> HarnessDeps {
+        let mut deps = deps_with_plan(dir, Arc::new(MockContext::default()), None, None);
+        deps.secrets = Some(secrets);
+        deps
+    }
+
+    #[cfg(feature = "chargebee")]
+    #[tokio::test]
+    async fn chargebee_resolves_only_for_a_company_that_grants_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets::default());
+        secrets
+            .set(
+                &CompanyId::new("acme"),
+                crate::chargebee::types::SITE_SECRET,
+                crate::ports::types::SecretValue("acme-test".into()),
+            )
+            .await
+            .expect("seed");
+        secrets
+            .set(
+                &CompanyId::new("acme"),
+                crate::chargebee::types::API_KEY_SECRET,
+                crate::ports::types::SecretValue("cb_key".into()),
+            )
+            .await
+            .expect("seed");
+        let deps = billing_deps(dir.path(), secrets);
+        let pool = HarnessPool::new();
+
+        // Granted and configured: the credential resolves.
+        let granted = pool
+            .resolve_chargebee(&record_granting(&["chargebee"]), &deps)
+            .await
+            .expect("a granted, configured company resolves");
+        assert_eq!(granted.site(), "acme-test");
+
+        // Same credentials, no grant. The store is untouched — the gate is the
+        // manifest, so a company that never opted in gets no tools however well
+        // configured the host happens to be.
+        assert!(
+            pool.resolve_chargebee(&record_granting(&[]), &deps)
+                .await
+                .is_none(),
+            "an ungranted company must resolve nothing"
+        );
+
+        // And a wildcard is not a grant: these tools send invoices to real
+        // people, so they are opted into by name rather than riding in on the
+        // `*` somebody set for file and shell tools.
+        assert!(
+            pool.resolve_chargebee(&record_granting(&["*"]), &deps)
+                .await
+                .is_none(),
+            "a catch-all grant must not confer chargebee"
+        );
+    }
+
+    #[cfg(feature = "chargebee")]
+    #[tokio::test]
+    async fn a_chargebee_store_hiccup_keeps_the_last_known_connection() {
+        // The distinction this pins: absence wires no tools, but a READ FAILURE
+        // keeps whatever was already resolved. Collapsing the two would drop a
+        // working company's billing tools mid-conversation on one bad read, and
+        // silently — the agent would simply stop being able to invoice.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets {
+            fail: true,
+            ..Default::default()
+        });
+        let mut deps = billing_deps(dir.path(), secrets);
+        let last_known = crate::harness::chargebee::TenantChargebee::resolve(
+            &(Arc::new(BillingSecrets {
+                map: StdMutex::new(
+                    [
+                        (
+                            crate::chargebee::types::SITE_SECRET.to_string(),
+                            "acme-test".to_string(),
+                        ),
+                        (
+                            crate::chargebee::types::API_KEY_SECRET.to_string(),
+                            "cb_key".to_string(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                fail: false,
+            }) as Arc<dyn SecretStore>),
+            &CompanyId::new("acme"),
+        )
+        .await
+        .expect("the seeded store reads")
+        .expect("both halves present");
+        deps.chargebee = Some(last_known);
+
+        let kept = pool_resolve_chargebee(&deps).await;
+        assert_eq!(
+            kept.map(|c| c.site().to_string()).as_deref(),
+            Some("acme-test"),
+            "a transient read failure must not disconnect a working integration"
+        );
+    }
+
+    #[cfg(feature = "chargebee")]
+    async fn pool_resolve_chargebee(
+        deps: &HarnessDeps,
+    ) -> Option<crate::harness::chargebee::TenantChargebee> {
+        HarnessPool::new()
+            .resolve_chargebee(&record_granting(&["chargebee"]), deps)
+            .await
+    }
+
+    #[cfg(feature = "paypal")]
+    #[tokio::test]
+    async fn paypal_resolves_only_for_a_company_that_grants_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secrets = Arc::new(BillingSecrets::default());
+        for (key, value) in [
+            (crate::company::paypal::CLIENT_ID_SECRET, "AY_id"),
+            (crate::company::paypal::CLIENT_SECRET_SECRET, "EL_secret"),
+        ] {
+            secrets
+                .set(
+                    &CompanyId::new("acme"),
+                    key,
+                    crate::ports::types::SecretValue(value.into()),
+                )
+                .await
+                .expect("seed");
+        }
+        let deps = billing_deps(dir.path(), secrets);
+        let pool = HarnessPool::new();
+
+        assert!(
+            pool.resolve_paypal(&record_granting(&["paypal"]), &deps)
+                .await
+                .is_some(),
+            "a granted, configured company resolves"
+        );
+        assert!(
+            pool.resolve_paypal(&record_granting(&[]), &deps)
+                .await
+                .is_none(),
+            "an ungranted company must resolve nothing"
+        );
+        assert!(
+            pool.resolve_paypal(&record_granting(&["*"]), &deps)
+                .await
+                .is_none(),
+            "a catch-all grant must not confer paypal"
+        );
+    }
+
+    #[cfg(feature = "paypal")]
+    #[tokio::test]
+    async fn a_paypal_grant_with_no_credential_wires_nothing_rather_than_failing() {
+        // Fail closed: a manifest that grants `paypal` on a host where nobody
+        // has saved a credential must wire no tools, not tools that fail on
+        // first use — an agent that HAS a wallet tool tells the operator the
+        // balance is unavailable, rather than that it cannot read wallets.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = billing_deps(dir.path(), Arc::new(BillingSecrets::default()));
+        assert!(
+            HarnessPool::new()
+                .resolve_paypal(&record_granting(&["paypal"]), &deps)
+                .await
+                .is_none()
+        );
     }
 }

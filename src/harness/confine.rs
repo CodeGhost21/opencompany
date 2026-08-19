@@ -57,7 +57,7 @@ use oh::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher};
 use oh::agent::prompts::SystemPromptBuilder;
 use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 use oh::agent::{Agent, AgentBuilder};
-use oh::memory::traits::Memory;
+use oh::memory::Memory;
 use oh::tools::Tool;
 
 use crate::error::OpenCompanyError;
@@ -70,7 +70,11 @@ use crate::ports::types::{ChunkAddr, ChunkHit, ChunkMeta, CompanyId, ContextChun
 
 /// The agent id a confined turn runs under. Deliberately not a roster id: it
 /// names no teammate, carries no manifest grants, and cannot be addressed.
-pub const CONFINED_AGENT_ID: &str = "workflow-copilot";
+///
+/// Defined in [`crate::ports::ids`] and re-exported here (issue #966): the
+/// attribution audit needs it in the default build, where this module does not
+/// compile. Every `confine::CONFINED_AGENT_ID` call site keeps working.
+pub use crate::ports::CONFINED_AGENT_ID;
 
 /// What one confined turn is confined **to**.
 ///

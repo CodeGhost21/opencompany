@@ -90,8 +90,10 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/ports-runs.md](runtime/ports-runs.md) | `RunStore`: attempts and their traces |
 | [runtime/events.md](runtime/events.md) | `CompanyEvent` vocabulary + journal correlation rules |
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
+| [runtime/globals.md](runtime/globals.md) | The global baseline every company gets: agents, workflows, skills, the starting tool belt, and `[globals].disable` |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
+| [runtime/ledgers.md](runtime/ledgers.md) | Dynamic ledgers: declared record shapes, the append-only fold, who may delete, the `derived/` folder |
 | [runtime/orchestration/README.md](runtime/orchestration/README.md) | Making a many-agent company converge: the three collapses, the three principles, phasing |
 | [runtime/orchestration/memory.md](runtime/orchestration/memory.md) | One memory contract: `MemoryProvider` replaces three ports, and the host decorator that keeps tenants apart |
 | [runtime/orchestration/context-routing.md](runtime/orchestration/context-routing.md) | Which workspace documents reach which role's prompt, the load-bearing exclusions, and assembly order |
@@ -105,6 +107,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/repos.md](runtime/repos.md) | Bound repositories: mirror cache, credential handling, quota |
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
+| [runtime/offline.md](runtime/offline.md) | Running with no network: the configuration, what is not local, and the CI lane that proves it |
 | [runtime/hub-console.md](runtime/hub-console.md) | One console deployment operating many hosts on other origins |
 | [security/agent-isolation.md](security/agent-isolation.md) | What confines an agent and what does not — enforced controls, the gaps, and the capability that survives every planned control |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |

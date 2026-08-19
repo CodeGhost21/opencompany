@@ -211,6 +211,32 @@ curl -X POST "$HOST/api/v1/company/workflows/weekly_digest/run" \
 }
 ```
 
+### Structured validation errors (issue #1016)
+
+A `POST`/`PUT …/workflows` whose graph fails author-time validation answers
+`400 { "code": "workflow_invalid" }` with an **additive** `problems` array — one
+entry per fault, each naming the node and config field so the console can
+highlight the exact spot. The `error` string stays the joined human sentence, so
+older string-only clients are unaffected; only this one code carries `problems`.
+
+```jsonc
+{
+  "error": "node `greet` has a `config.url` of `not-a-url` that is not a valid URL — …",
+  "code": "workflow_invalid",
+  "problems": [
+    { "node_id": "greet", "field": "config.url", "message": "node `greet` has a `config.url` …" }
+  ]
+}
+```
+
+The author-time config gate (issue #661, extended #1016) now also requires a
+`transform` to carry a non-empty `config.set` (a table of expression strings), a
+`split_out` to carry `config.path`, and an `http_request` `config.url` to be a
+real `http(s)` URL with a host (a bare `not-a-url` / `ftp://…` is refused at save
+instead of failing at run). An `output_parser` stays schema-optional (a bare
+identity parser is valid) and `merge` stays config-free; a `sub_workflow` whose
+`workflow_id` names no saved workflow this company can resolve is refused too.
+
 ### A run that stopped for a person (issues #881, #880)
 
 When a tool call inside an agent node's turn is parked for approval, the node
@@ -219,7 +245,7 @@ step waiting on a person is not a failure — and says so structurally:
 
 ```jsonc
 {
-  "output": null,
+  "output": { "nodes": { "draft": { "items": [ { "json": { "text": "…" } } ] } } },
   "pendingApprovals": ["spec"],
   "deliveries": [],
   "nodes": [ { "nodeId": "spec", "status": "blocked", "elapsedMs": 42000 } ],
@@ -232,6 +258,17 @@ step waiting on a person is not a failure — and says so structurally:
   ]
 }
 ```
+
+`output` carries what the nodes **upstream** of the block produced (issue
+#1008). It used to be `null`, so the run drawer showed nothing for a step that
+had just written a draft.
+
+The **blocked node itself has no entry**, here or in the durable snapshot behind
+`GET …/workflows/runs/{runId}/output`. A node refused inside its model's tool
+loop ends its turn by writing prose about being blocked, and filing that prose
+as the node's product would re-open, one surface over, exactly the confusion
+issue #881 fixed by stopping it reaching the next node. The node's `blocked`
+chip and the run's notice are what say what happened.
 
 `blockedNodes` and `approvals` are omitted entirely when empty, so a run that
 blocked on nobody is byte-unchanged. Both also ride the `WorkflowRunFinished`
@@ -249,6 +286,36 @@ row carries no `tool`).
 **Approving does not continue the run.** An agent node is not re-enterable, so
 the operator decides the card and runs the workflow again. See
 [`workflow-vocabulary.md`](../../spec/runtime/workflow-vocabulary.md) for why.
+
+### The node a run is executing right now (issue #1010)
+
+`GET …/workflows/runs` folds **both** node brackets, not just the finish. A run
+still in flight carries `startedNodes` — the ids it has begun, in start order —
+beside the `nodes` rows it has finished:
+
+```jsonc
+{
+  "runId": "run-live",
+  "running": true,
+  "startedNodes": ["collect", "draft"],
+  "nodes": [ { "nodeId": "collect", "status": "ok", "elapsedMs": 12000 } ]
+}
+```
+
+Started minus finished is the node executing right now — here, `draft`. Before
+this the fold read `WorkflowNodeStarted` (issue #382) nowhere, so the only
+per-node facts the history carried were finishes, and every console that learned
+about a run from the journal rather than from a live SSE start frame — a reload,
+a cron fire, an `EventSource` reconnect, a workflow switch and back — painted the
+graph with a hole exactly where the work was happening.
+
+`startedNodes` is a **receipt of what started** and deliberately survives the
+finish: an id in it with no matching `nodes` row on a settled run is the node the
+run was standing on when it was cancelled or lost, which neither list says on its
+own. Readers must therefore pair it with `running` before painting anything as
+in flight, or a settled run overlays a spinner nothing can clear. Omitted
+entirely when empty, like `nodes`, so a run journaled before #382 is
+byte-unchanged.
 
 Swap `{ "kind": "owner" }` for `{ "kind": "email", "target": "ada@example.com" }`
 and a recipient who has never written in comes back as
@@ -308,8 +375,8 @@ card builder (`draft_workflow_from_description` in `src/harness/workflow_build.r
 with the board card removed — the company evidence, the one tool-less model call,
 and the host's authority over the id, the display name, the approval gating and
 the node-kind vocabulary are identical. The one extra it grounds the model in is
-the company's **granted tool slugs** (`workflow_callable_tool_slugs`), because a
-typed description is far likelier to want a `tool_call` step than a card is.
+the company's **effective tool slugs** (`workflow_effective_tool_slugs`), because
+a typed description is far likelier to want a `tool_call` step than a card is.
 
 **It never persists.** The draft is validated exactly as `POST …/workflows`
 would (`courtesy_validate_draft`), handed back, and hydrated into the create
@@ -346,3 +413,49 @@ step (a restart, or configuring inference in Settings) rather than a bare
 failure. The spend is metered like a card pass, under a freshly minted id and a
 `workflow:copilot` sentinel agent; there is no `RunStore` row, because a
 synchronous request is not a card's attempt at its own work.
+
+## Which tools a proposal may name (issues #783, #874)
+
+`GET …/workflows/tool-slugs` is the browser-side copilot's tool grounding — the
+`CopilotPanel` reads it once and inlines the answer in the message it composes,
+so a proposed `tool_call` names a real slug instead of an invented one.
+
+```jsonc
+{ "slugs": ["shell", "read_workspace_state"],
+  "unwired": [ { "slug": "web_search",
+                 "reason": "searchBackendNotConfigured",
+                 "detail": "granted, but no managed search backend is configured on this deployment; …" } ] }
+```
+
+`slugs` is the **effective** set — `workflow_effective_tool_slugs`: the catalogue,
+the company's `[tools].allow`, and this deployment's wiring all agreeing. It is
+the same set the in-process create/fix copilot grounds on, so the two surfaces
+cannot drift.
+
+`unwired` is the granted-but-unwired remainder, with the reason from the same
+`WorkflowToolWiring` the run-time gate reads — `searchBackendNotConfigured` or
+`capabilityTierFiltered`, matching the two sentences `refusal_for` produces at
+run time. Reporting it, rather than dropping it, is what lets a reader tell "this
+company is not allowed that tool" (absent from both lists) from "allowed, but
+nobody configured the provider here".
+
+That distinction is issue #874. The route used to answer the wider **grant-only**
+set, so on a deployment with no search credential a granted `web_search` was
+offered, the copilot authored a node on it, and the run failed at the first node
+with `tool_call 'web_search' is not available in company workflows`.
+
+Two deliberate non-changes:
+
+- **Create/save validation stays permissive.** `validate_tool_call_node` still
+  checks grants alone, so authoring a graph now and wiring the provider later
+  remains legal. This route narrows what a caller is *told is available*, not
+  what the host will *accept*.
+- **Unknowable wiring is not "unwired".** With no harness deps attached the
+  deployment cannot be asked, so `slugs` falls back to the grant-only set and
+  `unwired` is empty — the pre-#874 answer. Claiming every granted tool is broken
+  would be the worse failure. A default build (no `openhuman` feature) wires no
+  `tool_call` grants at all and answers two empty lists rather than a 404, so the
+  copilot grounds on "no tools" instead of being unable to tell.
+
+A host predating #874 sends no `unwired` key; the client defaults it to `[]`,
+which reads identically to a fully wired deployment.

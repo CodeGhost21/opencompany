@@ -101,12 +101,15 @@ async fn main() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let meter = Arc::new(CapturingMeter::default());
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(cfg)),
         provider_slug: "managed".to_string(),
         context: Arc::new(FsContextStore::new(dir.path())),
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),
         workspace_root: dir.path().join("harness"),
+        workspace_git_enabled: false,
         // Issue #775: the shell audit sink hangs off the data root as
         // `companies/<slug>/audit/<agent>/`, deliberately a sibling of the
         // workspace tree rather than inside it.
@@ -137,6 +140,11 @@ async fn main() -> anyhow::Result<()> {
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
+        hosting: None,
         steer: opencompany::company::steer::InflightRegistry::default(),
         run_supervisor: opencompany::runtime::RunSupervisor::default(),
         delivery: None,

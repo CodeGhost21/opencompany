@@ -194,12 +194,12 @@ is `managed`, and even then they are the same value for different reasons.
 
 ## What this does not cover
 
-- **The native OAuth catalog.** `…/connections/{provider}/start` still resolves
-  through `HostConnectRoutes` — a stored provider token, else a *projected*
-  instance identity, else this host's own registered provider application. That
-  precedence is unchanged, so `source: "company"` never appears on a native-only
-  provider. That path is entangled with the inert-catalog question in #396 and is
-  left alone deliberately rather than papered over.
+- **Legacy native OAuth credentials.** #838 retires
+  `…/connections/{provider}/start`: through 2026-09-30 it answers a dated
+  `410 native_oauth_retired`, then #1023 removes it. The callback likewise
+  explains an in-flight browser redirect without exchanging its code. Existing
+  `oauth/{provider}` values remain readable and revocable, but no agent can use
+  them and no credential tier treats a configured host provider app as a route.
 - **Chat inference and embeddings.** Both still resolve from the environment via
   `hosted_endpoint_from_env`. Moving them onto this seam is issue #585; when it
   lands they inherit the rotation guarantee by construction, because the seam is
@@ -217,3 +217,20 @@ is `managed`, and even then they are the same value for different reasons.
 - **Two companies pasting the same key share one entity.** That cannot be
   prevented client-side; it is a deployment caveat, the same one the BYO Composio
   token already carries.
+- **Media generation does not read the projected tier.** `web_search`, chat
+  inference and embeddings all resolve through `TinyhumansTokenSource`, so a
+  hosted tenant's rotating pod token reaches them. `media_backend_from_env` does
+  not: it reads `OPENCOMPANY_MEDIA_KEY`, else a static `TINYHUMANS_API_KEY`, and
+  a projected token file alone leaves media unwired. This is a migration miss
+  from #189 rather than a decision, but it cannot be closed here — the upstream
+  media client takes a `String` bearer for the life of the process, so flattening
+  a 600-second projected token into it would trade "never works" for "works for
+  ten minutes". Fixing it properly means giving that client a resolvable
+  credential upstream, the same shape `SearchBackend` already has. Until then a
+  hosted deployment that wants media must also carry a **non-projected** key, and
+  `PlatformCredentialStatus::boot_warning` says so at boot (#879). That key
+  should be `OPENCOMPANY_MEDIA_KEY`, the supported per-surface override. A static
+  `TINYHUMANS_API_KEY` would also work, but it is the `docker compose` credential
+  and the explicitly unsupported self-host hatch; reaching for it here would make
+  that hatch load-bearing on the hosted path, which is a decision for whoever
+  closes the upstream gap rather than a workaround to settle by default.

@@ -229,11 +229,11 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   plus the credential sections above it (MCP, inference, company key, Composio
   token, channels).
 - **Source:** ✅ real (feature `oauth`) — `Company.connections` (GraphQL) reads
-  manifest intent (`[[connection]]`) + live OAuth status; `POST
-  …/connections/{provider}/start` returns the authorize URL,
-  `…/disconnect` drops tokens, and `GET /api/v1/oauth/callback` completes the
-  flow. Without the `oauth` feature the write routes `404 not_wired` and the
-  console shows the read-only catalog.
+  manifest intent (`[[connection]]`) + legacy native OAuth status. `POST
+  …/connections/{provider}/start` and `GET /api/v1/oauth/callback` are dated
+  410 retirement responses (#838); `…/disconnect` remains so a tenant can
+  release a token written before #828. The supported actionable connection path
+  is Composio.
 - **One list, one answer (issue #582).** The page used to render two provider
   lists — `ComposioSection`'s grid off `GET …/composio/connections`, and a
   categorised grid of eleven hardcoded tiles off `GET …/connections` — which
@@ -261,7 +261,7 @@ The console's models are the response contract. Keep host payloads aligned with:
 
 - `src/api/types.ts` — `CompanyStatus`, `ApprovalSummary`, `ChatResponse`,
   `FeedbackResponse`, `TeamMemberDto`, `InboxDto`, `InboxMessageDto`,
-  `ConnectionState`, `ConnectionStart`.
+  `ConnectionState`.
 - `src/lib/threads.ts` `Thread`/`ThreadContact`,
   `src/lib/tasks-sample.ts` `TaskCard`, `src/lib/skills.ts` `InstalledSkill`,
   `src/lib/workspace.ts` `FsNode`, `src/lib/memory.ts` `MemoryEntry`,
@@ -285,6 +285,15 @@ feature-gated off.
 - **Graceful 404:** until an endpoint exists it should 404; the console already
   treats that as "not wired yet" and shows the sample/notice — so partial
   rollout is safe.
+- **Toast lifetime:** the one `<Toaster>` is mounted at the app root, outside the
+  routed tree, so a toast outlives the view that raised it and nothing about
+  changing view clears one. `sonner`'s auto-dismiss is a timer it *pauses* — on
+  hover, on a pointer interaction, on a hidden tab — and two of those latch with
+  no way back (issue #933). `src/lib/toast-lifetime.ts` is the ceiling that makes
+  a stuck toast impossible: it accumulates each toast's *visible* time and
+  dismisses one whose duration plus a grace period is spent. Hovering to read, a
+  backgrounded tab, and an explicit `duration: Infinity` are all still honoured,
+  so callers keep raising plain `toast.*` calls and need not think about it.
 
 ## Implementation order (delivered)
 

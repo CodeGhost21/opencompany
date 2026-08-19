@@ -84,6 +84,15 @@ const APPROVAL_ID = "e2e-380-approval";
  * an empty queue rather than on the behaviour under test.
  */
 const isApprovalList = (url: URL) => /\/approvals$/.test(url.pathname);
+/**
+ * Every read that carries `pending_approvals`: the company list the console
+ * boots from, and the single-company status it then polls, in both addressing
+ * shapes. All three have to move together — the list is what seeds
+ * `initialStatus`, so patching only the poll leaves the console's *first* count
+ * at zero and the first poll then reads as a rise.
+ */
+const isCompanyRead = (url: URL) =>
+  /\/api\/v1\/(company|companies|companies\/[^/]+)$/.test(url.pathname);
 const isApprovalResolve = (url: URL) => /\/approvals\/[^/]+$/.test(url.pathname);
 const isTaskExport = (url: URL) => /\/tasks\/[^/]+\/export$/.test(url.pathname);
 const isTaskDetail = (url: URL) => /\/tasks\/[^/]+$/.test(url.pathname);
@@ -124,6 +133,19 @@ const approvalCard = (page: Page) =>
  * Serve one parked approval until `resolved` flips, then serve an empty queue —
  * which is what the real host does, since `resolve_outcome` removes the
  * approval from the parked map in step one, before anything slow happens.
+ *
+ * The company-status read is stubbed **in step with it** (issue #932). Both
+ * reads project one thing — the journal's parked set — so a fixture that fakes
+ * the queue and leaves the count real is not a state the host can be in: it
+ * says "nothing is pending" and "here is a pending approval" in the same
+ * breath. The console now resolves that contradiction in favour of the queue,
+ * which made this fixture read as a park landing on the first poll and raised
+ * the "needs a sign-off" push over the decision toast these tests assert on.
+ *
+ * The real response is fetched and one field overwritten, rather than
+ * fabricated: everything else on it — the company's name, lifecycle, whether
+ * the kill switch is engaged — is the host's to answer, and a hand-written
+ * status is a second place for those to drift.
  */
 async function stubQueue(page: Page): Promise<{ resolve: () => void }> {
   let resolved = false;
@@ -132,6 +154,26 @@ async function stubQueue(page: Page): Promise<{ resolve: () => void }> {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(resolved ? [] : [parkedApproval()]),
+    });
+  });
+  await page.route(isCompanyRead, async (route) => {
+    const response = await route.fetch();
+    // Anything but a 200 goes through untouched. Parsing it as the status
+    // envelope would throw inside the route handler, which surfaces as a dead
+    // page rather than as the sign-in or lookup failure it actually is.
+    if (!response.ok()) return route.fulfill({ response });
+    const body = await response.json();
+    const count = () => (resolved ? 0 : 1);
+    await route.fulfill({
+      status: response.status(),
+      contentType: "application/json",
+      // One route serves both shapes: the list is an array of statuses, the
+      // single read is one status.
+      body: JSON.stringify(
+        Array.isArray(body)
+          ? body.map((company) => ({ ...company, pending_approvals: count() }))
+          : { ...body, pending_approvals: count() },
+      ),
     });
   });
   return { resolve: () => (resolved = true) };

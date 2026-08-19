@@ -6,9 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
+use super::workflow_file::WorkflowNodeKind;
 use super::{
-    CompanyManifest, Tools, grants_composio_explicit, grants_media_explicit,
-    grants_search_explicit, load_dir_skills, parse_workflow, walk_workspace,
+    CompanyManifest, Tools, grants_chargebee_explicit, grants_composio_explicit,
+    grants_media_explicit, grants_paypal_explicit, grants_search_explicit, load_dir_skills,
+    parse_workflow, walk_workspace,
 };
 use crate::runtime::builder::effective_grants;
 
@@ -161,7 +163,15 @@ const FULL_BELT_PLUS_SEARCH: [&str; 6] = [
 
 fn load_company(name: &str) -> CompanyManifest {
     let dir = repo_root().join("companies").join(name);
-    CompanyManifest::from_path(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()))
+    let mut manifest =
+        CompanyManifest::from_path(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()));
+    // These tests are about what a bundle's author declared, so the global
+    // baseline appended to every roster is dropped: a global teammate's tool
+    // request is not this company's search posture, and holding a shipped
+    // bundle responsible for one would make every company look like it granted
+    // whatever the baseline asks for.
+    manifest.agents.retain(|agent| !agent.global);
+    manifest
 }
 
 /// One agent's effective grants: the company `[tools].allow` narrowed by that
@@ -384,6 +394,33 @@ fn granting_search_never_strips_the_inherited_default_belt() {
 }
 
 #[test]
+fn a_wildcard_never_confers_a_billing_namespace() {
+    // The point of these helpers: `*` is set for file and shell tools and must
+    // not quietly hand out invoicing or a wallet balance.
+    for grants in [
+        vec!["*".to_string()],
+        vec!["workspace".to_string(), "*".to_string()],
+        vec![],
+        vec!["chargebeeish".to_string(), "paypalish".to_string()],
+        vec!["mcp:chargebee".to_string()],
+    ] {
+        assert!(!grants_chargebee_explicit(&grants), "{grants:?}");
+        assert!(!grants_paypal_explicit(&grants), "{grants:?}");
+    }
+}
+
+#[test]
+fn a_billing_namespace_is_granted_bare_or_dotted_and_never_by_its_sibling() {
+    assert!(grants_chargebee_explicit(&["chargebee".to_string()]));
+    assert!(grants_chargebee_explicit(&["chargebee.read".to_string()]));
+    assert!(grants_paypal_explicit(&["paypal".to_string()]));
+    assert!(grants_paypal_explicit(&["paypal.wallet".to_string()]));
+    // Two namespaces, neither implying the other.
+    assert!(!grants_paypal_explicit(&["chargebee".to_string()]));
+    assert!(!grants_chargebee_explicit(&["paypal".to_string()]));
+}
+
+#[test]
 fn the_repo_skill_registry_parses() {
     let skills = load_dir_skills(&repo_root().join("skills"))
         .unwrap_or_else(|err| panic!("repo skills: {err}"));
@@ -562,4 +599,128 @@ fn the_marketing_campaign_preset_is_runnable() {
     assert_eq!(research.config["on_error"], "continue");
 
     assert_eq!(node("publish").config["agent_ref"], "copywriter");
+}
+
+/// Every seeded `output` node either names a destination its own manifest can
+/// resolve, or names none at all — and the ones that name none are exactly the
+/// templates that declare no desk (issue #947).
+///
+/// Two failures this catches, and they are opposite:
+///
+///  1. **A destination that cannot resolve.** A `channel` target is a
+///     [`ChannelAdapter`] id, and the adapters a company gets are one per desk in
+///     its own manifest (`runtime::builder`, issue #837). A target naming a desk
+///     that manifest does not declare parses fine, ships, and fails at run time
+///     on a freshly provisioned tenant — which is the class of bug #947 is about,
+///     one step further along.
+///  2. **A desk-bearing template that quietly loses its destination.** The
+///     allowlist below is the 18 templates that declare no desk and therefore
+///     have nothing to address. It is an allowlist rather than a `!is_empty()`
+///     check so that removing a destination from one of the three that *can*
+///     deliver fails here instead of passing as "well, some have none".
+///
+/// The 18 are tracked in #963: they need desks before they can have
+/// destinations, which is a content judgement per company rather than a stanza,
+/// and `agentic_research_lab` declares no desk deliberately.
+#[test]
+fn every_seeded_output_destination_resolves_against_its_own_manifest() {
+    /// Templates with an `output` node and no desk to deliver it to (#963).
+    const NO_DESK_YET: &[&str] = &[
+        "agentic_accounting_firm",
+        "agentic_consultation_firm",
+        "agentic_customer_support",
+        "agentic_design_studio",
+        "agentic_enterprise_sales",
+        "agentic_game_business",
+        "agentic_game_studio",
+        "agentic_influencer_business",
+        "agentic_law_firm",
+        "agentic_media_company",
+        "agentic_pharma_startup",
+        "agentic_realestate_company",
+        "agentic_recruiting_company",
+        "agentic_research_lab",
+        "agentic_venture_capital",
+        "agentic_venture_studio",
+        "signals_opportunity_studio",
+        "startup_accelerator",
+    ];
+
+    let mut checked = 0;
+    let mut with_destination = 0;
+    for dir in subdirs(&repo_root().join("companies")) {
+        let company = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .to_string();
+        let manifest_path = dir.join("company.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let manifest: CompanyManifest =
+            toml::from_str(&std::fs::read_to_string(&manifest_path).unwrap())
+                .unwrap_or_else(|err| panic!("{company}/company.toml: {err}"));
+        let desks: Vec<&str> = manifest
+            .group_chats
+            .iter()
+            .map(|chat| chat.id.as_str())
+            .collect();
+
+        for path in toml_files(&dir.join("workflows")) {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let file =
+                parse_workflow(&text).unwrap_or_else(|err| panic!("{}: {err:?}", path.display()));
+            let label = format!("{company}/{}", path.file_name().unwrap().to_string_lossy());
+
+            for node in file
+                .nodes
+                .iter()
+                .filter(|n| n.kind == WorkflowNodeKind::Output)
+            {
+                checked += 1;
+                let Some(destination) = node.destination.as_ref() else {
+                    assert!(
+                        NO_DESK_YET.contains(&company.as_str()),
+                        "{label} has an output node with no destination, so a run of it \
+                         delivers nothing. Give it a destination, or — if this template \
+                         declares no desk to deliver to — add it to `NO_DESK_YET` and to \
+                         issue #963."
+                    );
+                    assert!(
+                        desks.is_empty(),
+                        "{label} is listed in `NO_DESK_YET` but its manifest declares \
+                         desks {desks:?}, so it has somewhere to deliver. Give its output \
+                         node a destination and drop it from the list."
+                    );
+                    continue;
+                };
+                with_destination += 1;
+                assert_eq!(
+                    destination.kind, "channel",
+                    "{label} uses destination kind `{}`. `owner` reports \
+                     Failed/OwnerFallbackFailed on a tenant with no mailbox — every freshly \
+                     provisioned one — and `email` would hardcode a recipient into a \
+                     shipped template.",
+                    destination.kind
+                );
+                let target = destination.target.as_deref().unwrap_or("");
+                assert!(
+                    desks.contains(&target),
+                    "{label} delivers to channel `{target}`, which is not a desk \
+                     {company}'s manifest declares. A company's channel adapters are one \
+                     per desk, so this resolves nowhere at run time. Declared: {desks:?}"
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        checked, 21,
+        "the seeded output-node count changed; this test and #963's list describe 21"
+    );
+    assert_eq!(
+        with_destination, 3,
+        "exactly the three desk-bearing templates carry a destination today"
+    );
 }

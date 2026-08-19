@@ -356,8 +356,12 @@ async fn the_parked_card_produces_a_continuation_that_approves_the_node() {
         .find(|p| p.effect.kind == WORKFLOW_APPROVE_KIND)
         .expect("a gate card");
 
-    let input = crate::runtime::workflow_resume::continuation_input(&card.effect)
-        .expect("a policy-gated card is a well-formed continuation");
+    let input = crate::runtime::workflow_resume::continuation_input(
+        &card.effect,
+        &["work".to_string()],
+        &[],
+    )
+    .expect("a policy-gated card is a well-formed continuation");
     let approvals = input["approvals"]
         .as_array()
         .expect("the continuation carries an approvals array");

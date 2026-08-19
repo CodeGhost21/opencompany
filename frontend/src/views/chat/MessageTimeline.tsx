@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
+import { Bot, UserPlus } from "lucide-react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { ApprovalRow } from "./ApprovalRow";
 import { Avatar } from "./Avatar";
@@ -17,6 +19,11 @@ interface Props {
    * message — see {@link TimelineItem}.
    */
   items: TimelineItem[];
+  /**
+   * This channel's persisted history has not arrived yet, so the absence of
+   * rows is not evidence of anything (issue #934).
+   */
+  historyPending?: boolean;
   /** The message whose thread is open, if any — that row stays highlighted. */
   openThreadId: string | null;
   /** Someone on the company side is composing a reply. */
@@ -30,6 +37,11 @@ interface Props {
   liveSteps?: TurnStep[];
   onOpenThread: (messageId: string) => void;
   onReact: (messageId: string, emoji: string) => void;
+  /**
+   * Opens the members pane, for the "Add people" card on an empty channel.
+   * Optional so the thread panel — which renders no intro — need not pass it.
+   */
+  onAddPeople?: () => void;
   /** Now, for the cards' "waiting N minutes" line. Owned by the shell's feed. */
   now?: number;
   /** Agent id → display name, for a card's "Asked by" line. */
@@ -72,11 +84,13 @@ const BOTTOM_SLACK_PX = 32;
 export function MessageTimeline({
   channel,
   items,
+  historyPending = false,
   openThreadId,
   typing,
   liveSteps,
   onOpenThread,
   onReact,
+  onAddPeople,
   now,
   askerNames,
   decidingApprovals,
@@ -85,6 +99,10 @@ export function MessageTimeline({
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
+  // Rows that arrived locally — a message sent before hydration landed — are
+  // still worth showing while the rest of the history is in flight. It is only
+  // the *claim of emptiness* that has to wait.
+  const loading = historyPending && items.length === 0;
   /**
    * Is the view parked at the bottom, and therefore still following?
    *
@@ -139,7 +157,16 @@ export function MessageTimeline({
   return (
     <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
       <div className="flex min-h-full flex-col justify-end pb-4">
-        <ChannelIntro channel={channel} empty={items.length === 0} />
+        {/* `empty` only drives the top padding, and the skeleton fills the
+            same space real rows will — so a loading channel is spaced like a
+            full one and the intro does not jump down and back up. */}
+        <ChannelIntro
+          channel={channel}
+          empty={items.length === 0 && !loading}
+          loading={loading}
+          onAddPeople={onAddPeople}
+        />
+        {loading && <HistorySkeleton />}
         {items.map((item) =>
           item.kind === "message" ? (
             <div key={item.key}>
@@ -214,11 +241,13 @@ function DayDivider({ label }: { label: string }) {
   return (
     <div
       aria-label={label}
-      className="pointer-events-none sticky top-2 z-20 flex justify-center py-2"
+      className="pointer-events-none sticky top-2 z-20 flex items-center gap-3 px-4 py-2"
     >
-      <p className="rounded-full border bg-background px-2.5 py-1 text-2xs font-medium tracking-wide text-muted-foreground">
+      <span className="h-px flex-1 bg-border" aria-hidden />
+      <p className="rounded-full border bg-background px-3 py-1 text-2xs font-medium tracking-wide text-muted-foreground">
         {label}
       </p>
+      <span className="h-px flex-1 bg-border" aria-hidden />
     </div>
   );
 }
@@ -228,7 +257,17 @@ function DayDivider({ label }: { label: string }) {
  * above the first message rather than only showing when the channel is empty —
  * scrolling to the beginning of a channel should tell you where you are.
  */
-function ChannelIntro({ channel, empty }: { channel: Channel; empty: boolean }) {
+function ChannelIntro({
+  channel,
+  empty,
+  loading,
+  onAddPeople,
+}: {
+  channel: Channel;
+  empty: boolean;
+  loading: boolean;
+  onAddPeople?: () => void;
+}) {
   return (
     <div className={cn("px-4 pb-3", empty ? "pt-16" : "pt-6")}>
       <Avatar
@@ -238,11 +277,122 @@ function ChannelIntro({ channel, empty }: { channel: Channel; empty: boolean }) 
         className="mb-3 size-12 rounded-lg text-base"
       />
       <h2 className="text-xl font-semibold tracking-tight">{channelTitle(channel)}</h2>
+      {/* Both of these sentences are positive claims that the channel has no
+          history — "the start of", "the very beginning of". Neither may render
+          until the host has answered, or a reload of a busy DM reads as lost
+          conversation (issue #934). The identity block above is not a claim
+          and stays either way, so the pane still says where you are. */}
       <p className="mt-1 max-w-prose text-sm text-muted-foreground">
-        {channel.kind === "dm"
-          ? `This is the start of your direct message with ${channel.name} — ${lower(channel.purpose)}.`
-          : `This is the very beginning of ${channelTitle(channel)}. ${sentence(channel.purpose)}`}
+        {loading
+          ? sentence(channel.purpose)
+          : channel.kind === "dm"
+            ? `This is the start of your direct message with ${channel.name} — ${lower(channel.purpose)}.`
+            : `This is the very beginning of ${channelTitle(channel)}. ${sentence(channel.purpose)}`}
       </p>
+      {/* The two openings a new channel actually has. Held back until the
+          history has answered, for the same reason the sentence above is:
+          offering "add an agent here" over a channel that turns out to be full
+          of conversation reads as data loss. */}
+      {empty && !loading && channel.kind === "channel" && (
+        <ActionCards onAddPeople={onAddPeople} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The pair of starting moves on an empty channel.
+ *
+ * Cards rather than buttons in a row: an empty channel is mostly empty space,
+ * and the two things worth doing there deserve to be the largest objects on
+ * it. The icon sits on `--surface-icon` — the rung the brand guide names for
+ * exactly this, an icon circle — rather than on `muted`, which is the ground
+ * for recessed *fills*.
+ */
+function ActionCards({ onAddPeople }: { onAddPeople?: () => void }) {
+  return (
+    <div className="mt-5 flex flex-wrap gap-4">
+      <ActionCard
+        icon={Bot}
+        title="Create agent"
+        hint="Add an agent here."
+        href="#/company"
+      />
+      <ActionCard
+        icon={UserPlus}
+        title="Add people"
+        hint="Invite members."
+        onClick={onAddPeople}
+      />
+    </div>
+  );
+}
+
+function ActionCard({
+  icon: Icon,
+  title,
+  hint,
+  href,
+  onClick,
+}: {
+  icon: typeof Bot;
+  title: string;
+  hint: string;
+  href?: string;
+  onClick?: () => void;
+}) {
+  const body = (
+    <>
+      <span className="flex size-9 items-center justify-center rounded-lg bg-surface-icon text-muted-foreground">
+        <Icon className="size-4.5" aria-hidden />
+      </span>
+      <span className="mt-4 block">
+        <span className="block text-lg font-semibold tracking-tight">{title}</span>
+        <span className="mt-0.5 block text-2xs text-muted-foreground">{hint}</span>
+      </span>
+    </>
+  );
+  const cls =
+    "flex h-33 w-60 flex-col items-start rounded-xl border bg-card p-4 text-left transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none";
+
+  // A navigation is an anchor and an in-page action is a button, so the card
+  // keeps the affordance its behaviour actually has.
+  if (href) {
+    return (
+      <a href={href} className={cls}>
+        {body}
+      </a>
+    );
+  }
+  return (
+    <button type="button" onClick={onClick} className={cls} disabled={!onClick}>
+      {body}
+    </button>
+  );
+}
+
+/**
+ * Placeholder rows while a channel's history is on the wire.
+ *
+ * Shaped like the message rows it stands in for — avatar gutter, a name line,
+ * two lines of body — so the pane does not jump when the real transcript
+ * replaces it. `role="status"` is what makes the wait legible to a screen
+ * reader, which cannot see that anything is pulsing.
+ */
+function HistorySkeleton() {
+  return (
+    <div role="status" aria-busy="true" className="space-y-1">
+      <span className="sr-only">Loading messages…</span>
+      {[0, 1, 2].map((row) => (
+        <div key={row} className="flex items-start gap-2.5 px-4 py-1">
+          <Skeleton className="size-9 shrink-0 rounded-full" />
+          <div className="min-w-0 flex-1 space-y-2 py-1">
+            <Skeleton className="h-3 w-28" />
+            <Skeleton className="h-3 w-full max-w-prose" />
+            <Skeleton className={cn("h-3", row === 1 ? "w-1/2" : "w-3/4")} />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

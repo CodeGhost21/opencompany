@@ -390,11 +390,15 @@ pub struct RuntimeBuilder {
     /// manifest to answer.
     auth_mode_override: Option<AuthMode>,
     tasks: Option<Arc<dyn TaskStore>>,
+    ledgers: Option<Arc<dyn crate::ports::ledgers::LedgerStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
     /// Issue #553: the byte limits the workspace is held to. Defaults to a
     /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
     /// naming a quota is still not a way to write an unbounded file.
     workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Whether private per-agent filesystem workspaces keep automatic Git
+    /// checkpoints after tool calls.
+    workspace_git_enabled: bool,
     /// Issue #752: which storage backend is serving this host's secrets. Only
     /// the repository-credential gates read it, and the default is the refusing
     /// side (`fs`) — a runtime built without naming a backend is assumed to keep
@@ -507,8 +511,10 @@ impl RuntimeBuilder {
             bootstrap_admin: None,
             auth_mode_override: None,
             tasks: None,
+            ledgers: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            workspace_git_enabled: false,
             storage_kind: crate::store::StorageKind::default(),
             facts: None,
             artifacts: None,
@@ -631,6 +637,7 @@ impl RuntimeBuilder {
     /// (see [`crate::store::select`]).
     pub fn with_stores(mut self, handles: &crate::store::StorageHandles) -> Self {
         self.tasks = Some(handles.tasks.clone());
+        self.ledgers = Some(handles.ledgers.clone());
         self.workspace = Some(handles.workspace.clone());
         self.facts = Some(handles.facts.clone());
         self.artifacts = Some(handles.artifacts.clone());
@@ -654,15 +661,27 @@ impl RuntimeBuilder {
             .with_inbox(handles.inbox.clone())
     }
 
-    /// Overlays just the memory + context ports from a selected memory engine
+    /// Overlays the memory ports from a selected memory engine
     /// (`OPENCOMPANY_MEMORY`, see [`crate::store::select`]).
     ///
     /// Applied *after* [`with_stores`](Self::with_stores) (or over the fs
-    /// defaults), so a dedicated memory engine such as TinyCortex backs recall
-    /// while the base backend keeps every other durable port.
+    /// defaults), so a dedicated memory engine backs recall while the base
+    /// backend keeps every other durable port.
+    ///
+    /// Memory and context always come from the overlay. `FactStore` comes from
+    /// it only when the engine serves facts as well — the embedded engine
+    /// implements memory + context alone and leaves facts on the base backend,
+    /// while an engine bound through the `MemoryProvider` contract covers all
+    /// three ports. Taking whichever the overlay offers is what keeps one
+    /// company's memory on one engine instead of split across two (issue #914).
     pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
-        self.with_memory(overlay.memory.clone())
-            .with_context(overlay.context.clone())
+        let builder = self
+            .with_memory(overlay.memory.clone())
+            .with_context(overlay.context.clone());
+        match &overlay.facts {
+            Some(facts) => builder.with_facts(facts.clone()),
+            None => builder,
+        }
     }
 
     /// Swaps just the runtime journal's durable sink (default: the company
@@ -682,6 +701,13 @@ impl RuntimeBuilder {
     }
 
     /// Swaps the task board store (default: fs-backed).
+    /// Injects the ledger store.
+    #[must_use]
+    pub fn with_ledgers(mut self, ledgers: Arc<dyn crate::ports::ledgers::LedgerStore>) -> Self {
+        self.ledgers = Some(ledgers);
+        self
+    }
+
     pub fn with_tasks(mut self, tasks: Arc<dyn TaskStore>) -> Self {
         self.tasks = Some(tasks);
         self
@@ -715,6 +741,13 @@ impl RuntimeBuilder {
     /// tree). See [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace).
     pub fn with_workspace_quota(mut self, quota: crate::runtime::WorkspaceQuota) -> Self {
         self.workspace_quota = quota;
+        self
+    }
+
+    /// Enables or disables automatic Git checkpoints in private agent
+    /// workspaces. Disabled by default.
+    pub fn with_workspace_git_enabled(mut self, enabled: bool) -> Self {
+        self.workspace_git_enabled = enabled;
         self
     }
 
@@ -1115,6 +1148,11 @@ impl RuntimeBuilder {
             .unwrap_or_else(|| Arc::new(FsInboxStore::new(home.clone())));
         // The WS3 console ports default to a single shared fs backend.
         let fs_ops = Arc::new(FsOps::new(home.clone()));
+        // Chosen before the ops struct because two of its members need it: the
+        // ledger store itself, and the workspace guard that names a refusal
+        // after the ledger owning the file.
+        let ledgers_for_guard: Arc<dyn crate::ports::ledgers::LedgerStore> =
+            self.ledgers.clone().unwrap_or_else(|| fs_ops.clone());
         let ops = match handover.as_ref() {
             // A rebuild inherits the ops it was handed, announcer and all — the
             // wrap below happens once, at first construction. Re-wrapping an
@@ -1138,16 +1176,33 @@ impl RuntimeBuilder {
                 // wrapped INSIDE the announcer so a refused write is never
                 // announced — the feed must not claim a file appeared that the
                 // quota rejected. See [`QuotaEnforcedWorkspace`].
+                // And the `derived/` folder refuses a hand-written edit,
+                // wrapped INSIDE both so a refused edit is never announced and
+                // never charged — and so that every writer, console or agent or
+                // workflow node, obeys without knowing it does. See
+                // [`DerivedGuardWorkspace`].
                 workspace: Arc::new(WorkspaceAnnouncer::new(
                     Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
-                        self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                        Arc::new(crate::runtime::DerivedGuardWorkspace::new(
+                            self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                            ledgers_for_guard.clone(),
+                        )),
                         self.workspace_quota,
                     )),
                     events.clone(),
                 )),
+                ledgers: ledgers_for_guard.clone(),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
-                runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
+                // Issue #1015: every attempt status change journals a frame, so
+                // the task screen can be pushed rather than polled. Wrapped here
+                // rather than at the cycle's call sites because
+                // `reap_orphaned_runs` settles crash-killed runs through
+                // `finish_run` directly — see `runtime::run_events`.
+                runs: Arc::new(crate::runtime::run_events::EventingRunStore::new(
+                    self.runs.unwrap_or_else(|| fs_ops.clone()),
+                    events.clone(),
+                )),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 workflow_run_outputs: self
@@ -1486,10 +1541,18 @@ impl RuntimeBuilder {
             match crate::ports::runs::reap_orphaned_runs(ops.runs.as_ref(), &id).await {
                 Ok(reaped) => {
                     for run in reaped {
+                        // Issue #983: a reaped chat turn names no card, so the
+                        // row settle above was the whole of its cleanup. The
+                        // transcript half — folding its unterminated
+                        // `TurnStarted` into a `TurnFailed` — is the journal
+                        // sweep further down, not this one.
+                        let Some(task_id) = run.task_id.as_deref() else {
+                            continue;
+                        };
                         match crate::runtime::advance::advance_settled_card(
                             ops.tasks.as_ref(),
                             &id,
-                            &run.task_id,
+                            task_id,
                             crate::ports::runs::RunStatus::Failed,
                             crate::ports::runs::ORPHAN_ERROR,
                         )
@@ -1498,7 +1561,7 @@ impl RuntimeBuilder {
                             Ok(Some(column)) => tracing::info!(
                                 company = %id,
                                 run = %run.id,
-                                task = %run.task_id,
+                                task = %task_id,
                                 column,
                                 "returned a card stranded by a previous host process"
                             ),
@@ -1509,7 +1572,7 @@ impl RuntimeBuilder {
                             Err(err) => tracing::warn!(
                                 company = %id,
                                 run = %run.id,
-                                task = %run.task_id,
+                                task = %task_id,
                                 error = %err,
                                 "reaped an orphaned run but could not return its card"
                             ),
@@ -1574,6 +1637,28 @@ impl RuntimeBuilder {
         // logged inside the sweep and never stops a company booting.
         if handover.is_none() {
             crate::runtime::sweep_interrupted_runs(&events, &id).await;
+
+            // Issue #983, the chat-turn equivalent, resting on the same three
+            // invariants: a turn journals a `TurnStarted` before it takes the
+            // serial lock, every turn is driven in this process, and one process
+            // owns this journal. So a start with no terminal at boot is a turn
+            // that died with the last host — and without this the operator's
+            // question sits in the transcript with no answer after it and no
+            // explanation, which is indistinguishable from a message that never
+            // warranted a reply.
+            //
+            // The row half of the same turn is reclaimed by
+            // `reap_orphaned_runs` above; this is the transcript half. Both are
+            // needed: the row makes a status query honest, the event makes the
+            // conversation honest, and neither can be derived from the other.
+            //
+            // Gated on the handover for exactly the reason the sweeps above are,
+            // and here the mis-fire is the worst of the three: a chat turn
+            // survives a live runtime swap — the drain covers its *cycle*, but
+            // the spawned task journals the replies and settles the row after
+            // that cycle returns — so sweeping mid-life would tell the operator
+            // their turn failed and then answer it.
+            crate::runtime::sweep_interrupted_turns(&events, &id).await;
 
             // Issue #390, the cycle-level equivalent, resting on the same three
             // invariants: a cycle journals a start before it takes the serial
@@ -1660,6 +1745,41 @@ impl RuntimeBuilder {
                 continuations.rearm(journal.parked_turns());
                 continuations
             }
+        };
+
+        // Issue #978: the run-scoped half of the same fact, on exactly the same
+        // terms. A boot rebuilds it from the gates the replay left parked — the
+        // journal keeps their whole effect while they are parked, which is what
+        // makes a rehydrated batch re-dispatchable — and a rebuild inherits the
+        // live one, because that one also knows the verdicts taken since the
+        // replay and a fresh copy would re-ask about them.
+        let workflow_gates = match handover.as_ref() {
+            Some(h) => h.workflow_gates.clone(),
+            None => {
+                let gates = crate::runtime::workflow_gates::WorkflowGateQueue::default();
+                let parked = journal.pending();
+                gates.rearm(parked.iter().filter_map(|entry| {
+                    entry
+                        .batch
+                        .clone()
+                        .map(|turn| (turn, entry.id.clone(), &entry.effect))
+                }));
+                gates
+            }
+        };
+
+        // Issue #899 (Stage 1): the blocked-agent-node stash, shared between the
+        // workflow runner (which arms it at block-settle through `DeliveryParking`)
+        // and the runtime (whose `continue_turn` releases it). Inherited live on a
+        // rebuild, and a plain `default()` on a boot — unlike its two neighbours
+        // it is NOT rehydrated from the journal, because the parked tool-call
+        // effect carries no workflow id or trigger input to rebuild a stash from.
+        // A boot mid-block therefore re-arms the `continuations` counter but not
+        // this, and the released batch reports "re-run the workflow" instead of
+        // spawning. See `BlockedNodeQueue`.
+        let blocked_nodes = match handover.as_ref() {
+            Some(h) => h.blocked_nodes.clone(),
+            None => crate::runtime::blocked_nodes::BlockedNodeQueue::default(),
         };
 
         // Brain selection, in precedence order:
@@ -2094,6 +2214,84 @@ impl RuntimeBuilder {
                             // (fail closed). `HarnessPool::ensure` re-resolves this
                             // each turn so a console token change takes effect
                             // without restart.
+                            // Issue #788: the per-company Chargebee connection,
+                            // resolved from THIS company's secret store — never
+                            // the environment, because two companies on one host
+                            // bill two different sites. Only companies that
+                            // explicitly grant `chargebee` resolve at all; with
+                            // either half of the pair missing it stays `None`
+                            // (fail closed). `HarnessPool::ensure` re-resolves it
+                            // each turn, so a key saved in the console's Billing
+                            // settings takes effect without a restart.
+                            // Issue #789: the per-company PayPal connection,
+                            // resolved from this company's own secret store for
+                            // the same reason chargebee is.
+                            //
+                            // A store read error degrades to `None` HERE, unlike
+                            // in `HarnessPool::resolve_*`, which keeps the last
+                            // known connection: at boot there is no last known
+                            // one to keep. It is warned rather than fatal —
+                            // refusing to start the company over an unreadable
+                            // billing credential would take down every other
+                            // tool it has — and the next turn re-resolves.
+                            #[cfg(feature = "paypal")]
+                            let paypal_config = if crate::company::grants_paypal_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::paypal::TenantPaypal::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[paypal] could not read the billing credential at \
+                                             boot; wiring no PayPal tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
+                            #[cfg(feature = "chargebee")]
+                            let chargebee_config = if crate::company::grants_chargebee_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::chargebee::TenantChargebee::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[chargebee] could not read the billing credential at \
+                                             boot; wiring no Chargebee tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
+                            // The per-company hosting connection, resolved
+                            // from this company's own secret store for the same
+                            // reason the billing pair above is: two companies on
+                            // one host deploy to two different hosting accounts,
+                            // and a deployment publishes files to the internet
+                            // under the account's own name. An ambient
+                            // environment variable could only ever be somebody
+                            // else's account, so none is consulted.
+                            let hosting_config = if crate::company::grants_hosting_explicit(
+                                &self.manifest.tools.allow,
+                            ) {
+                                crate::harness::hosting::TenantHosting::resolve(&secrets, &id)
+                                    .await
+                                    .unwrap_or_else(|err| {
+                                        tracing::warn!(
+                                            company = %id,
+                                            "[hosting] could not read the hosting credential at \
+                                             boot; wiring no hosting tools this turn: {err}"
+                                        );
+                                        None
+                                    })
+                            } else {
+                                None
+                            };
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -2120,6 +2318,21 @@ impl RuntimeBuilder {
                             } else {
                                 None
                             };
+                            // Resolved to data here because `build_agent` is
+                            // synchronous. A store that cannot answer yields an
+                            // empty registry, which costs the prompt its
+                            // catalogue and leaves every tool working.
+                            let ledger_registry = crate::ledger::Registry::build(
+                                ops.ledgers.list_specs(&id).await.unwrap_or_else(|error| {
+                                    tracing::warn!(
+                                        company = %id,
+                                        %error,
+                                        "could not read this company's ledger declarations; \
+                                         agents get the built-ins only"
+                                    );
+                                    Vec::new()
+                                }),
+                            );
                             let deps = HarnessDeps {
                                 // Carried so live re-resolution merges the same
                                 // three layers boot did (issue #527).
@@ -2141,6 +2354,7 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                workspace_git_enabled: self.workspace_git_enabled,
                                 // Issue #775: the shell audit sink is HOST-owned
                                 // and hangs off the data root, resolving to
                                 // `companies/<slug>/audit/<agent>/` — a sibling
@@ -2153,6 +2367,8 @@ impl RuntimeBuilder {
                                 model_override,
                                 tasks: Some(ops.tasks.clone()),
                                 artifacts: Some(ops.artifacts.clone()),
+                                ledgers: Some(ops.ledgers.clone()),
+                                ledger_registry,
                                 // Skill read surface (#28): the operator delta
                                 // store + the company source dir (`companies/<name>`,
                                 // held as `seed_dir`) whose `skills/` subtree
@@ -2266,6 +2482,11 @@ impl RuntimeBuilder {
                                 // resolved above (token from the secret store,
                                 // never an env/platform key). `None` fails closed.
                                 composio: composio_config,
+                                #[cfg(feature = "chargebee")]
+                                chargebee: chargebee_config,
+                                #[cfg(feature = "paypal")]
+                                paypal: paypal_config,
+                                hosting: hosting_config,
                                 steer,
                                 run_supervisor: supervisor,
                                 // Issue #170: the ports an `output` node's
@@ -2293,10 +2514,18 @@ impl RuntimeBuilder {
                                     // response surface, not a workflow delivery
                                     // destination: its buffer has no durable
                                     // reader. Desk and provider adapters are the
-                                    // accepted workflow write paths.
+                                    // accepted workflow write paths. The rule
+                                    // itself lives next to the operator-channel
+                                    // constant (issue #981) so this set, the
+                                    // set the console's picker offers and the
+                                    // set delivery accepts cannot disagree.
                                     channels: channels
                                         .iter()
-                                        .filter(|channel| channel.channel_id() != OPERATOR_CHANNEL)
+                                        .filter(|channel| {
+                                            crate::runtime::channel::is_deliverable_channel(
+                                                channel.channel_id(),
+                                            )
+                                        })
                                         .cloned()
                                         .collect(),
                                     // Issue #227: the same gate and journal the
@@ -2309,6 +2538,18 @@ impl RuntimeBuilder {
                                     parking: Some(crate::workflows::DeliveryParking {
                                         approvals: gate.clone(),
                                         journal: journal.clone(),
+                                        // Issue #978: the SAME two queues the
+                                        // runtime gets below. A gate parked by a
+                                        // run has to arm the counters the
+                                        // resolve path releases, or the run is
+                                        // never continued at all.
+                                        continuations: continuations.clone(),
+                                        gates: workflow_gates.clone(),
+                                        // Issue #899 (Stage 1): the SAME stash the
+                                        // runtime gets below, armed at block-settle
+                                        // for a blocked agent node so the resolve
+                                        // path can find the run to re-dispatch.
+                                        blocked_nodes: blocked_nodes.clone(),
                                     }),
                                     // Issue #529: the same journal the runner
                                     // writes its start/per-node trail to, so a
@@ -2566,6 +2807,8 @@ impl RuntimeBuilder {
             runtime.adopt_locks(h.serial.clone(), h.task_writes.clone());
         }
         runtime.adopt_continuations(continuations);
+        runtime.adopt_workflow_gates(workflow_gates);
+        runtime.adopt_blocked_nodes(blocked_nodes);
 
         // MCP uses OpenHuman's process-global live connection registry. Keep a
         // runtime-owned config for this OpenCompany home so REST and agents see
@@ -2999,6 +3242,31 @@ mod test {
             .expect("tempdir")
     }
 
+    /// Automatic Git checkpoints are opt-in and stay off unless the operator
+    /// flips the switch. The default is asserted here so a silent change to the
+    /// host default — which would start shelling out to `git` in every agent
+    /// workspace — cannot slip past.
+    #[test]
+    fn workspace_git_checkpoints_default_off_and_switchable() {
+        let home = tmp_home("opencompany-workspace-git-");
+        let manifest: CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n")
+                .expect("manifest");
+        let builder = RuntimeBuilder::new(home.path().to_path_buf(), manifest);
+        assert!(
+            !builder.workspace_git_enabled,
+            "workspace Git checkpoints must default to off"
+        );
+        let enabled = builder.with_workspace_git_enabled(true);
+        assert!(enabled.workspace_git_enabled);
+        assert!(
+            !enabled
+                .with_workspace_git_enabled(false)
+                .workspace_git_enabled,
+            "the switch must also be able to turn checkpoints back off"
+        );
+    }
+
     mod scoped_grants {
         use super::*;
 
@@ -3233,16 +3501,9 @@ mod test {
                 .await
                 .expect("first boot");
             let runs = rt.runs();
-            runs.create_run(
-                &id,
-                NewRun {
-                    id: "run-1".to_string(),
-                    task_id: "t-1".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
-            .await
-            .expect("mint");
+            runs.create_run(&id, NewRun::for_task("run-1", "t-1", "ceo"))
+                .await
+                .expect("mint");
             runs.begin_run(&id, "run-1", EventSeq::new(3))
                 .await
                 .expect("begin");
@@ -3592,7 +3853,11 @@ mod test {
             let manifest = CompanyManifest::from_path(&path)
                 .unwrap_or_else(|e| panic!("{company} manifest must parse: {e}"));
 
-            for agent in &manifest.agents {
+            // The company's own roster only: the global baseline is appended to
+            // every manifest, and what it is granted is the company-wide belt
+            // like any teammate that requests nothing — not something this
+            // bundle's author decided, so not something this test pins.
+            for agent in manifest.agents.iter().filter(|agent| !agent.global) {
                 let grants = agent_effective_grants(&manifest.tools.allow, &agent.tools);
                 assert!(
                     grants_cover(&grants, "workspace"),
@@ -3768,11 +4033,7 @@ mod test {
         let home = home_dir.path().to_path_buf();
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         let id = CompanyId::new("acme");
-        let spec = |run: &str, task: &str| NewRun {
-            id: run.to_string(),
-            task_id: task.to_string(),
-            agent_id: "ceo".to_string(),
-        };
+        let spec = |run: &str, task: &str| NewRun::for_task(run, task, "ceo");
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
             .with_id(id.clone())
@@ -3831,6 +4092,187 @@ mod test {
         assert!(runs.list_stale_active(&id).await.unwrap().is_empty());
     }
 
+    /// Issue #983: a chat turn the host died under is reclaimed on **both**
+    /// halves — a `Failed` row carrying the orphan reason, and a `TurnFailed`
+    /// line closing the transcript bracket.
+    ///
+    /// Both are needed and neither is derivable from the other. The row makes
+    /// `GET {scope}/runs` honest; the event makes the *conversation* honest,
+    /// and without it the operator's question sits there with no answer and no
+    /// explanation — which is what a message that never warranted a reply looks
+    /// like too. The turn names no card, which is exactly why the row sweep
+    /// alone leaves nothing an operator would ever find.
+    #[tokio::test]
+    async fn boot_reclaims_a_chat_turn_stranded_by_a_previous_host() {
+        use crate::ports::runs::{NewRun, ORPHAN_ERROR, RunStatus};
+        use crate::ports::types::{CompanyEvent, EventSeq};
+
+        let home_dir = tmp_home("oc-turn-reap-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+
+        let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        first_boot
+            .runs()
+            .create_run(&id, NewRun::for_chat("turn-dead", "general", "general"))
+            .await
+            .unwrap();
+        first_boot
+            .runs()
+            .begin_run(&id, "turn-dead", EventSeq::new(1))
+            .await
+            .unwrap();
+        first_boot
+            .events()
+            .append(
+                &id,
+                CompanyEvent::TurnStarted {
+                    turn_id: "turn-dead".to_string(),
+                    chat_id: "general".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The host dies here: no settle, no reply, no failure line.
+        drop(first_boot);
+
+        let second_boot = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let row = second_boot
+            .runs()
+            .get_run(&id, "turn-dead")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, RunStatus::Failed);
+        assert_eq!(row.error.as_deref(), Some(ORPHAN_ERROR));
+        assert_eq!(row.task_id, None, "a chat turn attempted no card");
+
+        let swept: Vec<String> = second_boot
+            .events()
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s.event {
+                CompanyEvent::TurnFailed { turn_id, error } if turn_id == "turn-dead" => {
+                    Some(error)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            swept,
+            vec![crate::runtime::TURN_INTERRUPTED_BY_RESTART.to_string()],
+            "the transcript bracket was left open by the boot sweep"
+        );
+    }
+
+    /// **The negative half, and the one that matters most.** A live runtime
+    /// rebuild must sweep *neither* half of a chat turn.
+    ///
+    /// This is the #290 lesson in its sharpest form. A rebuild happens in a
+    /// process that has been serving, so "nothing from this process can be in
+    /// flight" — the whole proof both sweeps rest on — is false. And a chat turn
+    /// is more exposed than a workflow run: `rebuild_company` quiesces and
+    /// drains the *cycle* lock, but the spawned turn task journals its replies
+    /// and settles its row **after** the cycle returns, so a turn is routinely
+    /// live at exactly the moment a rebuild reaches here. Sweeping would fail
+    /// the row out from under it — its own settle is then rejected by the
+    /// transition table — and tell the operator in the transcript that the turn
+    /// failed, moments before its answer arrives.
+    #[tokio::test]
+    async fn a_rebuild_sweeps_no_live_chat_turn() {
+        use crate::ports::runs::{NewRun, RunStatus};
+        use crate::ports::types::{CompanyEvent, EventSeq};
+
+        let home_dir = tmp_home("oc-turn-rebuild-");
+        let home = home_dir.path().to_path_buf();
+        let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
+        let id = CompanyId::new("acme");
+
+        let live = RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        live.runs()
+            .create_run(&id, NewRun::for_chat("turn-live", "general", "general"))
+            .await
+            .unwrap();
+        live.runs()
+            .begin_run(&id, "turn-live", EventSeq::new(1))
+            .await
+            .unwrap();
+        live.events()
+            .append(
+                &id,
+                CompanyEvent::TurnStarted {
+                    turn_id: "turn-live".to_string(),
+                    chat_id: "general".to_string(),
+                    parent: None,
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // The swap, as `rebuild_company` performs it: quiesce, hand over, build.
+        live.quiesce().await;
+        let successor = RuntimeBuilder::new(home, manifest)
+            .with_id(id.clone())
+            .with_handover(live.handover())
+            .build()
+            .await
+            .unwrap();
+
+        let row = successor
+            .runs()
+            .get_run(&id, "turn-live")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.status,
+            RunStatus::Running,
+            "a rebuild failed a turn that is still working"
+        );
+        assert!(
+            !successor
+                .events()
+                .read_from(&id, EventSeq::new(0), usize::MAX)
+                .await
+                .unwrap()
+                .iter()
+                .any(|s| matches!(&s.event, CompanyEvent::TurnFailed { .. })),
+            "a rebuild told the operator a live turn had failed"
+        );
+
+        // And the turn's own settle still lands, because nothing took the row
+        // to a terminal state behind its back.
+        successor
+            .runs()
+            .finish_run(
+                &id,
+                "turn-live",
+                crate::ports::runs::RunOutcome::new(RunStatus::Succeeded),
+            )
+            .await
+            .expect("the live turn can still settle itself");
+    }
+
     /// Issue #337, the crash-truthfulness half: reaping the *row* is not enough
     /// — the **card** has to leave In Progress too, or the board keeps claiming
     /// work that provably is not being done and nothing will ever re-drive it
@@ -3862,6 +4304,7 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -3886,29 +4329,15 @@ mod test {
             .upsert(&id, &card("card-b", COLUMN_PAUSED))
             .await
             .unwrap();
-        runs.create_run(
-            &id,
-            NewRun {
-                id: "run-a".to_string(),
-                task_id: "card-a".to_string(),
-                agent_id: "ceo".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-a", "card-a", "ceo"))
+            .await
+            .unwrap();
         runs.begin_run(&id, "run-a", crate::ports::types::EventSeq::new(1))
             .await
             .unwrap();
-        runs.create_run(
-            &id,
-            NewRun {
-                id: "run-b".to_string(),
-                task_id: "card-b".to_string(),
-                agent_id: "ceo".to_string(),
-            },
-        )
-        .await
-        .unwrap();
+        runs.create_run(&id, NewRun::for_task("run-b", "card-b", "ceo"))
+            .await
+            .unwrap();
         runs.begin_run(&id, "run-b", crate::ports::types::EventSeq::new(2))
             .await
             .unwrap();
@@ -3965,14 +4394,7 @@ mod test {
             RunStatus::Failed
         );
         let next = runs
-            .create_run(
-                &id,
-                NewRun {
-                    id: "run-a2".to_string(),
-                    task_id: "card-a".to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
+            .create_run(&id, NewRun::for_task("run-a2", "card-a", "ceo"))
             .await
             .unwrap();
         assert_eq!(
@@ -3999,18 +4421,24 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md — plus the system roots
-        // boot always scaffolds beside them (issue #551), which are not seeded
-        // content and so are not what the re-seed gate is about. Filtering by
-        // `SYSTEM_ROOTS` rather than by name keeps this honest as that set
-        // changes (issue #645 took `Desks/` out of it).
+        // Seeded: README.md, Brand/, Brand/voice.md — plus runtime scaffold
+        // (`Agents/` and `secrets/README.md`) which is not what the re-seed
+        // gate is about.
         let seeded = |tree: &[crate::ports::WorkspaceNode]| {
+            let secrets = tree
+                .iter()
+                .find(|node| {
+                    node.parent_id.is_none()
+                        && node.name == crate::company::workspace_scaffold::SECRETS_ROOT
+                })
+                .map(|node| node.id.as_str());
             let mut names: Vec<String> = tree
                 .iter()
-                .map(|n| n.name.clone())
-                .filter(|name| {
-                    !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&name.as_str())
+                .filter(|node| {
+                    !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&node.name.as_str())
+                        && node.parent_id.as_deref() != secrets
                 })
+                .map(|node| node.name.clone())
                 .collect();
             names.sort();
             names
@@ -4040,9 +4468,8 @@ mod test {
         assert!(runtime.store().load(&id).await.unwrap().is_some());
     }
 
-    /// Issue #551: boot lays down the workspace's system roots — and nothing
-    /// inside them. Since issue #645 that is `Agents/` alone: `Desks/` had no
-    /// producer, so it is minted on first use instead of standing empty here.
+    /// Boot lays down `Agents/` and operator-only `secrets/README.md`. `Desks/`
+    /// has no producer, so it is minted on first use instead of standing empty.
     ///
     /// The per-agent folder is deliberately absent: it is minted the first time
     /// that agent produces something, so a roster of teammates who have done
@@ -4054,7 +4481,7 @@ mod test {
     /// an existing company picks the root up.
     #[tokio::test]
     async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
-        use crate::company::workspace_scaffold::AGENTS_ROOT;
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -4079,15 +4506,19 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT],
-            "boot provisions the managed root with no seed dir — no `Desks/`, and no \
+            vec![AGENTS_ROOT, "README.md", SECRETS_ROOT],
+            "boot provisions the managed roots with no seed dir — no `Desks/`, and no \
              folder for a teammate that has produced nothing"
         );
         for node in &tree {
-            assert!(node.parent_id.is_none());
-            assert_eq!(node.kind, NodeKind::Folder);
             assert_eq!(node.created_by, WorkspaceOrigin::Seed);
         }
+        assert_eq!(
+            tree.iter()
+                .filter(|node| node.parent_id.is_none() && node.kind == NodeKind::Folder)
+                .count(),
+            2
+        );
 
         // An existing, non-empty workspace: an `is_empty` gate would have
         // skipped this boot entirely, and a company that predates the feature
@@ -4129,7 +4560,13 @@ mod test {
         names.sort_unstable();
         assert_eq!(
             names,
-            vec![AGENTS_ROOT, "Desks", "creative_studio"],
+            vec![
+                AGENTS_ROOT,
+                "Desks",
+                "README.md",
+                "creative_studio",
+                SECRETS_ROOT,
+            ],
             "the deleted root was re-provisioned, and the unmanaged `Desks/` left as it stood"
         );
     }
@@ -4138,7 +4575,7 @@ mod test {
     /// roster: a company with no agents at all still gets it.
     #[tokio::test]
     async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
-        use crate::company::workspace_scaffold::AGENTS_ROOT;
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, SECRETS_ROOT};
 
         let home_dir = tmp_home("oc-noagents-");
         let id = CompanyId::new("acme");
@@ -4154,7 +4591,7 @@ mod test {
         let tree = runtime.workspace().tree(&id).await.unwrap();
         let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
         names.sort_unstable();
-        assert_eq!(names, vec![AGENTS_ROOT]);
+        assert_eq!(names, vec![AGENTS_ROOT, "README.md", SECRETS_ROOT]);
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the
@@ -4333,6 +4770,7 @@ mod test {
             mode: mode.to_string(),
             always_approve: always.iter().map(|s| s.to_string()).collect(),
             auto_approve_under_usd: under,
+            approval_ttl_hours: None,
         }
     }
 
@@ -4773,12 +5211,12 @@ mod test {
         assert_eq!(runtime.channels.len(), 2);
         assert!(runtime.channels.iter().any(|c| c.channel_id() == "email"));
 
-        // The #813 accessor the console's channel picker reads names BOTH: the
-        // always-wired `operator` and the openhuman-backed provider channel, so
-        // a workflow author can target either.
-        let wired = runtime.wired_channel_ids();
-        assert!(wired.contains(&"operator".to_string()));
-        assert!(wired.contains(&"email".to_string()));
+        // The accessor the console's channel picker reads (#813) names the
+        // openhuman-backed provider channel and NOT `operator`: delivery
+        // refuses the operator adapter by name, so offering it as a
+        // destination would offer the one target guaranteed to fail (#981).
+        let deliverable = runtime.deliverable_channel_ids();
+        assert_eq!(deliverable, vec!["email".to_string()], "{deliverable:?}");
 
         // A granted call routes through the OpenHuman transport.
         let result = runtime
@@ -4809,9 +5247,17 @@ mod test {
         // No openhuman channel is added when the daemon is unreachable.
         assert_eq!(runtime.channels.len(), 1);
         assert_eq!(runtime.channels[0].channel_id(), "operator");
-        // The #813 accessor the console's channel picker reads: `operator` is
-        // always wired, so a workflow always has at least one real target.
-        assert_eq!(runtime.wired_channel_ids(), vec!["operator".to_string()]);
+        // The accessor the console's channel picker reads (#813): `operator` is
+        // the only wired adapter here, and it is not a delivery target — so a
+        // workflow on this runtime has NOWHERE to deliver, and the honest
+        // answer is an empty picker (#981). It previously answered
+        // `["operator"]`, which is what put the guaranteed-to-fail target in
+        // front of authors.
+        assert!(
+            runtime.deliverable_channel_ids().is_empty(),
+            "an operator-only runtime has no workflow delivery channel: {:?}",
+            runtime.deliverable_channel_ids()
+        );
 
         // Tools degrade to the grant-enforcing built-in: ungranted rejected,
         // granted returns a well-formed not-implemented result — and the RPC
@@ -4902,6 +5348,108 @@ mod test {
             .collect();
         assert!(ids.contains(&"engineering"));
         assert!(ids.contains(&"research"));
+
+        // Both desks are real delivery targets — they write to the company's
+        // durable event log — and `operator` is not one of them (#981).
+        let deliverable = runtime.deliverable_channel_ids();
+        assert!(
+            deliverable.contains(&"engineering".to_string()),
+            "{deliverable:?}"
+        );
+        assert!(
+            deliverable.contains(&"research".to_string()),
+            "{deliverable:?}"
+        );
+        assert!(
+            !deliverable.contains(&"operator".to_string()),
+            "{deliverable:?}"
+        );
+    }
+
+    /// **The invariant that would have caught #981.** The picker's set and the
+    /// delivery layer's set are produced by the same `build()`, from the same
+    /// adapters, and must be the same list.
+    ///
+    /// They were not. `WorkflowDeliveryDeps.channels` dropped `operator` with an
+    /// inline filter while the accessor the console reads returned every adapter
+    /// — so an author was offered a destination the runner refuses by name, and
+    /// nothing in the build asserted the two agreed. Pinning them together is
+    /// what makes a future divergence a test failure rather than a run that
+    /// reports `channel-not-wired` for a target the console suggested.
+    ///
+    /// Needs the harness arm, because that is the only site that wires
+    /// `WorkflowDeliveryDeps` at all.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn the_picker_set_equals_the_delivery_deps_the_same_build_wired() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = tmp_home("oc-981-invariant-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("invariant-co");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Invariant Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[group_chat]]
+            id = "engineering"
+            name = "Engineering"
+            members = ["eng1"]
+            "#,
+        );
+
+        let stub = spawn_stub("ack").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    credential: crate::company::Credential::from_value("k"),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let delivery = runtime
+            .workflow_harness_deps
+            .as_ref()
+            .expect("the harness arm wires workflow deps")
+            .delivery
+            .as_ref()
+            .expect("the harness arm wires delivery deps");
+        let deps_channels: Vec<String> = delivery
+            .channels
+            .iter()
+            .map(|channel| channel.channel_id().to_string())
+            .collect();
+
+        assert_eq!(
+            runtime.deliverable_channel_ids(),
+            deps_channels,
+            "the destination picker offers a set the delivery layer does not accept"
+        );
+        // Not vacuous in either direction: the runtime really did wire the
+        // operator adapter, and the desk really is deliverable.
+        assert!(
+            runtime
+                .channels
+                .iter()
+                .any(|channel| channel.channel_id() == OPERATOR_CHANNEL),
+            "the operator adapter must be wired, or the exclusion proves nothing"
+        );
+        assert_eq!(deps_channels, vec!["engineering".to_string()]);
     }
 
     /// A desk added to `company.toml` since the last boot is wired on this one.

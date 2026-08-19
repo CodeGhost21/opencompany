@@ -7,6 +7,7 @@ import {
   Network,
   Settings2,
   ShieldCheck,
+  BookText,
   SquareKanban,
   Workflow,
 } from "lucide-react";
@@ -29,6 +30,7 @@ import {
   SidebarInset,
   SidebarMenu,
   SidebarMenuBadge,
+  SidebarMenuDot,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -71,12 +73,16 @@ import {
   channelIdForThread,
   deskFromDto,
   dmChannelId,
+  HISTORY_UNSTARTED,
   type DecidedApproval,
+  type HistoryHydration,
+  type HistoryStatus,
   type Transcripts,
 } from "@/views/chat/model";
 import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
+import { LedgersView } from "@/views/LedgersView";
 import { TasksView } from "@/views/TasksView";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
@@ -104,6 +110,7 @@ export type View =
   | "conversation"
   | "inbox"
   | "tasks"
+  | "ledgers"
   | "team"
   | "workspace"
   | "memory"
@@ -128,7 +135,16 @@ const NAV: NavItem[] = [
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
+  // The board, restored and now driven by the `tasks` ledger: its columns,
+  // their order and their labels are the host's declaration, and the cards are
+  // the task records. It keeps its own entry because it is the surface an
+  // operator lives in, and because a card carries far more than a ledger row.
   { view: "tasks", label: "Tasks", icon: SquareKanban },
+  // Everything else the company records — goals, decisions, and whatever axis
+  // this workspace declared. The board appears here too, as the `tasks`
+  // ledger, so this screen is the whole record rather than most of it; the
+  // two render through the same component.
+  { view: "ledgers", label: "Ledgers", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
@@ -165,10 +181,10 @@ const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
 const WORKFLOW_EVENT_WINDOW = 300;
 
 /**
- * Operator-facing copy for a `connect_error` code from the host's OAuth
- * callback (issue #300). The host sends a stable code rather than the
- * provider's own error text — that text is attacker-influenced and may carry
- * credential material, so it never leaves the host's logs.
+ * Operator-facing copy for a legacy `connect_error` query from the former
+ * native OAuth callback (issue #300). The callback now ends in its own dated
+ * explanatory page (#838), but an older bookmarked URL still gets a safe
+ * message rather than raw provider-controlled error text.
  *
  * Every message says what to do next: the whole point of the bounce-back is
  * that a failed handshake is recoverable, not a dead end. An unrecognized code
@@ -292,6 +308,11 @@ export function AppShell({
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
   const [transcripts, setTranscripts] = useState<Transcripts>({});
+  // How far each channel's history rehydration has got. Kept beside
+  // `transcripts` rather than inside it because an empty transcript is a
+  // legitimate final answer, and the timeline has to tell that apart from not
+  // having asked yet before it prints "this is the start of…" (issue #934).
+  const [hydration, setHydration] = useState<HistoryHydration>(HISTORY_UNSTARTED);
   // Host thread id → chat channel id, for every channel this company has.
   // Resolved by the desks/roster effect below, which already works the pairing
   // out to hydrate each channel and used to throw it away — leaving the shell
@@ -322,6 +343,17 @@ export function AppShell({
   // React batch still means "re-read" — the frame-loss the workflow canvas had
   // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
+  // sees an attempt move rather than waiting up to four seconds for its poll —
+  // and sees it at all while the tab is hidden, which the poll deliberately does
+  // not do. Its own counter rather than a share of `taskEventTick`: this fires
+  // several times per attempt, and folding it in would make the whole board
+  // refetch on every transition of every run.
+  //
+  // A counter, not the payload, for the same reason the tick above is one: the
+  // screen re-reads its own detail, so two frames collapsing inside one React
+  // batch still mean "re-read".
+  const [attemptEventTick, setAttemptEventTick] = useState(0);
   // Issue #327: the latest workspace write, as the Workspace view needs it.
   //
   // The payload-carrying variant of the `taskEventTick` pattern above, and the
@@ -331,6 +363,10 @@ export function AppShell({
   // alongside so two frames naming the same node in one React batch are still
   // two events rather than a state update React coalesces away.
   const [workspaceEvent, setWorkspaceEvent] = useState<WorkspaceEvent | null>(null);
+  // A recovery does not name one node, so it cannot reuse `workspaceEvent`'s
+  // payload contract. The workspace re-reads its whole canonical tree on this
+  // tick, just as the task and workflow surfaces do below.
+  const [workspaceRefreshTick, setWorkspaceRefreshTick] = useState(0);
   // Issue #228: bumped on every `workflow_run_finished` so the Workflows view
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
@@ -362,6 +398,27 @@ export function AppShell({
   // of magnitude above a run's ~N+2 frames; if it ever did cut a run's start,
   // the view simply shows no live state and the run history still has it.
   const [workflowRunEvents, setWorkflowRunEvents] = useState<CompanyStreamEvent[]>([]);
+  // Issue #1010: and emptied when the company changes.
+  //
+  // The window is the one company-scoped buffer that was never reset. Every
+  // fold that reads it matches frames on `workflowId`/`runId` alone — the
+  // frames carry no company — and provisioned companies are built from the same
+  // manifests, so two of them routinely hold a workflow of the *same id*.
+  // Switching company therefore painted the previous company's run onto an
+  // identically-named workflow, with a live-looking node and a Cancel button
+  // pointed at a run in a company the operator had left.
+  //
+  // Emptying is right rather than filtering: the frames that matter after a
+  // switch are the ones that arrive after it. The new company's own in-flight
+  // runs come back through the history seed (issue #863), which is scoped by
+  // the request, so nothing is lost by starting from nothing.
+  //
+  // The updater returns the SAME array when there is nothing to drop, so React
+  // bails out rather than re-rendering the whole shell for a no-op — this
+  // effect also fires on mount, when the window is empty by construction.
+  useEffect(() => {
+    setWorkflowRunEvents((prev) => (prev.length === 0 ? prev : []));
+  }, [company]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -418,24 +475,30 @@ export function AppShell({
    */
   const [failedApprovals, setFailedApprovals] = useState<Record<string, string>>({});
 
+  // The sidebar badge, and the rising edge behind the "needs a sign-off" push.
+  //
+  // Read off the feed rather than fetched here, and reconciled to the queue in
+  // `useCompany` (issue #932): this number sits a click away from the Approvals
+  // page's own header, and the two are only guaranteed to agree while they come
+  // from one response. Counting `feed.approvals` here directly would work today
+  // and would put the rule in the surface that happens to show it, instead of
+  // in the feed both surfaces read.
   const pending = feed.status.pending_approvals;
 
-  // OAuth connect bounce-back: the host's callback redirects the browser to
-  // `…/connections?connected={provider}` after storing the token, or to
-  // `…/connections?connect_error={code}[&provider={id}]` when the handshake
-  // failed. Land the operator on the Connections page either way, say what
-  // happened, then strip the params so a refresh doesn't re-fire them. Runs
-  // once; StrictMode's double invoke is harmless because the first run clears
-  // the params the second reads.
+  // A legacy native OAuth callback may have left `connected` or `connect_error`
+  // in a bookmarked URL. Land the operator on Connections, say what happened,
+  // then strip the params so a refresh does not re-fire them. The #838 callback
+  // itself now terminates on its explanatory page and never writes a credential.
+  // Runs once; StrictMode's double invoke is harmless because the first run
+  // clears the params the second reads.
   //
   // Connections is a page of the Settings section now (`#/settings/connections`),
   // so the bounce-back lands there rather than on a top-level view.
   //
-  // The failure half matters as much as the success half: before issue #300 the
-  // host answered a cancelled or expired handshake with a JSON body, which the
-  // browser rendered as the page — a dead end with no way back into the
-  // console. The host now always redirects, so this is where it becomes
-  // recoverable.
+  // Before issue #300 the host answered a cancelled or expired handshake with a
+  // JSON body, which the browser rendered as the page — a dead end with no way
+  // back into the console. Preserve the readable landing for legacy URLs even
+  // though #838 no longer redirects new native OAuth callbacks here.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("connected");
@@ -481,6 +544,10 @@ export function AppShell({
     // channels that no longer exist, and start the unread floor again so the
     // incoming company's rehydrated history isn't counted as news.
     setChatChannelByThread({});
+    // Another company's channels are another namespace here too, and a status
+    // carried over would let the incoming company's channels claim to be
+    // settled before anything has asked about them.
+    setHydration(HISTORY_UNSTARTED);
     setFirstDeskChannelId(null);
     setLastViewedChannel({});
     setUnreadSince(Date.now());
@@ -536,20 +603,35 @@ export function AppShell({
     // untouched), but not for a DM: the channel id is the console-local
     // `dmChannelId`, while the thread id `getChatHistory`/`chat` read is the
     // roster agent id (see `ChatView`'s `send`) — so this takes both.
+    const markHistory = (channelId: string, status: HistoryStatus) =>
+      setHydration((h) => ({ ...h, byChannel: { ...h.byChannel, [channelId]: status } }));
+
     const hydrateChannel = (channelId: string, threadId: string) => {
+      // Marked before the request, not after: the gap between "this channel
+      // exists" and "its history is in flight" is precisely the window the
+      // timeline used to fill with the empty-channel copy.
+      markHistory(channelId, "loading");
       client
         .getChatHistory(threadId, company)
         .then((entries) => {
-          if (cancelled || entries.length === 0) return;
+          if (cancelled) return;
+          if (entries.length === 0) {
+            // An empty answer is still an answer, and the only thing that ever
+            // makes the "start of your direct message" copy true.
+            markHistory(channelId, "ready");
+            return;
+          }
           const hydrated = fromHistory(entries);
           setTranscripts((t) => {
             const known = new Set((t[channelId] ?? []).map((m) => m.id));
             const fresh = hydrated.filter((m) => !known.has(m.id));
             return fresh.length === 0 ? t : { ...t, [channelId]: [...fresh, ...(t[channelId] ?? [])] };
           });
+          markHistory(channelId, "ready");
         })
         .catch(() => {
           /* host without `/chat/history`, or offline — channel stays empty */
+          if (!cancelled) markHistory(channelId, "ready");
         });
     };
 
@@ -586,6 +668,9 @@ export function AppShell({
         setFirstDeskChannelId(chatDesks[0]?.id ?? null);
         chatDesks.forEach((d) => hydrateChannel(d.id, d.id));
         roster.forEach((m) => hydrateChannel(dmChannelId(m), m.id));
+        // Every channel this pass will hydrate now has a status, so a channel
+        // with none is one nothing is coming for.
+        setHydration((h) => ({ ...h, discovered: true }));
       })
       .catch(() => {
         // Host without `/desks`, or offline — keep the static default
@@ -596,6 +681,7 @@ export function AppShell({
         setChatChannelByThread(channelMap(fallbackDesks, []));
         setFirstDeskChannelId(fallbackDesks[0]?.id ?? null);
         fallbackDesks.forEach((d) => hydrateChannel(d.id, d.id));
+        if (!cancelled) setHydration((h) => ({ ...h, discovered: true }));
       });
 
     return () => {
@@ -1035,6 +1121,17 @@ export function AppShell({
     }
   };
 
+  // One recovery path for a signalled gap, a healthy connection, and the hosted
+  // proxy's failed-to-open case (#23). These surfaces own their data, so every
+  // one re-reads rather than attempting to reconstruct lost payloads here.
+  const resyncDurableState = useCallback(async () => {
+    setTaskEventTick((n) => n + 1);
+    setWorkspaceRefreshTick((n) => n + 1);
+    setWorkflowRunTick((n) => n + 1);
+    setWorkflowListTick((n) => n + 1);
+    await feed.refresh();
+  }, [feed.refresh]);
+
   // The active push half of the attention surface: SSE-driven toasts + chat
   // injection, plus a rising-edge "needs a sign-off" toast off the poll's
   // pending count. Degrades silently to the `useCompany` poll when the host has
@@ -1043,6 +1140,7 @@ export function AppShell({
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
+    onRunEvent: useCallback(() => setAttemptEventTick((n) => n + 1), []),
     // Issue #377. Beside the board tick above, not instead of it: a settle both
     // moves a card between columns and needs saying in the conversation the
     // card came from.
@@ -1108,6 +1206,12 @@ export function AppShell({
       }
       void feed.refresh();
     },
+    onResync: resyncDurableState,
+    onRecoveryError: useCallback(() => {
+      toast.error("Live updates couldn't be recovered", {
+        description: "We couldn't refresh the latest company state. Check your connection and try again.",
+      });
+    }, []),
   });
 
   return (
@@ -1141,7 +1245,20 @@ export function AppShell({
                     <span>{item.label}</span>
                   </SidebarMenuButton>
                   {item.view === "approvals" && pending > 0 && (
-                    <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                    <>
+                      <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                      {/* Issue #1018: the badge is the sidebar's only attention
+                          signal and `SidebarMenuBadge` hides itself on the
+                          collapsed rail, so a collapsed sidebar said nothing was
+                          waiting. The dot is the same `pending` value rendered
+                          so it survives 32px — not a second source, so it cannot
+                          disagree with the badge or fork the count contract
+                          #932 pins. Exactly one of the two is visible at a
+                          time. */}
+                      <SidebarMenuDot
+                        label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
+                      />
+                    </>
                   )}
                 </SidebarMenuItem>
               ))}
@@ -1198,6 +1315,7 @@ export function AppShell({
               onReply={() => void feed.refresh()}
               transcripts={transcripts}
               setTranscripts={setTranscripts}
+              hydration={hydration}
               onSendStart={onSendStart}
               onSendEnd={onSendEnd}
               liveStepsByThread={liveStepsByThread}
@@ -1235,11 +1353,16 @@ export function AppShell({
               client={client}
               company={company}
               // Issue #464: the board learns that work appeared. The same
-              // counter the chat's in-flight strip reads — it is bumped by
-              // every task event, now including the host's board-write
-              // announcement — so a card opened from chat lands on the board
-              // without a reload rather than on the fallback poll's schedule.
+              // counter the chat's in-flight strip reads, so a card opened from
+              // chat lands on the board without a reload.
               taskEventTick={taskEventTick}
+              attemptEventTick={attemptEventTick}
+              // Issue #883: a paused card is blocked until every approval its
+              // turn parked is decided, and the board's own read carries none
+              // of them. This is the feed the sidebar badge already polls, so
+              // the card says what it is waiting on without a second request.
+              approvals={feed.approvals}
+              now={feed.now}
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -1247,6 +1370,27 @@ export function AppShell({
                 setActiveThreadId(threadId);
                 setView("conversation");
               }}
+              // Issue #883: "Review" on a blocked card opens the queue narrowed
+              // to that card. Through `navigate` rather than `setView` so the
+              // filter lands in the hash and survives a refresh and the Back
+              // button, like every other sub-page.
+              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+            />
+          )}
+          {view === "ledgers" && (
+            <LedgersView
+              client={client}
+              company={company}
+              // `#/ledgers/<slug>` opens that ledger. Unvalidated here, like
+              // every other sub-page: only this view knows which slugs exist,
+              // and it resolves an unknown one against the host rather than
+              // guessing.
+              sub={sub}
+              onOpenLedger={(slug) => navigate("ledgers", slug ?? undefined)}
+              // A board card leaves for its own screen. The board renders
+              // here; the card's timeline, plan, discussion and attempts stay
+              // where they already work.
+              onOpenCard={(id) => navigate("tasks", id)}
             />
           )}
           {view === "team" && (
@@ -1277,6 +1421,7 @@ export function AppShell({
                 // deliverable the publish drain lands shows up without a
                 // refresh.
                 event={workspaceEvent}
+                refreshTick={workspaceRefreshTick}
                 // Issue #552: the Artifacts tab's "Open in workspace" link
                 // sets `#/workspace/<nodeId>`, and `useHashView` hands the
                 // second segment back unvalidated — only this view knows
@@ -1291,6 +1436,13 @@ export function AppShell({
               client={client}
               company={company}
               feed={feed}
+              // Issue #883: `#/approvals/<taskId>` narrows the queue to one
+              // card, so "Review" on a blocked card lands on its approvals
+              // rather than on a page the operator has to search. Same
+              // unvalidated second segment every other sub-page gets — only
+              // this view knows whether the id matches anything parked, so it
+              // does that check itself and says so when it does not.
+              sub={sub}
               onResolved={noteSystem}
               onGoToConversation={() => setView("chat")}
             />
@@ -1315,6 +1467,29 @@ export function AppShell({
                 runEventTick={workflowRunTick}
                 runEvents={workflowRunEvents}
                 listEventTick={workflowListTick}
+                // Issue #1002: a run that parked cards can be unblocked from
+                // the run drawer, without leaving the run to find the rows in a
+                // flat queue. The SAME feed the Approvals page and the sidebar
+                // badge read, handed over unfiltered — this is a second reader
+                // of one queue, so the page still lists every row and the badge
+                // still counts every row.
+                //
+                // The four maps below are the same console-local state the
+                // inline chat card is given, owned here for the same reason: an
+                // operator who decides in the drawer, steps over to Approvals
+                // and comes back must not find a card that forgot what they did.
+                // Their `decided` half is fed by the `approval_resolved` frame
+                // as well as by this console's own resolves, which is what makes
+                // a decision taken on the page settle in the drawer with no
+                // reload.
+                approvals={feed.approvals}
+                approvalsNow={feed.now}
+                decidingApprovals={decidingApprovals}
+                decidedApprovals={decidedApprovals}
+                failedApprovals={failedApprovals}
+                onDecideApproval={(approval, verdict, scope) =>
+                  void decideApproval(approval, verdict, scope)
+                }
               />
             </Suspense>
           )}

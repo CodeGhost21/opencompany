@@ -201,6 +201,8 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
     let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));
     let journal = Arc::new(RuntimeJournal::new(dir.join("journal.jsonl")));
     let deps = HarnessDeps {
+        ledgers: None,
+        ledger_registry: Default::default(),
         provider: Arc::new(HostedProvider::new(HostedProviderConfig {
             base_url,
             credential: Credential::from_value("stub-key"),
@@ -211,6 +213,7 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: None,
         workspace_root: dir.to_path_buf(),
+        workspace_git_enabled: false,
         audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
         tasks: None,
@@ -238,6 +241,11 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
         plan: None,
         media: None,
         composio: None,
+        #[cfg(feature = "chargebee")]
+        chargebee: None,
+        #[cfg(feature = "paypal")]
+        paypal: None,
+        hosting: None,
         steer: crate::company::steer::InflightRegistry::default(),
         run_supervisor: crate::runtime::RunSupervisor::default(),
         delivery: Some(WorkflowDeliveryDeps {
@@ -249,6 +257,13 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
             parking: Some(DeliveryParking {
                 approvals: gate,
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),

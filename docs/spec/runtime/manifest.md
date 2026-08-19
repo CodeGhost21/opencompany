@@ -101,6 +101,8 @@ mode = "supervised"                # readonly | supervised | auto | full
 always_approve = ["publish_artifact"]   # default []; names a tool or an open
                                    # effect kind — see approvals.md
 auto_approve_under_usd = 1.0
+approval_ttl_hours = 24            # default 24; how long a parked approval
+                                   # waits before it default-denies
 
 [place]                            # see company-as-agent/
 discoverable = false               # default false: going public is opt-in
@@ -275,7 +277,12 @@ prompt = "Weekly review and operator digest"
   outward reads run unattended, anything that leaves the company or spends on
   submit still parks). `always_approve` lists effect kinds that park for
   approval regardless of amount and wins over every tier including `full`;
-  `auto_approve_under_usd` lets small spends through. The parse default is
+  `auto_approve_under_usd` lets small spends through; `approval_ttl_hours` sets
+  how long a parked approval waits before it default-denies (24 hours by
+  default — see [approvals.md](../company-brain/approvals.md), issue #971).
+  Omitting it is not the same as writing `24`: the key stays absent from the
+  persisted seed, which is what keeps a future change to the default from
+  looking like an edit and discarding a console `[policy]` override. The parse default is
   `supervised`, with all money/publish/filing effects gated — but a **new**
   company is given `auto`, written into its manifest explicitly rather than
   left to that default. See
@@ -420,13 +427,19 @@ prompt = "Weekly review and operator digest"
     which reaches further than own-folder lifecycle does. Renaming or deleting
     anything elsewhere in the tree stays operator-only.
 
-    Agent writes are **unconfined**: an agent may create or edit anywhere in its
-    company's tree. Confining creation while leaving overwrite free would
+    Agent writes are broad: an agent may create or edit ordinary shared content
+    anywhere in its company's tree. The reserved lowercase `secrets/` subtree
+    is the exception: boot creates it with an explanatory `README.md`, and
+    agent workspace list/read/search/write/create tools omit or refuse the
+    entire subtree while operator workspace APIs retain full access. This is a
+    model-visibility boundary, not the application credential store; provider
+    and tool credentials still belong in Connections/inference settings.
+    Confining other creation while leaving overwrite free would
     protect nothing. What keeps the tree navigable instead is steering plus
     attribution — the persona brief names the agent's own reserved folder
     `Agents/<agent-id>/` (minted the first time that agent puts something in it;
-    boot only scaffolds the empty `Agents/` root, and since issue #645 `Desks/`
-    is minted on first use rather than scaffolded) as the default
+    boot scaffolds the empty `Agents/` root plus `secrets/README.md`, and since
+    issue #645 `Desks/` is minted on first use rather than scaffolded) as the default
     home for what it produces and marks shared
     guidance as something to edit only on purpose, and every node records who
     created it and who last wrote it (issue #326), which the console shows. Both

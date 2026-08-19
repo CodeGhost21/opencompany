@@ -85,7 +85,7 @@ fs2 = "0.4"
 # and `axum`, so this is a direct-use declaration, not new compilation.
 tower = { version = "0.5", features = ["util"] }
 
-tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite"] }
+tinyagents = { path = "vendor/openhuman/vendor/tinyagents", optional = true, features = ["sqlite"] }
 
 # WS4: openhuman embedded as a library (the harness). Only links under the
 # `openhuman` feature; the default build pulls none of this enormous native
@@ -103,11 +103,13 @@ tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite"
 # OpenHuman's own skill *read* tools (`list_workflows` / `describe_workflow` /
 # `read_workflow_resource`), which live in the gated `openhuman::skills`
 # domain. The feature carries no extra deps (`skills = []` upstream) — it only
-# recompiles the skills domain modules. Keep `vendor/tinyagents` on the
-# same commit openhuman's own `vendor/tinyagents` pins: the two are a
-# lockstep pair, and a skew fails to compile (only under this feature, which
-# CI does not build).
-openhuman_core = { package = "openhuman", path = "vendor/openhuman", optional = true, default-features = false, features = ["skills", "mcp"] }
+# recompiles the skills domain modules. TinyAgents is consumed from OpenHuman's
+# own pin so both crates always share one trait identity and cannot drift.
+# `hosting` adds the `hosting_*` tools and the `tinyhosts` unified hosting API
+# behind them (`openhuman::hosting`), which is what lets a company put its
+# workspace on a real hosting provider. Taken without OpenHuman's TinyBus
+# module: `tinyhosts` is linked as a library, so nothing here loads a cdylib.
+openhuman_core = { package = "openhuman", path = "vendor/openhuman", optional = true, default-features = false, features = ["skills", "mcp", "hosting"] }
 # The openhuman `Provider`/`Memory` traits return `anyhow::Result` and log via
 # the `log` facade; both only link under the `openhuman` feature.
 anyhow = { version = "1", optional = true }
@@ -140,7 +142,7 @@ url = "2"
 # replaces the crate's SOURCE, not the version requirement it has to satisfy, so
 # a stale `0.5` fails resolution outright rather than quietly building the old
 # copy. Its `tinyagents` requirement resolves to the already-vendored
-# `vendor/tinyagents`, so this adds no new lockstep.
+# `vendor/openhuman/vendor/tinyagents`, so this adds no second copy.
 # We deliberately do NOT enable openhuman's own `flows` feature: that drags in
 # rhai + the builder tools, defeating the point of running tinyflows directly.
 tinyflows = { version = "0.8", optional = true }
@@ -202,6 +204,36 @@ mongodb = { version = "3", optional = true }
 # `openhuman` build adds no new compilation. Backs the `EngineCortex`
 # persistent memory + context overlay; never makes a network call.
 tinycortex = { version = "0.1", optional = true }
+
+# TinyMemory — the engine-neutral memory *contract* (issue #914), as distinct
+# from the TinyCortex *engine* above. `MemoryProvider` with three mandatory
+# capability families and ten optional ones, negotiated once at bind time.
+#
+# These are path deps rather than `[patch.crates-io]` entries because the crates
+# are `publish = false`: there is no registry version for a patch to replace.
+# The paths are byte-identical to the ones `vendor/openhuman/Cargo.toml`
+# declares, which is load-bearing — Cargo unifies two path deps only when they
+# resolve to the same directory, and two copies of `tinymemory-api` would mean
+# two nominally distinct `MemoryProvider` traits in one process.
+#
+# NOT `tinycortex-api`: that crate pins `CONTRACT_VERSION = (1, 0)` while this
+# one is at `(2, 0)`, `is_compatible` is major-equality only, and OpenHuman's
+# own inlined contract documents `tinycortex-api` as a deprecated re-export.
+# `docs/spec/runtime/orchestration/memory.md` names this path for that reason.
+#
+# `tinymemory` carries the driver registry (`DriverRegistry::admit`) and the
+# mandatory-family composition (`MemoryTraitProvider`); `tinymemory-remote`
+# carries the HTTP adapters for hosted engines.
+#
+# `tinymemory-tinycortex` is deliberately NOT here. It is the seam onto the
+# embedded engine, and the embedded mode does not go through this contract —
+# it keeps the durable `EngineCortex` overlay (see `store::memory::driver`).
+# Depending on it would drag `tinycortex`, and with it a bundled SQLite build,
+# into a tenant that selected a hosted engine over HTTP and needs neither
+# (tinymemory#18 §D).
+tinymemory = { path = "vendor/openhuman/vendor/tinymemory", optional = true }
+tinymemory-api = { path = "vendor/openhuman/vendor/tinymemory/api", optional = true }
+tinymemory-remote = { path = "vendor/openhuman/vendor/tinymemory/adapters/remote", optional = true }
 
 # Single-file `.tar` packing/unpacking for `opencompany export`/`import`. Pure
 # Rust, no system libs, no network. Only links under the `export` feature; the
@@ -371,6 +403,30 @@ mongodb = ["dep:mongodb"]
 # (that lands in 188c2). The fs stores and the port-conformance suite compile
 # without this; the offline `InMemoryCortex` remains the test/fallback backend.
 tinycortex = ["dep:tinycortex"]
+# The TinyMemory `MemoryProvider` contract (issue #914): binds the three memory
+# ports to one engine-neutral driver instead of three independent backends, and
+# turns the memory engine into an operator choice — the embedded engine in-pod,
+# or a hosted service behind a URL and a credential.
+#
+# Distinct from `tinycortex` above, which is one *engine*. This feature is the
+# *seam*: with it on, `OPENCOMPANY_MEMORY` additionally accepts `remote` and
+# `null`, and `embedded` becomes an alias for `tinycortex`.
+#
+# Deliberately does NOT imply `tinycortex`. The two modes are independent code
+# paths: `remote`/`null` bind a provider here, `embedded` uses the `tinycortex`
+# overlay. Selecting `embedded` without that feature refuses loudly at boot
+# ("requires a build with the `tinycortex` feature"), which is the right
+# outcome — and it lets a hosted-memory tenant build without linking a bundled
+# SQLite it will never call (tinymemory#18 §D).
+tinymemory = [
+    "dep:tinymemory",
+    "dep:tinymemory-api",
+    "dep:tinymemory-remote",
+    # The contract's storage trait (`tinymemory_api::traits::Memory`) returns
+    # `anyhow::Result`, so anything implementing or calling it has to name
+    # `anyhow` directly. Already an optional dep for other features.
+    "dep:anyhow",
+]
 # Node sidecar brain for self-hosters (bring-your-own-inference). Adds
 # `SidecarBrain`, which speaks the same `/orchestration/v1` wire frames as the
 # hosted brain but against a local sidecar process, with inference routed back
@@ -405,12 +461,21 @@ telegram = ["dep:reqwest"]
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).
 oauth = ["dep:reqwest"]
+# Issue #788: Chargebee billing integrated as backend service code, surfaced to
+# agents as callable tools. NOT a separate MCP server and NOT a second binary —
+# the integration lives in the tenant workload so the credential can be
+# per-company, held in that company's own SecretStore. The only gated dependency
+# is the shared `reqwest` client the REST calls use; `src/chargebee/` compiles
+# only under this feature, so the default build is unaffected.
+chargebee = ["dep:reqwest"]
+# Issue #789: PayPal wallet + transaction reads, same shape as `chargebee`
+# above — backend service code, per-company credentials, only `reqwest` gated.
+paypal = ["dep:reqwest"]
 
 [patch.crates-io]
-# opencompany's own vendored tinyagents (2.1.0). Satisfies openhuman's `^2.1`.
-# Kept on the exact commit openhuman's own `vendor/tinyagents` pins — see the
-# lockstep note on `openhuman_core` above.
-tinyagents = { path = "vendor/tinyagents" }
+# Reuse OpenHuman's own TinyAgents pin (2.1.0). This satisfies OpenHuman's
+# `^2.1` requirement while keeping a single checkout and crate identity.
+tinyagents = { path = "vendor/openhuman/vendor/tinyagents" }
 # WS4: openhuman's own Cargo.toml `[patch.crates-io]` is ignored when it is a
 # path dependency, so its vendored-submodule patches must be replicated here
 # (paths rebased onto `vendor/openhuman/vendor/...`). These entries are inert in

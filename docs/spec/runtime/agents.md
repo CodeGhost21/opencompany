@@ -77,9 +77,61 @@ prompt = """                            # appended to the generated persona
 Write for the reader, not the client.
 """
 prompt_files = ["prompts/house-style.md"]   # checked-in, bundle-relative
-context = ["Brand/Brand voice.md"]          # live workspace documents
+context = [                                 # live workspace documents
+    "Brand/Brand voice.md",                 #   read only (the bare-string shorthand)
+    { path = "Agents/copywriter/drafts", access = "write" },  # + workspace_write/workspace_create
+]
 classes = ["evidence"]                      # routing exclusions — see below
+
+ledgers = [                                 # per-agent ledger access (omit for unrestricted)
+    { name = "tasks", access = "record" },
+    { name = "decisions", access = "read" },
+]
+can_declare_ledgers = false                 # may this agent `define_ledger`? default true
 ```
+
+### `context` write access
+
+A bare string in `context` is read-only — routed into the prompt, nothing
+more. `{ path, access = "write" }` additionally puts that exact path in this
+agent's `workspace_write`/`workspace_create` scope.
+
+**Omitting every write entry is unconfined**, matching every manifest written
+before this existed: `workspace_write`/`workspace_create` reach anywhere in the
+company's tree, as they always could. Declaring **at least one** write entry
+confines this agent's `workspace_write`/`workspace_create` to exactly the paths
+it declared, plus its own `Agents/<id>/` home, which stays writable regardless
+— a role narrowed to a real access list must not also lose the ability to
+produce and revise its own work. See `src/harness/workspace_tools.rs` for the
+enforcement and why the pre-existing unconfined default is otherwise
+unchanged.
+
+### `ledgers`
+
+Which of the company's ledgers this agent's five ledger tools
+(`list_ledgers`, `read_ledger`, `record_entry`, `close_entry`,
+`define_ledger`) can see and use, and at what access.
+
+An omitted `ledgers` key is **unrestricted** — every ledger, at `record`
+access — the tool surface every agent had before this field existed. A
+declared list restricts `list_ledgers`/`read_ledger` to exactly the slugs
+named (an undeclared slug is invisible, not merely unwritable), and
+`record_entry`/`close_entry` additionally require `access = "record"` on that
+entry. A bare `{ name = "tasks" }` with no `access` key defaults to `read` —
+the safer of the two.
+
+This is the **visibility and read/record** half of ledger access; a ledger's
+own `writers` list (`docs/spec/runtime/ledgers.md`) stays the authoritative
+check for whether a write actually lands. Declaring `access = "record"` for a
+built-in ledger whose `writers` excludes this agent is a manifest validation
+error — the two must not silently disagree. A company-declared ledger is not
+cross-checked at manifest-load time, since it may not exist yet; any
+disagreement there is an ordinary tool refusal at call time.
+
+`can_declare_ledgers` (default `true`) governs `define_ledger` alone — a
+company discovers which axes it needs while running, so declaring one is
+unrestricted by default; set it `false` to keep a narrow role from growing the
+registry.
 
 ## The prompt
 
@@ -143,6 +195,31 @@ whole document, while clamping the tail costs only the tail.
 An empty or whitespace-only document is dropped rather than rendered as a bare
 heading. An empty section reads to the model as a source that exists and says
 nothing, which is worse than its absence.
+
+## The step budget, and what a paused turn looks like
+
+A single turn may make at most a fixed number of tool iterations — the
+`max_tool_iterations` an agent is built with, which today is the vendored
+runtime's default of 10. Reaching it is **a pause, not a failure**: the runtime
+stops the tool loop, asks the model once more (with tools withheld) for a
+resumable "Done so far / Next steps" checkpoint, and returns that as an ordinary
+successful reply. There is no error to catch and no error to match on, which is
+precisely why a capped turn used to be invisible — the operator read a tidy plan
+with no deliverable behind it and no way to tell the agent had been cut off
+mid-task. So the harness now reads the runtime's cap flag while the turn's agent
+lock is still held and carries it out on the turn's outcome, OR'd across every
+turn behind one operator bubble (the responder, any desk lead it handed work to,
+and the relay turn that folds their answers back together). When any of them
+paused, the operator gets a **second, unauthored bubble** after the reply saying
+the turn stopped at its step limit, that nothing errored, and that replying
+"continue" asks the agent to pick up from there. It is a separate bubble rather
+than an addition to the reply because the reply — and only the reply — is
+written back to the context store as memory; appending would file the platform's
+notice as something the agent said and recall it into later turns. The cap
+itself is unchanged by this: the turn stops in the same place, it just says so.
+See `src/harness/mod.rs` (`TurnOutcome::hit_iteration_cap`),
+`src/runtime/delegation.rs` for the fold, and `src/harness/brain.rs` for the
+notice.
 
 ## `classes`
 

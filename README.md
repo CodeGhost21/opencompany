@@ -280,7 +280,8 @@ frontend/               Company-agnostic operator console (Vite + React)
 docs/spec/              Architecture reference
 docs/modules/           Per-package design docs
 vendor/openhuman/       OpenHuman git submodule
-vendor/tinyagents/      TinyAgents git submodule
+vendor/openhuman/vendor/tinyagents/
+                        TinyAgents inherited from OpenHuman
 ```
 
 Package surfaces: **`app`** (config + shared state), **`company`** (manifest
@@ -300,6 +301,9 @@ what one person can run, how [Medulla](gitbooks/overview/medulla.md) drives it,
 and the [tiny.place economy](gitbooks/overview/tiny-place.md). Builders should
 start with the [developer section](gitbooks/developers/README.md) — build,
 CLI, architecture, authoring companies, deployment, and configuration.
+
+Checking a release against a deployed tenant is [`qa/`](qa/README.md): a
+zero-dependency console script and the checklist that goes with it.
 
 ## Community
 

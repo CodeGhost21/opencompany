@@ -159,6 +159,45 @@ pub fn grants_composio_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "composio" || grant.starts_with("composio."))
 }
 
+/// Whether a tool-grant list **explicitly** grants the `chargebee` billing
+/// namespace (issue #788).
+///
+/// Like [`grants_composio_explicit`], the catch-all `*` does **not** grant it:
+/// these tools send invoices to real customers of a real business, so they are
+/// opted into by name rather than ridden in on a wildcard a company set for its
+/// file and shell tools. Lives here (always compiled) so the feature-gated
+/// harness wiring and the always-compiled console capability route key off one
+/// source of truth.
+pub fn grants_chargebee_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "chargebee" || grant.starts_with("chargebee."))
+}
+
+/// Whether a tool-grant list **explicitly** grants the `hosting` namespace.
+///
+/// Like its siblings, the catch-all `*` does **not** confer it. These tools
+/// publish a company's files to the public internet under its own name and can
+/// provision a managed database it is billed for, so they are opted into by
+/// name rather than ridden in on a wildcard a company set for its file and
+/// shell tools.
+pub fn grants_hosting_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "hosting" || grant.starts_with("hosting."))
+}
+
+/// Whether a tool-grant list **explicitly** grants the `paypal` namespace
+/// (issue #789).
+///
+/// Like its siblings, the catch-all `*` does **not** grant it. These tools read
+/// a real business's wallet, so they are opted into by name.
+pub fn grants_paypal_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "paypal" || grant.starts_with("paypal."))
+}
+
 /// Whether a tool-grant list **explicitly** grants the metered `search`
 /// namespace (issue #238).
 ///
@@ -356,6 +395,33 @@ pub struct CompanyManifest {
     /// Cron-driven prompts. Renamed from the `[[schedule]]` array-of-tables.
     #[serde(default, rename = "schedule")]
     pub schedules: Vec<Schedule>,
+    /// How this company relates to the global baseline ([`crate::globals`]).
+    #[serde(default)]
+    pub globals: Globals,
+}
+
+/// `[globals]` — this company's relationship to the global baseline.
+///
+/// The roster, workflows and skills are a floor every company gets whichever
+/// vertical it started from, so the only thing left to configure for those is
+/// what this company does *not* want. Replacing a global needs no entry here:
+/// a company definition of the same id supersedes the global one on its own.
+///
+/// The tool belt (`[tools].default_allow`) is the one part of the baseline
+/// that is a *default*, not a floor: it is what a company with no `[tools]`
+/// section of its own starts with, never a minimum re-granted underneath one
+/// — see [`crate::globals`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Globals {
+    /// Globals this company drops outright, as `<kind>:<id>` keys — e.g.
+    /// `agent:researcher`, `workflow:weekly_review`, `skill:meeting-brief`.
+    ///
+    /// Validated against what the baseline actually carries: an entry naming
+    /// nothing is a manifest error, because the alternative is an opt-out the
+    /// operator wrote, believed, and silently never got. The kinds are
+    /// [`crate::globals::DISABLE_KINDS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disable: Vec<String>,
 }
 
 /// `[company]` — the seed of the Charter.
@@ -447,8 +513,13 @@ pub struct Agent {
     /// `harness::context_routing` before the (synchronous) agent build, and a
     /// change to one moves the roster fingerprint so it reaches the next turn
     /// rather than the next restart.
+    ///
+    /// An entry is either a bare path (routes the document into the prompt,
+    /// read-only — the pre-existing shorthand) or `{ path, access = "write" }`,
+    /// which additionally grants this agent `workspace_write`/`workspace_create`
+    /// on that path. See [`ContextEntry`] and [`Agent::write_scope`].
     #[serde(default)]
-    pub context: Option<Vec<String>>,
+    pub context: Option<Vec<ContextEntry>>,
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,
@@ -506,6 +577,179 @@ pub struct Agent {
     /// here rather than having it guessed from the free-text `role`.
     #[serde(default)]
     pub classes: Vec<String>,
+    /// Declared ledgers this agent may reach through the ledger tools, with
+    /// per-ledger read/record access.
+    ///
+    /// `None` (the default, omitted key) means **unrestricted** — every ledger
+    /// the company has, at `record` access — which is the tool surface every
+    /// agent had before this field existed, so adding it is a no-op for an
+    /// existing company. `Some(vec![])` restricts the agent to no ledgers at
+    /// all, distinct from taking the default; `Option<Vec<LedgerGrant>>` rather
+    /// than a defaulted `Vec` is what makes that distinction representable, the
+    /// same reasoning as [`context`](Self::context).
+    ///
+    /// This is the **visibility and read/record** half of ledger access.
+    /// [`LedgerSpec::writers`](crate::ledger::LedgerSpec::writers) stays the
+    /// authoritative check for whether a `record`/`close` call actually lands —
+    /// declaring `access = "record"` here for a built-in ledger whose writers
+    /// exclude this agent is a manifest validation error (the two must not
+    /// silently disagree); for a company-declared ledger, which may not exist
+    /// yet when the manifest is validated, the same conflict surfaces as an
+    /// ordinary tool refusal at call time.
+    #[serde(default)]
+    pub ledgers: Option<Vec<LedgerGrant>>,
+    /// Whether this agent may declare a new ledger with `define_ledger`.
+    ///
+    /// Defaults to `true` — declaring an axis a company discovers it needs
+    /// while running is deliberately unrestricted by default (see
+    /// `docs/spec/runtime/ledgers.md`), and every manifest written before this
+    /// field existed relied on that. Set `false` to keep a narrow role from
+    /// growing the company's ledger registry.
+    #[serde(default = "default_true")]
+    pub can_declare_ledgers: bool,
+    /// Whether this teammate came from the global baseline ([`crate::globals`])
+    /// rather than the company's own roster.
+    ///
+    /// Provenance, not configuration: no author writes it, and the merge sets it
+    /// on every teammate it appends. It exists because a manifest is serialized
+    /// back into the store with the merged roster in it, so without a marker a
+    /// global teammate becomes indistinguishable from one the company wrote —
+    /// and the baseline could then never be updated, retired, or opted out of
+    /// for that company again. With it,
+    /// [`apply_globals`](CompanyManifest::apply_globals) is idempotent: it drops
+    /// every previously-merged global and re-appends the current baseline, so a
+    /// company picks up baseline changes and honours `[globals].disable` on the
+    /// very next read.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub global: bool,
+}
+
+/// `#[serde(skip_serializing_if)]` predicate: keeps `global = false` — which is
+/// every hand-authored teammate — out of the serialized manifest.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// One [`Agent::context`] entry.
+///
+/// A bare TOML string (`"Brand/Voice.md"`) deserializes as [`Self::Path`], read
+/// access, matching every manifest written before write access existed. The
+/// table form (`{ path = "...", access = "write" }`) is [`Self::Detailed`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ContextEntry {
+    /// Read access, the pre-existing shorthand.
+    Path(String),
+    /// Explicit access, most commonly `write`.
+    Detailed {
+        path: String,
+        #[serde(default)]
+        access: ContextAccess,
+    },
+}
+
+impl ContextEntry {
+    /// The workspace-relative path, whichever form declared it.
+    pub fn path(&self) -> &str {
+        match self {
+            ContextEntry::Path(path) => path,
+            ContextEntry::Detailed { path, .. } => path,
+        }
+    }
+
+    /// This entry's access — `Read` unless a `Detailed` form says otherwise.
+    pub fn access(&self) -> ContextAccess {
+        match self {
+            ContextEntry::Path(_) => ContextAccess::Read,
+            ContextEntry::Detailed { access, .. } => *access,
+        }
+    }
+}
+
+impl From<&str> for ContextEntry {
+    fn from(path: &str) -> Self {
+        ContextEntry::Path(path.to_string())
+    }
+}
+
+impl From<String> for ContextEntry {
+    fn from(path: String) -> Self {
+        ContextEntry::Path(path)
+    }
+}
+
+/// Whether a routed [`ContextEntry`] is read-only or additionally writable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextAccess {
+    /// Routed into the prompt; no write grant on this path.
+    #[default]
+    Read,
+    /// Routed into the prompt, and this exact path is in the agent's
+    /// `workspace_write`/`workspace_create` scope.
+    Write,
+}
+
+/// One [`Agent::ledgers`] entry: a ledger slug and this agent's access to it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LedgerGrant {
+    /// The ledger's slug, as declared or built in — not validated against the
+    /// registry at manifest-load time, since a company-declared ledger may not
+    /// exist yet (the same reasoning as `Agent::context`'s missing-document
+    /// rule).
+    pub name: String,
+    /// This agent's access to it.
+    #[serde(default)]
+    pub access: LedgerAccess,
+}
+
+/// Read or record access to one ledger.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerAccess {
+    /// `list_ledgers` and `read_ledger` only.
+    #[default]
+    Read,
+    /// Read, plus `record_entry` and `close_entry` — still subject to
+    /// [`LedgerSpec::writers`](crate::ledger::LedgerSpec::writers).
+    Record,
+}
+
+impl Agent {
+    /// This agent's `workspace_write`/`workspace_create` scope.
+    ///
+    /// `None` means **unconfined** — every path in the company's tree, which is
+    /// the behaviour every agent had before per-path write access existed (see
+    /// `src/harness/workspace_tools.rs`), so a manifest that declares no
+    /// `access = "write"` entry is unaffected by this field's existence.
+    /// `Some(paths)` — returned as soon as `context` names at least one write
+    /// entry — confines `workspace_write`/`workspace_create` to exactly those
+    /// paths, plus this agent's own `Agents/<id>/` home, which the workspace
+    /// tools always allow regardless of this scope.
+    pub fn write_scope(&self) -> Option<Vec<String>> {
+        let entries = self.context.as_ref()?;
+        let paths: Vec<String> = entries
+            .iter()
+            .filter(|entry| entry.access() == ContextAccess::Write)
+            .map(|entry| entry.path().to_string())
+            .collect();
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    /// This agent's declared access to ledger `slug`, or `None` if it may not
+    /// reach it at all.
+    ///
+    /// An omitted `ledgers` key answers `Some(Record)` for every slug —
+    /// unrestricted, matching the tool surface before this field existed.
+    pub fn ledger_access(&self, slug: &str) -> Option<LedgerAccess> {
+        match &self.ledgers {
+            None => Some(LedgerAccess::Record),
+            Some(grants) => grants
+                .iter()
+                .find(|grant| grant.name.eq_ignore_ascii_case(slug.trim()))
+                .map(|grant| grant.access),
+        }
+    }
 }
 
 /// The `[[agent]].tier` value that marks a roster's orchestrator.
@@ -939,7 +1183,7 @@ impl Default for Tools {
             // `media`/`composio`: the #188 sign-off admitted it **opt-in**, so a
             // company that never asked for web search never spends on it.
             // Making it default-on is a one-word change here.
-            allow: vec!["*".into(), "media".into(), "composio".into()],
+            allow: crate::globals::default_tool_allow(),
             web_allowed_domains: Vec::new(),
             composio: ComposioTools::default(),
             search_daily_calls: None,
@@ -1000,6 +1244,30 @@ pub struct Policy {
     /// Spends strictly under this many USD skip approval.
     #[serde(default)]
     pub auto_approve_under_usd: Option<f64>,
+    /// How many hours a parked approval waits before it default-denies
+    /// (issue #971). `None` takes the gate's
+    /// [`DEFAULT_TTL_MILLIS`](crate::policy::DEFAULT_TTL_MILLIS), 24 hours.
+    ///
+    /// **Deliberately a bare `Option` with no serde default, and the absence is
+    /// load-bearing.** The obvious alternative — `#[serde(default = "…")]`
+    /// resolving to `Some(24)` at parse — walks straight into the trap
+    /// documented on [`mode`](Self::mode) above. The persisted record stores
+    /// the *defaulted* value, and `carry_policy_override` in
+    /// [`crate::runtime::builder`] is `previous_seed == next_seed` over this
+    /// whole block; so the day this default moves, every company with a silent
+    /// manifest gets a seed that changed under it, and the rebuild discards the
+    /// operator's console `[policy]` override as though version control had
+    /// spoken. Nobody edited anything, and the feature that breaks is not this
+    /// one.
+    ///
+    /// So `None` means "not configured" all the way through parse and persist,
+    /// and the default is resolved exactly once, at
+    /// [`ManifestApprovalGate::new`](crate::policy::ManifestApprovalGate::new).
+    ///
+    /// Skipped when absent so a manifest that never mentioned the knob
+    /// serializes byte-identically to before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_ttl_hours: Option<u64>,
 }
 
 impl Default for Policy {
@@ -1008,6 +1276,7 @@ impl Default for Policy {
             mode: default_policy_mode(),
             always_approve: default_always_approve(),
             auto_approve_under_usd: None,
+            approval_ttl_hours: None,
         }
     }
 }
@@ -1136,6 +1405,64 @@ pub struct Schedule {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// **T10 (issue #971).** A manifest that never mentions
+    /// `approval_ttl_hours` parses to `None` and serializes without the key —
+    /// byte-identical to a build that predates the field.
+    ///
+    /// This is not a serde-formatting nicety, it is the guard on
+    /// `carry_policy_override`. That rule is `previous_seed == next_seed` over
+    /// the whole `[policy]` block, so any value this field acquires at parse
+    /// becomes part of the identity of a block nobody wrote — and the day the
+    /// default moves, every silent manifest's seed changes under it and the
+    /// operator's console `[policy]` override is discarded as though version
+    /// control had spoken. The absence has to survive parse, persist and
+    /// reload for that not to happen. See the field's own note.
+    #[test]
+    fn a_manifest_without_an_approval_ttl_round_trips_unchanged() {
+        let silent: Policy = toml::from_str(
+            r#"
+            mode = "supervised"
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(silent.approval_ttl_hours, None);
+
+        // Byte-identical: the key is absent from the wire, not `null`.
+        let json = serde_json::to_string(&silent).expect("serialize");
+        assert!(
+            !json.contains("approval_ttl_hours"),
+            "a silent manifest must not gain the key on the wire: {json}"
+        );
+
+        // And the reload is `==` to the parse, which is the comparison
+        // `carry_policy_override` actually runs.
+        let back: Policy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, silent);
+        assert_eq!(
+            serde_json::to_string(&back).expect("serialize"),
+            json,
+            "a persist/reload cycle must be a fixed point"
+        );
+
+        // A manifest that DOES configure it keeps the value across the same
+        // cycle — the absence is meaningful, so presence must be too.
+        let configured: Policy = toml::from_str(
+            r#"
+            mode = "supervised"
+            approval_ttl_hours = 72
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(configured.approval_ttl_hours, Some(72));
+        let json = serde_json::to_string(&configured).expect("serialize");
+        let back: Policy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, configured);
+
+        // The two are NOT equal, which is what makes the seed comparison able
+        // to tell "operator configured a deadline" from "nobody said anything".
+        assert_ne!(silent, configured);
+    }
 
     /// Real-money `media` (issue #109) is granted ONLY by an explicit `media` /
     /// `media.*` grant — never by the catch-all `*`. This wildcard exclusion is
@@ -1333,7 +1660,10 @@ mod test {
         .expect("parse toml");
         assert_eq!(
             populated.context,
-            Some(vec!["GOAL.md".to_string(), "CLAIMS.md".to_string()])
+            Some(vec![
+                ContextEntry::from("GOAL.md"),
+                ContextEntry::from("CLAIMS.md")
+            ])
         );
 
         // The distinction survives a JSON round-trip too, since the routing
@@ -1341,6 +1671,90 @@ mod test {
         let json = serde_json::to_string(&omitted).expect("serialize");
         let back: Agent = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.context, None);
+    }
+
+    /// A bare `context` string is `Read`; `{ path, access = "write" }` is the
+    /// only way to grant `Write`. `write_scope` collects exactly the write
+    /// entries, and `None` — either an omitted `context` key or a `context`
+    /// with no write entry — is unconfined, not "confined to nothing".
+    #[test]
+    fn write_scope_is_none_unless_a_context_entry_declares_write() {
+        let omitted: Agent = toml::from_str("id = \"critic\"\nrole = \"Critic\"\n").unwrap();
+        assert_eq!(
+            omitted.write_scope(),
+            None,
+            "an omitted context key is unconfined"
+        );
+
+        let read_only: Agent =
+            toml::from_str("id = \"critic\"\nrole = \"Critic\"\ncontext = [\"Brand/Voice.md\"]\n")
+                .unwrap();
+        assert_eq!(
+            read_only.write_scope(),
+            None,
+            "a read-only context list is unconfined, not confined to nothing"
+        );
+
+        let write_entry: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            context = ["Brand/Voice.md", { path = "Agents/critic/notes.md", access = "write" }]
+            "#,
+        )
+        .expect("parse toml");
+        assert_eq!(
+            write_entry.write_scope(),
+            Some(vec!["Agents/critic/notes.md".to_string()]),
+            "only the declared write entry is in scope, not the read one"
+        );
+    }
+
+    /// An omitted `ledgers` key is unrestricted `Record` access to every slug
+    /// — the tool surface every agent had before this field existed. A
+    /// declared list answers only for the slugs it names.
+    #[test]
+    fn ledger_access_defaults_to_unrestricted_record() {
+        let unrestricted: Agent = toml::from_str("id = \"critic\"\nrole = \"Critic\"\n").unwrap();
+        assert_eq!(
+            unrestricted.ledger_access("tasks"),
+            Some(LedgerAccess::Record)
+        );
+        assert_eq!(
+            unrestricted.ledger_access("anything"),
+            Some(LedgerAccess::Record)
+        );
+
+        let scoped: Agent = toml::from_str(
+            r#"
+            id = "critic"
+            role = "Critic"
+            ledgers = [
+                { name = "tasks", access = "record" },
+                { name = "decisions", access = "read" },
+            ]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(scoped.ledger_access("tasks"), Some(LedgerAccess::Record));
+        assert_eq!(scoped.ledger_access("DECISIONS"), Some(LedgerAccess::Read));
+        assert_eq!(
+            scoped.ledger_access("goals"),
+            None,
+            "an undeclared slug is unreachable"
+        );
+    }
+
+    /// A bare `{ name = "tasks" }` grant, with no `access` key, defaults to
+    /// `Read` — the safer of the two, so declaring a `ledgers` list without
+    /// stating an access level does not silently hand out write access.
+    #[test]
+    fn a_ledger_grant_with_no_access_key_defaults_to_read() {
+        let agent: Agent = toml::from_str(
+            "id = \"critic\"\nrole = \"Critic\"\nledgers = [{ name = \"tasks\" }]\n",
+        )
+        .unwrap();
+        assert_eq!(agent.ledger_access("tasks"), Some(LedgerAccess::Read));
     }
 
     /// The `[plan]` section (issue #108) survives a TOML → struct → JSON → struct

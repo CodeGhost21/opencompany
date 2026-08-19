@@ -199,7 +199,14 @@ pub fn fold(turn: AcpTurn) -> TurnOutcome {
         }
     }
 
-    TurnOutcome { reply, steps }
+    TurnOutcome {
+        reply,
+        steps,
+        // Issue #926: an ACP turn runs behind an external agent process, whose
+        // protocol carries no iteration-cap signal — there is nothing to read,
+        // and inventing `true` here would label every ACP reply a pause.
+        hit_iteration_cap: false,
+    }
 }
 
 #[async_trait]

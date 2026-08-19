@@ -100,7 +100,7 @@ use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
 use crate::company::{
-    RawWorkflow, WorkflowSpecProjection, delete_company_workflow, load_workflow_union,
+    RawWorkflow, WorkflowSpecProjection, delete_company_workflow, load_workflow_with_globals,
     project_workflow_spec, raw_workflow_from_toml, seed_file_exists, update_company_workflow,
     workflow_version,
 };
@@ -169,8 +169,22 @@ impl WorkflowAdmin {
     /// This company's runtime-authored graph bodies, or the agent-facing error
     /// to return when the record cannot be read.
     async fn overlays(&self) -> Result<Vec<OverlayWorkflow>, ToolResult> {
+        Ok(self.overlays_and_globals().await?.0)
+    }
+
+    /// [`overlays`](Self::overlays), with the company's `[globals].disable`
+    /// beside them.
+    ///
+    /// Read from the same record load, because the two are read together: a
+    /// union that saw the overlays but not the opt-out would answer with a
+    /// global graph this company disabled.
+    async fn overlays_and_globals(
+        &self,
+    ) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ToolResult> {
         match self.store.load(&self.company).await {
-            Ok(record) => Ok(record.map(|r| r.overlay_workflows).unwrap_or_default()),
+            Ok(record) => Ok(record
+                .map(|r| (r.overlay_workflows, r.manifest.globals.disable))
+                .unwrap_or_default()),
             Err(err) => Err(ToolResult::error(format!(
                 "Couldn't read this company's saved workflows: {err}"
             ))),
@@ -277,6 +291,10 @@ fn detail_of(err: &OpenCompanyError) -> String {
         OpenCompanyError::InvalidRequest(message) | OpenCompanyError::Conflict(message) => {
             message.clone()
         }
+        // A structured workflow rejection (issue #1016) also carries prosumer
+        // text — its `Display` joins every problem's message — so the agent reads
+        // the same actionable sentence the flat #682 path gave it.
+        OpenCompanyError::WorkflowInvalid { .. } => err.to_string(),
         OpenCompanyError::CompanyNotFound(what) => {
             format!("no {what} exists — check the workflows list for valid ids.")
         }
@@ -368,8 +386,12 @@ impl Tool for ReadWorkflowTool {
             ));
         };
 
-        let overlays = match self.admin.overlays().await {
-            Ok(overlays) => overlays,
+        // Loaded once, together: the fallback below needs `disable` beside
+        // `overlays`, and a second, later load of the same record could see a
+        // globals opt-out this first load missed (or the reverse), letting a
+        // company-disabled global slip through — see `overlays_and_globals`.
+        let (overlays, disable) = match self.admin.overlays_and_globals().await {
+            Ok(pair) => pair,
             Err(result) => return Ok(result),
         };
         let stored = overlay_body(&overlays, &wid);
@@ -407,7 +429,7 @@ impl Tool for ReadWorkflowTool {
         // No overlay body: either a seed graph (readable through the union) or
         // an id this company does not answer for at all.
         let Some(raw) = raw else {
-            return Ok(self.read_seed_or_unknown(&overlays, &wid).await);
+            return Ok(self.read_seed_or_unknown(&overlays, &disable, &wid).await);
         };
 
         let projection = project_workflow_spec(&raw);
@@ -420,8 +442,18 @@ impl ReadWorkflowTool {
     /// Answer for an id with no overlay body: read it through the seed ∪
     /// overlay union so a source-defined graph is still *readable* (it is only
     /// unwritable), and give the unknown case `run_workflow`'s own steer.
-    async fn read_seed_or_unknown(&self, overlays: &[OverlayWorkflow], wid: &str) -> ToolResult {
-        let file = match load_workflow_union(self.admin.source_dir.as_deref(), overlays, wid) {
+    async fn read_seed_or_unknown(
+        &self,
+        overlays: &[OverlayWorkflow],
+        disable: &[String],
+        wid: &str,
+    ) -> ToolResult {
+        let file = match load_workflow_with_globals(
+            self.admin.source_dir.as_deref(),
+            overlays,
+            disable,
+            wid,
+        ) {
             Ok(file) => file,
             Err(err) => {
                 return ToolResult::error(format!("Couldn't load workflow `{wid}`: {err}"));
