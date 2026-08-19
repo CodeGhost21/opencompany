@@ -661,13 +661,29 @@ mod test {
     /// Writes a company into `root` the way completing setup does, and returns
     /// its id. Uses a seeding host so the bundle is a real one.
     async fn seed_a_company_into(root: &Path) -> Vec<String> {
-        for _ in 0..50 {
-            if let Ok(host) = embedded::start(root.to_path_buf()).await {
-                return host.companies().to_vec();
+        take_root(root).await.companies().to_vec()
+    }
+
+    /// Starts a seeding host over `root`, retrying while a released `flock`
+    /// clears.
+    ///
+    /// Every take in this module needs this, not just the ones that look like
+    /// a relaunch. `flock` belongs to the open file description, so a
+    /// subprocess spawned anywhere in this test binary between `fork` and
+    /// `exec` holds a copy of the lock — and the suite spawns `git` constantly.
+    /// A bare `expect` on a root released microseconds earlier therefore fails
+    /// a few runs in five, and the failure reads as "the roster is broken"
+    /// rather than "the kernel had not caught up".
+    async fn take_root(root: &Path) -> EmbeddedHost {
+        let mut last = None;
+        for _ in 0..200 {
+            match embedded::start(root.to_path_buf()).await {
+                Ok(host) => return host,
+                Err(error) => last = Some(error),
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        panic!("a released root must become takeable");
+        panic!("a released root must become takeable: {last:?}");
     }
 
     #[tokio::test]
@@ -722,10 +738,9 @@ mod test {
         drop(hosts);
 
         // Something else takes one of the two roots — a second window, or an
-        // `opencompany serve` in a terminal.
-        let squatter = embedded::start(dir.path().join("instances/acme"))
-            .await
-            .expect("the released root is takeable");
+        // `opencompany serve` in a terminal. Retried, because a root released a
+        // moment ago is not takeable a moment later: see `take_root`.
+        let squatter = take_root(&dir.path().join("instances/acme")).await;
 
         let relaunched = relaunch_until(dir.path(), default_is_running).await;
         let listed = relaunched.list();
@@ -776,13 +791,13 @@ mod test {
         root: &Path,
         settled: impl Fn(&[LocalInstanceInfo]) -> bool,
     ) -> LocalHosts {
-        for _ in 0..50 {
+        for _ in 0..200 {
             let hosts = LocalHosts::load(root.to_path_buf()).await;
             if settled(&hosts.list()) {
                 return hosts;
             }
             drop(hosts);
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         panic!("released roots must become takeable");
     }
@@ -806,12 +821,12 @@ mod test {
     /// Starts `id`, retrying for the same reason `relaunch` does.
     async fn start_when_free(hosts: &mut LocalHosts, id: &str) -> LocalInstanceInfo {
         let mut last = None;
-        for _ in 0..50 {
+        for _ in 0..200 {
             match hosts.start(id).await {
                 Ok(info) => return info,
                 Err(error) => last = Some(error),
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         panic!("a released root must become takeable: {last:?}");
     }
