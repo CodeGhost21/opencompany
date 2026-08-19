@@ -9,6 +9,7 @@
 //! `build` performs boot replay: it loads the runtime journal and rehydrates
 //! any parked approvals into the gate so an approval survives a restart.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
