@@ -94,6 +94,31 @@ pub async fn run_workflow(
     input: Value,
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
+    // A single pool is the single-harness case: the router is just the default
+    // lane over that pool. Kept as its own entrypoint so the many single-pool
+    // tests (and any single-harness caller) need not hand-assemble a router.
+    let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+        crate::harness::built_in::run_turn::HarnessRunTurn::new(
+            pool,
+            Arc::new(deps.clone()),
+        ),
+    );
+    run_workflow_lane_aware(turn, deps, record, workflow, input, ctx).await
+}
+
+/// [`run_workflow`] over an already-assembled, lane-aware router.
+///
+/// The production [`HarnessWorkflowRunner`] takes this path so a workflow
+/// `agent` node addressing a named-harness agent routes to that harness's
+/// engine instead of the default pool.
+pub async fn run_workflow_lane_aware(
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+    deps: HarnessDeps,
+    record: &CompanyRecord,
+    workflow: &WorkflowFile,
+    input: Value,
+    ctx: &WorkflowRunContext,
+) -> Result<WorkflowRun> {
     // Issue #151 part a: refuse an unbounded re-entry before it takes the host
     // down. `run_workflow` is an orchestrator tool, and a workflow `agent` node
     // may address the orchestrator — so a graph whose agent node runs a
@@ -122,7 +147,7 @@ pub async fn run_workflow(
     WORKFLOW_DEPTH
         .scope(
             depth + 1,
-            run_workflow_inner(pool, deps, record, workflow, input, ctx),
+            run_workflow_inner(turn, deps, record, workflow, input, ctx),
         )
         .await
 }
