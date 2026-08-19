@@ -291,6 +291,10 @@ fn detail_of(err: &OpenCompanyError) -> String {
         OpenCompanyError::InvalidRequest(message) | OpenCompanyError::Conflict(message) => {
             message.clone()
         }
+        // A structured workflow rejection (issue #1016) also carries prosumer
+        // text — its `Display` joins every problem's message — so the agent reads
+        // the same actionable sentence the flat #682 path gave it.
+        OpenCompanyError::WorkflowInvalid { .. } => err.to_string(),
         OpenCompanyError::CompanyNotFound(what) => {
             format!("no {what} exists — check the workflows list for valid ids.")
         }
