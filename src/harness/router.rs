@@ -138,6 +138,11 @@ impl HarnessRouter {
     /// The engine for `agent_id`, or the error explaining why there is none.
     fn engine_for(&self, agent_id: &str) -> Result<&Arc<dyn RunTurn>> {
         let harness = self.harness_for(agent_id);
+        if let Some(reason) = self.failures.lock().expect("router failures").get(harness) {
+            return Err(OpenCompanyError::Config(format!(
+                "agent `{agent_id}` is bound to harness `{harness}`, whose last warm-up failed: {reason}."
+            )));
+        }
         if let Some(engine) = self.engines.get(harness) {
             return Ok(engine);
         }
