@@ -2471,6 +2471,15 @@ struct WorkflowRunNode {
     node_id: String,
     status: WorkflowNodeStatus,
     elapsed_ms: u64,
+    /// The node's null-resolved config paths (issue #1014) — the engine's own
+    /// broken-wiring list, projected verbatim from the port row. Paths only, no
+    /// payload: a null resolution has no value, so the console renders *where*
+    /// the wiring came up empty and never *what* a node produced.
+    ///
+    /// `skip_serializing_if` keeps a clean node's row byte-identical to the
+    /// pre-#1014 shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<String>,
 }
 
 impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
@@ -2484,6 +2493,9 @@ impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
             node_id: row.node_id,
             status: row.status,
             elapsed_ms: row.elapsed_ms,
+            // Issue #1014: carry the null-resolved config paths through to the
+            // wire shape, like the three structural scalars above.
+            diagnostics: row.diagnostics,
         }
     }
 }
@@ -2630,6 +2642,7 @@ async fn list_runs(
                 node_id,
                 status,
                 elapsed_ms,
+                diagnostics,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -2642,6 +2655,10 @@ async fn list_runs(
                         node_id,
                         status,
                         elapsed_ms,
+                        // Issue #1014: the broken-wiring paths, folded straight
+                        // out of the journal so a re-read run shows the same
+                        // diagnostics the live run response carried.
+                        diagnostics,
                     });
                 }
             }
@@ -3607,6 +3624,7 @@ mod tests {
                 node_id: "spec".into(),
                 status: WorkflowNodeStatus::Blocked,
                 elapsed_ms: 42,
+                diagnostics: Vec::new(),
             }],
             dry_run: false,
             board: Vec::new(),
@@ -5313,6 +5331,7 @@ mod tests {
                         node_id: node_id.to_string(),
                         status,
                         elapsed_ms: 42,
+                        diagnostics: Vec::new(),
                     },
                 )
                 .await
@@ -7900,6 +7919,7 @@ label = "ok"
                         node_id: "done".to_string(),
                         status: crate::ports::types::WorkflowNodeStatus::Ok,
                         elapsed_ms: 3,
+                        diagnostics: Vec::new(),
                     }],
                     notices: Vec::new(),
                     board: Vec::new(),
