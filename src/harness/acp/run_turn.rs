@@ -281,12 +281,20 @@ impl AcpRunTurn {
         message: &str,
         control: &crate::company::steer::SteerControl,
     ) -> Result<TurnOutcome> {
-        self.steered_with_grace(company, agent_id, message, control, Self::CANCEL_GRACE)
-            .await
+        self.steered_with_grace(
+            company,
+            agent_id,
+            message,
+            control,
+            Self::CANCEL_GRACE,
+            Self::CANCEL_RPC_TIMEOUT,
+        )
+        .await
     }
 
-    /// [`Self::steered`] with the post-cancel grace made explicit, so the tests
-    /// can expire it in milliseconds rather than waiting out the real window.
+    /// [`Self::steered`] with both timing bounds made explicit — the post-cancel
+    /// grace and the per-cancel-RPC bound — so the tests can expire them in
+    /// milliseconds rather than waiting out the real windows.
     async fn steered_with_grace(
         &self,
         company: &CompanyId,
@@ -294,6 +302,7 @@ impl AcpRunTurn {
         message: &str,
         control: &crate::company::steer::SteerControl,
         grace: Duration,
+        cancel_rpc: Duration,
     ) -> Result<TurnOutcome> {
         let key = Self::session_key(company, agent_id);
         let turn = self.agent.prompt(company, &key, message);
@@ -307,9 +316,20 @@ impl AcpRunTurn {
                     // reads the action to decide what happens to the card, and
                     // consuming it here would leave it with nothing to read.
                     if control.pending().is_some() {
-                        // Advisory. Told, then waited for — see above.
-                        if let Err(err) = self.agent.cancel(company, &key).await {
-                            tracing::warn!(%err, "[harness::acp] cancel failed for session {key}");
+                        // Advisory. Told, then waited for — see above. The RPC
+                        // itself is bounded so a cancel that never answers (a
+                        // wedged host, a dead subprocess) cannot block the turn;
+                        // both outcomes below are logged and the flow continues.
+                        match tokio::time::timeout(cancel_rpc, self.agent.cancel(company, &key))
+                            .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                tracing::warn!(%err, "[harness::acp] cancel failed for session {key}");
+                            }
+                            Err(_elapsed) => {
+                                tracing::warn!("[harness::acp] cancel timed out for session {key}");
+                            }
                         }
                         match tokio::time::timeout(grace, &mut turn).await {
                             Ok(outcome) => return Ok(fold(outcome?)),
@@ -324,8 +344,14 @@ impl AcpRunTurn {
                                 // is the recovery path for the work it still
                                 // holds. A later turn on the same key opens a
                                 // fresh `session/prompt`, which the agent treats
-                                // as a new turn rather than an overlap.
-                                let _ = self.agent.cancel(company, &key).await;
+                                // as a new turn rather than an overlap. The
+                                // nudge is bounded the same way: it is best
+                                // effort, and the abandonment is the point.
+                                let _ = tokio::time::timeout(
+                                    cancel_rpc,
+                                    self.agent.cancel(company, &key),
+                                )
+                                .await;
                                 return Err(OpenCompanyError::Harness(format!(
                                     "the agent did not stop within {}s of a cancel; \
                                      abandoning the turn",
