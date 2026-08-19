@@ -647,8 +647,13 @@ mod test {
         // `session/cancel` can fail (the subprocess is mid-shutdown, say), but
         // that must not turn a cancelled turn into a failure of its own: the
         // cancel is advisory, the error is logged, and the turn still answers.
+        // The prompt holds until the cancel arrives so the steer check is
+        // actually reached — a prompt that resolves first would exit the loop
+        // and leave the cancel path unexercised.
         let mut agent = Scripted::answering(vec![AcpUpdate::MessageChunk("done".into())]);
         agent.cancel_fails = true;
+        agent.hold_for_cancel = true;
+        let cancels = agent.cancels.clone();
         let agent = Arc::new(agent);
         let run_turn: &dyn RunTurn = &AcpRunTurn::new(agent);
         let control = crate::company::steer::SteerControl::new();
@@ -658,6 +663,42 @@ mod test {
             .run_steered(&CompanyId::new("acme"), "ceo", "go", &control, None, None)
             .await
             .expect("a failed cancel still ends in a turn");
+        assert_eq!(outcome.reply, "done");
+        assert_eq!(
+            cancels.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the failed cancel was still attempted exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hung_cancel_rpc_does_not_block_the_turn() {
+        // A cancellation RPC that never answers — a wedged host, a dead
+        // subprocess — must not pin the steered turn forever. Both cancel calls
+        // are bounded, so the turn still settles on the grace schedule.
+        let mut agent = Scripted::answering(vec![AcpUpdate::MessageChunk("done".into())]);
+        agent.cancel_hangs = true;
+        agent.hold_for_cancel = true;
+        let agent = Arc::new(agent);
+        let run_turn = AcpRunTurn::new(agent);
+        let control = crate::company::steer::SteerControl::new();
+        control.request(crate::company::steer::SteerAction::Cancel);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_turn.steered_with_grace(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                Duration::from_millis(20), // post-cancel grace
+                Duration::from_millis(50), // cancel RPC bound
+            ),
+        )
+        .await
+        .expect("the turn settles despite a hung cancel RPC")
+        .expect("the release of the prompt lets the turn answer");
+
         assert_eq!(outcome.reply, "done");
     }
 
@@ -673,8 +714,11 @@ mod test {
                 stop_reason: "end_turn".into(),
             },
             hang: true,
+            hold_for_cancel: false,
+            cancel_hangs: false,
             cancel_fails: false,
             cancels: Default::default(),
+            cancel_started: tokio::sync::Notify::new(),
         });
         let cancels = agent.cancels.clone();
         let run_turn = AcpRunTurn::new(agent);
@@ -688,6 +732,7 @@ mod test {
                 "go",
                 &control,
                 Duration::from_millis(20),
+                Duration::from_millis(50),
             )
             .await
             .expect_err("a hung turn is abandoned, not awaited");
