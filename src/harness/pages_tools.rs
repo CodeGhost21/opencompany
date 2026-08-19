@@ -828,17 +828,32 @@ impl Tool for PagesWriteTool {
         }
 
         // Compile BEFORE anything is written — a rejected import or a parse
-        // error must leave the page exactly as it was (plan §2).
+        // error must leave the page exactly as it was (plan §2). The compile
+        // is a full swc parse/transform/codegen over up to `MAX_SOURCE_BYTES`
+        // of agent input — CPU-bound work that would otherwise occupy a tokio
+        // worker for its whole duration — so it runs on the blocking pool
+        // rather than inline in this async handler. The `spawn_blocking`
+        // closure owns its own copy of the source, so nothing from `args` is
+        // borrowed across the `await`.
         let compiled = match source {
-            Some(source) => match compile_page(source) {
-                Ok(compiled) => Some(compiled),
-                Err(diagnostic) => {
-                    return Ok(ToolResult::error(format!(
-                        "Could not compile `{slug}`'s Page.tsx — nothing was written:\n\n\
-                         {diagnostic}"
-                    )));
+            Some(source) => {
+                let owned = source.to_string();
+                match tokio::task::spawn_blocking(move || compile_page(&owned)).await {
+                    Ok(Ok(compiled)) => Some(compiled),
+                    Ok(Err(diagnostic)) => {
+                        return Ok(ToolResult::error(format!(
+                            "Could not compile `{slug}`'s Page.tsx — nothing was written:\n\n\
+                             {diagnostic}"
+                        )));
+                    }
+                    Err(e) => {
+                        return Ok(ToolResult::error(format!(
+                            "Could not compile `{slug}`'s Page.tsx — the compiler task failed: \
+                             {e}"
+                        )));
+                    }
                 }
-            },
+            }
             None => None,
         };
 
