@@ -75,7 +75,7 @@ interface Props {
    */
   onSendFailed?: (threadId: string) => void;
   /** Turns accepted but not settled, by thread id — survives a reload (#983). */
-  openTurns?: Record<string, OpenTurn>;
+  openTurns?: Record<string, OpenTurn[]>;
 }
 
 /** Consecutive messages from one sender within this window group together. */
