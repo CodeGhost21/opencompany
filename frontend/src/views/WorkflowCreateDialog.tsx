@@ -507,7 +507,11 @@ export function WorkflowCreateDialog({
    * missed: a create-mode draft landed its id and the next keystroke in Name
    * slugged over it. Pairing the two writes here means a future path cannot set
    * a chosen id *without* claiming it — the bug is removed as a class, not as an
-   * instance. Bare `setId` now means exactly one thing: a derived id.
+   * instance. Outside the reset effect, bare `setId` now means exactly one
+   * thing: a derived id. The reset effect is the one exception and has to be —
+   * it hydrates every field through `next*` locals so the pristine fingerprint
+   * is taken from the values it applies (issue #1006), so its id write cannot
+   * go through here. It sets `idTouched` itself, in the same pass.
    */
   function setAuthoredId(next: string) {
     setIdTouched(true);
@@ -647,10 +651,10 @@ export function WorkflowCreateDialog({
     if (prefilledDraft) {
       const g = prefilledDraft.workflow;
       // Issue #1053: chosen by the copilot, not left blank — editing the name
-      // afterwards must not slug over it. setIdTouched is redundant when
-      // workflow is already truthy (line 595 covers that), but harmless: React
-      // batches both in the same render, and for a create-mode prefilled draft
-      // (workflow === null) this is the call that actually latches the id.
+      // afterwards must not slug over it. Only the latch is written here; the id
+      // itself rides `nextId` like every other hydrated field, so the pristine
+      // fingerprint below is taken from the value this open actually applies
+      // (issue #1006) rather than from state React has not committed yet.
       setIdTouched(true);
       nextId = workflow?.id ?? g.id;
       nextName = g.name.trim();
