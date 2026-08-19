@@ -79,7 +79,7 @@ declaring no `[harness.inference]` falls back to the company-level
 
 ### Secret slots
 
-```
+```text
 inference/config                        # the DEFAULT harness
 inference/key
 
