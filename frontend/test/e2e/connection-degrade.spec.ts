@@ -72,7 +72,7 @@ test("a host that is down reddens its own row and leaves the others working", as
   page,
 }) => {
   await seedSecondHost(page);
-  await page.goto("/#/tasks");
+  await page.goto("/#/ledgers/tasks");
 
   // Both hosts are present, so the switcher is a control rather than a
   // nameplate.
