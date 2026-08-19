@@ -636,7 +636,10 @@ mod tests {
         assert!(!valid_slug(""), "empty");
         assert!(!valid_slug("-leading"), "leading dash");
         assert!(!valid_slug("has space"), "interior space");
-        assert!(!valid_slug("under_score"), "underscore is not in the alphabet");
+        assert!(
+            !valid_slug("under_score"),
+            "underscore is not in the alphabet"
+        );
         assert!(!valid_slug("UPPER"), "all uppercase");
         // And the shape that must pass.
         assert!(valid_slug("a-1"), "lowercase, digit, dash");
@@ -660,8 +663,8 @@ mod tests {
         use tower::ServiceExt;
 
         use crate::company::CompanyManifest;
-        use crate::ports::types::{CompanyId, CompanyRecord};
         use crate::ports::CompanyStore;
+        use crate::ports::types::{CompanyId, CompanyRecord};
         use crate::runtime::RuntimeBuilder;
         use crate::server::router;
         use crate::server::test_support::{fixed_cookie, seed_fixed_admin};
@@ -762,8 +765,13 @@ mod tests {
             );
 
             // `set_enabled` rejects the same slug without writing.
-            let (status, _, raw) =
-                send(&state, "PUT", "/api/v1/company/skills/A", Some(r#"{"enabled":true}"#)).await;
+            let (status, _, raw) = send(
+                &state,
+                "PUT",
+                "/api/v1/company/skills/A",
+                Some(r#"{"enabled":true}"#),
+            )
+            .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "set_enabled A: {raw}");
 
             // Neither attempt mutated the effective set.
