@@ -4621,6 +4621,7 @@ mod tests {
             global: false,
             id: id.to_string(),
             role: "Role".to_string(),
+            name: None,
             description: None,
             tier: tier.map(str::to_string),
             tools: Vec::new(),
