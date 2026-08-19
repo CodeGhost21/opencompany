@@ -35,7 +35,6 @@ const STRIP_RUNS = 5;
 export function WorkflowIndex({
   workflows,
   runsByWorkflow,
-  selectedId,
   onSelect,
   mode,
   loading,
@@ -44,7 +43,13 @@ export function WorkflowIndex({
   workflows: WorkflowSummary[];
   /** The recent runs of each workflow, newest first, from the company-wide page. */
   runsByWorkflow: Map<string, WorkflowRunOutcome[]>;
-  selectedId: string | null;
+  /**
+   * Open one workflow. Issue #1110: there is no `selectedId` counterpart, and
+   * that is the point — selecting IS leaving this surface, so nothing here is
+   * ever "the selected one". The cards used to carry `aria-pressed`, which
+   * announced every one of them to a screen reader as a toggle that was off;
+   * they are links to a page, and they read as buttons that do something now.
+   */
   onSelect: (id: string) => void;
   /**
    * Cards or list. Owned and rendered by the caller (issue #1110): the index is
@@ -84,7 +89,6 @@ export function WorkflowIndex({
               workflow={w}
               runs={runsByWorkflow.get(w.id) ?? []}
               runsLoaded={runsLoaded}
-              selected={w.id === selectedId}
               onSelect={() => onSelect(w.id)}
             />
           ))}
@@ -97,7 +101,6 @@ export function WorkflowIndex({
               workflow={w}
               runs={runsByWorkflow.get(w.id) ?? []}
               runsLoaded={runsLoaded}
-              selected={w.id === selectedId}
               onSelect={() => onSelect(w.id)}
             />
           ))}
@@ -113,24 +116,19 @@ function WorkflowCard({
   workflow,
   runs,
   runsLoaded,
-  selected,
   onSelect,
 }: {
   workflow: WorkflowSummary;
   runs: WorkflowRunOutcome[];
   runsLoaded: boolean;
-  selected: boolean;
   onSelect: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onSelect}
-      aria-pressed={selected}
       data-testid="workflow-card"
-      className={`flex flex-col gap-2 rounded-xl border bg-card/60 p-3 text-left transition hover:bg-accent/40 ${
-        selected ? "ring-2 ring-primary/40" : ""
-      }`}
+      className="flex flex-col gap-2 rounded-xl border bg-card/60 p-3 text-left transition hover:bg-accent/40"
     >
       <div className="flex items-start justify-between gap-2">
         <span className="min-w-0 truncate text-sm font-semibold">{workflow.name}</span>
@@ -168,24 +166,19 @@ function WorkflowRow({
   workflow,
   runs,
   runsLoaded,
-  selected,
   onSelect,
 }: {
   workflow: WorkflowSummary;
   runs: WorkflowRunOutcome[];
   runsLoaded: boolean;
-  selected: boolean;
   onSelect: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onSelect}
-      aria-pressed={selected}
       data-testid="workflow-list-row"
-      className={`flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-left transition hover:bg-accent/40 ${
-        selected ? "bg-accent/30" : ""
-      }`}
+      className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-left transition hover:bg-accent/40"
     >
       <span className="min-w-0 flex-1 truncate text-sm font-medium">{workflow.name}</span>
       {workflow.editable === false && (

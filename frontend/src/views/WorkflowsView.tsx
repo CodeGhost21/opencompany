@@ -1391,10 +1391,9 @@ export function WorkflowsView({
   // place the operator chose to go. Pushing keeps browser Back and this button
   // exact inverses of each other, which is what makes the pair learnable.
   //
-  // The two body-level drawers are closed on the way out because they are
-  // per-workflow surfaces: an operator who left one open, went back to the
-  // index and opened a second workflow would otherwise find it already up,
-  // showing the second workflow's runs under a panel they never asked for.
+  // Closing the per-workflow drawers is NOT done here — the effect that watches
+  // the selection does it, so that every route back to the index closes them and
+  // not just this one.
   const backToIndex = useCallback(() => {
     setSelectedId(null);
     setHistoryOpen(false);
@@ -2428,12 +2427,6 @@ export function WorkflowsView({
             <WorkflowIndex
               workflows={workflows}
               runsByWorkflow={runsByWorkflow}
-              // Issue #1110: nothing is ever "the selected one" while the index
-              // is what you are looking at — selecting IS leaving the index. It
-              // is passed as null rather than dropped so the component keeps one
-              // shape, and so a future surface that lists workflows beside an
-              // open one can still say which.
-              selectedId={null}
               onSelect={(id) => setSelectedId(id)}
               mode={indexMode}
               loading={loadingList}

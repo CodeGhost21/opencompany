@@ -241,6 +241,31 @@ describe("a URL naming a workflow opens it", () => {
 });
 
 describe("leaving a workflow behind", () => {
+  it("closes the per-workflow drawers, so the next one does not inherit them", async () => {
+    const { client } = makeClient();
+    await mountAt("#/workflows/alpha", client);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="workflow-history-toggle"]')?.click();
+    });
+    expect(container.querySelector('[data-testid="workflow-run-history"]')).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="workflow-back-to-index"]')
+        ?.click();
+    });
+    await act(async () => {
+      cards()[1].click();
+    });
+
+    expect(detailName()).toBe("Beta report");
+    // `beta`'s history panel was never asked for. Left open across the index it
+    // would come up over a workflow the operator has only just opened, showing
+    // that workflow's runs under a drawer they opened for a different one.
+    expect(container.querySelector('[data-testid="workflow-run-history"]')).toBeNull();
+  });
+
   it("returns to the index after deleting the open one, without picking a neighbour", async () => {
     const { client, graphGets, deletes } = makeClient();
     await mountAt("#/workflows/alpha", client);
