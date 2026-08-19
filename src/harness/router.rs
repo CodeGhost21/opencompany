@@ -95,6 +95,32 @@ impl HarnessRouter {
         self
     }
 
+    /// A router over `default_harness`, seeded with the default lane, every
+    /// extra lane, every unavailable harness, and every agent→harness binding.
+    ///
+    /// The single place both the brain and the workflow runner assemble a
+    /// router from the same four pieces, so the two dispatch points cannot
+    /// drift about which agent lands on which engine.
+    pub fn from_lanes(
+        default_harness: &str,
+        default_lane: Arc<dyn RunTurn>,
+        lanes: &[(String, Arc<dyn RunTurn>)],
+        unavailable: &[(String, String)],
+        bindings: &HashMap<String, String>,
+    ) -> Self {
+        let mut router = Self::new(default_harness).with_engine(default_harness, default_lane);
+        for (id, engine) in lanes {
+            router = router.with_engine(id, engine.clone());
+        }
+        for (id, reason) in unavailable {
+            router = router.with_unavailable(id, reason);
+        }
+        for (agent, harness) in bindings {
+            router = router.bind(agent, harness);
+        }
+        router
+    }
+
     /// The harness id `agent_id` runs on.
     pub fn harness_for(&self, agent_id: &str) -> &str {
         self.by_agent
