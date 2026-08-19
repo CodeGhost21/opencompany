@@ -147,10 +147,26 @@ struct SetInference {
     key: Option<String>,
 }
 
-/// Loads the company's committed `[inference]` section from its record.
+/// Loads the inference the company actually boots and runs on: the *default
+/// harness's* `[harness.inference]` when that harness declares one, falling back
+/// to the company-level `[inference]` section.
+///
+/// This mirrors [`RuntimeBuilder::build`](crate::runtime::RuntimeBuilder::build),
+/// which resolves `default_harness_inference()` before the company-level
+/// fallback. The status, probe, and runner-gap paths all read this, so a company
+/// whose only inference lives in `[harness.inference]` must resolve here too —
+/// otherwise it would report `managed`, reject `/inference/test` as
+/// `not_configured`, and mislabel its status after a reset, while turns run on
+/// the harness configuration the same record holds.
 async fn manifest_inference(runtime: &CompanyRuntime) -> Result<Inference, ApiError> {
     let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
-    Ok(record.map(|r| r.manifest.inference).unwrap_or_default())
+    Ok(record
+        .map(|r| {
+            r.manifest
+                .default_harness_inference()
+                .unwrap_or_else(|| r.manifest.inference.clone())
+        })
+        .unwrap_or_default())
 }
 
 /// The console-facing source label for a resolved source badge.
