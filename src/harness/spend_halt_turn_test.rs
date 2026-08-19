@@ -286,6 +286,7 @@ fn record(budget: Option<f64>) -> CompanyRecord {
         overlay_desk_tools: Default::default(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     }
 }
 
