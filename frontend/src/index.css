@@ -737,6 +737,56 @@
     --kg-tool: var(--kg-brain-2);
 }
 
+/* ============================================================================
+ * Markdown prose — inline code.
+ *
+ * `@plugin "@tailwindcss/typography"` at the top of this file ships two
+ * defaults nobody here asked for:
+ *
+ *     .prose :where(code)…::before { content: "`" }
+ *     .prose :where(code)…::after  { content: "`" }
+ *
+ * They exist because the plugin styles hand-written HTML, where a reader has
+ * no other cue that a span is code. What `components/markdown.tsx` feeds it is
+ * the *output* of a markdown parser, so the fences have already been consumed:
+ * the plugin drew them back on, and every surface using the shared `Markdown`
+ * component — chat, memory, ledgers, artifacts, workflows — rendered
+ * `` `UsageDto` `` where it meant `UsageDto` (issue #1108).
+ *
+ * What makes the override stick is the cascade *layer*, not the selector:
+ * `prose` is a utility, so everything the plugin emits lands in
+ * `@layer utilities`, and an unlayered rule outranks every layer no matter
+ * where it sits in the file. So these rules must stay unlayered — wrapping
+ * them in `@layer base` or `@layer utilities` to tidy the file up hands the
+ * backticks straight back. `test/unit/markdown-inline-code.test.ts` compiles
+ * this file and checks the outcome rather than the text, so that mistake
+ * fails a test instead of shipping.
+ * ========================================================================== */
+
+.prose :where(code):not(:where([class~="not-prose"] *))::before,
+.prose :where(code):not(:where([class~="not-prose"] *))::after {
+    content: none;
+}
+
+/* Without the backticks an inline span is set apart from the prose around it
+ * by its face alone, which at 0.875em is a weak signal in a chat line. It gets
+ * its own ground instead: `--muted` with a hairline, so the chip still reads
+ * where whatever is behind it is itself tinted — a hovered chat row is
+ * `bg-muted/40`, and a `remark-gfm` table header is tinted too. Sized in `em`
+ * so the chip tracks the text it wraps rather than the root font size.
+ *
+ * `pre *` is excluded on purpose. The plugin clears the ground inside a fenced
+ * block (`pre code { background-color: transparent; padding: 0 }`), and being
+ * unlayered this rule would otherwise outrank that too — every fenced block
+ * would gain a second, bordered ground inside its own.
+ */
+.prose :where(code):not(:where(pre *, [class~="not-prose"] *)) {
+    background-color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) * 0.6);
+    padding: 0.125em 0.375em;
+}
+
 @layer base {
     * {
         @apply border-border outline-ring/50;
