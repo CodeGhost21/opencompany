@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { ApprovalRow } from "@/views/chat/ApprovalRow";
 import type { DecidedApproval } from "@/views/chat/model";
 
+import { BlockedNodeApprovals } from "./BlockedNodeApprovals";
 import { DeliveryRows } from "./RunHistoryPanel";
 // Issue #596: the per-node parse is now shared with the durable run inspector
 // and the pre-publish approvals card, so it lives in `run-output.ts`.
@@ -246,6 +247,17 @@ export function RunResultPanel({
                 } and this run continues on its own — approving re-runs the step, so a changed decision may ask again.`
               : "Nothing here can be approved; change the policy and run the workflow again."}
           </p>
+        )}
+        {/* Issue #1014 (PR-B): the gated tool names per blocked node, and a link
+            per parked card to the Approvals queue. Kept consistent with the run
+            history drawer — the section below can also decide them inline when
+            this console can join the live queue (#1002), but the tool names and
+            a pointer to the page stand even when it cannot. */}
+        {blockedNodes.length > 0 && (
+          <BlockedNodeApprovals
+            blockedNodes={blockedNodes}
+            approvalRows={result.approvals}
+          />
         )}
         {blockedNodes.length === 0 && result.pendingApprovals.length > 0 && (
           <p className="mb-2 text-xs text-muted-foreground">
