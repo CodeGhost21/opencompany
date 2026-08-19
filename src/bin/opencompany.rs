@@ -1224,7 +1224,7 @@ async fn async_main() -> Result<()> {
                 // one would namespace ids that collide with another tenant's.
                 // Refuse to boot rather than misattribute at runtime.
                 if let Err(reason) = opencompany::app::validate_tenant_namespace(tenant) {
-                    return Err(opencompany::error::OpenCompanyError::Config(reason.into()));
+                    return Err(opencompany::error::OpenCompanyError::Config(reason));
                 }
             }
             // The address the platform records as this instance's creator. A
