@@ -2454,7 +2454,7 @@ mod tests {
 
         // `Capabilities` is not `Debug`, so match rather than `expect_err`.
         let err = match build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {
