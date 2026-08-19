@@ -514,4 +514,59 @@ mod tests {
                 .is_err()
         );
     }
+
+    /// One lane failing to warm does not take down the others: `ensure` warms
+    /// every engine, records the failed lane, and only that lane's turns error.
+    #[tokio::test]
+    async fn one_lane_failing_to_warm_does_not_take_down_the_others() {
+        let embedded = FlakyEngine::new("embedded");
+        let deep = FlakyEngine::new("deep");
+        let router = HarnessRouter::new("embedded")
+            .with_engine("embedded", embedded.clone())
+            .with_engine("deep", deep.clone())
+            .bind("researcher", "deep")
+            .bind("ceo", "embedded");
+
+        deep.set_fail(true);
+        router.ensure(&record()).await.unwrap();
+
+        let err = router
+            .run(&company(), "researcher", "hi", None)
+            .await
+            .expect_err("the failed lane's turn must error");
+        let msg = err.to_string();
+        assert!(msg.contains("researcher"), "{msg}");
+        assert!(msg.contains("deep"), "{msg}");
+        assert!(msg.contains("warm-up"), "names the failed warm-up: {msg}");
+
+        let out = router.run(&company(), "ceo", "hi", None).await.unwrap();
+        assert_eq!(out.reply, "embedded", "the healthy lane keeps working");
+    }
+
+    /// A lane that failed to warm comes back once a later `ensure` succeeds —
+    /// the recorded failure is cleared, so recovery needs no restart.
+    #[tokio::test]
+    async fn a_failed_lane_recovers_on_a_later_ensure() {
+        let embedded = FlakyEngine::new("embedded");
+        let deep = FlakyEngine::new("deep");
+        let router = HarnessRouter::new("embedded")
+            .with_engine("embedded", embedded.clone())
+            .with_engine("deep", deep.clone())
+            .bind("researcher", "deep");
+
+        deep.set_fail(true);
+        router.ensure(&record()).await.unwrap();
+        assert!(
+            router
+                .run(&company(), "researcher", "hi", None)
+                .await
+                .is_err(),
+            "the failed lane errors before recovery"
+        );
+
+        deep.set_fail(false);
+        router.ensure(&record()).await.unwrap();
+        let out = router.run(&company(), "researcher", "hi", None).await.unwrap();
+        assert_eq!(out.reply, "deep", "recovery needs no restart");
+    }
 }
