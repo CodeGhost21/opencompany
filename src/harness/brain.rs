@@ -7232,6 +7232,7 @@ members = ["eng1", "eng2"]
             .grant_standing(crate::runtime::grants::StandingGrant {
                 id: crate::runtime::grants::GrantId::new("g1"),
                 agent: "ceo".into(),
+                workflow: None,
                 tool: "workspace_write".into(),
                 granted_by: crate::ports::types::Actor {
                     kind: crate::ports::types::ActorKind::User,
