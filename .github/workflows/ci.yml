@@ -1100,34 +1100,74 @@ jobs:
       - name: Test (tinyplace)
         run: cargo test --locked --features tinyplace --lib
 
-      # Issue #467. The `Console E2E (live brain)` job below drives a host that
-      # has an agent harness, so it needs a FEATURE-GATED binary — the default
-      # one the `rust` job uploads answers a chat message with nothing, which is
-      # why four of the suite's best specs were skipped rather than run.
+  # Issue #1118. The gated host binary the `Console E2E (live brain)` job needs
+  # is built HERE rather than as the last step of `Rust (openhuman, tinycortex)`
+  # above, and the move is a wall-clock change, not a tidy-up.
+  #
+  # Issue #467 put it in that lane to avoid a second submodule checkout, a
+  # second apt install and a second compile of the vendored openhuman tree — a
+  # sound argument about total CPU, and the wrong one to optimise. The binary
+  # was ready roughly ten minutes into a lane that then spent another twenty
+  # running feature-scoped test suites that the e2e job does not consume, and
+  # `needs: rust-gated` made the e2e job wait for all of it. On run
+  # 32243809850 that lane reached its binary step at minute 31 of 33. The e2e
+  # suite is the LAST thing on the critical path, so every one of those minutes
+  # was added to the time a PR takes to answer.
+  #
+  # What the split costs: one more runner, one more compile of this feature set,
+  # and a cache entry of its own (`Swatinem/rust-cache` keys on the job, so this
+  # job is cold on its first run and warm after). What it buys: the e2e job
+  # starts when the binary exists instead of when an unrelated test matrix
+  # finishes. CPU minutes are the cheap resource here; the length of the
+  # feedback loop is the expensive one.
+  rust-gated-binary:
+    name: Gated host binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      # Same reason as the lane above: `submodules: true` is not recursive, and
+      # `--features openhuman` compiles the nested vendored graph rather than
+      # only resolving it.
+      - name: Init vendored openhuman crate submodules
+        run: scripts/ci/init-vendored-submodules.sh
+
+      # Same system libraries the gated lane installs, and for the same reason:
+      # `--features openhuman` links OpenSSL and the X11 dev libs that
+      # openhuman's unconditional `rdev`/`arboard` deps pull in even headless.
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev \
+            libx11-dev libxi-dev libxtst-dev libxrandr-dev libxcb1-dev libxkbcommon-dev
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+
+      # Issue #467. The `Console E2E (live brain)` job drives a host that has an
+      # agent harness, so it needs a FEATURE-GATED binary — the default one the
+      # `rust` job uploads answers a chat message with nothing, which is why four
+      # of the suite's best specs were skipped rather than run.
       #
-      # Here rather than in that job, for the same reason #428 put the default
-      # binary in `rust`: building it over there would mean a second submodule
-      # checkout, a second apt install and a second cold compile of the vendored
-      # openhuman tree, minutes of wall clock for a thing this job has already
-      # very nearly built.
-      #
-      # `mcp` on top of the job's own `openhuman,tinycortex`, because
-      # `mcp-agent.spec.ts` needs the `mcp_call_tool` belt entry, which is gated
-      # on it. That is another feature resolution, but a cheap one: the
-      # belt-contract step above already compiled `openhuman_core` with
-      # `openhuman_core/mcp` enabled, so what recompiles here is this crate plus
-      # its bin, not the vendored tree.
-      #
-      # `composio` on the same grounds as `mcp`, and for one spec:
+      # `mcp` because `mcp-agent.spec.ts` needs the `mcp_call_tool` belt entry,
+      # which is gated on it. `composio` for one spec:
       # `composio-account-choice.spec.ts` asserts WHICH connected account an
       # agent acts as (issue #820), and `composio_execute` exists on a belt only
-      # under this feature. Without it the spec would skip — which is how the
-      # four specs #467 rescued came to sit unrun for months. Cheap for the same
-      # reason: `composio` adds no `openhuman_core/*` subfeature, so the
-      # vendored tree does not rebuild.
+      # under this feature. Without either, those specs skip — which is how the
+      # four specs #467 rescued came to sit unrun for months.
       #
-      # `--bin`, not `--all-targets`: the lane needs a binary, and the tests and
-      # examples under this feature set are already covered above.
+      # `--bin`, not `--all-targets`: this job exists to produce one binary. The
+      # tests and examples under this feature set are covered by the lane above.
       - name: Build the gated host binary for the live-brain e2e lane
         run: cargo build --locked --features openhuman,tinycortex,mcp,composio --bin opencompany
 
@@ -1502,7 +1542,7 @@ jobs:
   console-e2e-live-brain:
     name: Console E2E (live brain)
     runs-on: ubuntu-latest
-    needs: rust-gated
+    needs: rust-gated-binary
     # Longer than the default lane's half hour: every operator message here runs
     # a real agent turn rather than being answered by the offline echo brain.
     timeout-minutes: 45
