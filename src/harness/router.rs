@@ -272,6 +272,7 @@ mod tests {
                 reply: self.label.clone(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                halted_for_spend: None,
             })
         }
 
@@ -333,6 +334,7 @@ mod tests {
                 reply: self.label.clone(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                halted_for_spend: None,
             })
         }
 
