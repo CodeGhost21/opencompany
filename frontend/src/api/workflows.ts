@@ -143,16 +143,22 @@ export interface WorkflowGraph {
   /** See {@link WorkflowSummary.enabled}. Same "only `false` means off" rule. */
   enabled?: boolean;
   /**
-   * The opaque optimistic-concurrency token for this graph (issue #259),
-   * present only when `editable`.
+   * The opaque optimistic-concurrency token for this graph (issue #259). Always
+   * serialized by a current host (issue #1013): a `string` when the graph is
+   * `editable`, and `null` when it is not (a source-defined or body-less graph
+   * has nothing to version). It used to be omitted for a non-editable graph,
+   * which read back as `undefined` and let a caller send nothing — silently
+   * overwriting a concurrent save; an explicit `null` is the honest "no token".
    *
-   * **Echo it back, never parse it.** Pass it to {@link updateWorkflow} or
-   * {@link deleteWorkflow} and the host refuses the write with a 409 if the
-   * graph changed since this read — which is what stops one console silently
-   * overwriting another's edit. Absent from a host predating #259, in which case
-   * the write is unconditional and that protection simply does not exist.
+   * **Echo it back, never parse it.** Pass it to {@link updateWorkflow},
+   * {@link deleteWorkflow}, or {@link restoreWorkflowRevision} and the host
+   * refuses the write with a 409 if the graph changed since this read — which is
+   * what stops one console silently overwriting another's edit. A current host
+   * now also refuses the write with a 400 if you send no token at all. `null`
+   * from a non-editable graph is falsy and sends nothing, which the console never
+   * does — those graphs are not editable.
    */
-  version?: string;
+  version: string | null;
 }
 
 /**
@@ -400,6 +406,26 @@ export interface WorkflowRunOutcome {
    * trail", never "the run did nothing".
    */
   nodes?: WorkflowRunNode[];
+  /**
+   * The nodes this run has *begun* executing, in start order (issue #1010).
+   *
+   * The other half of {@link nodes}, which is written by the finish bracket
+   * only — so before this a run in flight came back listing what was already
+   * over and nothing about the node working right now. Every console that
+   * learns about a run from the history rather than from a live start frame (a
+   * reload, a cron fire, an `EventSource` reconnect, a workflow switch and
+   * back) reads the graph through this.
+   *
+   * A **receipt of what started**, kept once the run settles: an id here with
+   * no matching {@link nodes} row on a settled run is the node the run was
+   * standing on when it was cancelled or lost. So it must ALWAYS be paired
+   * with {@link running} before anything is painted as in flight — see
+   * `statesFromRun`.
+   *
+   * Absent on a host predating #1010 and on a run journaled before #382, so
+   * absent must read as "no start trail", never as "nothing started".
+   */
+  startedNodes?: string[];
   /** When the run started. Absent on a pre-#371 row, whose only time is the finish. */
   startedAtMillis?: number;
   /**
@@ -870,14 +896,16 @@ export function fixWorkflowFromRun(
  * rename is a create plus a delete.
  *
  * Pass `expectedVersion` — the `version` from the {@link getWorkflow} this edit
- * was based on — to make the write conditional. If the graph moved in between,
- * the host answers `409` and **nothing is written**; surface that to the
- * operator with a reload rather than retrying without the token, which is the
- * silent-overwrite the guard exists to prevent.
+ * was based on — to make the write conditional. It is **required** (issue
+ * #1013): a `null`/absent token makes the host answer `400` rather than writing
+ * unconditionally, which is what stops a stale editor silently clobbering a
+ * concurrent save. If the graph moved in between, the host answers `409` and
+ * **nothing is written**; surface either as a reload rather than retrying, which
+ * is the silent-overwrite the guard exists to prevent.
  *
  * Other rejections carry the same prosumer-language `ApiError` a create does:
- * `400` for a bad graph, `404` for an unknown id, `409` for a source-defined
- * workflow or a display name already taken.
+ * `400` for a bad graph or a missing token, `404` for an unknown id, `409` for a
+ * source-defined workflow or a display name already taken.
  *
  * Returns the stored graph with a **fresh** `version`, so a second save needs no
  * intervening read.
@@ -887,7 +915,7 @@ export function updateWorkflow(
   company: string | null,
   wid: string,
   graph: WorkflowGraph,
-  expectedVersion?: string,
+  expectedVersion?: string | null,
 ): Promise<WorkflowGraph> {
   return client.put<WorkflowGraph>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}`,
@@ -903,9 +931,11 @@ export function updateWorkflow(
  * **Past runs are kept.** They record what the workflow did, which stays true
  * after it is gone; {@link listWorkflowRuns} keeps serving them.
  *
- * `expectedVersion` makes the delete conditional in exactly the sense the
- * operator means by clicking Delete on a graph they are looking at: if it
- * changed underneath them, the host answers `409` and removes nothing.
+ * `expectedVersion` is **required** (issue #1013) and makes the delete
+ * conditional in exactly the sense the operator means by clicking Delete on a
+ * graph they are looking at: a `null`/absent token is a `400` rather than an
+ * unconditional delete, and if the token changed underneath them the host
+ * answers `409` and removes nothing.
  *
  * Follows the same runtime-vs-source contract as `deleteDesk`: a workflow
  * defined by a file in the company source tree cannot be removed from the
@@ -915,7 +945,7 @@ export function deleteWorkflow(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
-  expectedVersion?: string,
+  expectedVersion?: string | null,
 ): Promise<void> {
   const query = expectedVersion
     ? `?expectedVersion=${encodeURIComponent(expectedVersion)}`
@@ -1016,18 +1046,20 @@ export async function listWorkflowRevisions(
  * review (issue #276) — read `enabled` on the result to reflect that.
  *
  * Pass `expectedVersion` — the `version` of the graph the operator was looking
- * at — to make the restore conditional. On a `409` the graph moved underneath
- * them: **reload and let them re-choose, do not retry** without the token, which
- * is the silent-overwrite the guard exists to prevent. Other rejections carry
- * the host's prosumer-language message: `404` for an unknown workflow or
- * revision, `409` for a source-defined / body-less workflow or a name collision.
+ * at — to make the restore conditional. It is **required** (issue #1013): a
+ * `null`/absent token is a `400` rather than an unconditional restore. On a `409`
+ * the graph moved underneath them: **reload and let them re-choose, do not
+ * retry** without the token, which is the silent-overwrite the guard exists to
+ * prevent. Other rejections carry the host's prosumer-language message: `400` for
+ * a missing token, `404` for an unknown workflow or revision, `409` for a
+ * source-defined / body-less workflow or a name collision.
  */
 export function restoreWorkflowRevision(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
   revisionId: string,
-  expectedVersion?: string,
+  expectedVersion?: string | null,
 ): Promise<WorkflowGraph> {
   return client.post<WorkflowGraph>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/revisions/${encodeURIComponent(

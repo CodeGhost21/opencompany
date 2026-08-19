@@ -282,6 +282,22 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // count is the whole difference between it and `edit` above.
   apply_patch: "Edit several files in its workspace at once",
   csv_export: "Save data as a spreadsheet file in its workspace",
+  // Hosting (issue #1079). Only the three that park need words here; the three
+  // read tools are `Reach::Nothing` and never reach an approval card.
+  //
+  // Each label names the thing an operator is actually consenting to, because
+  // these are the cards where a vague one costs the most: two of them change
+  // what the public sees at an address, and the third can write secrets at a
+  // third-party provider. "Use one of its tools" over a live deployment is the
+  // failure this issue is about.
+  hosting_launch_site: "Deploy a site to the public internet",
+  // "point at" rather than "add": the domain already exists and belongs to
+  // somebody — what this call does is aim it at a site.
+  hosting_add_domain: "Point a domain at one of its sites",
+  // Deliberately not worded as a deployment. The tool requires a redeploy
+  // afterwards for a build-time variable to take effect, so a label promising
+  // one would be describing an act that has not happened.
+  hosting_set_env: "Set environment variables on one of its sites",
   // `mcp_registry_tool_call` is deliberately absent: EFFECT_LABELS already
   // names it and is consulted first, so an entry here would be unreachable.
 };
@@ -591,6 +607,44 @@ export const FEEDBACK_CATEGORIES: { value: FeedbackCategory; label: string }[] =
 ];
 
 /** A short relative time like "2m ago", "3h ago", "just now". */
+/**
+ * Does approving this put something outside the company (#1024)?
+ *
+ * Reads the host's own `group`, never the effect `kind`. For a harness tool call
+ * `kind` IS the tool name — `composio_execute`, not `email.send` — so a predicate
+ * keyed on `kind` would match the native effects the icon table knows and miss
+ * the composio `GMAIL_SEND_EMAIL` send this was reported for. `group` is derived
+ * host-side from the tool *and its arguments*, the only place that is known.
+ *
+ * `other` is the catch-all internal bucket — the same line the host draws for
+ * `broadly_grantable`. An absent `group` is an older host and reads as internal,
+ * so the card renders exactly as it did before rather than labelling something
+ * this console cannot classify.
+ */
+export function leavesTheCompany(a: ApprovalSummary): boolean {
+  return a.group != null && a.group !== "other";
+}
+
+/**
+ * How old the parked payload is, and whether to say so loudly (#1024).
+ *
+ * `at_millis` is stamped when the effect is parked, in the same turn that
+ * composed its arguments — so it dates the payload, not the queue, and
+ * "Composed" is the honest word. "Parked" would be closer to the field name and
+ * would reintroduce the exact reading this fixes: parking is a queue event, and
+ * a queue reading is what let a five-day-old digest look routine.
+ *
+ * Labelled only for effects that leave the company. Elsewhere the age genuinely
+ * IS queue latency, and labelling it everywhere would spend the emphasis where
+ * it does not matter and dilute it where it does.
+ */
+export function payloadAge(a: ApprovalSummary, now: number): { text: string; emphasise: boolean } {
+  const age = timeAgo(a.at_millis, now);
+  return leavesTheCompany(a)
+    ? { text: `Composed ${age}`, emphasise: true }
+    : { text: age, emphasise: false };
+}
+
 export function timeAgo(atMillis: number, now: number): string {
   const secs = Math.max(0, Math.floor((now - atMillis) / 1000));
   if (secs < 45) return "just now";

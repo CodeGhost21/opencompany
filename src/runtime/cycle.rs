@@ -3789,6 +3789,52 @@ mod test {
 
     // --- What the card says (issue #372) ------------------------------------
 
+    /// **Issue #1024.** The parked effect's consequence group reaches the card.
+    ///
+    /// A `GMAIL_SEND_EMAIL` gate sat parked for days and mailed a five-day-old
+    /// digest the moment an operator cleared a backlog. The age was already on
+    /// the card — as a bare "5d ago" in the footer, where it reads as how long
+    /// the QUEUE has held the item rather than how old the PAYLOAD is. The
+    /// console can only tell those apart for an effect that leaves the company,
+    /// and it cannot work out which those are on its own: for a harness tool
+    /// call `kind` is the TOOL NAME (`composio_execute`), not `email.send`, so
+    /// a console keying on `kind` would miss exactly this send.
+    ///
+    /// So the host's own classification has to ride on the summary. This pins
+    /// that it is the PARKED EFFECT's group and not a constant: a summary that
+    /// hard-coded `Other` would render every outbound send as internal and put
+    /// the bug straight back.
+    #[tokio::test]
+    async fn a_parked_effect_carries_its_group_to_the_card() {
+        let home_dir = tmp_home();
+        let mut effect = harness_effect(
+            "devrel",
+            "composio_execute",
+            serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+        );
+        // The group a real `composio_execute` of a send resolves to.
+        effect.group = EffectGroup::Send;
+        let (rt, _id) = park_one(home_dir.path().to_path_buf(), effect).await;
+
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].group,
+            EffectGroup::Send,
+            "the card must carry the parked effect's own group; anything constant \
+             renders an outbound send as internal"
+        );
+        // And the tool name is NOT the discriminator — the reason the group has
+        // to be sent at all.
+        assert_eq!(pending[0].kind, "composio_execute");
+
+        // It survives the wire: the console reads this field, so a summary that
+        // classified correctly and serialized nothing would be no fix.
+        let wire: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&pending[0]).unwrap()).unwrap();
+        assert_eq!(wire["group"], "send");
+    }
+
     /// A harness-projected park reaches the operator naming its asker and what
     /// it will actually do — the whole point of #372, where the card used to say
     /// only "Shell".
@@ -4531,7 +4577,8 @@ mod test {
             .filter(|e| e.kind == crate::metering::INFERENCE_SPEND_KIND)
             .collect();
         assert_eq!(spend.len(), 1);
-        assert_eq!(spend[0].amount_usd, 0.031);
+        // Negative: an outflow, per the ledger convention (issue #1047).
+        assert_eq!(spend[0].amount_usd, -0.031);
     }
 
     /// Tokens without USD (the managed passthrough bills backend-side) still

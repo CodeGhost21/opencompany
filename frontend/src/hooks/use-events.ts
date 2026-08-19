@@ -15,6 +15,9 @@ import type {
  * raw third-party payload is ever on the wire.
  */
 export type CompanyStreamEvent =
+  // A structural control frame, never a journal event. The receiver fell
+  // behind, so durable views must re-read their canonical endpoints.
+  | { type: "stream_gap"; missed: number }
   | {
       type: "agent_reply";
       seq: number;
@@ -388,6 +391,16 @@ interface Options {
    */
   pendingApprovals: number;
   /**
+   * Re-reads durable state after a structural stream gap, a healthy stream
+   * connection, or a stream that failed to open. The latter keeps the hosted
+   * console current while the manager proxy fix in opencompany-microservice#23
+   * is rolling out.
+   */
+  onResync?: () => Promise<void> | void;
+  /** Reports a failed canonical recovery once, without turning ordinary gaps
+   * or reconnects into toast noise. */
+  onRecoveryError?: (error: unknown) => void;
+  /**
    * Called for each `AgentReply` so the shell can inject it into the active
    * chat's transcript. The shell dedupes against its own optimistic echo.
    */
@@ -536,6 +549,8 @@ export function useEvents(
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
+    onResync,
+    onRecoveryError,
   }: Options,
 ): void {
   // Keep the latest callbacks without re-opening the stream when they change.
@@ -575,6 +590,14 @@ export function useEvents(
   useEffect(() => {
     onApprovalEventRef.current = onApprovalEvent;
   }, [onApprovalEvent]);
+  const onResyncRef = useRef(onResync);
+  useEffect(() => {
+    onResyncRef.current = onResync;
+  }, [onResync]);
+  const onRecoveryErrorRef = useRef(onRecoveryError);
+  useEffect(() => {
+    onRecoveryErrorRef.current = onRecoveryError;
+  }, [onRecoveryError]);
 
   // The rising-edge detector for pending approvals. Seeded with the current
   // value so we only toast on an *increase* observed while mounted, never on the
@@ -599,10 +622,45 @@ export function useEvents(
     // stream of frames either way, so everything below is unchanged.
     const url = `${client.baseUrl}${client.scopeFor(company)}/events`;
     let unsubscribe: () => void;
+    let opened = false;
+    let recoveryFailed = false;
+    let recoveryInFlight = false;
+    let reconcileTimer: ReturnType<typeof setInterval> | undefined;
+    const recover = async () => {
+      if (recoveryInFlight) return;
+      recoveryInFlight = true;
+      try {
+        await onResyncRef.current?.();
+        recoveryFailed = false;
+      } catch (err) {
+        // A failed canonical read is actionable, but repeated reconnects must
+        // not flood the operator with the same error every thirty seconds.
+        if (!recoveryFailed) onRecoveryErrorRef.current?.(err);
+        recoveryFailed = true;
+      } finally {
+        recoveryInFlight = false;
+      }
+    };
+    const startReconciliation = () => {
+      if (reconcileTimer) return;
+      void recover();
+      reconcileTimer = setInterval(() => void recover(), 30_000);
+    };
+    // The hosted manager currently buffers the whole upstream response (#23),
+    // so an EventSource can remain CONNECTING forever without firing onOpen or
+    // onError. Treat that as loss of the incremental channel, not as silence.
+    const openDeadline = setTimeout(() => {
+      if (!opened) startReconciliation();
+    }, 10_000);
     try {
       unsubscribe = client.subscribeToEvents(company, {
         onOpen: () => {
+          opened = true;
+          clearTimeout(openDeadline);
+          if (reconcileTimer) clearInterval(reconcileTimer);
+          reconcileTimer = undefined;
           console.debug("[events] connected", { url });
+          void recover();
         },
         onMessage: (data) => {
           let event: CompanyStreamEvent;
@@ -622,23 +680,28 @@ export function useEvents(
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
             onWorkflowChanged: onWorkflowChangedRef.current,
             onApprovalEvent: onApprovalEventRef.current,
+            onResync: recover,
           });
         },
         onError: ({ reconnecting }) => {
-          // A dead stream and a reconnecting one are both survivable: the poll
-          // remains the source of truth, so this logs rather than retrying.
+          opened = false;
+          startReconciliation();
           console.debug("[events] stream error", { url, reconnecting });
         },
       });
     } catch (err) {
-      // No streaming in this environment, or a malformed URL. Nothing to do —
-      // the poll already covers it.
+      clearTimeout(openDeadline);
+      startReconciliation();
       console.debug("[events] stream unavailable, falling back to poll", err);
-      return;
+      return () => {
+        if (reconcileTimer) clearInterval(reconcileTimer);
+      };
     }
     console.debug("[events] connecting", { url });
 
     return () => {
+      clearTimeout(openDeadline);
+      if (reconcileTimer) clearInterval(reconcileTimer);
       console.debug("[events] disconnecting", { url });
       unsubscribe();
     };
@@ -668,8 +731,14 @@ export function handleEvent(
     onWorkflowRunEvent,
     onWorkflowChanged,
     onApprovalEvent,
+    onResync,
   } = subscribers;
   switch (event.type) {
+    // A gap means incremental state is no longer trustworthy. It is structural
+    // rather than an attention event, so recovery is deliberately toast-free.
+    case "stream_gap":
+      void onResync?.();
+      break;
     // Live turn frames drive the in-flight tool timeline — no toast, they render
     // inline in the chat.
     case "tool_call":

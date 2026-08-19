@@ -30,6 +30,7 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::events::EventStreamItem;
 use crate::ports::types::{
     Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, OutboundMessage, OverlayDesk,
     OverlayDeskMember, OverlayDeskOrder, StoredEvent, TurnStep, Verdict,
@@ -611,11 +612,11 @@ async fn company_events(
         .runtime
         .events()
         .subscribe(&company)
-        .filter_map(move |stored| {
+        .filter_map(move |item| {
             // Keep the teardown guard alive for the life of the stream.
             let _ = &guard;
-            let event =
-                project_event(&stored).map(|value| Ok(Event::default().data(value.to_string())));
+            let event = project_stream_item(&item)
+                .map(|value| Ok(Event::default().data(value.to_string())));
             std::future::ready(event)
         });
     // Merge the transient live turn-progress bus (tool_call/tool_result frames a
@@ -634,6 +635,18 @@ async fn company_events(
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     )
+}
+
+/// Projects a live subscription item into the operator stream's safe wire
+/// shape. A gap is an unpersisted control frame, deliberately structural-only.
+fn project_stream_item(item: &EventStreamItem) -> Option<serde_json::Value> {
+    match item {
+        EventStreamItem::Event(stored) => project_event(stored),
+        EventStreamItem::Gap { missed } => Some(serde_json::json!({
+            "type": "stream_gap",
+            "missed": missed,
+        })),
+    }
 }
 
 /// Projects a stored event into the safe SSE wire shape, or `None` to drop it.
@@ -6561,6 +6574,16 @@ mode = "full"
     }
 
     #[test]
+    fn projects_a_gap_with_structural_fields_only() {
+        let value = super::project_stream_item(&EventStreamItem::Gap { missed: 44 })
+            .expect("a gap must reach the console");
+        assert_eq!(
+            value,
+            serde_json::json!({ "type": "stream_gap", "missed": 44 })
+        );
+    }
+
+    #[test]
     fn projects_agent_reply_with_chat_fields_and_steps() {
         use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
@@ -7954,8 +7977,32 @@ mode = "full"
         resolve_request(id, serde_json::json!({"verdict":"approve","detach":true}))
     }
 
-    /// Waits for the follow-up work a detached resolve spawned to settle.
-    async fn settle(runtime: &Arc<CompanyRuntime>) {
+    /// Waits for the follow-up work a detached resolve spawned to settle:
+    /// first for the turn to unblock, then for its continuation to have
+    /// journaled `expected_replies` `AgentReply` rows.
+    ///
+    /// # Condition, not clock (issue #1071)
+    ///
+    /// The second half used to be `sleep(400ms)` with a comment admitting what
+    /// it was — "the continuation itself runs on a spawned task; let it finish".
+    /// `ContinuationQueue::waiting()` drops to zero when the turn is
+    /// **unblocked**, which is strictly earlier than when the continuation's
+    /// replies are **written**, so the gap had to be covered by something. A
+    /// fixed sleep covers it only on a machine fast enough that day: on a loaded
+    /// CI runner the assertions read the event log first and came back short —
+    /// `3` replies instead of `4`, or `[]` instead of `["ceo"]` — on branches
+    /// with nothing to do with this code.
+    ///
+    /// Raising the sleep is the tempting fix and only moves the threshold. This
+    /// waits for the thing the caller is about to assert, the same way the first
+    /// half already waits for `waiting()`, under the same 10-second cap. A test
+    /// that is going to check for N replies has no reason to proceed before N
+    /// replies exist, and every reason not to.
+    ///
+    /// The count is the caller's because only the caller knows it. Passing a
+    /// number smaller than the assertion would reintroduce the race quietly, so
+    /// pass exactly what is asserted.
+    async fn settle(runtime: &Arc<CompanyRuntime>, expected_replies: usize) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while runtime.continuations.waiting() > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -7963,8 +8010,13 @@ mode = "full"
         })
         .await
         .expect("the turn never unblocked");
-        // The continuation itself runs on a spawned task; let it finish.
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while agent_replies(runtime).await.len() < expected_replies {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the continuation never journaled {expected_replies} replies"));
     }
 
     /// **The keystone (issue #469).** A turn that parks four sign-offs, all
@@ -7995,7 +8047,7 @@ mode = "full"
         for handle in handles {
             assert_eq!(handle.await.unwrap().status(), StatusCode::OK);
         }
-        settle(&c.runtime).await;
+        settle(&c.runtime, 4).await;
 
         assert_eq!(
             c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
@@ -8047,7 +8099,7 @@ mode = "full"
                 );
             }
         }
-        settle(&c.runtime).await;
+        settle(&c.runtime, 4).await;
 
         assert_eq!(
             c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
@@ -8074,7 +8126,7 @@ mode = "full"
             let response = c.app.clone().oneshot(approve_detached(id)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
         }
-        settle(&c.runtime).await;
+        settle(&c.runtime, 2).await;
 
         let replies = agent_replies(&c.runtime).await;
         assert_eq!(replies.len(), 2, "both re-issues answered");
@@ -8109,7 +8161,7 @@ mode = "full"
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
-            settle(&c.runtime).await;
+            settle(&c.runtime, 1).await;
             agent_replies(&c.runtime)
                 .await
                 .into_iter()
@@ -8149,7 +8201,7 @@ mode = "full"
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        settle(&c.runtime).await;
+        settle(&c.runtime, 1).await;
 
         assert_eq!(
             c.cycles.load(std::sync::atomic::Ordering::SeqCst) - before,
@@ -8179,7 +8231,7 @@ mode = "full"
                 "the verdict is durable regardless of what the turn then does"
             );
         }
-        settle(&c.runtime).await;
+        settle(&c.runtime, 1).await;
 
         let replies = agent_replies(&c.runtime).await;
         assert_eq!(

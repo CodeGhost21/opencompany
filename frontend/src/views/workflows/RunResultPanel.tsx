@@ -221,8 +221,9 @@ export function RunResultPanel({
         {/* Issue #881: the sentence the drawer never had. A blocked run comes
             back with no error, nothing delivered and — before this — eight
             green node cards, so the operator's only reading was "it worked".
-            It says plainly that approving does not continue THIS run: an agent
-            step is not resumable, so they must run the workflow again. */}
+            Since issue #899 (Stage 1) it says approving CONTINUES this run
+            automatically, with the honest caveat that the continuation re-runs
+            the agent's turn and may ask again if it diverges. */}
         {blockedNodes.length > 0 && (
           <p
             className="mb-2 text-xs text-[var(--status-blocked-text)]"
@@ -242,7 +243,7 @@ export function RunResultPanel({
                   // still gets the original sentence rather than a pointer to
                   // something that is not there.
                   canDecideHere ? "below or in Approvals" : "in Approvals"
-                }, then run the workflow again — approving does not continue this run.`
+                } and this run continues on its own — approving re-runs the step, so a changed decision may ask again.`
               : "Nothing here can be approved; change the policy and run the workflow again."}
           </p>
         )}
@@ -374,11 +375,11 @@ function RunApprovalsSection({
       <p className="text-xs font-medium">
         {stillWaiting > 0
           ? `Waiting on you — ${stillWaiting} of ${rows.length} still to decide`
-          : // Every card answered. It must NOT say the run is continuing: an
-            // agent node is not re-enterable, so approving never resumes this
-            // run — the same thing the blocked sentence above says, said again
-            // at the moment the operator has just finished deciding.
-            `All ${rows.length} decided — run the workflow again to continue`}
+          : // Every card answered. Since issue #899 (Stage 1) the last decision
+            // continues the run automatically, so this says the run is picking
+            // back up — with the caveat, carried by the blocked sentence above,
+            // that the re-run may ask again if the agent's turn diverges.
+            `All ${rows.length} decided — this run is continuing`}
       </p>
       <div className="mt-1 space-y-1">
         {rows.map((row) => {

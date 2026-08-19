@@ -19,6 +19,11 @@
 /// downstream agent node's turn (an `agent -> agent` pipeline passes data).
 #[cfg(test)]
 mod agent_upstream_input_test;
+/// Issue #899 (Stage 1): end-to-end proof that approving a call gated inside an
+/// agent node's own tool loop AUTO-CONTINUES the blocked run — one continuation,
+/// after the last decision, and none for a wholly refused block.
+#[cfg(test)]
+mod blocked_node_continuation_test;
 /// Issues #881 / #880: end-to-end proof that a node whose deliverable was
 /// parked for approval reports `blocked`, stops its branch instead of handing
 /// its apology downstream, and that the run says what it parked.

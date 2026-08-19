@@ -92,6 +92,7 @@ import {
   initialRunState,
   layout,
   statesFromRun,
+  windowHasRunStart,
 } from "@/views/workflows/graph";
 import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
@@ -467,9 +468,16 @@ export function WorkflowsView({
   const [indexRunsLoaded, setIndexRunsLoaded] = useState(false);
   // Issue #303: the per-workflow copilot panel is open.
   const [copilotOpen, setCopilotOpen] = useState(false);
-  // Run ids the live fold has actually seen frames for. The fallback above
-  // consults it so a console WITH a working stream never double-paints a run it
-  // already watched, and one without it still gets the journaled answer.
+  // Run ids the live fold has actually seen frames for. The no-stream fallback
+  // above consults it so a console WITH a working stream never double-paints a
+  // run it already watched, and one without it still gets the journaled answer.
+  //
+  // Issue #1010: this is now its ONLY reader, and it is cleared on every
+  // workflow/company switch below. It used to gate `inFlightSeed` too, which
+  // was the bug: a set that only ever grows cannot speak for a 300-frame window
+  // that evicts, so a run whose start had aged out was reported as covered and
+  // the seed was withheld from a fold that had nothing left to fold. The seed
+  // now asks the window itself — see `windowHasRunStart`.
   const liveRanRef = useRef<Set<string>>(new Set());
   // Issue #863: the run this canvas adopted from the history rather than from a
   // start frame. Held so the trail STAYS on screen once that run settles — the
@@ -503,6 +511,15 @@ export function WorkflowsView({
   // operator back off whatever they had since selected or cleared.
   const appliedWorkflowRef = useRef<string | null>(null);
   const appliedRunRef = useRef<string | null>(null);
+
+  // Issue #1045: the deep-link id whose absent-path re-read is in flight, so
+  // that read is started at most once per id even though the follow effect
+  // reruns on every fresh `workflows` array. Deliberately SEPARATE from
+  // `appliedWorkflowRef`: an id is "applied" only once it has RESOLVED — got
+  // selected, or was confirmed missing after a fresh read — whereas an id whose
+  // re-read is still outstanding must stay unapplied, so a refresh that finally
+  // carries a graph authored elsewhere can still select it.
+  const resolvingWorkflowRef = useRef<string | null>(null);
 
   // How many local writes have landed. Compared across the list effect's await
   // so a `GET …/workflows` that was already in flight when a create, save or
@@ -626,27 +643,87 @@ export function WorkflowsView({
   // clicks a second task card's link without ever leaving this tab, so the
   // first-load resolution above never runs again.
   //
-  // Guarded to once per distinct id: this also reruns whenever `workflows` gets
+  // Guarded to once per RESOLVED id: this also reruns whenever `workflows` gets
   // a new array (a create, a rename, a company switch), and re-applying the URL
   // then would yank the selection back from wherever the operator had moved it.
   // A no-longer-current `sub` — the operator picked something else, so the hash
   // no longer matches — is left alone precisely because it was already applied.
+  //
+  // Issue #1045: an id is recorded in `appliedWorkflowRef` ONLY once it has
+  // resolved — selected, or confirmed missing after a fresh read. An id that is
+  // merely absent from the list on screen right now must NOT be frozen there:
+  // a graph the orchestrator (or another session) authored lands in the picker
+  // a beat after its link is followed, and that later refresh has to be allowed
+  // to select it. And an absent id no longer toasts on sight — it toasts only
+  // after a fresh re-read still cannot find it, which is what tells "renamed or
+  // deleted" apart from "authored elsewhere and not pulled into this tab yet".
   useEffect(() => {
     if (!requestedWorkflowId || workflows.length === 0) return;
     if (appliedWorkflowRef.current === requestedWorkflowId) return;
-    appliedWorkflowRef.current = requestedWorkflowId;
+    // Present in the list already on screen: select it, done. Marking it applied
+    // HERE, inside the present branch, is half the #1045 fix — an absent id must
+    // never reach the ref, or a later refresh carrying it would early-return
+    // above instead of selecting it.
     if (workflows.some((w) => w.id === requestedWorkflowId)) {
+      appliedWorkflowRef.current = requestedWorkflowId;
       setSelectedId(requestedWorkflowId);
       return;
     }
-    // Say so rather than silently showing a different graph: the operator
-    // followed a link expecting one specific workflow, and a canvas quietly
-    // painting another one is worse than no canvas at all.
-    toast.error(`This company has no workflow “${requestedWorkflowId}”.`, {
-      description:
-        "It may have been renamed or deleted since the link was made. Showing the current selection instead.",
-    });
-  }, [requestedWorkflowId, workflows]);
+    // Absent from the list on screen. Before #1045 this toasted straight away,
+    // against whatever the picker happened to hold the instant the id was first
+    // seen — on a link followed to a just-authored graph, a list that predates
+    // it — so the operator got a false "no workflow" and the canvas never
+    // resolved. Re-read the list first, and decide on the fresh answer. At most
+    // one read per requested id (the effect reruns on every `workflows` array).
+    if (resolvingWorkflowRef.current === requestedWorkflowId) return;
+    resolvingWorkflowRef.current = requestedWorkflowId;
+    let live = true;
+    const target = requestedWorkflowId;
+    const writesBefore = localWriteRef.current;
+    (async () => {
+      try {
+        const rows = await listWorkflows(client, company);
+        // Same liveness discipline as the list effect above: bail if the view
+        // unmounted or a dependency changed under us (both flip `live` via this
+        // effect's cleanup), and drop the rows if a local write landed while the
+        // read was in flight — that write holds newer truth than a read which
+        // predates it.
+        if (!live) return;
+        if (localWriteRef.current !== writesBefore) return;
+        if (appliedWorkflowRef.current === target) return;
+        appliedWorkflowRef.current = target;
+        if (rows.some((r) => r.id === target)) {
+          // The graph exists after all — authored elsewhere and not yet pulled
+          // into this tab. Adopt the fresh list so the picker shows it too, and
+          // select it. No toast: nothing was wrong.
+          setWorkflows(rows);
+          setSelectedId(target);
+          return;
+        }
+        // Still absent after a fresh read: the link genuinely names a workflow
+        // this company no longer has. Say so, once.
+        toast.error(`This company has no workflow “${target}”.`, {
+          description:
+            "It may have been renamed or deleted since the link was made. Showing the current selection instead.",
+        });
+      } catch {
+        // A failed re-read is not proof the workflow is missing. Leave the id
+        // unresolved so a later refresh can still land it, rather than toasting
+        // a false "no workflow" off a transient network error.
+        if (live) resolvingWorkflowRef.current = null;
+      }
+    })();
+    return () => {
+      live = false;
+      // Let a rerun retry the re-read: this cleanup fires when a dependency
+      // changed the read out from under us (an unrelated list refresh, a company
+      // switch), and the abandoned read above will not clear the guard itself.
+      resolvingWorkflowRef.current = null;
+    };
+    // `requestedWorkflowId` and `workflows` drive the resolution; `client` and
+    // `company` scope the re-read. `listWorkflows`, `localWriteRef`,
+    // `setWorkflows`, `setSelectedId` are stable.
+  }, [requestedWorkflowId, workflows, client, company]);
 
   // Issue #339: mirror the selection back into the hash, so whatever is on the
   // canvas can be copied out of the address bar and shared.
@@ -1276,7 +1353,18 @@ export function WorkflowsView({
       (r) => r.runId && (r.running || r.runId === adoptedFromHistoryRef.current),
     );
     if (!row?.runId) return null;
-    if (liveRanRef.current.has(row.runId) && row.runId !== adoptedFromHistoryRef.current) {
+    // Issue #1010: ask the WINDOW, not a set of every run this console has ever
+    // seen a frame for. The fold only supersedes this seed when it can find the
+    // run's own start frame, and the window is a rolling 300 that evicts — so
+    // the old "has watched it live, ever" reading withheld the seed from a fold
+    // that could no longer cover the run, and the canvas blanked. Switching
+    // workflow away and back mid-run was the reliable way to see it: the ref
+    // survived the switch while `adoptedFromHistoryRef` was cleared, so neither
+    // clause held and `inFlightSeed` returned null for a run still going.
+    if (
+      windowHasRunStart(runEvents, row.runId) &&
+      row.runId !== adoptedFromHistoryRef.current
+    ) {
       return null;
     }
     return {
@@ -1285,7 +1373,10 @@ export function WorkflowsView({
       elapsed: elapsedFromRun(row),
       scheduled: row.scheduled,
     };
-  }, [runs, runsFor, selectedId]);
+    // `runEvents` joins the deps with the guard above (issue #1010): the seed's
+    // answer now depends on what the window holds, so it has to recompute when
+    // the window changes.
+  }, [runs, runsFor, selectedId, runEvents]);
 
   // Issue #921: the runs the HOST reports as no longer in flight. This is the
   // only authority that survives a dead stream — the `workflow_run_finished`
@@ -1427,6 +1518,12 @@ export function WorkflowsView({
     // it across the switch would keep painting one graph's trail onto another's
     // canvas the moment the two share a node id.
     adoptedFromHistoryRef.current = null;
+    // Issue #1010: and its sibling, which was NOT cleared here — the asymmetry
+    // that made switching away and back mid-run blank the canvas. The two refs
+    // answer the same question from opposite sides and have to have the same
+    // lifetime; leaving one behind is how "this console watched that run" came
+    // to outlive the console's view of it.
+    liveRanRef.current = new Set();
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.

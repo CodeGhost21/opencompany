@@ -1185,6 +1185,9 @@ export function WorkflowCreateDialog({
         id: id.trim(),
         name: name.trim(),
         description: description.trim() || undefined,
+        // Locally-built body; the conditional-write token is passed separately as
+        // `expectedVersion`, so this carries none (issue #1013 makes it explicit).
+        version: null,
         nodes: outNodes,
         edges: edges.map(
           (e): WorkflowEdge => ({
