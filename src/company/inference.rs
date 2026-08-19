@@ -365,9 +365,15 @@ fn resolve_endpoint(
     let has_key = !key.trim().is_empty();
 
     if normalize_provider(provider) == "openrouter" && !has_key {
-        let base_url = base_url_override
-            .map(str::to_string)
-            .or_else(|| env_default.map(|e| e.base_url.clone()))
+        // The platform credential rides only the platform's own endpoint. A
+        // tenant-supplied base URL override with no key is a direct (keyless)
+        // config, not the inheritance branch: pairing the platform token with
+        // an arbitrary endpoint would leak it to wherever the override points.
+        if let Some(base_url) = base_url_override {
+            return (base_url.to_string(), Credential::None, false);
+        }
+        let base_url = env_default
+            .map(|e| e.base_url.clone())
             .unwrap_or_else(|| PLATFORM_BASE_URL.to_string());
         let credential = env_default
             .map(|e| e.credential.clone())
