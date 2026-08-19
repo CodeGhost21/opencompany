@@ -165,11 +165,15 @@ impl OrphanReport {
 /// it is actually persisted, which is what they will have to match when they
 /// fix it.
 ///
-/// **It does not care which tenant is running it.** Boot hydration filters
-/// `owners()` down to this workload's own tenant; this does not, because a
-/// company orphaned from tenant B is exactly as invisible whether tenant A or
-/// the platform is the one asking. Filtering to the local tenant would hide
-/// every orphan except those belonging to whoever happened to restart.
+/// **It does not care which tenant is running it.** This stays unfiltered on
+/// purpose: a company orphaned from tenant B is exactly as invisible whether
+/// tenant A or the platform is the one asking, and an operator running the
+/// `opencompany orphans` command wants every tenant's findings in one answer.
+/// The *boot* surface is a different decision — it filters to this workload's
+/// own tenant before printing, because in shared-single-DB a tenant pod's
+/// stderr is not the platform's log (`src/bin/opencompany.rs`). Filtering here
+/// would do that job badly by hiding orphans from the one reader who can act on
+/// them; filtering there is what keeps tenant B's ids out of tenant A's log.
 pub fn find(companies: &[CompanySummary], owners: &[(CompanyId, String)]) -> OrphanReport {
     let owned: BTreeSet<&str> = owners.iter().map(|(id, _)| id.as_ref()).collect();
     // A `BTreeMap` rather than a set: a duplicate id in `companies` would
