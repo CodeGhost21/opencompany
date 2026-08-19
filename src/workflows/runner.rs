@@ -2602,7 +2602,9 @@ to = "done"
         let dir = tempfile::tempdir().unwrap();
         let pool = Arc::new(HarnessPool::new());
         let rec = record();
-        let runner = HarnessWorkflowRunner::new(pool, deps(dir.path()), rec.clone());
+        let deps = deps(dir.path());
+        let turn = Arc::new(HarnessRunTurn::new(pool, Arc::new(deps.clone())));
+        let runner = HarnessWorkflowRunner::new(turn, deps, rec.clone());
 
         let file = parse_workflow(GREET).expect("workflow parses");
         let run = WorkflowRunner::run(
