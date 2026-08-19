@@ -316,7 +316,9 @@ pub async fn oc_forget_device(
 /// answers only this. Both degrade to the single-instance behaviour instead of
 /// to an unhandled `no such command`.
 #[tauri::command]
-pub async fn oc_embedded(state: State<'_, crate::AppHandleState>) -> Result<Option<EmbeddedInfo>, String> {
+pub async fn oc_embedded(
+    state: State<'_, crate::AppHandleState>,
+) -> Result<Option<EmbeddedInfo>, String> {
     let local = state.local.lock().await;
     Ok(local.default_instance().and_then(|instance| {
         Some(EmbeddedInfo {
@@ -425,6 +427,66 @@ mod test {
             "pairing must answer with these three fields and nothing else"
         );
         assert!(!wire.to_string().to_lowercase().contains("token"));
+    }
+
+    /// The keys the console reads off an instance row, by name.
+    ///
+    /// Same argument as `the_embedded_record_answers_in_the_keys_the_console_reads`:
+    /// nothing type-checks a Rust struct against the TypeScript that reads it,
+    /// and every optional field degrades silently. A renamed key lands as "the
+    /// instance list is full of blank rows", not as an error.
+    #[test]
+    fn an_instance_row_answers_in_the_keys_the_console_reads() {
+        let wire = serde_json::to_value(LocalInstanceInfo {
+            id: "acme".into(),
+            label: "Acme".into(),
+            data_dir: "/data/instances/acme".into(),
+            running: true,
+            base_url: Some("http://127.0.0.1:1234".into()),
+            instance_id: Some("inst-1".into()),
+            operator_email: Some("operator@opencompany.local".into()),
+            companies: vec!["acme".into()],
+            error: None,
+        })
+        .expect("serialise");
+
+        let object = wire.as_object().expect("an object");
+        assert_eq!(
+            object.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                "id",
+                "label",
+                "dataDir",
+                "running",
+                "baseUrl",
+                "instanceId",
+                "operatorEmail",
+                "companies",
+            ],
+        );
+    }
+
+    /// A stopped row carries no address, so the console cannot render one that
+    /// would fail its probe forever.
+    #[test]
+    fn a_stopped_instance_carries_no_address() {
+        let wire = serde_json::to_value(LocalInstanceInfo {
+            id: "acme".into(),
+            label: "Acme".into(),
+            data_dir: "/data/instances/acme".into(),
+            running: false,
+            base_url: None,
+            instance_id: None,
+            operator_email: None,
+            companies: Vec::new(),
+            error: Some("the data root is in use".into()),
+        })
+        .expect("serialise");
+
+        let object = wire.as_object().expect("an object");
+        assert!(!object.contains_key("baseUrl"));
+        assert_eq!(object["error"], "the data root is in use");
+        assert_eq!(object["running"], false);
     }
 
     /// A one-shot host that answers every request with `head`, then closes.
