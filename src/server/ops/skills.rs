@@ -309,6 +309,12 @@ async fn install(
     Path(SlugPath { slug }): Path<SlugPath>,
     body: Option<Json<InstallSkill>>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
+    if !valid_slug(&slug) {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "`{slug}` is not a valid skill slug. Skills live under `skills/<slug>/`, so a slug \
+             is `[a-z0-9][a-z0-9-]*`."
+        ))));
+    }
     let registry = state.shared_skill_registry()?;
     let doc = match registry.iter().find(|doc| doc.slug == slug) {
         Some(doc) => render_skill_md(doc),
