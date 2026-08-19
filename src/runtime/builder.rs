@@ -4051,6 +4051,41 @@ mod test {
             }
         }
 
+        /// Keeps each event's level alongside its rendered message.
+        ///
+        /// The captured text cannot stand in for the level: `with_max_level`
+        /// names a *maximum verbosity*, so a `WARN` ceiling admits `ERROR` too,
+        /// and a promotion would slip past an assertion that only reads the
+        /// message. This reads `Metadata::level()` itself.
+        #[derive(Clone, Default)]
+        struct Levels(StdArc<StdMutex<Vec<(tracing::Level, String)>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Levels {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Message(String);
+                impl tracing::field::Visit for Message {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if field.name() == "message" {
+                            self.0 = format!("{value:?}");
+                        }
+                    }
+                }
+                let mut message = Message(String::new());
+                event.record(&mut message);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((*event.metadata().level(), message.0));
+            }
+        }
+
         let home_dir = tmp_home("oc-inert-board-");
         let manifest = parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n");
         // No `with_harness`: the default shape ~200 callers use.
@@ -4063,10 +4098,15 @@ mod test {
 
         let logs = Captured::default();
         let sink = logs.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || sink.clone())
-            .with_max_level(tracing::Level::WARN)
-            .finish();
+        let levels = Levels::default();
+        let subscriber = {
+            use tracing_subscriber::layer::SubscriberExt;
+            tracing_subscriber::fmt()
+                .with_writer(move || sink.clone())
+                .with_max_level(tracing::Level::WARN)
+                .finish()
+                .with(levels.clone())
+        };
 
         let card = |id: &str, column: &str| crate::ports::tasks::TaskRecord {
             id: id.to_string(),
@@ -4118,6 +4158,26 @@ mod test {
             text.matches("no agent pool").count(),
             1,
             "the warning is latched per runtime, not raised per card: {text:?}"
+        );
+
+        // The level, read from the event rather than inferred from the text.
+        // `warn!` is the whole point: demoted to `debug!` it restores the
+        // silence this fixes, and promoted to `error!` it cries failure over a
+        // documented default that ~200 callers build on purpose.
+        let seen = levels.0.lock().unwrap().clone();
+        let inert: Vec<_> = seen
+            .iter()
+            .filter(|(_, message)| message.contains("no agent pool"))
+            .collect();
+        assert_eq!(
+            inert.len(),
+            1,
+            "exactly one inert-board event should reach the subscriber: {seen:?}"
+        );
+        assert_eq!(
+            inert[0].0,
+            tracing::Level::WARN,
+            "the inert-board line must stay at WARN: {seen:?}"
         );
     }
 
