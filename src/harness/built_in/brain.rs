@@ -8978,6 +8978,43 @@ kind = "built_in"
         );
     }
 
+    /// The named lane is a **real** pool, not a spy: it must build its own
+    /// roster at boot, or a bound agent's first turn fails `CompanyNotFound`
+    /// on an empty pool. This is the path the `SpyLane` coverage above cannot
+    /// reach — a spy forwards every turn, so it would pass whether or not the
+    /// lane's pool was ever warmed.
+    #[tokio::test]
+    async fn a_named_lane_builds_its_roster_at_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = brain_over_mock_with(dir.path(), two_harness_record());
+        // The lane `lanes::build` produces: its own pool over deps narrowed to
+        // the agents it serves.
+        let mut deep_deps = (*brain.deps).clone();
+        deep_deps.serves = Some(std::collections::HashSet::from(["researcher".to_string()]));
+        let deep: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(HarnessRunTurn::new(
+            Arc::new(HarnessPool::new()),
+            Arc::new(deep_deps),
+        ));
+        let brain = brain.with_lanes(vec![("deep".to_string(), deep.clone())]);
+
+        // Boot warm-up: the router warms every lane's engine, each against its
+        // own narrowed deps.
+        brain
+            .run_turn()
+            .ensure(&brain.record())
+            .await
+            .expect("every lane's roster builds");
+
+        // A bound agent's turn now reaches its lane's engine instead of dying
+        // with "company not found".
+        let out = brain
+            .run_turn()
+            .run(&CompanyId::new("acme"), "researcher", "hi", None)
+            .await
+            .expect("the deep lane's roster is built at boot");
+        assert!(out.reply.contains("hi"), "{}", out.reply);
+    }
+
     /// A declared harness this host cannot run fails the turn, naming the
     /// harness and the reason. It must never quietly borrow the default lane:
     /// that turn would succeed on a model and a credential nobody chose, and
