@@ -1453,6 +1453,22 @@ async fn an_operator_assigned_card_dispatches_even_when_the_plan_is_ambiguous() 
     let after = read(&runtime, "t-21").await;
     assert_eq!(after.column, COLUMN_IN_PROGRESS, "it still dispatches");
     assert_eq!(after.assignee, "sam");
+
+    // And it carries NO ownership question. The console renders any non-empty
+    // candidate list as an unanswered "Who owns this?" with live Assign buttons,
+    // so persisting one here would put that question on a card whose owner a
+    // person had already chosen and whose work is already running — asking about
+    // a decision that was never open. Caught by CodeRabbit on #1157: the first
+    // version of this test asserted the column and the assignee and stopped
+    // there, which is exactly the half that was wrong.
+    assert!(
+        after
+            .plan
+            .expect("the brief is still written")
+            .assignee_candidates
+            .is_empty(),
+        "an owned card has no ownership question to persist"
+    );
 }
 
 /// One candidate is unchanged behaviour: it is applied, recorded as the

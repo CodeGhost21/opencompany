@@ -360,7 +360,20 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
         [only] => Some(only.id.clone()),
         _ => None,
     };
-    let ambiguous = candidates.len() > 1;
+    // Resolved *before* the brief is built, because whether this card carries an
+    // ownership question is part of the brief. A card with a usable owner has no
+    // question to persist: it dispatches, and a candidate list stored beside a
+    // teammate who is already doing the work is one the console would render as
+    // an unanswered "Who owns this?" — with live Assign buttons — on a card
+    // nobody was ever asked about.
+    //
+    // The validity filter is part of that: a card still naming a teammate who
+    // has since left the roster has no usable owner, so it is ambiguous like any
+    // other unowned card rather than being answered with "the plan did not name
+    // a teammate who could take it", which would be false.
+    let assignee = settled_assignee(&evidence.card_assignee, proposed.clone())
+        .filter(|a| evidence.assignee_is_valid(a));
+    let ambiguous = assignee.is_none() && candidates.len() > 1;
     let plan = TaskPlan {
         description: cap(&draft.description, MAX_PROSE_CHARS),
         steps: draft
@@ -394,23 +407,15 @@ pub async fn run_planning_pass(runtime: Arc<CompanyRuntime>, task_id: String) {
         planned_at_millis: now_millis(),
     };
 
-    // The validity filter is hoisted out of the `let else` below so the
-    // ambiguity arm can see through it. A card still carrying a teammate who has
-    // since left the roster has no usable owner, so it is the ambiguity arm's
-    // business too — leaving it to the arm below would answer a card that named
-    // two perfectly good candidates with "the plan did not name a teammate who
-    // could take it".
-    let assignee = settled_assignee(&evidence.card_assignee, proposed)
-        .filter(|a| evidence.assignee_is_valid(a));
     // Issue #1106: park rather than pick, when the card has no usable owner and
     // the pass named more than one teammate who could take it.
     //
-    // Gated on `assignee.is_none()` deliberately — an assignee a person set is
-    // never second-guessed, so a card with a valid owner dispatches even when the
-    // planner could name three others who would also have fitted. That is the
-    // same precedence the proposal already had; this only adds a case to the
+    // `ambiguous` already carries `assignee.is_none()` — an assignee a person set
+    // is never second-guessed, so a card with a valid owner dispatches even when
+    // the planner could name three others who would also have fitted. That is
+    // the same precedence the proposal already had; this only adds a case to the
     // branch that had nothing to say.
-    if assignee.is_none() && ambiguous {
+    if ambiguous {
         settle_blocked(
             &runtime,
             &task_id,
