@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(&*embedded.seen.lock().unwrap(), &["ceo".to_string()]);
     }
 
-    /// All three `RunTurn` methods route, not just the streamed one. A method
+    /// Every `RunTurn` method routes, not just the streamed one. A method
     /// that forwarded to a fixed engine would send *dispatched card* turns to
     /// the wrong model while operator chat looked correct.
     #[tokio::test]
@@ -351,6 +351,14 @@ mod tests {
         assert_eq!(
             router
                 .run_steered_background(&company(), "researcher", "hi", &control, None)
+                .await
+                .unwrap()
+                .reply,
+            "deep"
+        );
+        assert_eq!(
+            router
+                .run_background(&company(), "researcher", "hi")
                 .await
                 .unwrap()
                 .reply,
