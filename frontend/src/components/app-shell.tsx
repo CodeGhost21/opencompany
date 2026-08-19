@@ -779,7 +779,6 @@ export function AppShell({
   useEffect(() => {
     companyRef.current = company;
   }, [company]);
-  // ── The company-clear effects ──────────────────────────────────────────────
   useEffect(() => {
     // Re-armed on mount, which is not redundant with the initial `true`:
     // `main.tsx` renders under `StrictMode`, so in development React mounts,
