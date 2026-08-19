@@ -3916,9 +3916,9 @@ fn summarize_run(
         .deliveries
         .iter()
         .filter(|d| {
-            !matches!(
+            matches!(
                 d.status,
-                crate::ports::DeliveryStatus::Sent | crate::ports::DeliveryStatus::Pending
+                crate::ports::DeliveryStatus::Denied | crate::ports::DeliveryStatus::Failed
             )
         })
         .collect();
@@ -9161,6 +9161,23 @@ name = "Morning"
             ..dropped.clone()
         };
         let md = summarize_run(&file, &parked, "run-parked", RunOutputStored::Stored);
+        assert!(!md.contains("did NOT reach a destination"), "{md}");
+
+        // A continuation that already delivered this report records a skip so
+        // it cannot send the same output twice. That is a successful lineage,
+        // not a failed destination that the operator should try to repair.
+        let skipped = WorkflowRun {
+            deliveries: vec![crate::ports::DeliveryReport {
+                node: "worker".into(),
+                kind: "email".into(),
+                target: Some("owner".into()),
+                status: crate::ports::DeliveryStatus::Skipped,
+                detail: "already delivered in this lineage".into(),
+                reason: crate::ports::DeliveryReason::AlreadyDelivered,
+            }],
+            ..dropped
+        };
+        let md = summarize_run(&file, &skipped, "run-skipped", RunOutputStored::Stored);
         assert!(!md.contains("did NOT reach a destination"), "{md}");
     }
 

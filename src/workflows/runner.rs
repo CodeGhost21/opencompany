@@ -1755,6 +1755,64 @@ mod tests {
     use crate::ports::run_output::WorkflowRunOutputStore;
     use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
+    /// A workflow lane that records which agent it served. Its reply names the
+    /// lane so the run output proves the same routing decision as the call log.
+    struct RecordingLane {
+        label: &'static str,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingLane {
+        fn new(label: &'static str) -> Arc<Self> {
+            Arc::new(Self {
+                label,
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl crate::runtime::delegation::RunTurn for RecordingLane {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.seen.lock().unwrap().push(agent_id.to_string());
+            Ok(crate::harness::TurnOutcome {
+                reply: self.label.to_string(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+                halted_for_spend: None,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            chat_id: Option<&str>,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(company, agent_id, message, chat_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &crate::company::steer::SteerControl,
+            _run_sink: Option<Arc<crate::harness::run_trace::RunTraceSink>>,
+        ) -> Result<crate::harness::TurnOutcome> {
+            self.run(company, agent_id, message, None).await
+        }
+    }
+
     fn record() -> CompanyRecord {
         let manifest = toml::from_str(
             r#"
@@ -2635,6 +2693,39 @@ to = "done"
         .await
         .expect("workflow runs");
         assert!(run.output.to_string().contains("hello-marker"));
+    }
+
+    /// The workflow port keeps the lane-aware router intact: an agent bound to
+    /// a named harness must not fall back to the default engine.
+    #[tokio::test]
+    async fn port_impl_routes_an_agent_node_to_its_named_harness() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = record();
+        let deps = deps(dir.path());
+        let default = RecordingLane::new("default-lane");
+        let deep = RecordingLane::new("deep-lane");
+        let turn: Arc<dyn crate::runtime::delegation::RunTurn> = Arc::new(
+            crate::harness::router::HarnessRouter::new("embedded")
+                .with_engine("embedded", default.clone())
+                .with_engine("deep", deep.clone())
+                .bind("ceo", "deep"),
+        );
+        let runner = HarnessWorkflowRunner::new(turn, deps, rec.clone());
+
+        let file = parse_workflow(GREET).expect("workflow parses");
+        let run = WorkflowRunner::run(
+            &runner,
+            &rec.id,
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs through the named lane");
+
+        assert!(run.output.to_string().contains("deep-lane"));
+        assert!(default.seen.lock().unwrap().is_empty());
+        assert_eq!(&*deep.seen.lock().unwrap(), &["ceo".to_string()]);
     }
 
     /// A workflow with no trigger is a caller-facing bad request, not a harness
