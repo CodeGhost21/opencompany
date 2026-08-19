@@ -82,6 +82,7 @@ import type { DecidedApproval } from "@/views/chat/model";
 import { cn } from "@/lib/utils";
 import { startVisiblePolling } from "@/lib/visible-poll";
 import type { NodeRunState } from "@/lib/workflow-sample";
+import { workflowSavedToast } from "@/lib/workflow-saved-toast";
 // Issue #303: the canvas arithmetic, the run-state folds and the three drawers
 // moved out when this file passed 1800 lines and was about to grow an index and
 // a copilot. See `workflows/graph.ts` for why the fold is pure.
@@ -1188,6 +1189,10 @@ export function WorkflowsView({
   // save again without a re-read — dropping it and re-fetching would be a round
   // trip that can only return the same thing.
   const handleSaved = useCallback((saved: WorkflowGraph) => {
+    // Issue #1017: read the armed state BEFORE overwriting `graph`, so a save
+    // that silently disarmed the workflow (a schedule edit comes back
+    // `enabled: false`) can be told apart from an ordinary one below.
+    const wasEnabled = graph?.enabled;
     // Newer than any list request already in flight — see `localWriteRef`.
     localWriteRef.current += 1;
     setGraph(saved);
@@ -1214,8 +1219,44 @@ export function WorkflowsView({
     // The write landed, so whatever we hold is current — the same reasoning as
     // the graph-load effect's clear.
     setConflict(null);
-    toast.success("Workflow saved.");
-  }, []);
+    // Issue #1017: a save that just disarmed the workflow gets a paused toast
+    // with a one-click Resume, instead of a "saved" that hid that its schedule
+    // was switched off. Every other save keeps the plain acknowledgement.
+    if (workflowSavedToast(wasEnabled, saved.enabled) === "disarmed") {
+      toast.warning(
+        `Saved, and paused “${saved.name}”. Its schedule is off — it won't run on its own until you resume it.`,
+        {
+          action: {
+            label: "Resume",
+            onClick: () => {
+              void (async () => {
+                try {
+                  const updated = await setWorkflowEnabled(client, company, saved.id, true);
+                  // Newer than any list request already in flight.
+                  localWriteRef.current += 1;
+                  setGraph(updated);
+                  setWorkflows((prev) =>
+                    prev.map((w) =>
+                      w.id === updated.id ? { ...w, enabled: updated.enabled } : w,
+                    ),
+                  );
+                  toast.success(
+                    `Resumed “${updated.name}”. It will run on its schedule again.`,
+                  );
+                } catch (e) {
+                  toast.error(
+                    e instanceof Error ? e.message : "could not change the workflow",
+                  );
+                }
+              })();
+            },
+          },
+        },
+      );
+    } else {
+      toast.success("Workflow saved.");
+    }
+  }, [client, company, graph]);
 
   // The creator posts the full graph back, so the new entry can be spliced
   // straight into the list and selected — no extra round trip to re-list.
