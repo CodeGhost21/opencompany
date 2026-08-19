@@ -51,6 +51,7 @@ import { TEAM_TONES, initials, toneFor } from "@/lib/team";
 import { fieldCopy, fieldPlaceholder } from "@/lib/setup-fields";
 import type { Step } from "@/components/ui/stepper";
 import {
+  adminEmailProblem,
   emptySetupDraft,
   jobItems,
   type SetupDraft,
@@ -529,8 +530,14 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
     if (current.id === "business" && !draft.industry.trim()) {
       return "Tell us a little about the company first.";
     }
-    if (current.id === "account" && needsCompany && !email.trim() && requiresSignIn(status, values)) {
-      return "We need an address, or nobody will be able to sign in to this company.";
+    if (current.id === "account" && needsCompany) {
+      // Checked here rather than left to the manifest validator on the last
+      // screen, which reported it as "`[users].admins` has an invalid entry"
+      // after the roster had been designed — a configuration error about a
+      // mistake made four steps earlier, in the language of a file the operator
+      // has never seen.
+      const problem = adminEmailProblem(email, requiresSignIn(status, values));
+      if (problem) return problem;
     }
     return undefined;
   };

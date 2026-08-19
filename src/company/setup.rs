@@ -1791,4 +1791,76 @@ mod tests {
         }
         assert_eq!(manifest.validate(), Vec::<String>::new());
     }
+
+    // ---------------------------------------------------------------------
+    // The admin address, and the console that must agree about it
+    // ---------------------------------------------------------------------
+
+    /// The rule the console re-implements, pinned to a shared fixture.
+    ///
+    /// A wizard that let `as` through produced a company whose manifest failed
+    /// validation on the *last* screen, after the roster had been designed and
+    /// the apply attempted — the operator was told "that didn't apply" about a
+    /// mistake they made four steps earlier.
+    ///
+    /// The console cannot call this validator, so it re-implements the rule, and
+    /// this fixture is what stops the two drifting. Deliberately loose on the
+    /// host side: `normalize_email` is trim + lowercase and the only structural
+    /// demand is an `@`, because the rule exists to stop an entry normalizing
+    /// into something `LoginIdentity::parse` would misread — not to police what
+    /// a mail server accepts. A console applying a stricter regex would reject
+    /// addresses the host takes happily.
+    #[test]
+    fn the_admin_address_rule_matches_the_shared_fixture() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            why: String,
+            input: String,
+            usable: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+
+        let raw = include_str!("../../tests/fixtures/setup-admin-email.json");
+        let fixture: Fixture = serde_json::from_str(raw).expect("fixture parses");
+        assert!(
+            !fixture.cases.is_empty(),
+            "an empty fixture asserts nothing"
+        );
+
+        for case in &fixture.cases {
+            assert_eq!(
+                crate::ports::users::is_usable_admin_email(&case.input),
+                case.usable,
+                "{} — input {:?}",
+                case.why,
+                case.input
+            );
+        }
+
+        // And the manifest validator applies the same rule, not a second one:
+        // every address the predicate rejects must be refused when written.
+        for case in fixture
+            .cases
+            .iter()
+            .filter(|c| !c.usable && !c.input.trim().is_empty())
+        {
+            let manifest = manifest_from_setup(
+                &answers("a shop", ""),
+                &[proposed("Ops")],
+                Some(&case.input),
+            );
+            assert!(
+                manifest
+                    .validate()
+                    .iter()
+                    .any(|p| p.contains("[users].admins")),
+                "{} — {:?} reached a valid manifest",
+                case.why,
+                case.input
+            );
+        }
+    }
 }

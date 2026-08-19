@@ -7,6 +7,7 @@ import type { TeamMemberDto } from "@/api/types";
 import {
   SETUP_STEPS,
   MAX_JOBS,
+  adminEmailProblem,
   jobItems,
   buildOutLabel,
   draftIsSubmittable,
@@ -197,5 +198,45 @@ describe("the job checklist", () => {
       expect(jobItems(testCase.input)).toEqual(testCase.items);
     });
   }
+});
+
+describe("the admin address", () => {
+  /**
+   * The bug: `as` passed the email step, the roster was designed, and the apply
+   * then failed with "`[users].admins` has an invalid entry" on the last screen
+   * — a configuration error about a mistake made four steps earlier.
+   *
+   * Driven by the SAME fixture the host's test reads. The console cannot call
+   * `is_usable_admin_email`, so a fixture is what keeps the re-implementation
+   * honest — and stops anyone "improving" this into a strict regex that refuses
+   * addresses the host accepts everywhere else.
+   */
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("../../../tests/fixtures/setup-admin-email.json", import.meta.url)),
+      "utf8",
+    ),
+  ) as { cases: { why: string; input: string; usable: boolean }[] };
+
+  it("has cases to assert on at all", () => {
+    expect(fixture.cases.length).toBeGreaterThan(0);
+  });
+
+  for (const testCase of fixture.cases) {
+    it(testCase.why, () => {
+      // `required` is true, so a blank address is a problem here as well as a
+      // structurally invalid one — the host's predicate answers only the second
+      // question, and both readings must reject everything it rejects.
+      const problem = adminEmailProblem(testCase.input, true);
+      expect(problem === undefined).toBe(testCase.usable);
+    });
+  }
+
+  /** A host with no sign-in needs no address — but a typo is still a typo. */
+  it("lets a blank address pass where sign-in is not required, but not a typo", () => {
+    expect(adminEmailProblem("", false)).toBeUndefined();
+    expect(adminEmailProblem("   ", false)).toBeUndefined();
+    expect(adminEmailProblem("as", false)).toContain("@");
+  });
 });
 
