@@ -712,15 +712,20 @@ mod tests {
         )
         .unwrap();
 
-        // The baseline is intact and the bogus delta contributed nothing.
+        // The bogus delta contributed nothing to the effective set…
         assert_eq!(eff.docs.len(), with_baseline(&[]));
-        // Nothing was written above the skills tree, and no `..` dir appeared
-        // inside it either.
-        assert_eq!(ws.path().join("skills").join("..").canonicalize().is_err(), true);
+        assert!(eff.docs.iter().all(|doc| doc.slug != ".."));
+        // …and its write never escaped the scratch tree: `skills/..` resolves
+        // to the workspace root, which is where the escaped SKILL.md would have
+        // landed.
+        assert!(
+            !ws.path().join("SKILL.md").exists(),
+            "the traversal delta wrote nothing outside the skills tree"
+        );
+        // Only the baseline dirs materialize — no `..` directory inside either.
         assert_eq!(
             std::fs::read_dir(ws.path().join("skills")).unwrap().count(),
-            with_baseline(&[]),
-            "only the baseline skills materialize"
+            eff.docs.len()
         );
     }
 
