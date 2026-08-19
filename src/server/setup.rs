@@ -90,6 +90,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/setup", get(read).post(apply))
         .route("/api/v1/setup/roster", post(propose_roster))
+        .route("/api/v1/setup/inference/test", post(test_inference))
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +178,54 @@ pub struct SetupDto {
     /// Company ids already registered on this host. A non-empty list means the
     /// seed step should be skipped — the instance already has a company.
     pub companies: Vec<String>,
+    /// What this host can already reach without the operator supplying anything.
+    pub inference: InferenceReadyDto,
+}
+
+/// The credential this host already holds, for the wizard's first step.
+///
+/// A hosted tenant has one injected by the control plane, and its operator has
+/// no key of their own and no way to get one. Reporting this is what lets the
+/// step arrive already answered — pre-filled and testable — instead of demanding
+/// something unobtainable.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct InferenceReadyDto {
+    /// Whether a credential is already resolvable, so the design pass would run
+    /// with the operator typing nothing.
+    ///
+    /// Answered by constructing the pass itself rather than by re-reading the
+    /// environment — see [`house_credential`]. A console that decided this
+    /// differently would pre-fill a step on a host that then silently shipped a
+    /// keyword-matched template.
+    pub ready: bool,
+    /// The provider slug behind it, for the picker's initial value. Always
+    /// `managed` today: the injected path is the platform's own endpoint.
+    pub provider: Option<&'static str>,
+    /// The endpoint it resolves to. Shown, not secret — it is a URL, and seeing
+    /// which one a test is about to hit is the difference between a green tick
+    /// and a green tick you can trust.
+    pub base_url: Option<String>,
+}
+
+/// Whether the host already holds a usable credential, and where it points.
+///
+/// Deliberately implemented by asking the harness for the very config the design
+/// pass would run on, not by re-reading `OPENCOMPANY_INFERENCE_KEY` and friends.
+/// That resolution is already subtle — a projected token file ahead of a static
+/// key, an explicit URL ahead of the default — and a second copy of it in the
+/// console layer would eventually disagree with the one that matters.
+///
+/// The credential itself never leaves this function.
+#[cfg(feature = "openhuman")]
+fn house_credential(env: &dyn EnvSource) -> Option<String> {
+    crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| config.base_url)
+}
+
+/// Without the harness there is no inference path at all, so the host holds
+/// nothing and the step asks for everything.
+#[cfg(not(feature = "openhuman"))]
+fn house_credential(_env: &dyn EnvSource) -> Option<String> {
+    None
 }
 
 /// What `POST /api/v1/setup` accepts.
@@ -507,6 +556,14 @@ fn snapshot(state: &AppState, env: &dyn EnvSource) -> Result<SetupDto, OpenCompa
             .into_iter()
             .map(|id| id.as_ref().to_string())
             .collect(),
+        inference: {
+            let base_url = house_credential(env);
+            InferenceReadyDto {
+                ready: base_url.is_some(),
+                provider: base_url.is_some().then_some("managed"),
+                base_url,
+            }
+        },
     })
 }
 
@@ -900,6 +957,172 @@ pub struct SetupRosterDto {
     /// The jobs no teammate owns. Non-empty only on the `model` path; a curated
     /// team makes no coverage claim about a list it never read.
     uncovered: Vec<String>,
+}
+
+/// What `POST /api/v1/setup/inference/test` accepts.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct InferenceTestRequest {
+    /// One of `crate::company::INFERENCE_PROVIDERS`.
+    provider: String,
+    /// The key the operator just typed. Blank means "use whatever this host
+    /// already has", which is the hosted case and the keyless-Ollama case.
+    ///
+    /// Used and discarded. Nothing here is written: testing a credential and
+    /// committing to it are separate acts, and an operator must be able to find
+    /// out a key is wrong without having already stored it.
+    key: Option<String>,
+    /// Endpoint override. Required for `openai_compatible`, defaulted otherwise.
+    base_url: Option<String>,
+}
+
+/// What the test answers. Never carries the credential, and never the raw
+/// provider error — see [`test_inference`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceTestDto {
+    ok: bool,
+    /// The endpoint that was actually reached, so a green tick is checkable.
+    /// An operator who mistypes a base URL and gets a tick from the *default*
+    /// endpoint has been told the wrong thing.
+    base_url: String,
+    /// Present only on failure, in the operator's language.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// `POST /api/v1/setup/inference/test` — a live one-turn probe of a credential
+/// the operator has just typed, before anything is written.
+///
+/// The company-scoped `POST {scope}/inference/test` cannot serve the wizard for
+/// the same reason the roster route could not: it resolves a `CompanyRuntime`
+/// and reads that company's secret store, and during first-run setup there is
+/// no company and no store. Same [`probe`](crate::harness::provider::probe)
+/// underneath.
+///
+/// ## Why this exists as its own step
+///
+/// The design pass is silent about credentials by design: it falls back to a
+/// curated team on any failure, so a wrong key produces a *plausible* company
+/// rather than an error. That is right for the pass and wrong for setup — an
+/// operator who mistypes a key would be shown a keyword-matched roster and told
+/// only that a model could not be reached, several screens after the mistake.
+/// One explicit test, before the questions, is where a bad credential is cheap
+/// to discover.
+///
+/// ## The error is summarised, not forwarded
+///
+/// A provider's failure body can echo request material back. The probe already
+/// scrubs the credential, and this narrows further to the shape of the failure —
+/// enough to act on, without a wire from an upstream error message into a
+/// browser on an unauthenticated first-run host.
+async fn test_inference(
+    State(state): State<AppState>,
+    crate::server::graphql::auth::MaybePeer(peer): crate::server::graphql::auth::MaybePeer,
+    headers: HeaderMap,
+    Json(req): Json<InferenceTestRequest>,
+) -> Result<Json<InferenceTestDto>, Response> {
+    authorize(&state, &headers, peer).await?;
+    Ok(Json(probe_inference(&req, &ProcessEnv).await))
+}
+
+/// Runs the probe against the resolved config.
+#[cfg(feature = "openhuman")]
+async fn probe_inference<E: EnvSource + Sync>(
+    req: &InferenceTestRequest,
+    env: &E,
+) -> InferenceTestDto {
+    let env_default =
+        crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| {
+            crate::company::inference::EnvDefault {
+                base_url: config.base_url,
+                credential: config.credential,
+            }
+        });
+    let decl = crate::company::inference::decl_for_probe(
+        &req.provider,
+        req.base_url.as_deref(),
+        req.key.as_deref(),
+        env_default.as_ref(),
+    );
+    let base_url = decl.base_url.clone();
+
+    // `openai_compatible` has no default endpoint, so a blank URL resolves to
+    // an empty string. Reported here rather than left to produce a confusing
+    // transport error from a request to nowhere.
+    if base_url.trim().is_empty() {
+        return InferenceTestDto {
+            ok: false,
+            base_url,
+            error: Some("This provider needs an endpoint URL.".to_string()),
+        };
+    }
+
+    match crate::harness::provider::probe(&decl).await {
+        Ok(()) => InferenceTestDto {
+            ok: true,
+            base_url,
+            error: None,
+        },
+        Err(err) => {
+            // Logged in full for whoever runs the host; summarised for the page.
+            tracing::info!(
+                provider = %req.provider,
+                base_url = %base_url,
+                error = %err,
+                "[setup] the inference test could not reach the provider"
+            );
+            InferenceTestDto {
+                ok: false,
+                base_url,
+                error: Some(summarise_probe_failure(&err.to_string())),
+            }
+        }
+    }
+}
+
+/// Without the harness there is nothing to probe with.
+#[cfg(not(feature = "openhuman"))]
+async fn probe_inference<E: EnvSource + Sync>(
+    req: &InferenceTestRequest,
+    _env: &E,
+) -> InferenceTestDto {
+    InferenceTestDto {
+        ok: false,
+        base_url: crate::company::inference::effective_base_url(
+            &req.provider,
+            req.base_url.as_deref(),
+        ),
+        error: Some(
+            "This build cannot reach a model — the agent harness is not compiled in.".to_string(),
+        ),
+    }
+}
+
+/// Turns a provider failure into one line an operator can act on.
+///
+/// Three outcomes are worth telling apart because each has a different fix: the
+/// key is wrong, the endpoint is wrong, or the provider said no for its own
+/// reasons. Everything else is reported as unreachable rather than guessed at.
+#[cfg(feature = "openhuman")]
+fn summarise_probe_failure(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key")
+    {
+        "That key was rejected by the provider.".to_string()
+    } else if lower.contains("403") || lower.contains("forbidden") {
+        "That key was accepted but is not allowed to use this model.".to_string()
+    } else if lower.contains("404") {
+        "Reached the host, but there is no chat endpoint at that URL.".to_string()
+    } else if lower.contains("429") || lower.contains("rate limit") {
+        "The provider is rate-limiting this key right now.".to_string()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "The provider did not answer in time.".to_string()
+    } else if lower.contains("dns") || lower.contains("connect") || lower.contains("resolve") {
+        "Could not reach that address.".to_string()
+    } else {
+        "Could not get a reply from the provider.".to_string()
+    }
 }
 
 /// `POST /api/v1/setup/roster` — propose a starting team for a company that

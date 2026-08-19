@@ -49,8 +49,8 @@ use tinyagents::harness::model::{ModelRequest, ModelResponse};
 
 use crate::company::setup::{
     AgentFocus, MAX_AGENTS, MAX_DESCRIPTION, MIN_AGENTS, ProposedAgent, RosterProposal,
-    RosterSource, RosterTemplate, SetupAnswers, job_items, match_template, template_proposal,
-    uncovered_indices, validate_roster,
+    RosterSource, RosterTemplate, SetupAnswers, is_entirely_reference_team, job_items,
+    match_template, template_proposal, uncovered_indices, validate_roster,
 };
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;
@@ -248,6 +248,21 @@ impl RosterBuilder {
         }
 
         let uncovered: Vec<String> = gaps.iter().filter_map(|i| jobs.get(*i).cloned()).collect();
+        // A roster that is entirely the reference team is the reference team,
+        // whatever produced it. Reporting it as designed would put "built from
+        // what you told us" over a roster nobody designed — and the review
+        // screen's provenance sentence is the one thing there an operator cannot
+        // check for themselves.
+        if is_entirely_reference_team(&best.agents, template) {
+            tracing::info!(
+                template = template.key,
+                "[setup] the model returned the reference team unchanged; reporting it as curated"
+            );
+            let mut proposal = fallback();
+            proposal.jobs = jobs;
+            return (proposal, usage);
+        }
+
         if !uncovered.is_empty() {
             tracing::info!(
                 template = template.key,
@@ -443,9 +458,11 @@ fn system_prompt() -> String {
          Design the team from what they actually said:\n\
          - The jobs they want automated are given to you as a NUMBERED list. Every number must \
          be owned by someone on the team. Each agent lists the numbers it owns in `covers`.\n\
-         - Cover the business, not just the list. A shop that sells things needs someone \
-         watching the money whether or not they thought to say so. An agent that owns no \
-         numbered job is fine when the business needs it — use an empty `covers`.\n\
+         - Their list is a FLOOR, not a ceiling. After every numbered job has an owner, add the \
+         one or two roles this business obviously needs and they did not think to name — a shop \
+         that sells things needs someone watching the money and someone answering customers, \
+         whether or not they said so. A team that covers only the list is a checklist, not a \
+         company. Those roles carry an empty `covers`, which is expected.\n\
          - If they describe two businesses, staff both.\n\
          - Use the roles that fit THIS business. A reference team for the closest common case is \
          included below — treat it as a quality bar for naming and phrasing, not as a menu. \
@@ -455,6 +472,10 @@ fn system_prompt() -> String {
          - `name` is a short label (1-2 words). `role` is the job title. `description` is one \
          concrete sentence under {MAX_DESCRIPTION} characters saying what that agent owns — \
          \"Dispatch, tracking, and returns\" beats \"handles logistics\".\n\
+         - Write every `description` in the operator's own terms, using the words they used for \
+         their business and their jobs. Do not reuse the reference team's sentences: it is there \
+         to show you the register to write in, never the text to copy. A mandate that could sit \
+         on any company's roster has told this operator nothing.\n\
          - `focus` is the shape of the work, one of: {focuses}. It decides which tools the \
          teammate is given, so choose the closest fit: `research` finds things out, `writing` \
          produces the written work, `operations` keeps work moving, `analysis` measures and \
@@ -939,5 +960,49 @@ mod test {
             );
         }
         assert!(prompt.contains("covers"), "{prompt}");
+    }
+
+    /// The prompt must actually ask for the operator's words. The reference team
+    /// was being copied sentence-for-sentence — three of six mandates in a real
+    /// run were the template's, one of them verbatim — which made half a
+    /// designed roster indistinguishable from a canned one.
+    #[test]
+    fn the_system_prompt_forbids_reusing_the_reference_sentences() {
+        let prompt = system_prompt();
+        let lower = prompt.to_lowercase();
+        assert!(lower.contains("own terms"), "{prompt}");
+        assert!(lower.contains("do not reuse"), "{prompt}");
+    }
+
+    /// A model that hands the reference team straight back is reported as
+    /// **curated**, not designed. The line-up is the substantive claim, and
+    /// "built from what you told us" is the one sentence on the review screen an
+    /// operator cannot check for themselves.
+    #[tokio::test]
+    async fn the_reference_team_handed_back_is_reported_as_curated() {
+        let answers = SetupAnswers {
+            industry: "I sell homeware online".to_string(),
+            team_hint: String::new(),
+            automate: "meta ads, dispatch".to_string(),
+        };
+        // Exactly the ecommerce reference team, which is what this pass is shown.
+        let echoed = roster_json(&[
+            ("Meta Ads Specialist", "operations", &[0]),
+            ("SEO Specialist", "analysis", &[]),
+            ("Logistics Coordinator", "operations", &[1]),
+            ("Operations Manager", "operations", &[]),
+            ("Accountant", "analysis", &[]),
+        ]);
+        let model = SequencedModel::new(&[&echoed]);
+        let (proposal, _) = builder(model).propose(&answers).await;
+
+        assert_eq!(
+            proposal.source,
+            RosterSource::Fallback,
+            "a copy of the reference team must not be reported as designed"
+        );
+        // The jobs still ride along: they are the operator's own words, and the
+        // review screen shows them whichever way the roster was produced.
+        assert_eq!(proposal.jobs, vec!["meta ads", "dispatch"]);
     }
 }

@@ -655,6 +655,32 @@ pub fn uncovered_jobs(jobs: &[String], claimed: &[usize]) -> Vec<String> {
         .collect()
 }
 
+/// Whether every role on this roster came from the reference team it was shown.
+///
+/// The degenerate case the reference team invites. `match_template`'s roster goes
+/// into the prompt as a quality bar for naming and phrasing, and a model that
+/// takes it as a menu can hand the whole thing back unchanged. Nothing about the
+/// *shape* of that answer is wrong — bounds pass, roles are unique, mandates fit
+/// — so validation admits it, and the operator is then told "built from what you
+/// told us" about a roster nobody designed.
+///
+/// This is the one claim worth policing deterministically. It does **not** police
+/// style: a designed line-up that borrows a sentence or two is still a designed
+/// line-up, and the prompt asks for the operator's own words without the host
+/// enforcing prose. What it refuses is calling a copy an original.
+///
+/// Roles are compared by slug, so a re-spacing or a case change does not read as
+/// authorship.
+pub fn is_entirely_reference_team(agents: &[ProposedAgent], template: &RosterTemplate) -> bool {
+    if agents.is_empty() {
+        return false;
+    }
+    let reference: Vec<String> = template.agents.iter().map(|a| role_slug(a.role)).collect();
+    agents
+        .iter()
+        .all(|agent| reference.contains(&role_slug(&agent.role)))
+}
+
 /// A roster a setup pass is offering the operator, and where it came from.
 ///
 /// Carries its provenance because the console says so out loud — decision D2 is
@@ -1582,5 +1608,63 @@ mod tests {
             proposal.uncovered.is_empty(),
             "a fallback must not claim a gap it never looked for"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Refusing to call a copy an original
+    // ---------------------------------------------------------------------
+
+    /// The degenerate answer the reference team invites: hand the whole thing
+    /// back. Nothing about its *shape* is wrong, so validation admits it — and
+    /// the operator would then be told "built from what you told us" about a
+    /// roster nobody designed.
+    #[test]
+    fn a_roster_that_is_only_the_reference_team_is_recognised() {
+        assert!(is_entirely_reference_team(
+            &ECOMMERCE.proposed(),
+            &ECOMMERCE
+        ));
+        // Re-spacing and re-casing are not authorship.
+        let restyled: Vec<ProposedAgent> = ECOMMERCE
+            .agents
+            .iter()
+            .map(|a| ProposedAgent {
+                name: a.name.to_string(),
+                role: a.role.to_uppercase().replace(' ', "  "),
+                description: a.description.to_string(),
+                focus: Some(a.focus),
+            })
+            .collect();
+        assert!(is_entirely_reference_team(&restyled, &ECOMMERCE));
+    }
+
+    /// It must not fire on a designed line-up. One added role is a decision the
+    /// model made, and this guard exists to protect the provenance claim — not
+    /// to police how much of the reference wording survived.
+    #[test]
+    fn one_role_of_its_own_is_enough_to_be_a_designed_team() {
+        let mut roster = ECOMMERCE.proposed();
+        roster.push(proposed("Cold Email Specialist"));
+        assert!(!is_entirely_reference_team(&roster, &ECOMMERCE));
+
+        // The real case this was checked against: three template roles and
+        // three of the model's own is a designed team.
+        let mixed = vec![
+            proposed("SEO Specialist"),
+            proposed("Logistics Coordinator"),
+            proposed("Accountant"),
+            proposed("Cold Email Specialist"),
+            proposed("Product Researcher"),
+            proposed("Social Media Manager"),
+        ];
+        assert!(!is_entirely_reference_team(&mixed, &ECOMMERCE));
+    }
+
+    /// An empty roster is not a copy of anything. Reported as false so the
+    /// caller's own too-thin check stays the thing that handles it — two rules
+    /// competing over one case is how the padding bug happened.
+    #[test]
+    fn an_empty_roster_is_not_a_copy() {
+        assert!(!is_entirely_reference_team(&[], &ECOMMERCE));
     }
 }

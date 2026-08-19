@@ -245,6 +245,54 @@ retired or replaced. The framing is "here is a starting point", never "your
 company is ready" — the first invites correction, the second sets us up to be
 judged on whether we guessed perfectly, which we will not have.
 
+## The model step comes first
+
+**Decision D8: the credential is settled before the questions, and a failure is
+visible at the moment it happens.**
+
+It sat third, after the three questions, on the reasoning that cheap interesting
+questions earn the right to ask for a credential. That reasoning was right about
+motivation and wrong about consequence: the design pass falls back to a curated
+team on *any* failure, so a missing or mistyped key produces a plausible company
+rather than an error, and the operator finds out two screens later if at all. The
+one step whose failure invalidates every answer after it belongs before them.
+
+`POST /api/v1/setup/inference/test` is a live one-turn probe of what the operator
+typed, built through the same `resolve_endpoint` the runtime uses — a test passing
+under different rules than the runtime applies is worse than no test. It persists
+nothing: finding out a key is wrong must not require having stored it. Provider
+errors are summarised to one actionable line rather than forwarded, since a
+failure body can echo request material into a browser on an unauthenticated host.
+
+The step is a **gate with an escape**. `GET /api/v1/setup` reports whether the
+host already holds a credential, so a hosted tenant — whose operator has no key
+and no way to get one — arrives with the step already answered and only needs to
+press Test. Where nothing is configured, an explicit "continue without a model"
+proceeds to the curated team. Decision D3 is not negotiable: a credential the
+operator cannot obtain must never be the one thing that traps them.
+
+A secret's *presence* is reported, never its bytes — so there is nothing to
+pre-fill the key box with, and the configured state is drawn as a settled fact
+rather than an empty field. An empty box with placeholder text reads as an
+unanswered question, which on a hosted tenant is the one impression it must not
+give.
+
+## What a teammate can reach on day one
+
+Every designed teammate starts with the workspace and nothing outward: the focus
+belts name `workspace`, `docs`, `files` and sometimes `web`, and never `composio`
+or `media` (decision D7). So a Social Media Manager cannot post and a Cold Email
+Specialist cannot send, until the operator connects an account.
+
+That is the right posture — reaching a real account is an act only a person can
+authorise, and at first run there is nothing connected — but a roster reads as a
+set of capabilities, and saying nothing repeats the failure the twelve invented
+teammates were deleted for: offering what the host cannot honour. The review
+screen states it. The fix is the sentence, not a wider grant.
+
+An `outreach` focus carrying `composio` was rejected: it would put credential
+reach behind a value a model chose from free text — what D7's enum prevents.
+
 ## The claim is checked, not trusted
 
 **Decision D6: the host splits the jobs, the model claims which it owns, and the
@@ -269,6 +317,16 @@ if naming the missing jobs outright did not produce an owner, a third phrasing
 will not either. What survives is reported to the operator on the review screen
 rather than hidden — an honest gap they can act on beats a roster that quietly
 ignored a third of what they asked for.
+
+A roster that is **entirely** the reference team is reported as curated, not
+designed, whatever produced it. The reference roster goes into the prompt as a
+quality bar, and a model that reads it as a menu can hand the whole thing back —
+an answer whose shape is perfectly valid, so validation admits it, and the
+operator is then told "built from what you told us" about a roster nobody
+designed. The guard is on the line-up, not the prose: one role of the model's own
+is a decision, and a team that borrows a sentence is still designed. The prompt
+asks for the operator's own words; the host only refuses to call a copy an
+original.
 
 Coverage is a claim only the design pass makes. A curated fallback was chosen by
 keyword and never read the list, so it reports its provenance instead and claims
