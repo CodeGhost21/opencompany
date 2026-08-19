@@ -204,22 +204,6 @@ function roleHash(role: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function member(name: string, role: string, description: string): TeamMember {
-  return {
-    id: localMemberId(role),
-    name,
-    role,
-    description,
-    tone: toneFor(name),
-    avatar: avatarFor(name),
-    inboxEnabled: false,
-    // A console-invented teammate exists on no host, so it holds no grant and
-    // sits on no desk. Stated, not guessed.
-    effectiveTools: [],
-    desks: [],
-  };
-}
-
 /**
  * A generic starter team that fits any company; the operator edits from here.
  *
@@ -260,8 +244,8 @@ export function newMember(fields: { name: string; role: string; description: str
     tone: toneFor(memberId),
     avatar: avatarFor(memberId),
     inboxEnabled: false,
-    // Same as `member` above: nothing on a host has granted this teammate
-    // anything or seated it anywhere yet.
+    // Nothing on a host has granted this teammate anything or seated it
+    // anywhere yet, so both are stated empty rather than guessed.
     effectiveTools: [],
     desks: [],
   };
