@@ -57,6 +57,11 @@ pub struct HarnessRouter {
     /// Why a declared harness has no engine, so the failure can say which
     /// harness and what to do rather than "not found".
     unavailable: HashMap<String, String>,
+    /// Harness id → why its engine's last warm-up failed. A lane with a
+    /// recorded failure fails its turns with this reason while every other lane
+    /// keeps working; a successful re-`ensure` clears the entry, so a recovered
+    /// harness comes back without a restart.
+    failures: Mutex<HashMap<String, String>>,
 }
 
 impl HarnessRouter {
