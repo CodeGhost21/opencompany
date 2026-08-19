@@ -431,6 +431,16 @@ export function AppShell({
   useEffect(() => {
     setWorkflowRunEvents((prev) => (prev.length === 0 ? prev : []));
   }, [company]);
+  // `openTurns` is company-scoped too: the row ids that name a durable turn
+  // belong to one company, yet the indicator is keyed by *thread* ("main" being
+  // the universal id), so an old company's still-open turn would otherwise
+  // keep driving a new company's working indicator after a switch. Empty it on
+  // company change; the hydration re-arm (`GET {scope}/runs`) below restores
+  // whatever the new company actually has in flight, exactly as it does for a
+  // mid-turn reload.
+  useEffect(() => {
+    setOpenTurns((prev) => (Object.keys(prev).length === 0 ? prev : {}));
+  }, [company]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
