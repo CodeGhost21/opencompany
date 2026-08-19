@@ -385,4 +385,50 @@ mod tests {
         assert!(text.contains("ghost"), "{text}");
         assert!(text.contains("tenant-b"), "{text}");
     }
+
+    /// The boot filter keeps only this tenant's unowned companies — identified
+    /// by the `<tenant>--` id prefix `namespace_company_id` writes — and drops
+    /// the rest, so tenant B's company ids never reach tenant A's boot log.
+    #[test]
+    fn the_boot_filter_keeps_only_this_tenants_companies() {
+        let report = find(
+            &[company("tenant-a--acme"), company("tenant-b--beta")],
+            &[],
+        );
+        let filtered = filter_to_tenant(report, "tenant-a");
+
+        let ids: Vec<&str> = filtered.unowned.iter().map(|c| c.id.as_ref()).collect();
+        assert_eq!(ids, vec!["tenant-a--acme"]);
+        assert!(filtered.dangling.is_empty());
+    }
+
+    /// A company with no tenant prefix is nobody's in the shared database, so
+    /// the boot filter drops it too. Such a company is addressable with
+    /// platform scope, not orphaned from a tenant.
+    #[test]
+    fn the_boot_filter_drops_unprefixed_companies() {
+        let report = find(&[company("acme")], &[]);
+        let filtered = filter_to_tenant(report, "tenant-a");
+
+        assert!(filtered.is_empty(), "{filtered:?}");
+    }
+
+    /// Dangling rows are matched by their persisted tenant, compared
+    /// canonically (`tenant:acme` and `acme` are one tenant), so the boot
+    /// filter keeps this tenant's litter and drops everyone else's.
+    #[test]
+    fn the_boot_filter_keeps_this_tenants_dangling_rows() {
+        let report = find(
+            &[],
+            &[
+                owner("tenant-a--ghost", "tenant:acme"),
+                owner("tenant-b--ghost", "tenant-b"),
+            ],
+        );
+        let filtered = filter_to_tenant(report, "acme");
+
+        let ids: Vec<&str> = filtered.dangling.iter().map(|r| r.id.as_ref()).collect();
+        assert_eq!(ids, vec!["tenant-a--ghost"]);
+        assert!(filtered.unowned.is_empty());
+    }
 }
