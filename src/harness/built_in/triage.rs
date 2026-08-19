@@ -301,17 +301,17 @@ impl TriageEscalation for MeteredTriage {
         let (verdict, usage) = self.evaluator.classify(message).await;
         // Metered even when the verdict is `Unavailable`: an unparseable reply
         // still burned tokens, and a classification we could not read is
-        // precisely the spend an operator would want to see.
-        if let Some(meter) = self.meter.as_ref() {
-            crate::metering::record_triage_usage(
-                &usage,
-                &self.evaluator.provider_slug(),
-                &self.company,
-                self.store.as_ref(),
-                meter.as_ref(),
-            )
-            .await;
-        }
+        // precisely the spend an operator would want to see. The record call is
+        // made whether or not a meter is wired — the ledger half must not be
+        // lost to a host that only records spend it can prove.
+        crate::metering::record_triage_usage(
+            &usage,
+            &self.evaluator.provider_slug(),
+            &self.company,
+            self.store.as_ref(),
+            self.meter.as_ref().map(|meter| meter.as_ref()),
+        )
+        .await;
         verdict
     }
 }
