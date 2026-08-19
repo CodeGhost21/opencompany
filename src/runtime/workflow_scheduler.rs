@@ -1558,6 +1558,38 @@ to = "done"
     /// that escapes into a log or a PR body names nobody.
     const RECIPIENT: &str = "recipient@example.invalid";
 
+    /// Issue #981: `skipped` is no longer the same question as "did not go
+    /// out". Two of its reasons describe a report whose fate is accounted for —
+    /// an earlier run in the approval lineage sent it (issue #438), or a test
+    /// run attempted nothing on purpose (issue #542) — so they sit in the
+    /// `skipped` breakdown and out of the number an operator alerts on.
+    #[test]
+    fn an_accounted_for_skip_is_counted_but_not_alerted_on() {
+        let counts = DeliveryCounts::of(&[
+            reported(
+                "a",
+                DeliveryStatus::Skipped,
+                DeliveryReason::AlreadyDelivered,
+                "",
+            ),
+            reported("b", DeliveryStatus::Skipped, DeliveryReason::DryRun, ""),
+        ]);
+        assert_eq!(counts.skipped, 2, "the breakdown still sees them");
+        assert_eq!(counts.undelivered(), 0, "but nothing here needs a fix");
+
+        // The deliberate non-move: an `output` node with nowhere to send
+        // produced a report and lost it, which is what issue #925 added the row
+        // to make visible.
+        let nowhere = DeliveryCounts::of(&[reported(
+            "c",
+            DeliveryStatus::Skipped,
+            DeliveryReason::NoDestinationConfigured,
+            "",
+        )]);
+        assert_eq!(nowhere.skipped, 1);
+        assert_eq!(nowhere.undelivered(), 1);
+    }
+
     /// The fold behind the summary line counts each status separately, because
     /// "policy refused to send" and "something broke" are different problems.
     #[test]

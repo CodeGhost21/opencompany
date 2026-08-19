@@ -735,6 +735,58 @@ mod test {
         assert_eq!(wired.kind, "workflow.run");
     }
 
+    /// **Issue #981: a parked report is not a lost one, and must be counted
+    /// once.**
+    ///
+    /// This projection folded anything that was not `sent`, so a report waiting
+    /// in the approvals queue was reported to the sidecar on one line as both
+    /// "1 not delivered" *and* "1 pending approval" — the same row, counted
+    /// twice, once as a loss it is not. A test run's rows and an approval-gate
+    /// continuation's already-sent ones landed in the same bucket for the same
+    /// reason. All three now fold `crate::ports::undelivered_count`, the one
+    /// rung the host's verdict and the console stand on.
+    #[test]
+    fn a_parked_or_accounted_for_report_is_not_wired_out_as_undelivered() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: None,
+            deliveries: vec![
+                DeliveryReport {
+                    node: "owner_summary".to_string(),
+                    kind: "email".to_string(),
+                    target: Some(RECIPIENT.to_string()),
+                    status: DeliveryStatus::Pending,
+                    detail: "waiting in Approvals".to_string(),
+                    reason: DeliveryReason::ParkedForApproval,
+                },
+                DeliveryReport {
+                    node: "digest".to_string(),
+                    kind: "channel".to_string(),
+                    target: Some("engineering".to_string()),
+                    status: DeliveryStatus::Skipped,
+                    detail: "already delivered by an earlier run".to_string(),
+                    reason: DeliveryReason::AlreadyDelivered,
+                },
+            ],
+            pending_approvals: vec!["owner_summary".to_string()],
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+            blocked_nodes: Vec::new(),
+            approvals: Vec::new(),
+        };
+
+        let wired = wire_event(8, &event);
+
+        assert!(wired.body.contains("0 not delivered"), "{}", wired.body);
+        assert!(wired.body.contains("1 pending approval"), "{}", wired.body);
+        // The rows themselves are still counted as routed — nothing is hidden,
+        // only classified.
+        assert!(wired.body.contains("2 report(s) routed"), "{}", wired.body);
+    }
+
     /// **Issue #383: a stopped run must not wire out as a finished one.**
     ///
     /// A cancelled run carries `cancelled: true` and **no error**, so the arm
