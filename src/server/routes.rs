@@ -735,7 +735,9 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(
-            json.get("busy").and_then(serde_json::Value::as_bool).is_some(),
+            json.get("busy")
+                .and_then(serde_json::Value::as_bool)
+                .is_some(),
             "the manager reads a top-level boolean `busy`; got {json}"
         );
     }

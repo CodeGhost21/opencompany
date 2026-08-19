@@ -3002,10 +3002,7 @@ mod tests {
                 .run_supervisor()
                 .begin("wf-1", false)
                 .expect("begin a workflow run");
-            assert!(
-                runtime.is_busy(),
-                "a live workflow run must report busy"
-            );
+            assert!(runtime.is_busy(), "a live workflow run must report busy");
         }
         assert!(
             !runtime.is_busy(),
