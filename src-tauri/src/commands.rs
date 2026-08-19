@@ -453,15 +453,17 @@ mod test {
         let object = wire.as_object().expect("an object");
         assert_eq!(
             object.keys().map(String::as_str).collect::<Vec<_>>(),
+            // Sorted: `serde_json` maps are ordered, so this is the wire's
+            // order rather than the struct's.
             vec![
-                "id",
-                "label",
-                "dataDir",
-                "running",
                 "baseUrl",
-                "instanceId",
-                "operatorEmail",
                 "companies",
+                "dataDir",
+                "id",
+                "instanceId",
+                "label",
+                "operatorEmail",
+                "running",
             ],
         );
     }
