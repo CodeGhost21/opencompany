@@ -224,7 +224,13 @@ export function TeamView({
       listTasks(client, company).catch(() => null),
       fetchBoardColumns(client, company).catch(() => null),
     ]);
-    setWorkload(tasks && columns ? workloadByAssignee(tasks, columns) : null);
+    // `columns.length === 0` is a *third* failure and the easiest to miss:
+    // `fetchBoardColumns` resolves empty — it does not reject — for a host whose
+    // ledger list carries no `tasks` ledger at all. Treating that as a known
+    // vocabulary would put "Idle · 0 open tasks" on every card of a company
+    // whose board this console never found, which is the exact false claim the
+    // `null` state exists to prevent.
+    setWorkload(tasks && columns?.length ? workloadByAssignee(tasks, columns) : null);
   }, [client, company]);
 
   useEffect(() => {

@@ -92,6 +92,17 @@ interface Props {
   refreshKey?: number;
   /** Reopen first-run setup, so skipping it is not a dead end. */
   onRunSetup?: () => void;
+  /**
+   * Drop the desk from the hash, landing on bare `#/company`.
+   *
+   * Wired to the toggle for the one case it cannot otherwise answer: asking for
+   * Cards while `#/company/<deskId>` is forcing the chart. Without this the
+   * control is *visible and inert* — the operator presses Cards, the chart stays
+   * put because the route outranks the preference, and the only thing that
+   * changed is the stored preference they could not see. Leaving the desk is
+   * what "show me the cards" means from there.
+   */
+  onLeaveDesk?: () => void;
 }
 
 export function CompanyView({
@@ -101,6 +112,7 @@ export function CompanyView({
   onOpenAgent,
   refreshKey,
   onRunSetup,
+  onLeaveDesk,
 }: Props) {
   const [chosen, setChosen] = useState<CompanyMode>(readMode);
   const mode: CompanyMode = focusDeskId ? "chart" : chosen;
@@ -119,6 +131,9 @@ export function CompanyView({
       onMode={(next) => {
         setChosen(next);
         writeMode(next);
+        // The route outranks the preference, so asking for Cards from a desk
+        // address has to clear the desk or nothing visible happens.
+        if (focusDeskId && next === "cards") onLeaveDesk?.();
       }}
     />
   );

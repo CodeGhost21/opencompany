@@ -205,6 +205,47 @@ test("#1141 the org chart is one toggle away, and the choice is remembered", asy
   await expect(card(page, "Maya")).toBeVisible();
 });
 
+test("#1141 asking for Cards from a desk address leaves the desk", async ({ page }) => {
+  await mockApi(page);
+
+  // `#/company/<deskId>` forces the chart — a desk address is an org-chart
+  // address (issue #485).
+  await page.goto("/#/company/research");
+  await expect(page.getByRole("tree", { name: "Company org chart" })).toBeVisible({
+    timeout: 30_000,
+  });
+
+  // So Cards has to clear the desk. Otherwise it is a control an operator can
+  // see and press while the route silently outranks it, and the only thing that
+  // changes is a preference they cannot observe.
+  await page.getByTestId("company-mode-cards").click();
+  await expect(card(page, "Maya")).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => page.url()).not.toContain("research");
+});
+
+test("#1141 a host with no board says nothing, rather than idle", async ({ page }) => {
+  await mockApi(page);
+  // Routed *after* `mockApi`, so this handler wins: a ledger list with no board
+  // in it. `fetchBoardColumns` resolves empty for that rather than rejecting,
+  // which is the failure most likely to be read as "everybody is free".
+  await page.route("**/api/v1/**/ledgers", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ledgers: [] }),
+    }),
+  );
+
+  await page.goto("/#/company");
+  const maya = card(page, "Maya");
+  await expect(maya).toBeVisible({ timeout: 30_000 });
+  // The teammate still renders in full; only the claim this console cannot
+  // support is missing.
+  await expect(maya.getByTestId("team-card-description")).toBeVisible();
+  await expect(maya.getByTestId("team-card-status")).toHaveCount(0);
+  await expect(maya.getByTestId("team-card-tasks")).toHaveCount(0);
+});
+
 test("#1141 bare #/team is the Company page now", async ({ page }) => {
   await mockApi(page);
 

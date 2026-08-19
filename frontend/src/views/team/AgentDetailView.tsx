@@ -145,8 +145,10 @@ export function AgentDetailView({
         fetchBoardColumns(client, company).catch(() => null),
       ]);
       if (!live) return;
+      // Empty columns is a host whose ledger list carries no board — an absence,
+      // not a vocabulary. Same rule as the roster's cards.
       setWorkload(
-        tasks && columns
+        tasks && columns?.length
           ? (workloadByAssignee(tasks, columns).get(agentId) ?? { open: 0, status: "idle" })
           : null,
       );

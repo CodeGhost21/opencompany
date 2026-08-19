@@ -1415,6 +1415,10 @@ export function AppShell({
               // Skipping setup must not be a dead end: an unstaffed company keeps
               // a visible way back in.
               onRunSetup={() => setSetupForced(true)}
+              // Asking for Cards from `#/company/<deskId>` means leaving the
+              // desk: the route forces the chart, so the toggle would otherwise
+              // be a control that visibly does nothing.
+              onLeaveDesk={() => navigate("company")}
             />
           )}
           {view === "chat" && (
