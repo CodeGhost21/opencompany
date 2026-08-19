@@ -1174,11 +1174,10 @@ impl AgentRunner for HarnessAgentRunner {
         // first spawning run without these.
         let turn = Box::pin(async {
             let outcome = claim
-                .scoped(Box::pin(self.pool.run_background(
+                .scoped(Box::pin(self.turn.run_background(
                     &self.company,
                     agent_ref,
                     &message,
-                    &self.deps,
                 )))
                 .await;
             // Drained on BOTH arms, deliberately. A turn that errored may still have
