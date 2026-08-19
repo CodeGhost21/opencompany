@@ -299,6 +299,100 @@ mod tests {
         }
     }
 
+    /// An engine whose `ensure` can be made to fail on command, so a test can
+    /// check that one lane's warm-up failure does not take every other lane
+    /// down, and that a later successful `ensure` brings the lane back.
+    struct FlakyEngine {
+        label: String,
+        fail_ensure: Mutex<bool>,
+    }
+
+    impl FlakyEngine {
+        fn new(label: &str) -> Arc<Self> {
+            Arc::new(Self {
+                label: label.to_string(),
+                fail_ensure: Mutex::new(false),
+            })
+        }
+
+        fn set_fail(&self, fail: bool) {
+            *self.fail_ensure.lock().unwrap() = fail;
+        }
+    }
+
+    #[async_trait]
+    impl RunTurn for FlakyEngine {
+        async fn run(
+            &self,
+            _company: &CompanyId,
+            _agent_id: &str,
+            _message: &str,
+            _chat_id: Option<&str>,
+        ) -> Result<TurnOutcome> {
+            Ok(TurnOutcome {
+                reply: self.label.clone(),
+                steps: Vec::new(),
+                hit_iteration_cap: false,
+            })
+        }
+
+        async fn run_steered(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &SteerControl,
+            chat_id: Option<&str>,
+            _run_sink: Option<Arc<RunTraceSink>>,
+        ) -> Result<TurnOutcome> {
+            self.run(company, agent_id, message, chat_id).await
+        }
+
+        async fn run_steered_background(
+            &self,
+            company: &CompanyId,
+            agent_id: &str,
+            message: &str,
+            _control: &SteerControl,
+            _run_sink: Option<Arc<RunTraceSink>>,
+        ) -> Result<TurnOutcome> {
+            self.run(company, agent_id, message, None).await
+        }
+
+        async fn ensure(&self, _company: &CompanyRecord) -> Result<()> {
+            if *self.fail_ensure.lock().unwrap() {
+                return Err(OpenCompanyError::Config(
+                    "roster warm-up failed".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    /// A minimal record for `ensure` to warm against; the engines in these
+    /// tests ignore it, so only the manifest-less shape is needed.
+    fn record() -> CompanyRecord {
+        let manifest: crate::company::CompanyManifest =
+            toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest parses");
+        CompanyRecord {
+            id: company(),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        }
+    }
+
     fn company() -> CompanyId {
         CompanyId::new("acme")
     }
