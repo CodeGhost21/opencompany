@@ -646,10 +646,8 @@ async fn run_workflow_inner(
             let partial_output = Value::Object(partial_nodes);
             if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
                 // A genuine failure. Persist the partial capture so the inspector
-                // shows what the nodes that ran produced. Log-only on a write
-                // error (Part 3): this branch returns `Err`, so there is no
-                // `WorkflowRun` to hang a notice on.
-                let _ = persist_run_output(
+                // shows what the nodes that ran produced.
+                if !persist_run_output(
                     run_output_store.as_deref(),
                     &record.id,
                     &workflow.id,
@@ -657,8 +655,37 @@ async fn run_workflow_inner(
                     &partial_output,
                     true,
                 )
-                .await;
-                return Err(map_engine_error(err));
+                .await
+                {
+                    // This branch used to be log-only, because it returns `Err`
+                    // and an `Err` had no `WorkflowRun` to hang a notice on. It
+                    // has one now (below), so the operator hears about a lost
+                    // snapshot on the failure arm exactly as on the blocked one.
+                    notices.push(run_output_persist_failed_notice());
+                }
+                // Issue #1008 (second half): the failure carries the partial run
+                // rather than only a message. The nodes that ran before the break
+                // really did open board cards, park approvals and raise notices,
+                // and those are durable facts by now — so the caller's
+                // `record_run_finished` can list them instead of journaling a
+                // failed run as an empty one. See `OpenCompanyError::partial_run`.
+                return Err(OpenCompanyError::WorkflowRunFailed {
+                    source: Box::new(map_engine_error(err)),
+                    partial: Box::new(WorkflowRun {
+                        output: partial_output,
+                        pending_approvals: Vec::new(),
+                        deliveries: Vec::new(),
+                        cancelled: false,
+                        nodes,
+                        notices: notices.take(),
+                        board: board.take(),
+                        // Non-empty exactly when a real failure and a block
+                        // happened together — the case the containment check
+                        // above refuses to relabel as a plain block.
+                        blocked_nodes: blocked,
+                        approvals: approvals.take(),
+                    }),
+                });
             }
             tracing::info!(
                 company = %record.id,
@@ -668,6 +695,15 @@ async fn run_workflow_inner(
                 "workflow: the run stopped because a node is waiting on an operator, not because \
                  it failed"
             );
+            // Issue #1008: minus the blocked nodes' own entries, and that
+            // subtraction is issue #881's invariant rather than tidiness. A node
+            // refused inside its model's tool loop ends its turn by writing
+            // *prose about being blocked*, and the engine records that prose as
+            // the step's output. #881 stopped that apology travelling to the next
+            // node; letting it ride the run inspector as the node's product would
+            // re-open the same lie one surface over. The node's `blocked` chip and
+            // the run's notice already say what happened.
+            let partial_output = without_nodes(partial_output, &blocked);
             // A blocked run DOES return a `WorkflowRun`, so a failed persist adds
             // an operator-facing notice rather than only a log line (Part 6).
             if !persist_run_output(
@@ -682,12 +718,32 @@ async fn run_workflow_inner(
             {
                 notices.push(run_output_persist_failed_notice());
             }
+            // Issue #899 (Stage 1): this is the block-settle arm the DEFAULT
+            // `on_error = "stop"` takes — a blocked agent node reaches here as an
+            // `Err` the containment check reclassifies. Stash each blocked node's
+            // continuation facts so approving its parked calls re-dispatches the
+            // run. (The `on_error = "continue"/"route"` case settles on the main
+            // arm below, which arms the same stash there.)
+            stash_blocked_agent_nodes(
+                delivery.as_ref(),
+                &workflow.id,
+                &run_id,
+                &trigger_input,
+                &blocked,
+            );
             return Ok(blocked_run(BlockedRun {
                 nodes,
                 blocked,
                 notices,
                 board: board.take(),
                 approvals: approvals.take(),
+                // Issue #1008: the same capture the durable snapshot took, so a
+                // live run drawer and a run reopened from History show one thing
+                // rather than disagreeing about what the run produced. Wrapped
+                // under `nodes` because that is the shape every reader of
+                // `WorkflowRun.output` already parses — the durable record stores
+                // the bare map, the run body carries the engine's envelope.
+                output: serde_json::json!({ "nodes": partial_output }),
             }));
         }
         None => {
@@ -933,6 +989,17 @@ async fn run_workflow_inner(
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
+    // Issue #899 (Stage 1): stash the workflow id and trigger input each blocked
+    // agent node's continuation needs, keyed by the same per-(run, node) turn key
+    // its parked calls armed `ContinuationQueue` under. The resolve path releases
+    // both together and re-dispatches the run once the last call is decided.
+    stash_blocked_agent_nodes(
+        delivery.as_ref(),
+        &workflow.id,
+        &run_id,
+        &trigger_input,
+        &blocked_nodes,
+    );
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
     // via a `notices` sentence, not only via the node's own status — the
     // per-node chip is easy to miss on a run that otherwise looks fine, and a
@@ -1035,6 +1102,10 @@ struct BlockedRun {
     notices: super::caps::RunNotices,
     board: Vec<crate::ports::WorkflowRunBoardRow>,
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// Issue #1008: what the nodes upstream of the block produced, in the
+    /// engine's `{ "nodes": { "<id>": { "items": [ … ] } } }` envelope, with the
+    /// blocked nodes' own entries already removed by the caller.
+    output: Value,
 }
 
 /// Settles a run that stopped because a node is waiting on an operator (issue
@@ -1051,14 +1122,22 @@ struct BlockedRun {
 ///
 /// Each emptiness below is a claim rather than a shrug:
 ///
-/// * **no `output`** — the engine returned an error, not a final state. There is
-///   no partial state to report, and the per-node output snapshot the console
-///   inspector reads is likewise not written: nothing settled to persist. The
-///   blocked node in particular produced nothing, which is the entire point;
 /// * **no `deliveries`** — `deliver_outputs` runs off the settled output, which
 ///   does not exist here. An absent row already means "not reached" everywhere
 ///   else, and a run that stopped short must not mail anybody a report of work
 ///   it did not finish.
+///
+/// # `output` is threaded in, not emptied (issue #1008)
+///
+/// It used to be `Value::Null`, on the argument that "the engine returned an
+/// error, not a final state". That holds for the engine's *merged* state and not
+/// for the nodes: everything upstream of the block ran to completion and
+/// produced real items, which the progress observer collected on the way past.
+/// Reporting none of it made the run inspector say "no output for this node"
+/// about a node that had just written a draft. The caller threads its collected
+/// capture in — the same value it persisted — having first removed the blocked
+/// nodes' own entries, so "the blocked node produced nothing" stays literally
+/// true here.
 ///
 /// `notices` carries the operator-facing sentence, composed from the structural
 /// blocked rows so the wording lives in one place and no model prose or store
@@ -1070,6 +1149,7 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
         notices,
         board,
         approvals,
+        output,
     } = settled;
     for b in &blocked {
         notices.push(blocked_notice(b));
@@ -1077,7 +1157,7 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
     let mut pending_approvals = Vec::new();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked);
     WorkflowRun {
-        output: Value::Null,
+        output,
         pending_approvals,
         deliveries: Vec::new(),
         cancelled: false,
@@ -1087,6 +1167,25 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
         blocked_nodes: blocked,
         approvals,
     }
+}
+
+/// Drops `blocked`'s nodes from a collected `{ "<id>": { "items": [ … ] } }`
+/// capture (issue #1008).
+///
+/// A blocked node produced nothing, so it must have no entry — see the call site
+/// for why that is issue #881's invariant and not a cosmetic choice. A value of
+/// another shape is returned untouched: this narrows a map it recognises and
+/// never invents one.
+fn without_nodes(mut output: Value, blocked: &[crate::ports::WorkflowBlockedNode]) -> Value {
+    if blocked.is_empty() {
+        return output;
+    }
+    if let Value::Object(nodes) = &mut output {
+        for b in blocked {
+            nodes.remove(&b.node_id);
+        }
+    }
+    output
 }
 
 /// The operator's sentence for one blocked node (issue #881).
@@ -1112,7 +1211,9 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
     let mut tail = String::new();
     if parked > 0 {
         tail.push_str(&format!(
-            " It parked {parked} approval{}; decide {} in Approvals and run the workflow again.",
+            " It parked {parked} approval{}; approve {} in Approvals and this run continues on \
+             its own. Approving re-runs the step, so if the agent's next turn differs it may ask \
+             again.",
             if parked == 1 { "" } else { "s" },
             if parked == 1 { "it" } else { "them" }
         ));
@@ -1272,6 +1373,40 @@ struct PausedGates<'a> {
 /// continuation an approval starts knows what has already left the process.
 /// Without it, approving a gate re-mails every report upstream of it — the
 /// re-run semantics above applied to a side effect that reaches a real person.
+/// Stashes the facts each blocked agent node's continuation needs — the workflow
+/// id and this run's trigger input — keyed by the per-(run, node) turn key its
+/// gated calls armed `ContinuationQueue` under at park time (issue #899, Stage 1).
+///
+/// # Why here, and not where the calls are parked
+///
+/// The calls are parked mid-turn from `HarnessAgentRunner`, which carries no
+/// trigger input. This is the one place with the workflow id, the trigger input
+/// and the list of blocked nodes together — exactly as `park_pending_gates` is
+/// the one place a gate's facts come together. A node with no parked approval id
+/// is skipped: nothing can be decided, so nothing will ever release a stash.
+///
+/// A build with no approvals queue wired stashes nothing and is silent — the
+/// same node already logged its own "could not be parked" line, and there is no
+/// resolve path to release a stash to.
+fn stash_blocked_agent_nodes(
+    delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
+    workflow_id: &str,
+    run_id: &str,
+    trigger_input: &serde_json::Value,
+    blocked: &[crate::ports::WorkflowBlockedNode],
+) {
+    let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
+        return;
+    };
+    for node in blocked {
+        if node.approval_ids.is_empty() {
+            continue;
+        }
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
+        parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+    }
+}
+
 async fn park_pending_gates(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     record: &CompanyRecord,
@@ -2133,6 +2268,70 @@ to = "boom"
             "the node that succeeded before the failure must be in the partial snapshot: {}",
             stored.nodes
         );
+
+        // Issue #1008 (second half): the failure also carries the partial run up
+        // to the caller, so `record_run_finished` can journal what the run did
+        // before it broke instead of an all-empty row.
+        let partial = err
+            .partial_run()
+            .expect("a run that broke mid-graph reports what it had already done");
+        assert!(
+            partial.nodes.iter().any(|n| n.node_id == "export"),
+            "{:?}",
+            partial.nodes
+        );
+        assert!(
+            !partial.cancelled,
+            "a failure is not an operator stop, whatever else it carries"
+        );
+        assert!(
+            partial.output.get("export").is_some(),
+            "the partial run reports the same capture that was persisted: {}",
+            partial.output
+        );
+    }
+
+    /// Issue #1008: `without_nodes` removes exactly the blocked nodes' entries
+    /// and leaves everything else — including a capture of another shape —
+    /// untouched.
+    ///
+    /// Unit-level beside the end-to-end proof in `blocked_node_test`, because
+    /// the "leaves a value it does not recognise alone" half has no reachable
+    /// path through a real run and would otherwise be an untested branch.
+    #[test]
+    fn without_nodes_removes_only_the_blocked_entries() {
+        let blocked = |id: &str| crate::ports::WorkflowBlockedNode {
+            node_id: id.to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: Vec::new(),
+            unparkable: 0,
+        };
+
+        let capture = serde_json::json!({
+            "writer": { "items": ["draft"] },
+            "publish": { "items": ["apology prose"] },
+        });
+        let narrowed = without_nodes(capture, &[blocked("publish")]);
+        assert!(narrowed.get("writer").is_some(), "{narrowed}");
+        assert!(
+            narrowed.get("publish").is_none(),
+            "the blocked node produced nothing, so it must have no entry: {narrowed}"
+        );
+
+        // Nothing blocked: returned verbatim rather than rebuilt.
+        let untouched = serde_json::json!({ "writer": { "items": ["draft"] } });
+        assert_eq!(
+            without_nodes(untouched.clone(), &[]),
+            untouched,
+            "a run that blocked on nobody is byte-unchanged"
+        );
+
+        // A value of another shape is not a map to narrow — returned as-is
+        // rather than replaced with an invented one.
+        assert_eq!(
+            without_nodes(Value::Null, &[blocked("publish")]),
+            Value::Null
+        );
     }
 
     // --- Output destinations, end to end (issue #170) ------------------------
@@ -2580,6 +2779,72 @@ to = "done"
         assert!(
             err.to_string().contains("http_request"),
             "the failure should come from the guarded http client: {err}"
+        );
+    }
+
+    /// A run context with the dry flag set. `WorkflowRunContext::new` takes
+    /// `scheduled`, not `dry_run` — the dry flag defaults to false and is
+    /// flipped after construction, exactly as the run route does.
+    fn dry_context() -> WorkflowRunContext {
+        let mut ctx = WorkflowRunContext::new(false);
+        ctx.dry_run = true;
+        ctx
+    }
+
+    /// **Issue #1048.** The same graph as `t5`, dry-run: a target the real run
+    /// refuses must not report `ok`.
+    ///
+    /// Test run is the one control an operator has for checking a graph before
+    /// arming it on a schedule, so a green dry run followed by a real run that
+    /// cannot start is worse than no dry run at all — it converts "I checked it"
+    /// into a false belief.
+    ///
+    /// A loopback target is the lever because the upstream guard refuses
+    /// private/loopback addresses *regardless of the company's allowlist*
+    /// (see `t5_http_request_to_loopback_is_ssrf_denied`), so the verdict is
+    /// decidable from the URL alone — no DNS, no request, nothing performed.
+    #[tokio::test]
+    async fn a_dry_run_refuses_a_target_the_real_run_would_refuse() {
+        let src = r#"
+id = "dry-ssrf"
+name = "Dry SSRF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "http_request"
+name = "Fetch"
+[node.config]
+method = "GET"
+url = "http://127.0.0.1:9/"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "fetch"
+[[edge]]
+from = "fetch"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(src).expect("parses");
+        let err = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &dry_context(),
+        )
+        .await
+        .expect_err("a dry run must refuse a target the real run refuses");
+        assert!(
+            err.to_string().contains("http_request"),
+            "the dry refusal should name the node, as the live one does: {err}"
         );
     }
 
@@ -3455,6 +3720,7 @@ to = "done"
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
@@ -3754,6 +4020,7 @@ to = "gate"
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });

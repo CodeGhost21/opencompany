@@ -292,9 +292,11 @@ describe("the staleness guard", () => {
     expect(control(MINE.id, "Approve")).toBeNull();
     expect(control(MINE.id, "Decline")).toBeNull();
     // The row does not vanish — the operator has to be able to see the decision
-    // land — but it states the verdict instead of asking again.
+    // land — but it states the verdict instead of asking again. Since #899 a
+    // decided blocked run continues on its own, so the section says so rather
+    // than telling the operator to re-run.
     expect(card(MINE.id)?.textContent).toContain("Approved");
-    expect(section()?.textContent).toContain("run the workflow again");
+    expect(section()?.textContent).toContain("this run is continuing");
   });
 
   it("is not fooled by the run's own frozen receipt", async () => {

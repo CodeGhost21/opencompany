@@ -1768,6 +1768,20 @@ impl RuntimeBuilder {
             }
         };
 
+        // Issue #899 (Stage 1): the blocked-agent-node stash, shared between the
+        // workflow runner (which arms it at block-settle through `DeliveryParking`)
+        // and the runtime (whose `continue_turn` releases it). Inherited live on a
+        // rebuild, and a plain `default()` on a boot — unlike its two neighbours
+        // it is NOT rehydrated from the journal, because the parked tool-call
+        // effect carries no workflow id or trigger input to rebuild a stash from.
+        // A boot mid-block therefore re-arms the `continuations` counter but not
+        // this, and the released batch reports "re-run the workflow" instead of
+        // spawning. See `BlockedNodeQueue`.
+        let blocked_nodes = match handover.as_ref() {
+            Some(h) => h.blocked_nodes.clone(),
+            None => crate::runtime::blocked_nodes::BlockedNodeQueue::default(),
+        };
+
         // Brain selection, in precedence order:
         //   1. an explicit brain (test injection) always wins;
         //   2. under the `openhuman` feature, an attached harness pool + a
@@ -2531,6 +2545,11 @@ impl RuntimeBuilder {
                                         // never continued at all.
                                         continuations: continuations.clone(),
                                         gates: workflow_gates.clone(),
+                                        // Issue #899 (Stage 1): the SAME stash the
+                                        // runtime gets below, armed at block-settle
+                                        // for a blocked agent node so the resolve
+                                        // path can find the run to re-dispatch.
+                                        blocked_nodes: blocked_nodes.clone(),
                                     }),
                                     // Issue #529: the same journal the runner
                                     // writes its start/per-node trail to, so a
@@ -2789,6 +2808,7 @@ impl RuntimeBuilder {
         }
         runtime.adopt_continuations(continuations);
         runtime.adopt_workflow_gates(workflow_gates);
+        runtime.adopt_blocked_nodes(blocked_nodes);
 
         // MCP uses OpenHuman's process-global live connection registry. Keep a
         // runtime-owned config for this OpenCompany home so REST and agents see

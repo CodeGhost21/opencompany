@@ -88,6 +88,7 @@ const GRAPH: WorkflowGraph = {
     { from: "start", to: "collect" },
     { from: "collect", to: "draft" },
   ],
+  version: null,
 };
 
 /** A run in flight: `collect` finished, `draft` started and has not. */

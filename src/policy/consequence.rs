@@ -735,6 +735,66 @@ const DECLARED: &[Declared] = &[
     // whenever" is exactly the grant the `Standing` field refuses to describe,
     // and every push already parks as its own approval regardless.
     d("repo_publish", EffectGroup::Publish, Reach::Nothing),
+    // ---- Hosting (issue #1079) ---------------------------------------------
+    //
+    // The six `hosting_*` tools openhuman ships in `src/openhuman/hosting/`.
+    // Declared here rather than left to `undeclared()`, which is what that
+    // fallback's own doc asks for: it is "a courtesy for an unregistered read,
+    // not a second classifier to trust with an unreviewed capability".
+    //
+    // **Why the fallback gets these wrong, and why it is not being taught to
+    // get them right.** `undeclared()` decides "is this a read?" with
+    // `READ_ONLY_PREFIXES` matched by `name.starts_with(p)`. Every name here
+    // begins with `hosting_`, so `list`/`get`/`read` can never match — the
+    // prefix test cannot see past the namespace, and all six come back
+    // `Consequence`. Widening that test to look inside a namespace is the
+    // tempting general fix and is the wrong one: the fallback runs ONLY for
+    // tools no belt registered (a registered one is caught by
+    // `every_registered_tool_is_declared`), so making it cleverer extends trust
+    // to exactly the population that has had no review. It would also trade a
+    // fail-CLOSED miss — a read that parks, which costs an approval — for a
+    // fail-OPEN one, an effect that reads as a read. Declaring is the fix the
+    // file already prescribes.
+    //
+    // Three reads, per openhuman's own `hosting/README.md`, which labels each
+    // of them "Read-only.". They ask the provider what exists and what it did;
+    // nothing leaves this company and nothing is spent.
+    d(
+        "hosting_deployment_status",
+        EffectGroup::Other,
+        Reach::Nothing,
+    ),
+    d("hosting_list_sites", EffectGroup::Other, Reach::Nothing),
+    d("hosting_analytics", EffectGroup::Other, Reach::Nothing),
+    // The public deployment itself: it spends money and changes what the world
+    // sees at an address. `Publish` is the label an operator's card needs, and
+    // the fallback gave it `Other` — its name contains no `deploy`, `publish` or
+    // `post`, while the *status read* contains `deploy` and was labelled
+    // `Publish`. The two were inverted, which is worse than both being vague.
+    d(
+        "hosting_launch_site",
+        EffectGroup::Publish,
+        Reach::Consequence,
+    ),
+    // Attaching a domain is the other half of "what the world sees at an
+    // address", so it carries the same label as the launch it points at.
+    d(
+        "hosting_add_domain",
+        EffectGroup::Publish,
+        Reach::Consequence,
+    ),
+    // `hosting_set_env` is the one the issue left open, and the tool's own
+    // description settles it: "The site must be redeployed afterwards for a
+    // build-time variable to take effect." It changes what the NEXT deployment
+    // serves; it does not itself deploy. `Publish` would tell an operator a
+    // deployment is happening when none is, which is the same misdescription
+    // this change exists to remove — so `Other`, and `Consequence` because it
+    // still writes provider state and can store secrets write-only there.
+    d("hosting_set_env", EffectGroup::Other, Reach::Consequence),
+    // NOTE: a `hosting_rollback` tool is in flight (issue #913). It will need a
+    // row here too — it is an outward effect on a live site, so `Publish` /
+    // `Consequence` is the shape to start from, but it is left to that change to
+    // declare rather than guessed at now.
 ];
 
 /// A per-call declaration — the default. `const fn` so [`DECLARED`] stays a
@@ -1656,6 +1716,130 @@ mod tests {
 
     fn c(tool: &str) -> Consequence {
         consequence_of(tool, &json!({}))
+    }
+
+    // ── hosting (issue #1079) ───────────────────────────────────────────────
+
+    /// The three tools openhuman's `hosting/README.md` labels "Read-only." ask
+    /// the provider what exists and what it did. Asking whether a build
+    /// finished must not cost an operator an approval.
+    #[test]
+    fn a_hosting_read_does_not_park() {
+        for tool in [
+            "hosting_deployment_status",
+            "hosting_list_sites",
+            "hosting_analytics",
+        ] {
+            let consequence = c(tool);
+            assert_eq!(
+                consequence.reach,
+                Reach::Nothing,
+                "`{tool}` only reads the provider"
+            );
+            assert!(
+                !consequence.parks_under_auto(),
+                "`{tool}` must not interrupt anybody"
+            );
+        }
+    }
+
+    /// The outward effects still park. Without this the downgrade above would
+    /// pass against a table that stopped gating the whole namespace.
+    #[test]
+    fn a_hosting_effect_still_parks() {
+        for tool in [
+            "hosting_launch_site",
+            "hosting_add_domain",
+            "hosting_set_env",
+        ] {
+            let consequence = c(tool);
+            assert_eq!(
+                consequence.reach,
+                Reach::Consequence,
+                "`{tool}` changes provider state"
+            );
+            assert!(
+                consequence.parks_under_auto(),
+                "`{tool}` must still park under auto"
+            );
+        }
+    }
+
+    /// **The label inversion this fixes.** Before declaring these, the fallback's
+    /// `undeclared_group` matched on substrings: `hosting_launch_site` — the
+    /// actual public deployment — contains no `deploy`/`publish`/`post` and fell
+    /// through to `Other`, while `hosting_deployment_status` — a read — contains
+    /// `deploy` and came back `Publish`. The operator's card described the
+    /// risky call as nothing in particular and the harmless one as a publish.
+    #[test]
+    fn the_deployment_is_labelled_publish_and_the_status_read_is_not() {
+        assert_eq!(c("hosting_launch_site").group, EffectGroup::Publish);
+        assert_eq!(c("hosting_add_domain").group, EffectGroup::Publish);
+        assert_ne!(
+            c("hosting_deployment_status").group,
+            EffectGroup::Publish,
+            "a status read must not announce itself as a deployment"
+        );
+    }
+
+    /// `hosting_set_env` is `Other`, not `Publish`, and the tool's own
+    /// description is why: "The site must be redeployed afterwards for a
+    /// build-time variable to take effect." It changes what the NEXT deployment
+    /// serves and does not itself deploy, so a `Publish` card would tell an
+    /// operator a deployment is happening when none is.
+    #[test]
+    fn setting_env_is_not_labelled_as_a_deployment() {
+        let consequence = c("hosting_set_env");
+        assert_eq!(consequence.group, EffectGroup::Other);
+        assert_eq!(consequence.reach, Reach::Consequence);
+    }
+
+    /// Every hosting tool answers from the table, not from `undeclared()`.
+    ///
+    /// This is the regression guard for the mechanism itself: the fallback's
+    /// `READ_ONLY_PREFIXES` are matched with `name.starts_with`, so a
+    /// `hosting_`-prefixed read can never match one and the fallback cannot
+    /// classify any of these correctly. If a row is dropped, the tool silently
+    /// returns to that fallback rather than erroring — so the coverage is
+    /// asserted directly.
+    #[test]
+    fn every_hosting_tool_is_declared() {
+        let declared: std::collections::BTreeSet<&str> = declared_tools().collect();
+        for tool in [
+            "hosting_deployment_status",
+            "hosting_list_sites",
+            "hosting_analytics",
+            "hosting_launch_site",
+            "hosting_add_domain",
+            "hosting_set_env",
+        ] {
+            assert!(
+                declared.contains(tool),
+                "`{tool}` fell back to `undeclared()`, where the `hosting_` prefix \
+                 defeats the read test — declare it in DECLARED"
+            );
+        }
+    }
+
+    /// The mechanism, pinned on a name that is *not* declared: a namespaced read
+    /// still cannot be seen by the prefix test.
+    ///
+    /// Kept as documentation of why declaring is the fix rather than teaching
+    /// the fallback to split on `_`. Widening that test would extend trust to
+    /// tools no belt registered and no reviewer saw, and would turn a
+    /// fail-closed miss into a fail-open one.
+    #[test]
+    fn the_fallback_cannot_see_a_read_verb_behind_a_namespace() {
+        assert_eq!(
+            c("hosting_list_something_undeclared").reach,
+            Reach::Consequence,
+            "an undeclared namespaced read gates — inconvenient, and the safe direction"
+        );
+        assert_eq!(
+            c("list_something_undeclared").reach,
+            Reach::Nothing,
+            "the same verb at the front is seen, which is what makes the namespace the problem"
+        );
     }
 
     // -----------------------------------------------------------------------

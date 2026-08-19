@@ -591,6 +591,33 @@ async fn a_blocked_run_persists_the_partial_output_it_reached() {
         "the node that succeeded before the block must be in the partial snapshot: {}",
         stored.nodes
     );
+
+    // Issue #881's invariant, one surface over: the blocked node produced
+    // nothing, so it has no entry. Its turn ended by writing prose about being
+    // refused, and filing that prose as the node's output would re-open in the
+    // inspector exactly the confusion #881 fixed by stopping it reaching the
+    // next node.
+    assert!(
+        stored.nodes.get("work").is_none(),
+        "a blocked node's refusal prose must not be filed as its output: {}",
+        stored.nodes
+    );
+
+    // And the settled body carries the same capture, so the live run drawer and
+    // a run reopened from History cannot disagree about what the run produced.
+    assert!(
+        run.output.to_string().contains("BLOCK-MARKER-42"),
+        "the blocked run must report the output it reached, not `null`: {}",
+        run.output
+    );
+    assert!(
+        run.output
+            .get("nodes")
+            .and_then(|n| n.get("work"))
+            .is_none(),
+        "and must exclude the blocked node there too: {}",
+        run.output
+    );
 }
 
 #[cfg(test)]
