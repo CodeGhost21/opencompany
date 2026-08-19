@@ -124,6 +124,45 @@ describe("renaming a node cascades to the edges that reference it", () => {
     expect(graph.edges[0].from).toBe("start");
     expect(graph.edges[0].to).toBe("hello");
   });
+
+  it("keeps cascading after the id was cleared before the replacement was typed", async () => {
+    // Same fixture as above, but the rename goes through an intermediate
+    // empty id — clearing the field first (as a user backspacing it out
+    // does) before typing the replacement.
+    const workflow: WorkflowGraph = {
+      id: "greeter",
+      name: "Greeter",
+      version: "v1",
+      nodes: [
+        { id: "start", kind: "trigger", name: "Start" },
+        { id: "greet", kind: "agent", name: "Greet", agent: "alice" },
+      ],
+      edges: [{ from: "start", to: "greet" }],
+    };
+    const put = vi.fn((_path: string, _body?: unknown) => Promise.resolve(workflow));
+    await openEditing(stubClient({ put }), workflow);
+
+    await act(async () => {
+      type('[aria-label="Node id"]', "", 1);
+    });
+    await act(async () => {
+      type('[aria-label="Node id"]', "hello", 1);
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    // Pre-fix: the first edit cascades the edge to `""` (its rewrite still
+    // fires, since the id going *into* that edit was `"greet"`, not `""`).
+    // The second edit's rewrite is the one that used to be skipped — its
+    // `prevId` reads back as `""`, which the old `prevId &&` guard treated
+    // as "no previous id" and left the edge pointing at `""` forever.
+    expect(put).toHaveBeenCalledTimes(1);
+    const graph = put.mock.calls[0][1] as WorkflowGraph;
+    expect(graph.edges).toHaveLength(1);
+    expect(graph.edges[0].from).toBe("start");
+    expect(graph.edges[0].to).toBe("hello");
+  });
 });
 
 describe("the dialog consuming the host's structured workflow_invalid 400", () => {

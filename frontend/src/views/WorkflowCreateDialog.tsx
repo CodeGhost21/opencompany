@@ -930,7 +930,14 @@ export function WorkflowCreateDialog({
     // renamed node, leaving the operator nothing to re-point it at.
     const prevId = nodes.find((n) => n.key === key)?.id;
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
-    if ("id" in fields && prevId && fields.id !== prevId) {
+    const nextId = fields.id;
+    // `""` is a real previous id (the field cleared mid-edit, see below) and
+    // must still be tracked — only a missing row (`prevId === undefined`) or
+    // an edit that didn't touch `id` (`nextId === undefined`) skips the
+    // cascade. Using `prevId &&`/`fields.id` truthiness here previously
+    // dropped the rewrite once `prevId` was `""`, so clearing an id and then
+    // typing a replacement left edges stranded pointing at `""` forever.
+    if (nextId !== undefined && prevId !== undefined && nextId !== prevId) {
       // Continuously, on every keystroke of the id: the edges track the row's
       // id so a rename can never orphan them. A transient empty id (the field
       // cleared mid-edit) cascades to `""`, which is harmless — `validate()`
@@ -938,8 +945,8 @@ export function WorkflowCreateDialog({
       setEdges((rows) =>
         rows.map((e) => ({
           ...e,
-          from: e.from === prevId ? fields.id! : e.from,
-          to: e.to === prevId ? fields.id! : e.to,
+          from: e.from === prevId ? nextId : e.from,
+          to: e.to === prevId ? nextId : e.to,
         })),
       );
     }
