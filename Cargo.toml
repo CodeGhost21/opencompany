@@ -75,7 +75,15 @@ mime_guess = "2"
 # `futures_io`'s traits rather than tokio's.
 tokio-util = { version = "0.7", features = ["compat", "io"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` is load-bearing: the operator SSE frames (`project_event`
+# in `src/server/operator.rs`) are built by appending keys in a fixed order,
+# and the unit tests assert that exact order. That feature used to reach the
+# build only by feature-unification luck (an unrelated dependency enabling it);
+# the pages feature's dependency reshuffle dropped it, so the frames silently
+# re-sorted alphabetically (BTreeMap) and the order assertions failed. Declare
+# it here so the json!:insert ordering the SSE stream and its tests rely on is
+# deterministic rather than whoever else happens to enable it.
+serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 toml = "1"
 # The *writing* half of `config.toml`, for the first-run setup flow

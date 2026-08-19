@@ -828,16 +828,13 @@ impl Tool for PagesWriteTool {
         }
 
         // Compile BEFORE anything is written — a rejected import or a parse
-        // error must leave the page exactly as it was (plan §2).
-        //
-        // `compile_page` is a full SWC parse/transform/codegen pass over up to
-        // `MAX_SOURCE_BYTES` of agent input — pure CPU synchronous work with no
-        // await points, so running it inline would occupy a tokio worker (one
-        // of the few concurrent tool slots) for its whole duration. Run it on
-        // the blocking pool instead. The source cap is what bounds swc's
-        // recursive-descent nesting depth, so a pathological page cannot drive
-        // the parser past what the pool's threads handle: the error surface
-        // here stays a clean tool error, never a wedged runtime.
+        // error must leave the page exactly as it was (plan §2). The compile
+        // is a full swc parse/transform/codegen over up to `MAX_SOURCE_BYTES`
+        // of agent input — CPU-bound work that would otherwise occupy a tokio
+        // worker for its whole duration — so it runs on the blocking pool
+        // rather than inline in this async handler. The `spawn_blocking`
+        // closure owns its own copy of the source, so nothing from `args` is
+        // borrowed across the `await`.
         let compiled = match source {
             Some(source) => {
                 let owned = source.to_string();
@@ -849,10 +846,10 @@ impl Tool for PagesWriteTool {
                              {diagnostic}"
                         )));
                     }
-                    Err(join) => {
+Err(e) => {
                         return Ok(ToolResult::error(format!(
-                            "Could not compile `{slug}`'s Page.tsx — the compiler worker \
-                             failed: {join}. Nothing was written."
+                            "Could not compile `{slug}`'s Page.tsx — the compiler task failed: \
+                             {e}"
                         )));
                     }
                 }
