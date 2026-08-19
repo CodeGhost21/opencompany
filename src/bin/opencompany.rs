@@ -992,12 +992,34 @@ fn main() -> Result<()> {
         .block_on(async_main())
 }
 
+/// The filter to install, given whatever `RUST_LOG` holds.
+///
+/// Split out from [`async_main`] and taking the variable as an argument so the
+/// choice can be tested without mutating process-global environment state,
+/// which no test can do without racing every other test in the binary.
+///
+/// `Some` — the operator set the variable, so it is parsed exactly the way it
+/// was before [`DEFAULT_LOG_FILTER`] existed: **lossily**. A single malformed
+/// directive drops itself and the valid ones around it still apply. Parsing it
+/// strictly and falling back on error would silently discard an operator's
+/// entire working configuration over one typo, which is a worse failure than
+/// the one this constant was added to fix.
+///
+/// `None` — the variable is unset, so [`DEFAULT_LOG_FILTER`] applies.
+fn log_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    // `EnvFilter::new` is `parse_lossy` over the same `ERROR` default directive
+    // that `from_default_env` uses, so passing the variable's value through it
+    // is exactly what the old code did with it — just reachable from a test.
+    match rust_log {
+        Some(directives) => tracing_subscriber::EnvFilter::new(directives),
+        None => tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER),
+    }
+}
+
 async fn async_main() -> Result<()> {
+    let rust_log = std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok();
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| DEFAULT_LOG_FILTER.into()),
-        )
+        .with_env_filter(log_filter(rust_log.as_deref()))
         .init();
 
     match Cli::parse().command {
@@ -1811,7 +1833,7 @@ mod test {
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry()
             .with(Captured(std::sync::Arc::clone(&captured)))
-            .with(tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
+            .with(log_filter(None));
 
         tracing::subscriber::with_default(subscriber, || {
             // The worker's recovery summary — the line the operator needs.
@@ -1851,6 +1873,39 @@ mod test {
         assert!(
             !seen("tinyagents::observability", tracing::Level::INFO),
             "the exception stops at `warn`; captured {events:?}"
+        );
+    }
+
+    /// A `RUST_LOG` the operator set is theirs, even when part of it is junk.
+    ///
+    /// `try_from_default_env` rejects the whole variable over one malformed
+    /// directive, so falling back to [`DEFAULT_LOG_FILTER`] on that error would
+    /// throw away every valid directive the operator wrote — turning a typo into
+    /// a silent, total loss of their logging configuration. [`log_filter`] parses
+    /// it lossily instead, which is what this binary did before the constant
+    /// existed. Flagged by review on PR #1186.
+    #[test]
+    fn a_malformed_directive_does_not_discard_the_rest_of_rust_log() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        // One good directive, one that cannot parse.
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(Some(
+                "opencompany::kept=info,@@@not a directive@@@",
+            )));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "opencompany::kept", "the operator asked for this");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        assert!(
+            events
+                .iter()
+                .any(|(t, l)| t == "opencompany::kept" && *l == tracing::Level::INFO),
+            "the valid directive must survive the invalid one beside it; captured {events:?}"
         );
     }
 }
