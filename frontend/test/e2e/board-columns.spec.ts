@@ -144,12 +144,23 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   await addTask.click();
   await expect(page.getByRole("heading", { name: "New task" })).toBeVisible();
 
-  // One field. Title / Note / Priority / Assignee are gone from create — the
-  // host defaults the last two and the card's edit surface owns them (#278).
+  // Title / Note / Priority stay gone from create — the host defaults priority
+  // and the card's edit surface owns them (#278).
   await expect(page.locator("#new-prompt")).toBeVisible();
-  for (const gone of ["#new-title", "#new-note", "#new-assignee"]) {
+  for (const gone of ["#new-title", "#new-note", "#new-priority"]) {
     await expect(page.locator(gone)).toHaveCount(0);
   }
+
+  // Assignee came *back* in #1106, and is the one exception to "one field".
+  // #301 removed it on the reasoning that the host defaults it; what that missed
+  // is that the host's default is a planning pass which picks an owner, and picks
+  // one silently when two teammates fit. Offering it here is the pre-empt.
+  //
+  // The rule that keeps this from re-breaking what #301 fixed is the *default*,
+  // asserted below rather than the control's absence: an operator who ignores it
+  // types a prompt, hits Create, and gets exactly the unassigned card they got
+  // before — the field is omitted from the body entirely when untouched.
+  await expect(page.locator("#new-assignee")).toHaveCount(1);
 
   // A prompt longer than the title cap: the title is shortened and the full
   // text survives in the note, so nothing the operator typed is lost.
@@ -158,7 +169,7 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   await page.locator("#new-prompt").fill(long);
   await page.getByRole("button", { name: "Create", exact: true }).click();
 
-  type Row = { title: string; note?: string; column: string };
+  type Row = { title: string; note?: string; column: string; assignee: string };
   const find = async (): Promise<Row | undefined> => {
     const rows = (await (await request.get(`${API}/tasks`)).json()) as Row[];
     return rows.find((r) => r.title.startsWith(marker));
@@ -170,6 +181,10 @@ test("new work enters through one prompt box and lands in To-do", async ({ page,
   expect(created.column).toBe("todo");
   expect(created.title.length).toBeLessThanOrEqual(81); // 80 + the ellipsis
   expect(created.note).toBe(long);
+  // The #1106 default, and the reason adding the control is a no-op for anyone
+  // who does not use it: the prompt was the only thing filled in, so the card is
+  // unassigned exactly as it was before the picker existed.
+  expect(created.assignee).toBe("");
 });
 
 /**
