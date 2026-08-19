@@ -351,7 +351,7 @@ describe("open turns read back from the run store", () => {
       { id: "turn-1", chatId: "main", status: "running" },
     ]);
 
-    expect(open).toEqual({ main: { turnId: "turn-1", queued: false } });
+    expect(open).toEqual({ main: [{ turnId: "turn-1", queued: false }] });
   });
 
   it("calls a turn that has not taken the lock queued, not working", () => {
@@ -362,7 +362,7 @@ describe("open turns read back from the run store", () => {
     // The serial train is real — five concurrent messages queue behind one
     // another — and a spinner implying progress while a turn waits its turn is
     // the console saying something untrue.
-    expect(open.main.queued).toBe(true);
+    expect(open.main[0].queued).toBe(true);
   });
 
   it("ignores a dispatch at a card, which owns no conversation's indicator", () => {
@@ -380,14 +380,16 @@ describe("open turns read back from the run store", () => {
       { id: "turn-2", chatId: "design", status: "pending" },
     ]);
 
-    expect(open.main.queued).toBe(false);
-    expect(open.design.queued).toBe(true);
+    expect(open.main[0].queued).toBe(false);
+    expect(open.design[0].queued).toBe(true);
   });
 
-  it("names a thread by its running turn when one is queued behind it", () => {
+  it("orders a thread's rows running-first yet keeps the queued sibling", () => {
     // The per-company serial lock lets one thread hold a running turn and a
     // queued one at once. The running row is what the operator is waiting on,
-    // so it must name the indicator whichever order the store lists them in.
+    // so it must head the list whichever order the store listed them in — but
+    // the queued sibling is NOT dropped, because its reply is still coming and
+    // the poll watches it too (issue #1000).
     const runningFirst = openTurnsFromRuns([
       { id: "turn-1", chatId: "main", status: "running" },
       { id: "turn-2", chatId: "main", status: "pending" },
@@ -397,8 +399,76 @@ describe("open turns read back from the run store", () => {
       { id: "turn-1", chatId: "main", status: "running" },
     ]);
 
-    expect(runningFirst).toEqual({ main: { turnId: "turn-1", queued: false } });
-    expect(pendingFirst).toEqual({ main: { turnId: "turn-1", queued: false } });
+    const expected = {
+      main: [
+        { turnId: "turn-1", queued: false },
+        { turnId: "turn-2", queued: true },
+      ],
+    };
+    expect(runningFirst).toEqual(expected);
+    expect(pendingFirst).toEqual(expected);
+  });
+
+  it("keeps two queued rows in store order", () => {
+    // No running turn yet — two sends queued behind a long first turn. Both
+    // are still awaited, so both stay, in the order the store listed them.
+    const open = openTurnsFromRuns([
+      { id: "turn-1", chatId: "main", status: "pending" },
+      { id: "turn-2", chatId: "main", status: "pending" },
+    ]);
+
+    expect(open.main.map((t) => t.turnId)).toEqual(["turn-1", "turn-2"]);
+    expect(open.main.every((t) => t.queued)).toBe(true);
+  });
+});
+
+/**
+ * The merge that arms the map without evicting a turn another leg registered.
+ * `onSendDetached` appends from a POST's answer while a reload (or a failed
+ * POST's re-query) arms from `listRuns`; the two collide on the same turn.
+ */
+describe("merging armed turn lists", () => {
+  it("appends a thread's turns beside an existing row", () => {
+    const merged = mergeOpenTurns(
+      { main: [{ turnId: "turn-1", queued: false }] },
+      { main: [{ turnId: "turn-2", queued: true }] },
+    );
+
+    expect(merged.main.map((t) => t.turnId)).toEqual(["turn-1", "turn-2"]);
+    // A copy, never a mutation of the previous state.
+    expect(merged).not.toBe({ main: [{ turnId: "turn-1", queued: false }] });
+  });
+
+  it("collapses the same turn onto one entry, fresh reading wins", () => {
+    // A reload mid-POST arms the same row the 202 just registered. One entry
+    // survives, and the store's later answer is the honest `queued` reading.
+    const merged = mergeOpenTurns(
+      { main: [{ turnId: "turn-1", queued: true }] },
+      { main: [{ turnId: "turn-1", queued: false }] },
+    );
+
+    expect(merged.main).toEqual([{ turnId: "turn-1", queued: false }]);
+  });
+
+  it("never evicts an existing row a re-arm does not repeat", () => {
+    // The re-arm came back listing only the newer turn; the running row the
+    // POST leg registered must survive the merge, not be replaced by it.
+    const merged = mergeOpenTurns(
+      { main: [{ turnId: "turn-1", queued: false }] },
+      { main: [{ turnId: "turn-2", queued: true }] },
+    );
+
+    expect(merged.main.map((t) => t.turnId)).toEqual(["turn-1", "turn-2"]);
+    expect(merged.design).toBeUndefined();
+  });
+
+  it("leaves untouched threads alone", () => {
+    const merged = mergeOpenTurns(
+      { design: [{ turnId: "turn-x", queued: true }] },
+      { main: [{ turnId: "turn-1", queued: false }] },
+    );
+
+    expect(merged.design).toEqual([{ turnId: "turn-x", queued: true }]);
   });
 });
 
