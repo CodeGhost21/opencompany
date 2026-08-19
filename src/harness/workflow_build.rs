@@ -54,6 +54,7 @@
 //! tests it.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -528,7 +529,9 @@ pub async fn run_workflow_build_pass(
             return;
         }
     };
-    if let Err(err) = courtesy_validate_draft(&draft, &evidence.record) {
+    if let Err(err) =
+        courtesy_validate_draft(&draft, &evidence.record, evidence.source_dir.as_deref())
+    {
         settle_to_todo(
             &runtime,
             &task_id,
@@ -834,6 +837,9 @@ struct Evidence {
     existing_names: Vec<String>,
     /// Existing workflow ids, so the host mints a non-clashing id.
     existing_ids: HashSet<String>,
+    /// See [`CompanyEvidence::source_dir`] — folded through so the card path's
+    /// courtesy validation passes the same directory create would.
+    source_dir: Option<PathBuf>,
 }
 
 /// One roster teammate as the copilot grounds — and the deterministic resolver
@@ -872,6 +878,11 @@ struct CompanyEvidence {
     existing_names: Vec<String>,
     /// Existing workflow ids, so the host mints a non-clashing id.
     existing_ids: HashSet<String>,
+    /// The company source directory, carried WITH the record so every
+    /// `courtesy_validate_draft` caller reading this evidence passes the same
+    /// one create would. Withholding it silently narrows the `sub_workflow`
+    /// existence probe to non-seed graphs (review of #1074).
+    source_dir: Option<PathBuf>,
 }
 
 /// Reads the company's own state deterministically — the roster, the existing
@@ -920,6 +931,7 @@ async fn gather_company_evidence(runtime: &Arc<CompanyRuntime>) -> crate::Result
         roster,
         existing_names,
         existing_ids,
+        source_dir: runtime.source_dir().map(Path::to_path_buf),
         record,
     })
 }
@@ -941,6 +953,7 @@ async fn gather_evidence(
         roster: company.roster,
         existing_names: company.existing_names,
         existing_ids: company.existing_ids,
+        source_dir: company.source_dir,
         record: company.record,
     })
 }

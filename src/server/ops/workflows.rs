@@ -845,7 +845,11 @@ async fn validate_workflow(
         .await
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(company.id().to_string())))?;
-    courtesy_validate_draft(&draft, &record).map_err(ApiError)?;
+    // The SAME source directory create passes (`create_company_workflow` at the
+    // top of this module). It feeds only the `sub_workflow` existence probe, and
+    // withholding it here made this refuse a child workflow that lives as a seed
+    // file — which create accepts. Review of #1074.
+    courtesy_validate_draft(&draft, &record, company.runtime.source_dir()).map_err(ApiError)?;
     Ok(Json(ValidateWorkflowResponse { valid: true }))
 }
 
@@ -4459,6 +4463,174 @@ mod tests {
                 json_body(validated).await,
                 json_body(created).await,
                 "a pre-flight that names a different problem than the submit is worse than none"
+            );
+        }
+
+        /// A company whose runtime HAS a source directory holding one seed
+        /// workflow at `workflows/child.toml` — the self-hosted / local `serve`
+        /// shape. `hosted_state` deliberately has none, so the seed-file half of
+        /// the `sub_workflow` existence probe is unreachable from it.
+        async fn seeded_state(home: &std::path::Path) -> (AppState, tempfile::TempDir) {
+            let source = tempfile::Builder::new()
+                .prefix("oc-workflows-source-")
+                .tempdir()
+                .expect("tempdir");
+            let workflows = source.path().join("workflows");
+            std::fs::create_dir_all(&workflows).unwrap();
+            std::fs::write(
+                workflows.join("child.toml"),
+                "id = \"child\"\nname = \"Child\"\n[[node]]\nid = \"start\"\n\
+                 kind = \"trigger\"\nname = \"Start\"\n",
+            )
+            .unwrap();
+
+            let store = FsCompanyStore::new(home.to_path_buf());
+            let id = CompanyId::new("acme");
+            store
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: empty_manifest(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                    setup: Default::default(),
+                })
+                .await
+                .unwrap();
+            let runtime = RuntimeBuilder::new(home.to_path_buf(), empty_manifest())
+                .with_id(id.clone())
+                .with_seed_dir(source.path())
+                .build()
+                .await
+                .unwrap();
+            assert!(
+                runtime.source_dir().is_some(),
+                "this fixture only proves anything with a source directory"
+            );
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            (state, source)
+        }
+
+        /// A graph whose `sub_workflow` node runs `child` — which exists ONLY as
+        /// a seed file, so the probe can only see it with a source directory.
+        fn body_with_sub_workflow() -> serde_json::Value {
+            serde_json::json!({
+                "id": "parent",
+                "name": "Parent",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "child_run",
+                        "kind": "sub_workflow",
+                        "name": "Run the child",
+                        "config": { "workflow_id": "child" }
+                    }
+                ],
+                "edges": [ { "from": "start", "to": "child_run" } ]
+            })
+        }
+
+        /// **The review finding on #1074.** `courtesy_validate_draft` passed
+        /// `None` for `source_dir` while create passes
+        /// `company.runtime.source_dir()`. That argument feeds exactly one rule —
+        /// `workflow_id_exists` → `seed_file_exists` — so a draft naming a
+        /// seed-file child was refused 400 by the pre-flight and accepted 200 by
+        /// the submit.
+        ///
+        /// A different **verdict**, not a different sentence: strictly worse than
+        /// the divergence the reorder fixed, and the exact failure a pre-flight
+        /// exists to prevent. Hosted tenants (`source_dir == None`) never saw it;
+        /// self-hosted and local `serve` from a company repo did.
+        #[tokio::test]
+        async fn validate_accepts_a_seed_file_sub_workflow_because_create_does() {
+            let home_dir = home();
+            let (state, _source) = seeded_state(home_dir.path()).await;
+
+            let validated = post_validate(&state, body_with_sub_workflow()).await;
+            let status = validated.status();
+            let body = json_body(validated).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "the pre-flight refused a child create accepts: {body}"
+            );
+
+            let created = post_create_on(&state, body_with_sub_workflow()).await;
+            assert_eq!(
+                created.status(),
+                StatusCode::OK,
+                "create must accept it, or this test proves nothing"
+            );
+        }
+
+        /// The other half: a `sub_workflow` naming nothing at all is still
+        /// refused, and by both routes. Threading the source directory must widen
+        /// what the probe can see, not switch it off.
+        #[tokio::test]
+        async fn validate_still_refuses_a_sub_workflow_that_names_nothing() {
+            let home_dir = home();
+            let (state, _source) = seeded_state(home_dir.path()).await;
+
+            let mut body = body_with_sub_workflow();
+            body["nodes"][1]["config"]["workflow_id"] = serde_json::json!("ghost");
+
+            let validated = post_validate(&state, body.clone()).await;
+            let created = post_create_on(&state, body).await;
+            assert_eq!(validated.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(created.status(), validated.status());
+            assert_eq!(
+                json_body(validated).await,
+                json_body(created).await,
+                "the pre-flight must answer with the submit's own body"
+            );
+        }
+
+        /// The over-cap refusal, which the two routes used to word differently
+        /// ("the proposed workflow is N bytes" here, "the rendered workflow is N
+        /// bytes" there). Same status and verdict, different sentence — the drift
+        /// this PR set out to remove, and its own body claims the bodies are
+        /// identical. One constructor now, and this is what holds it.
+        #[tokio::test]
+        async fn validate_and_create_refuse_an_over_cap_draft_in_the_same_words() {
+            let home_dir = home();
+            let (state, _store, _id) = hosted_state(home_dir.path()).await;
+
+            // Well past the 64 KiB TOML cap once rendered, and structurally fine
+            // otherwise, so the cap is the only thing either route can complain
+            // about.
+            let mut body = create_body();
+            body["description"] = serde_json::json!("x".repeat(70_000));
+
+            let validated = post_validate(&state, body.clone()).await;
+            let created = post_create_on(&state, body).await;
+
+            assert_eq!(validated.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(created.status(), validated.status());
+            let from_validate = json_body(validated).await;
+            assert_eq!(
+                from_validate,
+                json_body(created).await,
+                "the pre-flight must answer with the submit's own body"
+            );
+            assert!(
+                from_validate["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("over the"),
+                "{from_validate}"
             );
         }
 

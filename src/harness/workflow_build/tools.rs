@@ -309,7 +309,11 @@ impl Tool for CheckWorkflowTool {
         // the same gate the create route runs, WITHOUT persisting.
         match raw_workflow_from_spec(&spec) {
             Ok(raw) => {
-                if let Err(err) = courtesy_validate_draft(&raw, &self.ctx.company.record) {
+                if let Err(err) = courtesy_validate_draft(
+                    &raw,
+                    &self.ctx.company.record,
+                    self.ctx.company.source_dir.as_deref(),
+                ) {
                     problems.push(err.to_string());
                 }
             }
@@ -477,7 +481,11 @@ impl Tool for ProposeWorkflowTool {
             if errors.is_empty() {
                 match raw_workflow_from_spec(&spec) {
                     Ok(raw) => {
-                        if let Err(err) = courtesy_validate_draft(&raw, &self.ctx.company.record) {
+                        if let Err(err) = courtesy_validate_draft(
+                            &raw,
+                            &self.ctx.company.record,
+                            self.ctx.company.source_dir.as_deref(),
+                        ) {
                             errors.push(err.to_string());
                         }
                     }
