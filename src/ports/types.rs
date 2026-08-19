@@ -2687,6 +2687,18 @@ pub struct OverlayBlob {
     /// provenance existed (the `#[serde(default)]` keeps those rows loading).
     #[serde(default)]
     pub provenance: Option<TemplateProvenance>,
+    /// The three answers first-run setup was given, when the company came from
+    /// that flow. `None` for every other company and for rows written before it
+    /// existed, which `#[serde(default)]` keeps loading.
+    ///
+    /// Carried in the blob rather than a column for the same reason
+    /// [`provenance`](Self::provenance) is: the SQLite and MongoDB backends
+    /// rebuild a record field by field, so anything not in here is silently
+    /// dropped on the way back out. That would lose the answers Phase 2 builds
+    /// workflows from — on exactly the backends a hosted tenant runs, and only
+    /// there, which is the worst shape a data-loss bug can take.
+    #[serde(default)]
+    pub setup: Option<crate::company::setup::SetupAnswers>,
 }
 
 impl OverlayBlob {
@@ -2703,6 +2715,7 @@ impl OverlayBlob {
             desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
+            setup: record.setup.clone(),
         }
     }
 
@@ -2729,6 +2742,9 @@ impl OverlayBlob {
                     desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     provenance: None,
+                    // A legacy bare-array row predates first-run setup by a long
+                    // way; it can carry no answers.
+                    setup: None,
                 })
                 .map_err(|_| original),
         }
@@ -3471,6 +3487,61 @@ pub struct PaymentReceipt {
 mod test {
     use super::*;
     use crate::ports::workflow_runner::DeliveryStatus;
+
+    /// The answers must survive the **blob**, not merely the record.
+    ///
+    /// `CompanyRecord` gained a `setup` field and the fs store round-tripped it
+    /// for free, because it serialises the whole record. SQLite and MongoDB do
+    /// not: they rebuild a record field by field from `OverlayBlob`, so anything
+    /// missing there is dropped silently on the way back out — losing exactly the
+    /// answers Phase 2 builds workflows from, on exactly the backends a hosted
+    /// tenant runs, and nowhere else. `--all-features` compilation is what
+    /// surfaced it; this is what keeps it surfaced.
+    #[test]
+    fn the_setup_answers_survive_the_overlay_blob() {
+        let answers = crate::company::setup::SetupAnswers {
+            industry: "E-commerce — homeware".into(),
+            team_hint: "someone on dispatch".into(),
+            automate: "meta ads, order dispatch".into(),
+        };
+        let mut record = CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest: toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest"),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: Some(answers.clone()),
+        };
+
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let parsed = OverlayBlob::parse(&json).expect("parse");
+        assert_eq!(
+            parsed.setup,
+            Some(answers),
+            "the answers were dropped by the blob the SQL backends rebuild from"
+        );
+
+        // A company that never went through setup carries nothing, and a row
+        // written before the field existed still loads.
+        record.setup = None;
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        assert_eq!(OverlayBlob::parse(&json).expect("parse").setup, None);
+        assert_eq!(
+            OverlayBlob::parse("{\"agents\":[]}")
+                .expect("legacy row")
+                .setup,
+            None
+        );
+    }
 
     fn round_trip<T>(value: &T) -> T
     where

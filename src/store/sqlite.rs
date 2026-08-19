@@ -529,6 +529,7 @@ impl CompanyStore for SqliteStore {
             overlay_desk_tools: overlay.desk_tools,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
+            setup: overlay.setup,
         }))
     }
 
@@ -4032,6 +4033,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
