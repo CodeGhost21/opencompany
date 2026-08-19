@@ -82,4 +82,19 @@ impl RunTurn for HarnessRunTurn {
             .run_steered_background(company, agent_id, message, &self.deps, control, run_sink)
             .await
     }
+
+    async fn run_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+    ) -> Result<TurnOutcome> {
+        self.pool
+            .run_background(company, agent_id, message, &self.deps)
+            .await
+    }
+
+    async fn ensure(&self, company: &CompanyRecord) -> Result<()> {
+        self.pool.ensure(company, &self.deps).await
+    }
 }
