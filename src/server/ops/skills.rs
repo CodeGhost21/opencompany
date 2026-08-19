@@ -708,7 +708,7 @@ mod tests {
             uri: &str,
             body: Option<&str>,
         ) -> (StatusCode, Value, String) {
-            let mut request = Request::builder()
+            let request = Request::builder()
                 .method(method)
                 .uri(uri)
                 .header("cookie", fixed_cookie("acme"));
