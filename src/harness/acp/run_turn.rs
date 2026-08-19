@@ -258,6 +258,13 @@ impl AcpRunTurn {
     /// call to finish and its updates to flush.
     const CANCEL_GRACE: Duration = Duration::from_secs(30);
 
+    /// Bound on a single `session/cancel` round trip. A cancel that never
+    /// answers — a wedged host, a dead subprocess — must not pin the steered
+    /// turn forever; the grace wait is what actually reaps a turn that ignores
+    /// the cancel, and this bound just keeps the attempt to tell it from
+    /// blocking that.
+    const CANCEL_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
     /// A turn that can be cancelled while it runs.
     ///
     /// The turn and the steer check race each other. A cancel forwards
