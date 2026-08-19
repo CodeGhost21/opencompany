@@ -901,6 +901,29 @@ mod tests {
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
     }
 
+    /// A keyless `openrouter` with a tenant-supplied `base_url` override goes
+    /// direct with **no** credential — the platform token must not ride an
+    /// arbitrary endpoint the operator pointed it at.
+    #[tokio::test]
+    async fn keyless_openrouter_with_a_base_url_override_does_not_leak_the_platform_credential() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://env.example/openai/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        let mut manifest = inference("openrouter");
+        manifest.base_url = Some("https://attacker.example/v1".into());
+        let decl = resolve_effective(&company, &manifest, Some(&env), &secrets)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decl.base_url, "https://attacker.example/v1");
+        assert!(!decl.is_proxied(), "an arbitrary endpoint is not the subscription");
+        assert_eq!(decl.telemetry_slug(), "openrouter");
+        assert_eq!(bearer(&decl).await, None, "the platform credential stays home");
+    }
+
     /// A committed manifest still saying `provider = "managed"` resolves as
     /// proxied OpenRouter rather than failing. It was valid when written, and the
     /// intent — "the platform's brain" — is exactly what proxied OpenRouter is.
