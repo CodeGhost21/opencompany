@@ -1,5 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import { expectWorkflowIndex, openFirstWorkflow } from "./workflows";
+
 /**
  * Issue #1107: run history is a LEFT RAIL beside the canvas on a wide viewport,
  * and the bottom strip it has always been below `xl` (1280px).
@@ -15,6 +17,12 @@ import { expect, test, type Page } from "@playwright/test";
  * every pixel it takes is a pixel the graph loses, and the right-hand overlays
  * (`CopilotPanel`, `NodeDetailPanel`) then cover ~396px more of what is left.
  * Below `xl` the rail is therefore not in-flow at all — hence the narrow case.
+ *
+ * Issue #1110: the rail lives in the DETAIL view, so every case here opens a
+ * workflow first — and the last case pins the other half of that, which is that
+ * the index must not carry per-workflow run chrome at all. A list of workflows
+ * has no single run to show history for, so there is nothing for a rail to be
+ * beside.
  */
 
 /** Dismisses the first-run tour if it is up; see `workflow-run-history.spec.ts`. */
@@ -29,7 +37,14 @@ async function dismissTour(page: Page) {
   await expect(skip).toBeHidden();
 }
 
-/** Opens run history, skipping on a host that does not serve `…/workflows/runs`. */
+/**
+ * Opens run history on a workflow's detail view, skipping on a host that does
+ * not serve `…/workflows/runs`.
+ *
+ * Issue #1110: the caller must have opened a workflow already. Waiting for the
+ * toggle on the index would time out and report it as an unsupported host,
+ * which would be a lie about the host to cover a spec that never navigated.
+ */
 async function openHistory(page: Page) {
   const toggle = page.getByTestId("workflow-history-toggle");
   try {
@@ -54,6 +69,7 @@ test("at xl the run history is a left rail, and the canvas keeps its width", asy
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/#/workflows");
   await dismissTour(page);
+  await openFirstWorkflow(page);
 
   const panel = await openHistory(page);
   const flow = canvas(page);
@@ -87,6 +103,7 @@ test("below xl the run history falls back to a strip under the canvas", async ({
   await page.setViewportSize({ width: 1024, height: 800 });
   await page.goto("/#/workflows");
   await dismissTour(page);
+  await openFirstWorkflow(page);
 
   const panel = await openHistory(page);
   const flow = canvas(page);
@@ -104,4 +121,28 @@ test("below xl the run history falls back to a strip under the canvas", async ({
     Math.abs(strip.width - graph.width),
     "the strip spans the same width as the canvas",
   ).toBeLessThan(4);
+});
+
+test("the index carries no run chrome, and leaving a workflow takes the rail with it", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/#/workflows");
+  await dismissTour(page);
+
+  // Issue #1110: the tab's front door. Nothing here is about one run — no
+  // History toggle to open a rail with, and no rail already open.
+  await expectWorkflowIndex(page);
+  await expect(page.getByTestId("workflow-history-toggle")).toHaveCount(0);
+  await expect(page.getByTestId("workflow-run-history")).toHaveCount(0);
+
+  // Open one, put the rail up, and go back. The rail belongs to the workflow,
+  // so it must not survive the trip: it is not merely hidden on the index, the
+  // slot it mounts in does not exist there.
+  await openFirstWorkflow(page);
+  await openHistory(page);
+  await page.getByTestId("workflow-back-to-index").click();
+  await expectWorkflowIndex(page);
+  await expect(page.getByTestId("workflow-run-history")).toHaveCount(0);
+  await expect(page.getByTestId("workflow-history-toggle")).toHaveCount(0);
 });

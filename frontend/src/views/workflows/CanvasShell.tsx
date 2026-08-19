@@ -1,12 +1,20 @@
-// The workflows view's column layout — and the convention for where a panel
-// mounts (issue #1107).
+// The workflow DETAIL view's column layout — and the convention for where a
+// panel mounts (issue #1107).
+//
+// Scope first, because it is load-bearing since issue #1110: this is the shell
+// for `#/workflows/<id>`, never for `#/workflows`. The index is a list of
+// workflows, so it has no single run to show history for and no single graph to
+// inspect — every slot below is per-workflow chrome. `WorkflowsView` therefore
+// renders this on the detail side of its one branch and a plain column on the
+// index side, which is what makes "no run chrome on the index" structural
+// rather than a rule each panel has to remember.
 //
 // Before this, every panel the view grew was appended to one vertical stack
 // under the canvas, and each one ate the dimension a workflow graph needs most.
 // Run history was the worst case: tall rows in a `max-h-72` horizontal strip,
 // showing two runs at a time while spending the full width of the screen.
 //
-// The view now has three slots, and each one is a decision about the panel's
+// The detail view has three slots, and each one is a decision about the panel's
 // LIFETIME, not about where there happens to be room:
 //
 //   left   — an in-flow rail. A browsing context the operator opened on
@@ -25,7 +33,8 @@
 //            copilot clears the selected node.
 //
 //   bottom — a full-width strip below BOTH canvas and rail, mounted as a
-//            sibling of this component. The receipt for something that just
+//            sibling of this component (and, like this component, only on the
+//            detail side of the branch). The receipt for something that just
 //            happened and is dismissed when read: `RunResultPanel` and
 //            `RunFailurePanel`. Full width because it spans the whole view,
 //            and below the rail because the rail answers "what has run
