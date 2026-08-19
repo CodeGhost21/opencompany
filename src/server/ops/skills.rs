@@ -400,6 +400,12 @@ async fn set_enabled(
     Path(SlugPath { slug }): Path<SlugPath>,
     Json(body): Json<SetEnabled>,
 ) -> Result<Json<InstalledSkill>, ApiError> {
+    if !valid_slug(&slug) {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
+            "`{slug}` is not a valid skill slug. Skills live under `skills/<slug>/`, so a slug \
+             is `[a-z0-9][a-z0-9-]*`."
+        ))));
+    }
     // Preserve an existing delta's source and custom doc; a first toggle of a
     // built-in company skill records a Company-sourced override.
     let existing = company
