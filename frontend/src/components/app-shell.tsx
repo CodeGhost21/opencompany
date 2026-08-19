@@ -1304,7 +1304,16 @@ export function AppShell({
   const onSendDetached = useCallback(
     (threadId: string, turnId?: string) => {
       const held = pendingPostThreadsRef.current.detached(threadId);
-      setOpenTurns((prev) => ({ ...prev, [threadId]: { turnId, queued: true } }));
+      // Append, never replace (issue #1000). The serial lock queues a second
+      // send behind the running turn, and a replace would stop the poll
+      // watching the running row — the one whose reply settles first. The list
+      // drains oldest-first, so the newest accepted turn goes on the end.
+      setOpenTurns((prev) => {
+        const turns = prev[threadId] ?? [];
+        // The reload arm can race this POST's answer on the same turn.
+        if (turnId && turns.some((t) => t.turnId === turnId)) return prev;
+        return { ...prev, [threadId]: [...turns, { turnId, queued: true }] };
+      });
       held.forEach((frame) => renderAgentReply(frame));
     },
     [renderAgentReply],
