@@ -292,9 +292,63 @@ divergence in an auth extractor being precisely the class of bug that cannot be
 afforded. With a real listener, every Playwright spec and every proxy test is
 valid evidence about embedded mode too.
 
-`None` when it could not start — most often because another process holds the
-data root. The console renders that as a row; the desktop still holds remote
-hosts, which is the point of holding several.
+Not started when its root could not be taken — most often because another
+process holds it. The console renders that as a row; the desktop still holds
+remote hosts, which is the point of holding several.
+
+## Several hosts on one machine
+
+`src-tauri/src/local.rs` is the layer above `embedded.rs`: `embedded` knows how
+to start *one* host over *one* data root and says nothing about which roots
+exist; `LocalHosts` is the roster of the roots an operator asked for, and which
+of them are listening.
+
+An operator running two companies side by side — a real one and a scratch one,
+or two clients — is why. Two hosts cannot share a data root (`prepare_instance`
+locks it, because two would overwrite each other's companies), so a second local
+company is a **second root**, not a second process over the first.
+
+The roster is `<data-dir>/instances.json`:
+
+```json
+{
+  "instances": [
+    { "id": "default", "label": "This computer", "autostart": true },
+    { "id": "acme", "label": "Acme", "root": "instances/acme", "autostart": true }
+  ]
+}
+```
+
+- **`id`** is minted from the label, and is the directory name under
+  `instances/`. Renaming an instance changes the label and never the id, so the
+  data stays where it is.
+- **`root` absent means the data dir itself.** That is the `default` instance,
+  and it is where every install predating this file already keeps its company.
+  Moving it under `instances/default/` would be a migration whose failure mode
+  is "my company is gone", in exchange for symmetry.
+- **`autostart`** records the operator's last explicit start or stop, so a
+  stopped instance is not silently restarted by the next launch.
+
+A `root` that escapes the data dir — absolute, or containing `..` — is dropped
+when the roster is read. It is a plain file in a directory an operator can open,
+and a hand-edit must not be able to point a host and its lock somewhere this
+application never chose.
+
+Commands: `oc_local_instances` lists, `oc_create_local_instance` adds a root and
+starts it, `oc_start_local_instance` / `oc_stop_local_instance` take and release
+one, `oc_rename_local_instance` changes only the label, and
+`oc_forget_local_instance` drops a row **leaving its data on disk** — the
+reversible half only, because the other half is someone's company. Stopping is
+what frees the root for an `opencompany serve` in a terminal.
+
+An instance that fails to start is a row carrying its reason, never a launch
+that fails: one busy root must not stop the other instances, or the multi-host
+case would be worse than the single-host one it replaces.
+
+`oc_embedded` survives as the `default` instance's row, because the shell and
+the console ship independently — a `pnpm dev` console against an older `cargo`
+build, or a current console against an older shell, degrades to the one-host
+behaviour instead of to an unhandled command.
 
 ### First run
 
@@ -347,13 +401,23 @@ previous launch's row left behind pointing at a closed port. They persist, so
 they accumulated, and they all carry the same label; the sidebar filled with
 indistinguishable "This computer" entries, all but one broken (issue #615).
 
-`oc_embedded` therefore also reports `instance_id`, read from the data root
+Every local host therefore reports `instance_id`, read from the data root
 (see [`instance.rs`](../../../src/app/instance.rs)) rather than derived from the
-address, and the console registers this host through `adoptEmbeddedHost` rather
-than `addConnection`. That function matches on the identity, re-points the
-remembered connection at the new port, and drops anything else claiming to be
-this application's host — enforcing the invariant that at most one embedded
-connection exists at a time.
+address, and the console registers them through `adoptLocalHosts` rather than
+`addConnection`. That function matches each running instance on its identity,
+re-points the remembered connection at the new port, and drops the profiles no
+running instance claimed.
+
+It takes the whole set in one call for a reason the single-host version could
+not survive. `adoptEmbeddedHost` dropped *any other* embedded profile as last
+launch's ghost — and with a roster, another embedded profile is ordinarily the
+operator's second company. The prune has to see every live instance before it
+removes anything, so it is one call rather than a loop of them.
+`adoptEmbeddedHost` remains as the one-host wrapper for the degrade above.
+
+Only **running** instances become connections. A stopped one has no address, so
+a row for it could do nothing but fail its probe forever; it is visible — and
+startable — in the rail's dialog instead.
 
 Reusing the remembered id is what carries the tour state, the last-read channel
 and the mail draft across a relaunch, all of them keyed by connection id. A
