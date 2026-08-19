@@ -251,8 +251,8 @@ export interface OpenRunRow {
 }
 
 /**
- * Folds the open run rows into the per-thread turns the working indicator reads
- * (issue #983).
+ * Folds the open run rows into the per-thread turn lists the working indicator
+ * and the poll read (issue #983).
  *
  * This is the reload leg, and it is the thing that was impossible before the
  * turn became durable: a console that never saw the POST asks which turns are
@@ -265,17 +265,70 @@ export interface OpenRunRow {
  * carried through rather than flattened, because "queued behind other turns" and
  * "working" are different things to tell an operator, and the serial lock makes
  * the first one common.
+ *
+ * Every open row is kept, running ones first. A thread can hold a running turn
+ * and a queued one behind it, and both have a reply the operator is waiting on;
+ * the running one merely names the indicator, which is what the ordering — not
+ * a discard — expresses. Dropping the queued sibling was the bug where a second
+ * detached send on a loaded-away console left a reply nobody was watching for
+ * (issue #1000).
  */
-export function openTurnsFromRuns(runs: readonly OpenRunRow[]): Record<string, OpenTurnRow> {
-  const open: Record<string, OpenTurnRow> = {};
+export function openTurnsFromRuns(runs: readonly OpenRunRow[]): Record<string, OpenTurnRow[]> {
+  const byThread = new Map<string, OpenTurnRow[]>();
+  const seen = new Set<string>();
   for (const run of runs) {
-    if (!run.chatId) continue;
+    if (!run.chatId || seen.has(run.id)) continue;
+    seen.add(run.id);
     const queued = run.status === "pending";
-    // A thread can hold a running turn and a queued one behind it. The running
-    // one is what the operator is waiting on, so it names the row — otherwise
-    // the answer would depend on the order the store listed the rows in.
-    if (open[run.chatId] && !open[run.chatId].queued) continue;
-    open[run.chatId] = { turnId: run.id, queued };
+    const list = byThread.get(run.chatId);
+    if (list) list.push({ turnId: run.id, queued });
+    else byThread.set(run.chatId, [{ turnId: run.id, queued }]);
+  }
+  const open: Record<string, OpenTurnRow[]> = {};
+  for (const [chatId, rows] of byThread) {
+    // Stable sort, so same-status rows keep the store's order: running first,
+    // queued behind — whichever order the store listed them in. The head is
+    // what the working indicator reads.
+    rows.sort((a, b) => (a.queued === b.queued ? 0 : a.queued ? 1 : -1));
+    open[chatId] = rows;
   }
   return open;
+}
+
+/**
+ * Merges one leg's turns into the shell's map without ever replacing a turn
+ * another leg already registered (issue #1000).
+ *
+ * `onSendDetached` appends from the POST's own answer; the fold above arms
+ * from `listRuns` after a reload or a failed POST. The two can race on the
+ * same turn — a reload mid-POST, a re-arm landing after the 202 — so this
+ * collapses a repeated `turnId` onto one entry, with the incoming `queued`
+ * reading winning because a store answer is newer than the moment of accept.
+ * The head of a thread's list is untouched by an incoming shorter list: arms
+ * add, they never reorder or evict.
+ */
+export function mergeOpenTurns(
+  existing: Record<string, OpenTurn[]>,
+  incoming: Record<string, OpenTurn[]>,
+): Record<string, OpenTurn[]> {
+  const out: Record<string, OpenTurn[]> = { ...existing };
+  for (const [threadId, turns] of Object.entries(incoming)) {
+    const current = out[threadId] ?? [];
+    const merged = [...current];
+    const indexOfTurn = new Map<string, number>(
+      merged.map((t, i) => [t.turnId ?? "", i]),
+    );
+    for (const turn of turns) {
+      const key = turn.turnId ?? "";
+      const at = indexOfTurn.get(key);
+      if (at === undefined) {
+        indexOfTurn.set(key, merged.length);
+        merged.push(turn);
+      } else {
+        merged[at] = { ...merged[at], ...turn };
+      }
+    }
+    out[threadId] = merged;
+  }
+  return out;
 }
