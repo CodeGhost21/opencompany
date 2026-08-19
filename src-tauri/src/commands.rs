@@ -451,10 +451,18 @@ mod test {
         .expect("serialise");
 
         let object = wire.as_object().expect("an object");
+        // Sorted before comparing, because the *set* of keys is what this test
+        // is about and the order is not ours to depend on. The root crate enables
+        // `serde_json/preserve_order` (load-bearing for the operator SSE frames),
+        // which swaps the map from a sorted `BTreeMap` to insertion-ordered
+        // `IndexMap` — and cargo unifies features across the workspace, so this
+        // crate inherits it whether or not it wants it. The assertion read the
+        // old sorted order as though it were the wire contract; it was an
+        // artefact of a dependency's default.
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
         assert_eq!(
-            object.keys().map(String::as_str).collect::<Vec<_>>(),
-            // Sorted: `serde_json` maps are ordered, so this is the wire's
-            // order rather than the struct's.
+            keys,
             vec![
                 "baseUrl",
                 "companies",

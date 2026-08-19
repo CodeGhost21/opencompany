@@ -797,11 +797,11 @@ function FieldRow({
           `.toml` file with input boxes. The key is still here — small and
           monospaced — because whoever opened Advanced is often the person who
           will next edit that file by hand. */}
-      <Label htmlFor={field.key} className="text-[15px] font-medium leading-snug">
+      <Label htmlFor={field.key} className="text-base font-medium leading-snug">
         {copy.label}
       </Label>
       {copy.hint && (
-        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">{copy.hint}</p>
+        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">{copy.hint}</p>
       )}
       <Input
         id={field.key}
@@ -814,12 +814,12 @@ function FieldRow({
         onChange={(e) => onChange(e.target.value)}
       />
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <code className="font-mono text-[11px] text-muted-foreground/70">{field.key}</code>
+        <code className="font-mono text-2xs text-muted-foreground/70">{field.key}</code>
         {/* Only where it is true *and* actionable: a locked field cannot be
             changed here at all, so telling its owner about a restart is noise
             about work they are not doing. */}
         {field.requires_restart && !locked && (
-          <span className="text-[11px] text-muted-foreground/70">· needs a restart</span>
+          <span className="text-2xs text-muted-foreground/70">· needs a restart</span>
         )}
       </div>
       {locked && <div className="mt-1.5">{<LayerLock />}</div>}
@@ -903,12 +903,12 @@ function AccountStep({
           sentence, and the gap belongs before the field. */}
       <Label
         htmlFor="setup-email"
-        className="text-[15px] font-medium leading-snug"
+        className="text-base font-medium leading-snug"
         data-testid="setup-question"
       >
         What&apos;s your email?
       </Label>
-      <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+      <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
         {required
           ? "This is how you sign back in, and the only address that can administer the company."
           : "Optional on this host — you chose no sign-in, so anyone who can reach it is the owner."}
@@ -994,10 +994,10 @@ function PowerStep({
   return (
     <div className="space-y-7">
       <div>
-        <Label className="text-[15px] font-medium leading-snug" data-testid="setup-question">
+        <Label className="text-base font-medium leading-snug" data-testid="setup-question">
           What should your team think with?
         </Label>
-        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
           {onTheHouse
             ? "This host already has a model. Test it and carry on — you don't need a key of your own."
             : "Your teammates need a model to work. We'll check it reaches before going any further."}
@@ -1028,7 +1028,7 @@ function PowerStep({
                   <Badge variant="secondary">Already set up</Badge>
                 )}
               </div>
-              <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">{option.hint}</p>
+              <p className="mt-0.5 text-sm leading-snug text-muted-foreground">{option.hint}</p>
             </button>
           ))}
         </div>
@@ -1036,10 +1036,10 @@ function PowerStep({
 
       {spec.needsUrl && (
         <div>
-          <Label htmlFor="setup-base-url" className="text-[15px] font-medium leading-snug">
+          <Label htmlFor="setup-base-url" className="text-base font-medium leading-snug">
             Endpoint
           </Label>
-          <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+          <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
             The base URL of the chat API, ending in <code>/v1</code>.
           </p>
           <Input
@@ -1055,7 +1055,7 @@ function PowerStep({
 
       {spec.needsKey && (
         <div>
-          <Label htmlFor="setup-key" className="text-[15px] font-medium leading-snug">
+          <Label htmlFor="setup-key" className="text-base font-medium leading-snug">
             API key
           </Label>
 
@@ -1073,7 +1073,7 @@ function PowerStep({
           {onTheHouse && !override ? (
             <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border bg-muted/40 p-3">
               <div className="flex items-center gap-2 text-sm">
-                <Check className="size-4 text-emerald-600 dark:text-emerald-400" />
+                <Check className="size-4 text-status-done-text" />
                 <span data-testid="setup-key-on-the-house">
                   Using this host&apos;s key
                 </span>
@@ -1082,14 +1082,14 @@ function PowerStep({
                 type="button"
                 onClick={() => setOverride(true)}
                 data-testid="setup-key-override"
-                className="shrink-0 text-[13px] text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                className="shrink-0 text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
               >
                 Use my own
               </button>
             </div>
           ) : (
             <>
-              <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+              <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
                 {onTheHouse
                   ? "This replaces the host's key for this company."
                   : "Used to test the connection now, and saved when you finish."}
@@ -1123,7 +1123,7 @@ function PowerStep({
                     onChange("");
                   }}
                   data-testid="setup-key-revert"
-                  className="mt-2 text-[13px] text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                  className="mt-2 text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
                 >
                   Go back to using this host&apos;s key
                 </button>
@@ -1158,7 +1158,7 @@ function PowerStep({
             somewhere else, is worse than no tick — it is a wrong answer they
             watched us produce. */}
         {tested.kind === "ok" && (
-          <p className="text-[13px] leading-snug text-emerald-600 dark:text-emerald-400" data-testid="setup-test-ok">
+          <p className="text-sm leading-snug text-status-done-text" data-testid="setup-test-ok">
             Reached {tested.baseUrl} and got a reply.
           </p>
         )}
@@ -1180,14 +1180,14 @@ function PowerStep({
           type="button"
           onClick={() => onTested({ kind: "skipped" })}
           data-testid="setup-skip-model"
-          className="text-[13px] text-muted-foreground underline underline-offset-4 hover:text-foreground"
+          className="text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
         >
           Continue without a model — you&apos;ll get a standard team for your
           industry, and can add a key later
         </button>
       )}
       {tested.kind === "skipped" && (
-        <p className="text-[13px] leading-snug text-muted-foreground" data-testid="setup-skipped">
+        <p className="text-sm leading-snug text-muted-foreground" data-testid="setup-skipped">
           Carrying on without a model. Your team will be a standard one for your
           industry rather than designed from your answers.
         </p>
@@ -1284,8 +1284,8 @@ function ReviewStep({
   return (
     <div className="space-y-4" data-testid="setup-review">
       <div>
-        <h2 className="text-[15px] font-medium leading-snug">Your team</h2>
-        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+        <h2 className="text-base font-medium leading-snug">Your team</h2>
+        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
           {roster.source === "model"
             ? "Built from what you told us. Rename or drop anyone — you can add more later."
             : roster.reason === "not_designable"
@@ -1375,7 +1375,7 @@ function ReviewStep({
                   </li>
                 ))}
               </ul>
-              <p className="mt-2 text-[13px] leading-snug text-muted-foreground">
+              <p className="mt-2 text-sm leading-snug text-muted-foreground">
                 You can still continue — add someone for it here, or later from
                 the team page.
               </p>
@@ -1471,10 +1471,10 @@ function AdvancedStep({
   return (
     <div className="space-y-7" data-testid="setup-advanced">
       <div>
-        <h2 className="text-[15px] font-medium leading-snug" data-testid="setup-question">
+        <h2 className="text-base font-medium leading-snug" data-testid="setup-question">
           Anything you want to change?
         </h2>
-        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
           Every one of these already has a working default. Press on if none of
           it matters to you — written to{" "}
           <code className="font-mono text-xs">{status.config_path}</code>.
@@ -1487,8 +1487,8 @@ function AdvancedStep({
         // where "how people sign in" ended and "where the thinking runs" began.
         <section key={group.id} className="rounded-xl border">
           <div className="border-b px-4 py-3">
-            <h3 className="text-[15px] font-medium leading-snug">{group.title}</h3>
-            <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">{group.hint}</p>
+            <h3 className="text-base font-medium leading-snug">{group.title}</h3>
+            <p className="mt-0.5 text-sm leading-snug text-muted-foreground">{group.hint}</p>
           </div>
           <div className="space-y-5 px-4 py-4">
             {group.id === "signin" && (
@@ -1549,10 +1549,10 @@ function BusinessStep({
             breathing room belongs *before the field*, not inside the sentence.
             A uniform `space-y` gave all three the same gap and the question
             read as three unrelated lines. */}
-        <Label htmlFor="setup-industry" className="text-[15px] font-medium leading-snug">
+        <Label htmlFor="setup-industry" className="text-base font-medium leading-snug">
           What kind of company are you setting up?
         </Label>
-        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
           A sentence is plenty. What you sell, or what you do.
         </p>
         <Input
@@ -1570,10 +1570,10 @@ function BusinessStep({
       </div>
 
       <div>
-        <Label htmlFor="setup-automate" className="text-[15px] font-medium leading-snug">
+        <Label htmlFor="setup-automate" className="text-base font-medium leading-snug">
           What are you trying to automate?
         </Label>
-        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
           List whatever comes to mind. This is what your team gets built around.
         </p>
         <Textarea
@@ -1590,18 +1590,18 @@ function BusinessStep({
             so showing it here is what makes a bad split fixable by the person
             who typed it rather than a silent input to a prompt. */}
         {jobs.length > 1 && (
-          <p className="mt-2 text-[13px] leading-snug text-muted-foreground" data-testid="setup-jobs">
+          <p className="mt-2 text-sm leading-snug text-muted-foreground" data-testid="setup-jobs">
             {jobs.length} jobs — each one needs an owner on your team.
           </p>
         )}
       </div>
 
       <div>
-        <Label htmlFor="setup-teamHint" className="text-[15px] font-medium leading-snug">
+        <Label htmlFor="setup-teamHint" className="text-base font-medium leading-snug">
           Anyone in particular you need on the team?
-          <span className="ml-1.5 text-[13px] font-normal text-muted-foreground">Optional</span>
+          <span className="ml-1.5 text-sm font-normal text-muted-foreground">Optional</span>
         </Label>
-        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+        <p className="mt-0.5 text-sm leading-snug text-muted-foreground">
           We&apos;ll suggest a team either way — this just adds to it.
         </p>
         <Textarea
