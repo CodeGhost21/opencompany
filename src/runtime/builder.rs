@@ -2171,9 +2171,21 @@ impl RuntimeBuilder {
                         // managed env default? A corrupt runtime config degrades
                         // to "unconfigured" (managed/echo brain) rather than
                         // bricking boot.
+                        //
+                        // The manifest layer is the *default harness's* effective
+                        // inference — `default_harness_inference()` falling back
+                        // to the company-level `[inference]` — the same resolution
+                        // `TenantProvider::new` applies a few lines down. A
+                        // company whose only inference lives in
+                        // `[harness.inference]` must count as configured here,
+                        // or it would never reach the provider it just declared.
+                        let effective_manifest = self
+                            .manifest
+                            .default_harness_inference()
+                            .unwrap_or_else(|| self.manifest.inference.clone());
                         let configured = inference::resolve_effective(
                             &id,
-                            &self.manifest.inference,
+                            &effective_manifest,
                             env_default.as_ref(),
                             secrets.as_ref(),
                         )
