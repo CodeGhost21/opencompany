@@ -1616,7 +1616,7 @@ mod tests {
         deps: &HarnessDeps,
     ) -> Arc<dyn RunTurn> {
         Arc::new(crate::harness::built_in::run_turn::HarnessRunTurn::new(
-            Arc::new(HarnessPool::new()),
+            Arc::new(crate::harness::HarnessPool::new()),
             Arc::new(deps.clone()),
         ))
     }
