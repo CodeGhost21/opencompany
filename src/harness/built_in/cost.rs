@@ -118,7 +118,18 @@ pub async fn record_turn_cost(
     }
     if let (Some(meter), Some(sample)) = (meter, usage_sample_for(turn, agent_id, provider, run_id))
     {
-        meter.record(company, &sample).await?;
+        // The usage sample is telemetry, not the turn's record of itself: the
+        // ledger write above has already happened, so a meter failure must not
+        // fail a completed turn. Log it and let the turn stand.
+        if let Err(error) = meter.record(company, &sample).await {
+            tracing::warn!(
+                company = %company,
+                agent = %agent_id,
+                provider = %provider,
+                error = %error,
+                "[cost] failed to record the usage sample; the turn still stands"
+            );
+        }
     }
     Ok(())
 }
