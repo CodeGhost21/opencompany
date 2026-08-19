@@ -420,7 +420,7 @@ pub fn decl_for_probe(
     env_default: Option<&EnvDefault>,
 ) -> InferenceDecl {
     let provider = provider.trim().to_string();
-    let (base_url, credential) = resolve_endpoint(
+    let (base_url, credential, proxied) = resolve_endpoint(
         &provider,
         base_url,
         key.unwrap_or_default().trim().to_string(),
@@ -432,6 +432,7 @@ pub fn decl_for_probe(
         models: BTreeMap::new(),
         source: InferenceSource::Runtime,
         credential,
+        proxied,
     }
 }
 
