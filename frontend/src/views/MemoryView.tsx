@@ -158,6 +158,9 @@ export function MemoryView({ client, company }: Props) {
   const [engine, setEngine] = useState<MemorySpec | undefined>(undefined);
   useEffect(() => {
     let live = true;
+    // Clear first: on a client swap the old badge would otherwise survive a
+    // failed /spec and name the wrong host.
+    setEngine(undefined);
     client
       .spec()
       .then((spec) => {
@@ -231,7 +234,7 @@ export function MemoryView({ client, company }: Props) {
                 data-testid="memory-engine-badge"
               >
                 engine: {engine.driver_id ?? engine.backend}
-                {engine.backend === "remote" && engine.capabilities.length > 0 && (
+                {engine.capabilities.length > 0 && (
                   <> · {engine.capabilities.length} families</>
                 )}
               </span>

@@ -704,3 +704,52 @@ async fn taint_survives_export_and_reimport() {
         "re-import must land the content still stamped ExternalSync"
     );
 }
+
+/// The fake's `namespace_summaries` is what the mandatory composition's export
+/// WALKS, so a wrong count or a duplicated namespace there silently weakens
+/// every export test built on it. The round trip above uses one namespace and
+/// cannot see either fault; this pins both directly.
+#[tokio::test]
+async fn namespace_summaries_reports_each_namespace_once_with_its_count() {
+    let (fake, provider) = FakeEngine::with_handle();
+    let memory = BoundMemory::bind(provider.clone(), DriverClass::Embedded).unwrap();
+
+    // Two companies so the namespaces differ, and differing key counts so a
+    // summary that reported the store's total instead of the namespace's
+    // would fail.
+    for (id, keys) in [(acme_id(), 3usize), (globex_id(), 1usize)] {
+        for index in 0..keys {
+            memory
+                .context()
+                .put(
+                    &id,
+                    ContextChunk {
+                        label: format!("chunk-{index}"),
+                        body: format!("body {index}"),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    let summaries = fake.namespace_summaries().await.unwrap();
+    let mut namespaces: Vec<&str> = summaries.iter().map(|s| s.namespace.as_str()).collect();
+    namespaces.sort_unstable();
+    let mut deduped = namespaces.clone();
+    deduped.dedup();
+    assert_eq!(
+        namespaces, deduped,
+        "each namespace must appear exactly once"
+    );
+
+    let total: usize = summaries.iter().map(|s| s.count).sum();
+    assert_eq!(
+        total, 4,
+        "counts must sum to the rows stored: {summaries:?}"
+    );
+    assert!(
+        summaries.iter().any(|s| s.count == 3) && summaries.iter().any(|s| s.count == 1),
+        "each namespace must carry ITS own count, not the store total: {summaries:?}"
+    );
+}
