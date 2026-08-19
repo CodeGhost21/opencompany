@@ -420,8 +420,21 @@ mod tests {
             .unwrap();
 
         // The CFO shares the company + ContextStore but must not see the CEO's
-        // namespaced entry.
-        assert!(cfo.get("global", "secret").await.unwrap().is_none());
+        // namespaced entry. Each agent reads back its *own* value — the CEO's
+        // "ceo-only" content is isolated under the CEO's agent scope and never
+        // surfaces for the CFO.
+        let cfo_got = cfo
+            .get("global", "secret")
+            .await
+            .unwrap()
+            .expect("the CFO stored this key itself");
+        assert_eq!(cfo_got.content, "cfo-only");
+        let ceo_got = ceo
+            .get("global", "secret")
+            .await
+            .unwrap()
+            .expect("the CEO stored this key itself");
+        assert_eq!(ceo_got.content, "ceo-only");
         assert_eq!(ceo.count().await.unwrap(), 1);
         assert_eq!(cfo.count().await.unwrap(), 1);
 
