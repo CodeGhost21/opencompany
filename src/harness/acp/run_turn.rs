@@ -248,13 +248,25 @@ impl RunTurn for AcpRunTurn {
 }
 
 impl AcpRunTurn {
+    /// How long a cancelled turn may keep running before the waiter gives up.
+    ///
+    /// Cancellation in ACP is cooperative: `session/cancel` is a notification,
+    /// and a harness inside a long tool call only notices when that call
+    /// returns. So the post-cancel wait stays, but it is bounded — a cancelled
+    /// turn that has not drained its output within this window is abandoned,
+    /// not waited on forever. The window is generous enough for a slow tool
+    /// call to finish and its updates to flush.
+    const CANCEL_GRACE: Duration = Duration::from_secs(30);
+
     /// A turn that can be cancelled while it runs.
     ///
     /// The turn and the steer check race each other. A cancel forwards
     /// `session/cancel` and then **keeps waiting** rather than abandoning the
     /// turn: ACP cancellation is cooperative, the agent still answers with
     /// `stopReason: "cancelled"`, and dropping the future here would leave a
-    /// harness mid-tool-call with nothing reading its output.
+    /// harness mid-tool-call with nothing reading its output. That wait is
+    /// bounded by [`Self::CANCEL_GRACE`]: a turn that ignores the cancel past
+    /// the grace window is abandoned with an error, not awaited forever.
     async fn steered(
         &self,
         company: &CompanyId,
@@ -275,9 +287,31 @@ impl AcpRunTurn {
                     // consuming it here would leave it with nothing to read.
                     if control.pending().is_some() {
                         // Advisory. Told, then waited for — see above.
-                        let _ = self.agent.cancel(company, &key).await;
-                        let outcome = (&mut turn).await?;
-                        return Ok(fold(outcome));
+                        if let Err(err) = self.agent.cancel(company, &key).await {
+                            tracing::warn!(%err, "[harness::acp] cancel failed for session {key}");
+                        }
+                        match tokio::time::timeout(Self::CANCEL_GRACE, &mut turn).await {
+                            Ok(outcome) => return Ok(fold(outcome?)),
+                            Err(_elapsed) => {
+                                // The agent ignored the cancel past the grace
+                                // window. The port has no abort/reset seam —
+                                // `cancel` is all there is — so the best this
+                                // side can do is nudge once more and drop the
+                                // turn. Dropping the future ends the reader on
+                                // this session; the agent's own `session/cancel`
+                                // handling (or the host reaping the subprocess)
+                                // is the recovery path for the work it still
+                                // holds. A later turn on the same key opens a
+                                // fresh `session/prompt`, which the agent treats
+                                // as a new turn rather than an overlap.
+                                let _ = self.agent.cancel(company, &key).await;
+                                return Err(OpenCompanyError::Harness(format!(
+                                    "the agent did not stop within {}s of a cancel; \
+                                     abandoning the turn",
+                                    Self::CANCEL_GRACE.as_secs()
+                                )));
+                            }
+                        }
                     }
                 }
             }
