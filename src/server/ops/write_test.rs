@@ -744,6 +744,7 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -3938,7 +3939,12 @@ async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "invalid_request");
+    // Issue #1016: a dangling edge is now a structured `workflow_invalid` whose
+    // `problems` array names the endpoint and the field, so the console can
+    // highlight the id the author wrote.
+    assert_eq!(body["code"], "workflow_invalid");
+    assert_eq!(body["problems"][0]["node_id"], "ghost");
+    assert_eq!(body["problems"][0]["field"], "to");
 
     // An agent node naming a teammate not on the roster.
     let (status, body) = send(
@@ -4581,6 +4587,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         parent_task_id: parent.map(str::to_string),
         output: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,
@@ -4770,6 +4777,7 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
         origin_run_id: None,
@@ -5437,6 +5445,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -5556,6 +5565,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -5661,6 +5671,7 @@ async fn dispatched_task(
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -6119,6 +6130,7 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                planning_attempts: Vec::new(),
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
                 origin_run_id: None,
@@ -6399,14 +6411,7 @@ async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
     for (id, task) in [("run-a", "t-1"), ("run-b", "t-1"), ("run-c", "t-other")] {
         runtime
             .runs()
-            .create_run(
-                &company,
-                NewRun {
-                    id: id.to_string(),
-                    task_id: task.to_string(),
-                    agent_id: "ceo".to_string(),
-                },
-            )
+            .create_run(&company, NewRun::for_task(id, task, "ceo"))
             .await
             .unwrap();
     }
@@ -7414,6 +7419,7 @@ async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
         parent_task_id: None,
         output: None,
         plan: None,
+        planning_attempts: Vec::new(),
         deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
         workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
             summary: "Email the digest".to_string(),

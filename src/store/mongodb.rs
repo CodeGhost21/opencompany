@@ -48,7 +48,7 @@ use crate::Result;
 use crate::company::CompanyManifest;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
+use crate::ports::events::{EventLog, EventStreamItem, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::login_codes::LoginCodeRecord;
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
@@ -732,15 +732,17 @@ impl EventLog for MongoStore {
         Ok(out)
     }
 
-    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
         let rx = self.sender_for(id).subscribe();
         let stream = futures::stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => return Some((event, rx)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return None,
+            // Each call to this closure produces exactly one item and hands the
+            // receiver back as continuation state, so there is no loop here.
+            match rx.recv().await {
+                Ok(event) => Some((EventStreamItem::Event(event), rx)),
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    Some((EventStreamItem::Gap { missed }, rx))
                 }
+                Err(broadcast::error::RecvError::Closed) => None,
             }
         });
         Box::pin(stream)
@@ -2055,15 +2057,23 @@ impl crate::ports::runs::RunStore for MongoStore {
         // usage sequences use, keyed per card — so concurrent creates cannot
         // collide even across processes. `next_seq` is 0-based; attempts are
         // 1-based (`Attempt 1` is the first).
-        let attempt = self
-            .next_seq(company, &format!("run:{}", spec.task_id))
-            .await?
-            .saturating_add(1);
+        // A card-less run (issue #983) is always attempt 1 — see the fs
+        // backend's `create_run` for why the ordinal is not shared across them,
+        // and note that a shared counter here would be worse still: it is
+        // durable, so every chat turn a company ever ran would keep counting up.
+        let attempt = match &spec.task_id {
+            Some(task_id) => self
+                .next_seq(company, &format!("run:{task_id}"))
+                .await?
+                .saturating_add(1),
+            None => 1,
+        };
         let run = RunRecord {
             id: spec.id,
             company: company.clone(),
             task_id: spec.task_id,
             agent_id: spec.agent_id,
+            chat_id: spec.chat_id,
             attempt: attempt as u32,
             status: RunStatus::Pending,
             trigger_event_seq: None,
@@ -2092,7 +2102,7 @@ impl crate::ports::runs::RunStore for MongoStore {
             .insert_one(doc! {
                 "company_id": company.as_ref(),
                 "run_id": &run.id,
-                "task_id": &run.task_id,
+                "task_id": run.task_id.as_deref(),
                 "status": run.status.as_str(),
                 "attempt": run.attempt as i64,
                 "created_ms": run.created_at_millis as i64,
@@ -2128,7 +2138,7 @@ impl crate::ports::runs::RunStore for MongoStore {
             .update_one(
                 doc! {"company_id": company.as_ref(), "run_id": &run.id},
                 doc! {"$set": {
-                    "task_id": &run.task_id,
+                    "task_id": run.task_id.as_deref(),
                     "status": run.status.as_str(),
                     "attempt": run.attempt as i64,
                     "created_ms": run.created_at_millis as i64,
@@ -4362,6 +4372,13 @@ mod test {
     async fn conformance_monotonic_event_seq() {
         let Some(s) = store().await else { return };
         conformance::assert_monotonic_event_seq(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_event_subscription_surfaces_gap() {
+        let Some(s) = store().await else { return };
+        conformance::assert_event_subscription_surfaces_gap(s.clone()).await;
         drop_db(&s).await;
     }
 

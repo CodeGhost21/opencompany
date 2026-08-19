@@ -6,6 +6,8 @@ import {
   type Page,
 } from "@playwright/test";
 
+import { openWorkflow } from "./workflows";
+
 /**
  * Issue #824: the workflows toolbar laid out wider than its container and
  * overflowed into an `overflow-hidden` ancestor, so its last control —
@@ -62,29 +64,36 @@ async function createWorkflow(request: APIRequestContext) {
   expect(res.ok(), `create: ${res.status()} ${await res.text()}`).toBeTruthy();
 }
 
+/**
+ * Best-effort teardown so a failed spec does not poison the next run.
+ * `expectedVersion` is required (issue #1013), so this reads the workflow's
+ * current token first.
+ */
 async function removeWorkflow(request: APIRequestContext) {
+  const version = await request
+    .get(`${COMPANY_SCOPE}/workflows/${WORKFLOW_ID}`)
+    .then(async (res) => (res.ok() ? ((await res.json()).version as string | null) : null))
+    .catch(() => null);
+  const query = version ? `?expectedVersion=${encodeURIComponent(version)}` : "";
   await request
-    .delete(`${COMPANY_SCOPE}/workflows/${WORKFLOW_ID}`)
+    .delete(`${COMPANY_SCOPE}/workflows/${WORKFLOW_ID}${query}`)
     .catch(() => undefined);
 }
 
 /**
- * Selects the workflow in the picker, so the per-workflow half of the toolbar
- * mounts and the row is at its **widest** — the state the defect appears in.
+ * Opens the workflow, so the per-workflow half of the toolbar mounts and the
+ * row is at its **widest** — the state the defect appears in.
  *
- * The view does auto-select when the list lands, so this is belt-and-braces
- * today. It is here anyway because the auto-select is not what this spec is
- * about: were it ever to change, the assertions below would start failing on a
- * toolbar that was simply never populated, which reads as a layout regression
- * and is not one. Selecting explicitly keeps the failure honest. Matches the
- * helper in `workflow-node-config.spec.ts`.
+ * Issue #1110 turned this from belt-and-braces into the load-bearing step it
+ * always claimed to be. The note that used to sit here — "the view does
+ * auto-select, so this is belt-and-braces today; were that ever to change, the
+ * assertions below would start failing on a toolbar that was simply never
+ * populated, which reads as a layout regression and is not one" — described
+ * exactly what has now changed. `#/workflows` is the index, the wide row exists
+ * only inside a workflow, and this is how the spec gets there.
  */
 async function selectWorkflow(page: Page, name: string) {
-  const picker = page.getByRole("combobox").first();
-  await expect(picker).toBeEnabled();
-  await picker.click();
-  await page.getByRole("option", { name, exact: true }).click();
-  await expect(picker).toContainText(name);
+  await openWorkflow(page, name);
 }
 
 /**
@@ -111,8 +120,12 @@ const CONTROLS: Array<{ label: string; find: (page: Page) => Locator }> = [
     find: (p) => p.getByRole("button", { name: "Test run" }).first(),
   },
   {
-    label: "Browse",
-    find: (p) => p.getByRole("button", { name: "Browse" }).first(),
+    // Issue #1110: what "Browse" became. It opened the index over the canvas;
+    // the index is the tab's front door now, so the control is the way back to
+    // it. Addressed by test id for the same reason Pause is — it sits in the
+    // heading group rather than the action row, and its name is prose.
+    label: "All workflows",
+    find: (p) => p.getByTestId("workflow-back-to-index"),
   },
   {
     label: "Copilot",

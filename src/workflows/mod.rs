@@ -19,6 +19,11 @@
 /// downstream agent node's turn (an `agent -> agent` pipeline passes data).
 #[cfg(test)]
 mod agent_upstream_input_test;
+/// Issue #899 (Stage 1): end-to-end proof that approving a call gated inside an
+/// agent node's own tool loop AUTO-CONTINUES the blocked run — one continuation,
+/// after the last decision, and none for a wholly refused block.
+#[cfg(test)]
+mod blocked_node_continuation_test;
 /// Issues #881 / #880: end-to-end proof that a node whose deliverable was
 /// parked for approval reports `blocked`, stops its branch instead of handing
 /// its apology downstream, and that the run says what it parked.
@@ -41,6 +46,11 @@ mod gated_tool_call_test;
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
 mod gated_tool_turn_test;
+/// Issue #978: a run that fans out to N gated nodes is cleared by approving,
+/// not multiplied by it — the composition of #395, #243 and #469 that each of
+/// their own suites is blind to.
+#[cfg(test)]
+mod parallel_gate_fanout_test;
 /// Issue #846: a continuation replays the outward calls its lineage already
 /// made, instead of making them a second time.
 pub mod replay;

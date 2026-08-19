@@ -135,20 +135,42 @@ pub async fn run_workflow(
 /// **same** channel, so the collector sees them in that order and a node's
 /// started event always journals ahead of its finished one.
 ///
-/// Deliberately scalars and no `ExecutionStep`: the engine's step carries the
-/// node's `output` items, and this hop exists partly to make it *impossible* for
-/// that payload to reach the journal — the same stance the live turn frames take
-/// on tool args. A `Started` frame carries the node id alone; the node has not
-/// run, so there is no status or duration to carry either. What is not carried
-/// cannot leak.
+/// Deliberately no whole `ExecutionStep`. A `Started` frame carries the node id
+/// alone; the node has not run, so there is no status, duration, or output to
+/// carry either. What is not carried cannot leak.
+///
+/// A `Finished` frame carries the node's `output` items (issue #1008) **as well
+/// as** its status and duration — but that payload is used for exactly one thing
+/// and is walled off from the journal: the collector accumulates it into a
+/// side map that feeds ONLY the durable, console-facing run-output store on the
+/// **failure/blocked arms**, where the engine returns no `outcome.output` to
+/// persist from. The journal still receives only `{node_id, status,
+/// elapsed_ms}` (see the `Finished` arm of the collector, which builds its
+/// `WorkflowNodeFinished` from those three scalars and never touches `output`) —
+/// the same stance the live turn frames take on tool args. Before #1008 the
+/// failure paths threw this output away, so a failed/blocked run's inspector
+/// wrongly claimed the run predated output capture.
 enum NodeProgress {
     /// A node began executing (issue #382) — the opening bracket. Id only.
     Started { node_id: String },
-    /// A node finished (issue #371) — its status and wall-clock duration.
+    /// A node finished (issue #371) — its status, wall-clock duration, and the
+    /// items it emitted (issue #1008; [`Value::Null`] on an error step). The
+    /// output is consumed only by the run-output persist on the failure arms;
+    /// it never reaches the journal.
     Finished {
         node_id: String,
         status: WorkflowNodeStatus,
         elapsed_ms: u64,
+        output: Value,
+        /// Issue #1014: the config paths of this node's null-resolved
+        /// `=`-expressions — the engine's own broken-wiring list, lifted off
+        /// `ExecutionStep.diagnostics`. Paths only (each
+        /// `NullResolution.location`), never a resolved value: a null resolution
+        /// has no value, and the location is config the author wrote, so nothing
+        /// a node produced rides this channel. Carried onto the node row and the
+        /// `WorkflowNodeFinished` event; like the scalars beside it, never the
+        /// `output`.
+        diagnostics: Vec<String>,
     },
 }
 
@@ -193,6 +215,25 @@ impl tinyflows::observability::RunObserver for ProgressObserver {
             // `u128` millis is the engine's type; a node running longer than
             // 584 million years is not the failure mode worth a `Result`.
             elapsed_ms: u64::try_from(step.duration_ms).unwrap_or(u64::MAX),
+            // Issue #1014: the config path of every `=`-expression this node's
+            // execution resolved to `null` — the engine's own broken-wiring
+            // list. Only `NullResolution.location` (a dotted config path the
+            // author wrote, e.g. `args.to`) is taken; the `expression` and any
+            // resolved value are dropped here, so nothing but the wiring's
+            // address leaves the observer. Empty on error steps and for nodes
+            // with no expression config.
+            diagnostics: step
+                .diagnostics
+                .iter()
+                .map(|d| d.location.clone())
+                .collect(),
+            // Issue #1008: the node's emitted items, carried so the collector can
+            // accumulate a partial per-node output map for the failure/blocked
+            // arms (which have no `outcome.output` to persist from). A success
+            // step's `output` is the items array; an error step's is
+            // `Value::Null`. This clone rides the same channel as the scalars
+            // and never touches the journal.
+            output: step.output.clone(),
         });
     }
 }
@@ -297,6 +338,26 @@ async fn run_workflow_inner(
     // *outside* the capability bundle, so a hard abort that drops the engine future
     // (and with it the bundle and its board claim) still leaves every row already
     // collected readable here: a card is real once written, so it must stay listed.
+    // Issue #976: a graph whose only node is its trigger has nothing to execute.
+    // The engine runs it happily — there is no stage to fail — so it settles as
+    // an ordinary finished run, and a run row that says nothing is its own small
+    // lie: `QA Test Pipeline` on staging banked six of them. Said here, through
+    // the channel #638 built for exactly this shape of fact.
+    //
+    // A notice rather than an error, for the reason `notices` exists at all: an
+    // empty graph is not a failure. Nothing broke, nothing was attempted, and
+    // marking it failed would put a half-authored stub into the failure count
+    // next to runs that genuinely went wrong. Same call `NoDestinationConfigured`
+    // makes one level down (#925) — state the reason instead of leaving it to be
+    // inferred from an absence.
+    if !workflow.has_runnable_node() {
+        notices.push(crate::company::STAGELESS_WORKFLOW_NOTICE.to_string());
+        tracing::warn!(
+            company = %record.id,
+            workflow = %workflow.id,
+            "workflow run: the graph has no runnable node, so this run could not do anything"
+        );
+    }
     let board = super::caps::RunBoard::default();
     // Issue #881 / #880: the two sideways channels an agent node reports through
     // — that it blocked, and what it parked. Owned out here for exactly the
@@ -359,6 +420,14 @@ async fn run_workflow_inner(
     // The journal is passed to the collector only in that case; `None` there
     // means "collect the rows, write nothing" — the shape the default build and
     // every dry run take.
+    //
+    // Issue #1008: the collector *additionally* accumulates a per-node output
+    // map (`{ "<id>": { "items": [ … ] } }`) from each `Finished` frame's
+    // output. This map exists solely to feed the durable run-output persist on
+    // the failure/blocked arms, where the engine returns no `outcome.output`. It
+    // is returned beside the rows and never journaled — the journal invariant
+    // (no node output) is preserved because the `WorkflowNodeFinished` event is
+    // still built from the three scalars alone.
     let journal_nodes = events.clone().filter(|_| !dry_run);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<NodeProgress>();
     let collector = tokio::spawn({
@@ -367,6 +436,10 @@ async fn run_workflow_inner(
         let run_id = run_id.clone();
         async move {
             let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
+            // Issue #1008: node_id -> `{ "items": [ … ] }`, canonical-shaped so
+            // the console's `parseNodeMessages` reads it exactly like a clean
+            // run's `outcome.output["nodes"]`.
+            let mut partial_nodes = serde_json::Map::new();
             while let Some(progress) = rx.recv().await {
                 match progress {
                     // Issue #382: the node's opening bracket. Journaled only when
@@ -397,6 +470,8 @@ async fn run_workflow_inner(
                         node_id,
                         status,
                         elapsed_ms,
+                        output,
+                        diagnostics,
                     } => {
                         if let Some(events) = journal_nodes.as_ref() {
                             let event = CompanyEvent::WorkflowNodeFinished {
@@ -405,6 +480,11 @@ async fn run_workflow_inner(
                                 node_id: node_id.clone(),
                                 status,
                                 elapsed_ms,
+                                // Issue #1014: the broken-wiring paths ride the
+                                // durable event too, so a re-read run (folded
+                                // from the journal) shows the same diagnostics
+                                // the synchronous response did.
+                                diagnostics: diagnostics.clone(),
                             };
                             if let Err(err) = events.append(&company, event).await {
                                 tracing::warn!(
@@ -417,6 +497,19 @@ async fn run_workflow_inner(
                                 );
                             }
                         }
+                        // Issue #1008: accumulate this node's output into the
+                        // partial map under the canonical `{ "items": [ … ] }`
+                        // shape. A success step's `output` is the items array; an
+                        // error (or any non-array) step contributes an empty
+                        // `items`, so the failing node still appears as "produced
+                        // none" rather than vanishing. Keyed before `node_id`
+                        // moves into the row below.
+                        let items = match output {
+                            Value::Array(_) => output,
+                            _ => Value::Array(Vec::new()),
+                        };
+                        partial_nodes
+                            .insert(node_id.clone(), serde_json::json!({ "items": items }));
                         // Collected for the response on every path — status is
                         // `Copy`, `node_id` moves in after its clone (if any)
                         // went to the event.
@@ -424,11 +517,16 @@ async fn run_workflow_inner(
                             node_id,
                             status,
                             elapsed_ms,
+                            // Issue #1014: the node's null-resolved config paths,
+                            // carried on the run response's per-node timeline.
+                            // `diagnostics` moves in after its clone above went
+                            // to the event.
+                            diagnostics,
                         });
                     }
                 }
             }
-            rows
+            (rows, partial_nodes)
         }
     });
 
@@ -519,30 +617,37 @@ async fn run_workflow_inner(
     // clone somewhere longer-lived, this would log and move on with an empty
     // trail instead of wedging the run (and the host behind it) forever.
     drop(observer);
-    let nodes: Vec<crate::ports::WorkflowRunNodeRow> =
-        match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
-            Ok(Ok(rows)) => rows,
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    company = %record.id,
-                    workflow = %workflow.id,
-                    %run_id,
-                    %err,
-                    "workflow: the node-progress collector did not shut down cleanly"
-                );
-                Vec::new()
-            }
-            Err(_) => {
-                tracing::warn!(
-                    company = %record.id,
-                    workflow = %workflow.id,
-                    %run_id,
-                    "workflow: node progress events did not drain in time; the run's finished \
-                     record may be journaled ahead of them"
-                );
-                Vec::new()
-            }
-        };
+    // Issue #1008: the collector now returns both the response rows and the
+    // accumulated per-node output map. The map feeds ONLY the run-output persist
+    // on the failure/blocked arms below; `nodes` stays the output-free row list
+    // the journal and `WorkflowRun.nodes` carry. A drain failure yields an empty
+    // map, so a persist on that path simply records "produced none".
+    let (nodes, partial_nodes): (
+        Vec<crate::ports::WorkflowRunNodeRow>,
+        serde_json::Map<String, Value>,
+    ) = match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(err)) => {
+            tracing::warn!(
+                company = %record.id,
+                workflow = %workflow.id,
+                %run_id,
+                %err,
+                "workflow: the node-progress collector did not shut down cleanly"
+            );
+            (Vec::new(), serde_json::Map::new())
+        }
+        Err(_) => {
+            tracing::warn!(
+                company = %record.id,
+                workflow = %workflow.id,
+                %run_id,
+                "workflow: node progress events did not drain in time; the run's finished \
+                 record may be journaled ahead of them"
+            );
+            (Vec::new(), serde_json::Map::new())
+        }
+    };
 
     // Resolved only AFTER the drain above, so a cancelled run's completed nodes
     // are journaled exactly like a completed run's before the caller writes the
@@ -564,8 +669,55 @@ async fn run_workflow_inner(
         // reports the error, and the block survives on the approval receipts.
         Some(Err(err)) => {
             let blocked = blocks.take();
+            // Issue #1008: the engine returns no `outcome.output` on this arm, so
+            // the run's per-node output lives ONLY in the map the progress
+            // observer accumulated. Persist that, flagged `partial`, on BOTH the
+            // genuine-failure and the blocked branches — before #1008 both threw
+            // it away, so the inspector wrongly reported "this run predates output
+            // capture" for every failed or blocked run.
+            let partial_output = Value::Object(partial_nodes);
             if blocked.is_empty() || !only_blocked_nodes_errored(&nodes, &blocked) {
-                return Err(map_engine_error(err));
+                // A genuine failure. Persist the partial capture so the inspector
+                // shows what the nodes that ran produced.
+                if !persist_run_output(
+                    run_output_store.as_deref(),
+                    &record.id,
+                    &workflow.id,
+                    &run_id,
+                    &partial_output,
+                    true,
+                )
+                .await
+                {
+                    // This branch used to be log-only, because it returns `Err`
+                    // and an `Err` had no `WorkflowRun` to hang a notice on. It
+                    // has one now (below), so the operator hears about a lost
+                    // snapshot on the failure arm exactly as on the blocked one.
+                    notices.push(run_output_persist_failed_notice());
+                }
+                // Issue #1008 (second half): the failure carries the partial run
+                // rather than only a message. The nodes that ran before the break
+                // really did open board cards, park approvals and raise notices,
+                // and those are durable facts by now — so the caller's
+                // `record_run_finished` can list them instead of journaling a
+                // failed run as an empty one. See `OpenCompanyError::partial_run`.
+                return Err(OpenCompanyError::WorkflowRunFailed {
+                    source: Box::new(map_engine_error(err)),
+                    partial: Box::new(WorkflowRun {
+                        output: partial_output,
+                        pending_approvals: Vec::new(),
+                        deliveries: Vec::new(),
+                        cancelled: false,
+                        nodes,
+                        notices: notices.take(),
+                        board: board.take(),
+                        // Non-empty exactly when a real failure and a block
+                        // happened together — the case the containment check
+                        // above refuses to relabel as a plain block.
+                        blocked_nodes: blocked,
+                        approvals: approvals.take(),
+                    }),
+                });
             }
             tracing::info!(
                 company = %record.id,
@@ -575,12 +727,55 @@ async fn run_workflow_inner(
                 "workflow: the run stopped because a node is waiting on an operator, not because \
                  it failed"
             );
+            // Issue #1008: minus the blocked nodes' own entries, and that
+            // subtraction is issue #881's invariant rather than tidiness. A node
+            // refused inside its model's tool loop ends its turn by writing
+            // *prose about being blocked*, and the engine records that prose as
+            // the step's output. #881 stopped that apology travelling to the next
+            // node; letting it ride the run inspector as the node's product would
+            // re-open the same lie one surface over. The node's `blocked` chip and
+            // the run's notice already say what happened.
+            let partial_output = without_nodes(partial_output, &blocked);
+            // A blocked run DOES return a `WorkflowRun`, so a failed persist adds
+            // an operator-facing notice rather than only a log line (Part 6).
+            if !persist_run_output(
+                run_output_store.as_deref(),
+                &record.id,
+                &workflow.id,
+                &run_id,
+                &partial_output,
+                true,
+            )
+            .await
+            {
+                notices.push(run_output_persist_failed_notice());
+            }
+            // Issue #899 (Stage 1): this is the block-settle arm the DEFAULT
+            // `on_error = "stop"` takes — a blocked agent node reaches here as an
+            // `Err` the containment check reclassifies. Stash each blocked node's
+            // continuation facts so approving its parked calls re-dispatches the
+            // run. (The `on_error = "continue"/"route"` case settles on the main
+            // arm below, which arms the same stash there.)
+            stash_blocked_agent_nodes(
+                delivery.as_ref(),
+                &workflow.id,
+                &run_id,
+                &trigger_input,
+                &blocked,
+            );
             return Ok(blocked_run(BlockedRun {
                 nodes,
                 blocked,
                 notices,
                 board: board.take(),
                 approvals: approvals.take(),
+                // Issue #1008: the same capture the durable snapshot took, so a
+                // live run drawer and a run reopened from History show one thing
+                // rather than disagreeing about what the run produced. Wrapped
+                // under `nodes` because that is the shape every reader of
+                // `WorkflowRun.output` already parses — the durable record stores
+                // the bare map, the run body carries the engine's envelope.
+                output: serde_json::json!({ "nodes": partial_output }),
             }));
         }
         None => {
@@ -606,14 +801,25 @@ async fn run_workflow_inner(
         // show how far the run got and what each finished node made. This is an
         // outcome-bearing arm (unlike the hard-abort return above, which has no
         // outcome and persists nothing).
-        persist_run_output(
+        //
+        // Issue #1008: this is a CLEAN cancel with a real `outcome.output`, so it
+        // persists that canonical map with `partial = false` — the "partial"
+        // flag is reserved for the failure/blocked arms that have no outcome and
+        // fall back to the observer's accumulated capture. A failed write adds an
+        // operator notice (Part 6), since this arm returns a `WorkflowRun`.
+        let raw_nodes = outcome.output.get("nodes").cloned().unwrap_or(Value::Null);
+        if !persist_run_output(
             run_output_store.as_deref(),
             &record.id,
             &workflow.id,
             &run_id,
-            &outcome.output,
+            &raw_nodes,
+            false,
         )
-        .await;
+        .await
+        {
+            notices.push(run_output_persist_failed_notice());
+        }
         return Ok(WorkflowRun {
             output: outcome.output,
             pending_approvals: Vec::new(),
@@ -789,14 +995,23 @@ async fn run_workflow_inner(
     // completion AND the paused-with-`pending_approvals` case both reach here).
     // Best-effort, upstream of the WorkflowRun below so console/scheduled/
     // agent-tool runs all persist through this one site.
-    persist_run_output(
+    //
+    // Issue #1008: a clean settle carries the real `outcome.output`, so it
+    // persists that canonical map with `partial = false`; a failed write adds an
+    // operator notice (Part 6) since this arm returns a `WorkflowRun`.
+    let raw_nodes = outcome.output.get("nodes").cloned().unwrap_or(Value::Null);
+    if !persist_run_output(
         run_output_store.as_deref(),
         &record.id,
         &workflow.id,
         &run_id,
-        &outcome.output,
+        &raw_nodes,
+        false,
     )
-    .await;
+    .await
+    {
+        notices.push(run_output_persist_failed_notice());
+    }
 
     // Issue #881: a node can block and the run still reach here — an author who
     // wrote `on_error = "continue"` or `"route"` asked for the branch to survive
@@ -806,6 +1021,17 @@ async fn run_workflow_inner(
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
+    // Issue #899 (Stage 1): stash the workflow id and trigger input each blocked
+    // agent node's continuation needs, keyed by the same per-(run, node) turn key
+    // its parked calls armed `ContinuationQueue` under. The resolve path releases
+    // both together and re-dispatches the run once the last call is decided.
+    stash_blocked_agent_nodes(
+        delivery.as_ref(),
+        &workflow.id,
+        &run_id,
+        &trigger_input,
+        &blocked_nodes,
+    );
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
     // via a `notices` sentence, not only via the node's own status — the
     // per-node chip is easy to miss on a run that otherwise looks fine, and a
@@ -908,6 +1134,10 @@ struct BlockedRun {
     notices: super::caps::RunNotices,
     board: Vec<crate::ports::WorkflowRunBoardRow>,
     approvals: Vec<crate::ports::WorkflowRunApprovalRow>,
+    /// Issue #1008: what the nodes upstream of the block produced, in the
+    /// engine's `{ "nodes": { "<id>": { "items": [ … ] } } }` envelope, with the
+    /// blocked nodes' own entries already removed by the caller.
+    output: Value,
 }
 
 /// Settles a run that stopped because a node is waiting on an operator (issue
@@ -924,14 +1154,22 @@ struct BlockedRun {
 ///
 /// Each emptiness below is a claim rather than a shrug:
 ///
-/// * **no `output`** — the engine returned an error, not a final state. There is
-///   no partial state to report, and the per-node output snapshot the console
-///   inspector reads is likewise not written: nothing settled to persist. The
-///   blocked node in particular produced nothing, which is the entire point;
 /// * **no `deliveries`** — `deliver_outputs` runs off the settled output, which
 ///   does not exist here. An absent row already means "not reached" everywhere
 ///   else, and a run that stopped short must not mail anybody a report of work
 ///   it did not finish.
+///
+/// # `output` is threaded in, not emptied (issue #1008)
+///
+/// It used to be `Value::Null`, on the argument that "the engine returned an
+/// error, not a final state". That holds for the engine's *merged* state and not
+/// for the nodes: everything upstream of the block ran to completion and
+/// produced real items, which the progress observer collected on the way past.
+/// Reporting none of it made the run inspector say "no output for this node"
+/// about a node that had just written a draft. The caller threads its collected
+/// capture in — the same value it persisted — having first removed the blocked
+/// nodes' own entries, so "the blocked node produced nothing" stays literally
+/// true here.
 ///
 /// `notices` carries the operator-facing sentence, composed from the structural
 /// blocked rows so the wording lives in one place and no model prose or store
@@ -943,6 +1181,7 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
         notices,
         board,
         approvals,
+        output,
     } = settled;
     for b in &blocked {
         notices.push(blocked_notice(b));
@@ -950,7 +1189,7 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
     let mut pending_approvals = Vec::new();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked);
     WorkflowRun {
-        output: Value::Null,
+        output,
         pending_approvals,
         deliveries: Vec::new(),
         cancelled: false,
@@ -960,6 +1199,25 @@ fn blocked_run(settled: BlockedRun) -> WorkflowRun {
         blocked_nodes: blocked,
         approvals,
     }
+}
+
+/// Drops `blocked`'s nodes from a collected `{ "<id>": { "items": [ … ] } }`
+/// capture (issue #1008).
+///
+/// A blocked node produced nothing, so it must have no entry — see the call site
+/// for why that is issue #881's invariant and not a cosmetic choice. A value of
+/// another shape is returned untouched: this narrows a map it recognises and
+/// never invents one.
+fn without_nodes(mut output: Value, blocked: &[crate::ports::WorkflowBlockedNode]) -> Value {
+    if blocked.is_empty() {
+        return output;
+    }
+    if let Value::Object(nodes) = &mut output {
+        for b in blocked {
+            nodes.remove(&b.node_id);
+        }
+    }
+    output
 }
 
 /// The operator's sentence for one blocked node (issue #881).
@@ -985,7 +1243,9 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
     let mut tail = String::new();
     if parked > 0 {
         tail.push_str(&format!(
-            " It parked {parked} approval{}; decide {} in Approvals and run the workflow again.",
+            " It parked {parked} approval{}; approve {} in Approvals and this run continues on \
+             its own. Approving re-runs the step, so if the agent's next turn differs it may ask \
+             again.",
             if parked == 1 { "" } else { "s" },
             if parked == 1 { "it" } else { "them" }
         ));
@@ -1010,8 +1270,8 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
     )
 }
 
-/// Persists a settled run's per-node output to the durable, console-facing
-/// store (issue #596), best-effort.
+/// Persists a run's per-node output to the durable, console-facing store (issue
+/// #596; failure/blocked capture added in #1008), best-effort.
 ///
 /// One helper, called from every outcome-bearing arm of `run_workflow_inner`, so
 /// the bounding + write live in exactly one place. `store` is `None` on the
@@ -1019,40 +1279,64 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
 /// is logged at `warn` and never fails the run: the run's work is already done
 /// and correct, and losing an inspector snapshot must not discard it.
 ///
-/// The value persisted is `output["nodes"]` — the same capture the in-process
-/// [`RunOutputCache`](crate::harness::orchestrator::RunOutputCache) reads — but
-/// on a **separate** durable store, so the two consumers never share storage.
-/// Bounding happens inside
+/// The caller hands `raw_nodes` — the `{ "<id>": { "items": [ … ] } }` map — in
+/// directly: on the clean arms that is `outcome.output["nodes"]` (the same
+/// capture the in-process
+/// [`RunOutputCache`](crate::harness::orchestrator::RunOutputCache) reads), and
+/// on the failure/blocked arms (issue #1008) it is the map the progress observer
+/// accumulated, flagged `partial`. Bounding happens inside
 /// [`WorkflowRunOutputRecord::from_raw_nodes`](crate::ports::WorkflowRunOutputRecord::from_raw_nodes),
 /// which clips (never refuses) so the durable record always exists.
+///
+/// Returns `true` when the snapshot is safely stored (or there is no store to
+/// store it in — a no-op is not a failure), and `false` only when a store was
+/// present and the write errored. The notice-bearing callers (which return a
+/// `WorkflowRun`) use `false` to add an operator-facing notice; the genuine-`Err`
+/// caller has no `WorkflowRun` to hang one on and lets the `warn!` stand alone
+/// (issue #1008, Part 3).
 async fn persist_run_output(
     store: Option<&dyn crate::ports::run_output::WorkflowRunOutputStore>,
     company: &CompanyId,
     workflow_id: &str,
     run_id: &str,
-    output: &Value,
-) {
+    raw_nodes: &Value,
+    partial: bool,
+) -> bool {
     let Some(store) = store else {
-        return;
+        return true;
     };
-    // The engine's per-node map lives under `output["nodes"]`; a run with no such
-    // key persists an empty map, which the console renders as "produced none".
-    let raw_nodes = output.get("nodes").cloned().unwrap_or(Value::Null);
     let record = crate::ports::WorkflowRunOutputRecord::from_raw_nodes(
         run_id,
         workflow_id,
         crate::ports::now_millis(),
-        &raw_nodes,
+        raw_nodes,
+        partial,
     );
-    if let Err(err) = store.put_run_output(company, &record).await {
-        tracing::warn!(
-            company = %company,
-            workflow = %workflow_id,
-            %run_id,
-            %err,
-            "workflow: could not persist the run's per-node output; the run is unaffected"
-        );
+    match store.put_run_output(company, &record).await {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!(
+                company = %company,
+                workflow = %workflow_id,
+                %run_id,
+                %err,
+                "workflow: could not persist the run's per-node output; the run is unaffected"
+            );
+            false
+        }
     }
+}
+
+/// The operator-facing notice a notice-bearing arm adds when
+/// [`persist_run_output`] could not write the snapshot (issue #1008, Part 3).
+///
+/// The run's result itself is unaffected — this only warns that reopening the
+/// run later may show no output for its nodes, so the black-box silence has a
+/// visible cause instead of masquerading as "this run predates output capture".
+fn run_output_persist_failed_notice() -> String {
+    "This run's per-node output could not be saved, so reopening it later may show no output \
+     for some steps. The run itself was unaffected."
+        .to_string()
 }
 
 /// What a settled run left for the operator to decide.
@@ -1121,6 +1405,40 @@ struct PausedGates<'a> {
 /// continuation an approval starts knows what has already left the process.
 /// Without it, approving a gate re-mails every report upstream of it — the
 /// re-run semantics above applied to a side effect that reaches a real person.
+/// Stashes the facts each blocked agent node's continuation needs — the workflow
+/// id and this run's trigger input — keyed by the per-(run, node) turn key its
+/// gated calls armed `ContinuationQueue` under at park time (issue #899, Stage 1).
+///
+/// # Why here, and not where the calls are parked
+///
+/// The calls are parked mid-turn from `HarnessAgentRunner`, which carries no
+/// trigger input. This is the one place with the workflow id, the trigger input
+/// and the list of blocked nodes together — exactly as `park_pending_gates` is
+/// the one place a gate's facts come together. A node with no parked approval id
+/// is skipped: nothing can be decided, so nothing will ever release a stash.
+///
+/// A build with no approvals queue wired stashes nothing and is silent — the
+/// same node already logged its own "could not be parked" line, and there is no
+/// resolve path to release a stash to.
+fn stash_blocked_agent_nodes(
+    delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
+    workflow_id: &str,
+    run_id: &str,
+    trigger_input: &serde_json::Value,
+    blocked: &[crate::ports::WorkflowBlockedNode],
+) {
+    let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
+        return;
+    };
+    for node in blocked {
+        if node.approval_ids.is_empty() {
+            continue;
+        }
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
+        parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+    }
+}
+
 async fn park_pending_gates(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     record: &CompanyRecord,
@@ -1158,7 +1476,28 @@ async fn park_pending_gates(
         return;
     };
 
+    // Issue #978: the gates this lineage has already refused. A denied node is
+    // decided and final — replaying into it must not raise the question a second
+    // time, or a mixed verdict still nets new cards and "approving never
+    // increases pending approvals" is false again.
+    let denied = crate::runtime::workflow_resume::denied_in_input(trigger_input);
+
+    // Issue #978: every gate this run parks shares ONE turn key, so the N of a
+    // fan-out are one decision batch owed exactly one continuation. Keyed on the
+    // run because the run is what gets re-dispatched.
+    let turn = crate::runtime::workflow_resume::workflow_turn_key(run_id);
+
     for node_id in pending {
+        if denied.iter().any(|refused| refused == node_id) {
+            tracing::info!(
+                company = %record.id,
+                workflow = %workflow_id,
+                node = %node_id,
+                %run_id,
+                "workflow: this gate was already refused, so it is not asked about again"
+            );
+            continue;
+        }
         // Issue #460: when the policy is what stopped this node, the card says
         // which tool and why.
         //
@@ -1224,6 +1563,7 @@ async fn park_pending_gates(
                 effect,
                 crate::runtime::journal::TaskLink::Unlinked,
                 None,
+                Some(turn.clone()),
             )
             .await
         {
@@ -1593,6 +1933,95 @@ to = "done"
         assert!(output.contains("hello-marker"), "{output}");
     }
 
+    /// A GREET-shaped graph whose agent node carries a config `=`-expression
+    /// pointing at a trigger field that does not exist (issue #1014). The engine
+    /// resolves the expression to `null` and records a `NullResolution`, which
+    /// this test asserts reaches the run's per-node timeline.
+    const AGENT_NULL_BINDING: &str = r#"
+id = "greet"
+name = "Greet"
+
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+summary = "say hello-marker"
+agent = "ceo"
+
+[node.config]
+recipient = "=item.missing_field"
+
+[[node]]
+id = "done"
+kind = "output"
+name = "Report back"
+
+[[edge]]
+from = "start"
+to = "ceo"
+
+[[edge]]
+from = "ceo"
+to = "done"
+"#;
+
+    /// Issue #1014: a node whose config `=`-expression resolves to `null` yields
+    /// a [`WorkflowRunNodeRow`](crate::ports::WorkflowRunNodeRow) whose
+    /// `diagnostics` carries that config **path** — the engine's own broken-wiring
+    /// list, surfaced on the run response so an operator sees the unresolved
+    /// binding behind a bad step.
+    ///
+    /// The discriminating half is *paths only*: `diagnostics` carries the config
+    /// location (`recipient`) and never the expression text (`=item.missing_field`)
+    /// nor any resolved value — the no-payload stance the rest of the row takes.
+    #[tokio::test]
+    async fn a_null_resolved_config_expression_surfaces_as_a_node_diagnostic_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let deps = deps(dir.path());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(AGENT_NULL_BINDING).expect("workflow parses");
+        let run = run_workflow(
+            pool,
+            deps,
+            &rec,
+            &file,
+            // No `missing_field` on the trigger payload, so `=item.missing_field`
+            // resolves to `null` and the engine records the miss.
+            serde_json::json!({ "brief": "launch" }),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("workflow runs");
+
+        let ceo = run
+            .nodes
+            .iter()
+            .find(|n| n.node_id == "ceo")
+            .expect("the agent node finished and produced a row");
+
+        // The config path of the null-resolved binding rode all the way to the
+        // run's per-node timeline.
+        assert!(
+            ceo.diagnostics.iter().any(|d| d.contains("recipient")),
+            "expected the `recipient` config path in diagnostics, got {:?}",
+            ceo.diagnostics
+        );
+        // Paths only: neither the expression text nor a resolved value leaks.
+        assert!(
+            !ceo.diagnostics.iter().any(|d| d.contains("=item")),
+            "diagnostics must carry config paths, not expression text: {:?}",
+            ceo.diagnostics
+        );
+    }
+
     // --- Durable per-node output persist-at-settle (issue #596) ---------------
 
     /// A completed run persists its per-node output to the durable store, so a
@@ -1802,6 +2231,7 @@ to = "done"
             node_id: "work".to_string(),
             status: WorkflowNodeStatus::Error,
             elapsed_ms: 10,
+            diagnostics: Vec::new(),
         }];
         assert!(only_blocked_nodes_errored(&nodes, &blocked));
     }
@@ -1821,11 +2251,13 @@ to = "done"
                 node_id: "work".to_string(),
                 status: WorkflowNodeStatus::Error,
                 elapsed_ms: 10,
+                diagnostics: Vec::new(),
             },
             crate::ports::WorkflowRunNodeRow {
                 node_id: "other".to_string(),
                 status: WorkflowNodeStatus::Error,
                 elapsed_ms: 5,
+                diagnostics: Vec::new(),
             },
         ];
         assert!(
@@ -1868,6 +2300,161 @@ to = "done"
                 .unwrap()
                 .is_none(),
             "a dry run must persist nothing durable"
+        );
+    }
+
+    /// Issue #1008 (the decisive change): a run whose first node SUCCEEDS and a
+    /// later node FAILS hard (default `on_error = "stop"`, so the engine returns
+    /// `Err`) must STILL persist the per-node output the observer captured before
+    /// the failure — flagged `partial`. Before #1008 this arm returned `Err`
+    /// without persisting anything, so the inspector wrongly claimed the run
+    /// predated output capture.
+    ///
+    /// `start → export (csv_export, succeeds) → boom (bogus_tool, unknown slug →
+    /// hard stop)`: the export node's frame is captured off the progress
+    /// observer, and the run fails on `boom`.
+    #[tokio::test]
+    async fn a_failed_run_persists_the_partial_output_it_reached() {
+        let src = r#"
+id = "partial_fail"
+name = "Partial fail"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "export"
+kind = "tool_call"
+name = "Export"
+[node.config]
+slug = "csv_export"
+[node.config.args]
+filename = "wf-out.csv"
+data = "[{\"name\":\"Ada\"},{\"name\":\"Bob\"}]"
+[[node]]
+id = "boom"
+kind = "tool_call"
+name = "Boom"
+[node.config]
+slug = "bogus_tool"
+[[edge]]
+from = "start"
+to = "export"
+[[edge]]
+from = "export"
+to = "boom"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsOps::new(dir.path()));
+        let mut deps = deps(dir.path());
+        deps.run_output_store = Some(store.clone());
+        let rec = tools_record();
+        let file = parse_workflow(src).expect("parses");
+        let ctx = WorkflowRunContext::new(false);
+        let run_id = ctx.run_id.clone();
+
+        let err = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &rec,
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &ctx,
+        )
+        .await
+        .expect_err("the run fails hard on the unknown-slug node");
+        assert!(
+            err.to_string().contains("bogus_tool") || err.to_string().contains("boom"),
+            "the failure should come from the failing node: {err}"
+        );
+
+        // The decisive assertion: the snapshot exists (was `None` pre-#1008,
+        // because the `Err` arm persisted nothing).
+        let stored = store
+            .get_run_output(&rec.id, &run_id)
+            .await
+            .expect("store read")
+            .expect("a failed run must still persist the output it reached before failing");
+        assert!(
+            stored.partial,
+            "a failure-arm capture must be flagged partial: {stored:?}"
+        );
+        assert_eq!(stored.workflow_id, "partial_fail");
+        assert_eq!(stored.run_id, run_id);
+        // The successful `export` node's output is present under the canonical
+        // `{ items: [...] }` shape the console renders.
+        assert!(
+            stored
+                .nodes
+                .get("export")
+                .and_then(|n| n.get("items"))
+                .is_some(),
+            "the node that succeeded before the failure must be in the partial snapshot: {}",
+            stored.nodes
+        );
+
+        // Issue #1008 (second half): the failure also carries the partial run up
+        // to the caller, so `record_run_finished` can journal what the run did
+        // before it broke instead of an all-empty row.
+        let partial = err
+            .partial_run()
+            .expect("a run that broke mid-graph reports what it had already done");
+        assert!(
+            partial.nodes.iter().any(|n| n.node_id == "export"),
+            "{:?}",
+            partial.nodes
+        );
+        assert!(
+            !partial.cancelled,
+            "a failure is not an operator stop, whatever else it carries"
+        );
+        assert!(
+            partial.output.get("export").is_some(),
+            "the partial run reports the same capture that was persisted: {}",
+            partial.output
+        );
+    }
+
+    /// Issue #1008: `without_nodes` removes exactly the blocked nodes' entries
+    /// and leaves everything else — including a capture of another shape —
+    /// untouched.
+    ///
+    /// Unit-level beside the end-to-end proof in `blocked_node_test`, because
+    /// the "leaves a value it does not recognise alone" half has no reachable
+    /// path through a real run and would otherwise be an untested branch.
+    #[test]
+    fn without_nodes_removes_only_the_blocked_entries() {
+        let blocked = |id: &str| crate::ports::WorkflowBlockedNode {
+            node_id: id.to_string(),
+            tools: vec!["shell".to_string()],
+            approval_ids: Vec::new(),
+            unparkable: 0,
+        };
+
+        let capture = serde_json::json!({
+            "writer": { "items": ["draft"] },
+            "publish": { "items": ["apology prose"] },
+        });
+        let narrowed = without_nodes(capture, &[blocked("publish")]);
+        assert!(narrowed.get("writer").is_some(), "{narrowed}");
+        assert!(
+            narrowed.get("publish").is_none(),
+            "the blocked node produced nothing, so it must have no entry: {narrowed}"
+        );
+
+        // Nothing blocked: returned verbatim rather than rebuilt.
+        let untouched = serde_json::json!({ "writer": { "items": ["draft"] } });
+        assert_eq!(
+            without_nodes(untouched.clone(), &[]),
+            untouched,
+            "a run that blocked on nobody is byte-unchanged"
+        );
+
+        // A value of another shape is not a map to narrow — returned as-is
+        // rather than replaced with an invented one.
+        assert_eq!(
+            without_nodes(Value::Null, &[blocked("publish")]),
+            Value::Null
         );
     }
 
@@ -2316,6 +2903,72 @@ to = "done"
         assert!(
             err.to_string().contains("http_request"),
             "the failure should come from the guarded http client: {err}"
+        );
+    }
+
+    /// A run context with the dry flag set. `WorkflowRunContext::new` takes
+    /// `scheduled`, not `dry_run` — the dry flag defaults to false and is
+    /// flipped after construction, exactly as the run route does.
+    fn dry_context() -> WorkflowRunContext {
+        let mut ctx = WorkflowRunContext::new(false);
+        ctx.dry_run = true;
+        ctx
+    }
+
+    /// **Issue #1048.** The same graph as `t5`, dry-run: a target the real run
+    /// refuses must not report `ok`.
+    ///
+    /// Test run is the one control an operator has for checking a graph before
+    /// arming it on a schedule, so a green dry run followed by a real run that
+    /// cannot start is worse than no dry run at all — it converts "I checked it"
+    /// into a false belief.
+    ///
+    /// A loopback target is the lever because the upstream guard refuses
+    /// private/loopback addresses *regardless of the company's allowlist*
+    /// (see `t5_http_request_to_loopback_is_ssrf_denied`), so the verdict is
+    /// decidable from the URL alone — no DNS, no request, nothing performed.
+    #[tokio::test]
+    async fn a_dry_run_refuses_a_target_the_real_run_would_refuse() {
+        let src = r#"
+id = "dry-ssrf"
+name = "Dry SSRF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "fetch"
+kind = "http_request"
+name = "Fetch"
+[node.config]
+method = "GET"
+url = "http://127.0.0.1:9/"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "fetch"
+[[edge]]
+from = "fetch"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(src).expect("parses");
+        let err = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &dry_context(),
+        )
+        .await
+        .expect_err("a dry run must refuse a target the real run refuses");
+        assert!(
+            err.to_string().contains("http_request"),
+            "the dry refusal should name the node, as the live one does: {err}"
         );
     }
 
@@ -3185,6 +3838,13 @@ to = "done"
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: gate,
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
@@ -3478,6 +4138,13 @@ to = "gate"
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: Arc::new(crate::policy::ManifestApprovalGate::new(policy)),
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
@@ -3535,8 +4202,17 @@ to = "gate"
             .find(|p| p.effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND)
             .expect("the paused gate is waiting on the operator")
             .effect;
-        let continuation = crate::runtime::workflow_resume::continuation_input(&card)
-            .expect("a well-formed card continues");
+        let continuation = crate::runtime::workflow_resume::continuation_input(
+            &card,
+            &[
+                card.payload[crate::runtime::workflow_resume::PAYLOAD_NODE_ID]
+                    .as_str()
+                    .expect("the card names its gate")
+                    .to_string(),
+            ],
+            &[],
+        )
+        .expect("a well-formed card continues");
 
         // --- run 2: the same graph, from the trigger, with the gate approved.
         let second = run_workflow(

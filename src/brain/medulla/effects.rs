@@ -169,6 +169,41 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             },
             "tool_access.changed",
         ),
+        // Issue #983. Written for completeness on the same terms as
+        // `ReactionToggled` above, not for a live path: these bracket a chat
+        // turn and are appended beside it rather than driving a cycle, so a
+        // brain never sees one here. The turn id is the whole payload — the
+        // message text rides the `OperatorMessage` this brackets, and the
+        // failure reason is tenant-scoped, so neither is copied here.
+        CompanyEvent::TurnStarted {
+            turn_id, chat_id, ..
+        } => (
+            Role::System,
+            "operator".to_string(),
+            format!("[{chat_id}] turn {turn_id} accepted"),
+            "turn.started",
+        ),
+        CompanyEvent::TurnFailed { turn_id, .. } => (
+            Role::System,
+            "operator".to_string(),
+            format!("Turn {turn_id} did not finish"),
+            "turn.failed",
+        ),
+        // Issue #1015. Structural only, like every arm here: a minted run id and
+        // two fixed-vocabulary statuses. `error` is deliberately not copied —
+        // it is tenant-scoped, the same reason `TurnFailed` above carries only
+        // its id.
+        CompanyEvent::RunStatusChanged {
+            run_id, from, to, ..
+        } => (
+            Role::System,
+            "board".to_string(),
+            match from {
+                Some(from) => format!("Attempt {run_id}: {from} -> {to}"),
+                None => format!("Attempt {run_id}: {to}"),
+            },
+            "run.status_changed",
+        ),
         CompanyEvent::TaskDispatched { task_id, .. } => (
             Role::System,
             "board".to_string(),

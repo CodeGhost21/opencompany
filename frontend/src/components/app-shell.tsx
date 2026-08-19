@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AppWindow,
   FolderClosed,
   LayoutDashboard,
   type LucideIcon,
@@ -30,6 +31,7 @@ import {
   SidebarInset,
   SidebarMenu,
   SidebarMenuBadge,
+  SidebarMenuDot,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -101,6 +103,9 @@ const WorkspaceView = lazy(() =>
 const FinancesView = lazy(() =>
   import("@/views/FinancesView").then((m) => ({ default: m.FinancesView })),
 );
+// Hosts a sandboxed iframe and the postMessage bridge — load on demand, same
+// as the other heavier, less-visited surfaces.
+const PagesView = lazy(() => import("@/views/PagesView").then((m) => ({ default: m.PagesView })));
 
 export type View =
   | "overview"
@@ -115,6 +120,7 @@ export type View =
   | "memory"
   | "approvals"
   | "workflows"
+  | "pages"
   | "finances"
   | "settings"
   | "feedback";
@@ -147,6 +153,10 @@ const NAV: NavItem[] = [
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
   { view: "workflows", label: "Workflows", icon: Workflow },
+  // Agent-authored internal dashboard pages, rendered in a sandboxed iframe
+  // (docs/spec/runtime/pages.md). Placed beside Workflows: both are the
+  // "something an agent built" surfaces, as opposed to the fixed views above.
+  { view: "pages", label: "Pages", icon: AppWindow },
   { view: "settings", label: "Settings", icon: Settings2 },
 ];
 
@@ -180,10 +190,10 @@ const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
 const WORKFLOW_EVENT_WINDOW = 300;
 
 /**
- * Operator-facing copy for a `connect_error` code from the host's OAuth
- * callback (issue #300). The host sends a stable code rather than the
- * provider's own error text — that text is attacker-influenced and may carry
- * credential material, so it never leaves the host's logs.
+ * Operator-facing copy for a legacy `connect_error` query from the former
+ * native OAuth callback (issue #300). The callback now ends in its own dated
+ * explanatory page (#838), but an older bookmarked URL still gets a safe
+ * message rather than raw provider-controlled error text.
  *
  * Every message says what to do next: the whole point of the bounce-back is
  * that a failed handshake is recoverable, not a dead end. An unrecognized code
@@ -342,6 +352,17 @@ export function AppShell({
   // React batch still means "re-read" — the frame-loss the workflow canvas had
   // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  // Issue #1015: bumped on every `run_status_changed`, so the task detail screen
+  // sees an attempt move rather than waiting up to four seconds for its poll —
+  // and sees it at all while the tab is hidden, which the poll deliberately does
+  // not do. Its own counter rather than a share of `taskEventTick`: this fires
+  // several times per attempt, and folding it in would make the whole board
+  // refetch on every transition of every run.
+  //
+  // A counter, not the payload, for the same reason the tick above is one: the
+  // screen re-reads its own detail, so two frames collapsing inside one React
+  // batch still mean "re-read".
+  const [attemptEventTick, setAttemptEventTick] = useState(0);
   // Issue #327: the latest workspace write, as the Workspace view needs it.
   //
   // The payload-carrying variant of the `taskEventTick` pattern above, and the
@@ -351,6 +372,10 @@ export function AppShell({
   // alongside so two frames naming the same node in one React batch are still
   // two events rather than a state update React coalesces away.
   const [workspaceEvent, setWorkspaceEvent] = useState<WorkspaceEvent | null>(null);
+  // A recovery does not name one node, so it cannot reuse `workspaceEvent`'s
+  // payload contract. The workspace re-reads its whole canonical tree on this
+  // tick, just as the task and workflow surfaces do below.
+  const [workspaceRefreshTick, setWorkspaceRefreshTick] = useState(0);
   // Issue #228: bumped on every `workflow_run_finished` so the Workflows view
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
@@ -382,6 +407,27 @@ export function AppShell({
   // of magnitude above a run's ~N+2 frames; if it ever did cut a run's start,
   // the view simply shows no live state and the run history still has it.
   const [workflowRunEvents, setWorkflowRunEvents] = useState<CompanyStreamEvent[]>([]);
+  // Issue #1010: and emptied when the company changes.
+  //
+  // The window is the one company-scoped buffer that was never reset. Every
+  // fold that reads it matches frames on `workflowId`/`runId` alone — the
+  // frames carry no company — and provisioned companies are built from the same
+  // manifests, so two of them routinely hold a workflow of the *same id*.
+  // Switching company therefore painted the previous company's run onto an
+  // identically-named workflow, with a live-looking node and a Cancel button
+  // pointed at a run in a company the operator had left.
+  //
+  // Emptying is right rather than filtering: the frames that matter after a
+  // switch are the ones that arrive after it. The new company's own in-flight
+  // runs come back through the history seed (issue #863), which is scoped by
+  // the request, so nothing is lost by starting from nothing.
+  //
+  // The updater returns the SAME array when there is nothing to drop, so React
+  // bails out rather than re-rendering the whole shell for a no-op — this
+  // effect also fires on mount, when the window is empty by construction.
+  useEffect(() => {
+    setWorkflowRunEvents((prev) => (prev.length === 0 ? prev : []));
+  }, [company]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -448,22 +494,20 @@ export function AppShell({
   // in the feed both surfaces read.
   const pending = feed.status.pending_approvals;
 
-  // OAuth connect bounce-back: the host's callback redirects the browser to
-  // `…/connections?connected={provider}` after storing the token, or to
-  // `…/connections?connect_error={code}[&provider={id}]` when the handshake
-  // failed. Land the operator on the Connections page either way, say what
-  // happened, then strip the params so a refresh doesn't re-fire them. Runs
-  // once; StrictMode's double invoke is harmless because the first run clears
-  // the params the second reads.
+  // A legacy native OAuth callback may have left `connected` or `connect_error`
+  // in a bookmarked URL. Land the operator on Connections, say what happened,
+  // then strip the params so a refresh does not re-fire them. The #838 callback
+  // itself now terminates on its explanatory page and never writes a credential.
+  // Runs once; StrictMode's double invoke is harmless because the first run
+  // clears the params the second reads.
   //
   // Connections is a page of the Settings section now (`#/settings/connections`),
   // so the bounce-back lands there rather than on a top-level view.
   //
-  // The failure half matters as much as the success half: before issue #300 the
-  // host answered a cancelled or expired handshake with a JSON body, which the
-  // browser rendered as the page — a dead end with no way back into the
-  // console. The host now always redirects, so this is where it becomes
-  // recoverable.
+  // Before issue #300 the host answered a cancelled or expired handshake with a
+  // JSON body, which the browser rendered as the page — a dead end with no way
+  // back into the console. Preserve the readable landing for legacy URLs even
+  // though #838 no longer redirects new native OAuth callbacks here.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("connected");
@@ -1086,6 +1130,17 @@ export function AppShell({
     }
   };
 
+  // One recovery path for a signalled gap, a healthy connection, and the hosted
+  // proxy's failed-to-open case (#23). These surfaces own their data, so every
+  // one re-reads rather than attempting to reconstruct lost payloads here.
+  const resyncDurableState = useCallback(async () => {
+    setTaskEventTick((n) => n + 1);
+    setWorkspaceRefreshTick((n) => n + 1);
+    setWorkflowRunTick((n) => n + 1);
+    setWorkflowListTick((n) => n + 1);
+    await feed.refresh();
+  }, [feed.refresh]);
+
   // The active push half of the attention surface: SSE-driven toasts + chat
   // injection, plus a rising-edge "needs a sign-off" toast off the poll's
   // pending count. Degrades silently to the `useCompany` poll when the host has
@@ -1094,6 +1149,7 @@ export function AppShell({
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
+    onRunEvent: useCallback(() => setAttemptEventTick((n) => n + 1), []),
     // Issue #377. Beside the board tick above, not instead of it: a settle both
     // moves a card between columns and needs saying in the conversation the
     // card came from.
@@ -1159,6 +1215,12 @@ export function AppShell({
       }
       void feed.refresh();
     },
+    onResync: resyncDurableState,
+    onRecoveryError: useCallback(() => {
+      toast.error("Live updates couldn't be recovered", {
+        description: "We couldn't refresh the latest company state. Check your connection and try again.",
+      });
+    }, []),
   });
 
   return (
@@ -1192,7 +1254,20 @@ export function AppShell({
                     <span>{item.label}</span>
                   </SidebarMenuButton>
                   {item.view === "approvals" && pending > 0 && (
-                    <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                    <>
+                      <SidebarMenuBadge>{pending}</SidebarMenuBadge>
+                      {/* Issue #1018: the badge is the sidebar's only attention
+                          signal and `SidebarMenuBadge` hides itself on the
+                          collapsed rail, so a collapsed sidebar said nothing was
+                          waiting. The dot is the same `pending` value rendered
+                          so it survives 32px — not a second source, so it cannot
+                          disagree with the badge or fork the count contract
+                          #932 pins. Exactly one of the two is visible at a
+                          time. */}
+                      <SidebarMenuDot
+                        label={`${pending} ${pending === 1 ? "approval needs" : "approvals need"} you`}
+                      />
+                    </>
                   )}
                 </SidebarMenuItem>
               ))}
@@ -1290,6 +1365,7 @@ export function AppShell({
               // counter the chat's in-flight strip reads, so a card opened from
               // chat lands on the board without a reload.
               taskEventTick={taskEventTick}
+              attemptEventTick={attemptEventTick}
               // Issue #883: a paused card is blocked until every approval its
               // turn parked is decided, and the board's own read carries none
               // of them. This is the feed the sidebar badge already polls, so
@@ -1354,6 +1430,7 @@ export function AppShell({
                 // deliverable the publish drain lands shows up without a
                 // refresh.
                 event={workspaceEvent}
+                refreshTick={workspaceRefreshTick}
                 // Issue #552: the Artifacts tab's "Open in workspace" link
                 // sets `#/workspace/<nodeId>`, and `useHashView` hands the
                 // second segment back unvalidated — only this view knows
@@ -1399,7 +1476,41 @@ export function AppShell({
                 runEventTick={workflowRunTick}
                 runEvents={workflowRunEvents}
                 listEventTick={workflowListTick}
+                // Issue #1002: a run that parked cards can be unblocked from
+                // the run drawer, without leaving the run to find the rows in a
+                // flat queue. The SAME feed the Approvals page and the sidebar
+                // badge read, handed over unfiltered — this is a second reader
+                // of one queue, so the page still lists every row and the badge
+                // still counts every row.
+                //
+                // The four maps below are the same console-local state the
+                // inline chat card is given, owned here for the same reason: an
+                // operator who decides in the drawer, steps over to Approvals
+                // and comes back must not find a card that forgot what they did.
+                // Their `decided` half is fed by the `approval_resolved` frame
+                // as well as by this console's own resolves, which is what makes
+                // a decision taken on the page settle in the drawer with no
+                // reload.
+                approvals={feed.approvals}
+                approvalsNow={feed.now}
+                decidingApprovals={decidingApprovals}
+                decidedApprovals={decidedApprovals}
+                failedApprovals={failedApprovals}
+                onDecideApproval={(approval, verdict, scope) =>
+                  void decideApproval(approval, verdict, scope)
+                }
               />
+            </Suspense>
+          )}
+          {view === "pages" && (
+            <Suspense
+              fallback={
+                <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
+                  Loading pages…
+                </div>
+              }
+            >
+              <PagesView client={client} company={company} />
             </Suspense>
           )}
           {view === "finances" && (

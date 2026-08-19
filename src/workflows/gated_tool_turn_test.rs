@@ -257,6 +257,13 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
             parking: Some(DeliveryParking {
                 approvals: gate,
                 journal: journal.clone(),
+                // Issue #978: a test fixture parks into its own queues. The
+                // production wiring is `RuntimeBuilder`, which hands the
+                // runtime's own handles in so a park arms what the resolve
+                // path releases.
+                continuations: Default::default(),
+                gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
