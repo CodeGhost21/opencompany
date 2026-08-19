@@ -5220,6 +5220,35 @@ mode = "full"
         );
     }
 
+    /// **Issue #1000 — the floor of the `202` contract.** A detached response
+    /// is a promise the console can poll, and the poll starts from the body's
+    /// `turnId`; a `202` carrying no row is a promise a buffered-`/events`
+    /// tenant cannot collect, which strands the reply until reload. So when the
+    /// turn's row cannot be minted, the route must not answer `202` at all: it
+    /// settles the turn synchronously instead, handing the console the answer —
+    /// a state the console renders natively, being the same shape an older host
+    /// (one that ignored `detach`) has always returned.
+    #[tokio::test]
+    async fn a_detached_request_without_a_turn_row_settles_synchronously() {
+        let home_dir = home();
+        let state = state_with_failing_runs(home_dir.path()).await;
+        let app = router(state);
+        let cookie = crate::server::test_support::fixed_cookie("acme");
+
+        let body = post_chat(&app, &cookie, r#"{"text":"rowless detach","detach":true}"#).await;
+
+        // The settled shape, not the empty 202: the console is handed the
+        // answer, never a turn id it cannot act on.
+        assert!(
+            body.get("detached").is_none(),
+            "a rowless turn must not claim it can be read back: {body}"
+        );
+        assert!(
+            body["responses"].as_array().is_some_and(|r| !r.is_empty()),
+            "the synchronous fallback still delivers the reply: {body}"
+        );
+    }
+
     /// A thread reply survives a reload: the parent id posted with the message
     /// comes back on both the operator's line and the answer it drew, so a
     /// rehydrating console folds the exchange under the same row it was typed
