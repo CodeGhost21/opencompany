@@ -579,29 +579,43 @@ function NodeTimeline({
     >
       <span className="text-xs font-medium">Steps</span>
       {nodes.map((n, i) => (
-        <div
-          key={`${n.nodeId}-${i}`}
-          className="flex flex-wrap items-baseline gap-1.5"
-        >
-          <Badge
-            variant="outline"
-            /* Issue #881: three tones. The default arm was "anything that is
-               not an error is green", which painted a blocked step — one that
-               produced nothing — exactly like a step that delivered. */
-            className={`h-4 px-1.5 text-3xs font-normal ${
-              n.status === "error"
-                ? "border-status-failed/40 bg-status-failed-soft"
-                : n.status === "blocked"
-                  ? "border-status-blocked/50 bg-status-blocked-soft"
-                  : "border-status-done/40 bg-status-done-soft"
-            }`}
-          >
-            {n.status}
-          </Badge>
-          <span className="text-2xs">{nameById.get(n.nodeId) ?? n.nodeId}</span>
-          <span className="text-2xs text-muted-foreground">
-            {n.elapsedMs} ms
-          </span>
+        <div key={`${n.nodeId}-${i}`} className="space-y-0.5">
+          <div className="flex flex-wrap items-baseline gap-1.5">
+            <Badge
+              variant="outline"
+              /* Issue #881: three tones. The default arm was "anything that is
+                 not an error is green", which painted a blocked step — one that
+                 produced nothing — exactly like a step that delivered. */
+              className={`h-4 px-1.5 text-3xs font-normal ${
+                n.status === "error"
+                  ? "border-status-failed/40 bg-status-failed-soft"
+                  : n.status === "blocked"
+                    ? "border-status-blocked/50 bg-status-blocked-soft"
+                    : "border-status-done/40 bg-status-done-soft"
+              }`}
+            >
+              {n.status}
+            </Badge>
+            <span className="text-2xs">
+              {nameById.get(n.nodeId) ?? n.nodeId}
+            </span>
+            <span className="text-2xs text-muted-foreground">
+              {n.elapsedMs} ms
+            </span>
+          </div>
+          {/* Issue #1014: the engine's own broken-wiring list for this node —
+              every config binding that resolved to null, by its config path.
+              Paths only (the host forwards no resolved value), so this points
+              the operator at *where* a step's wiring came up empty without
+              echoing what any node produced. */}
+          {n.diagnostics && n.diagnostics.length > 0 && (
+            <p
+              className="pl-1 text-3xs text-[var(--status-failed-text)]"
+              data-testid="workflow-run-node-diagnostics"
+            >
+              unresolved wiring: {n.diagnostics.join(", ")}
+            </p>
+          )}
         </div>
       ))}
     </div>
