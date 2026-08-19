@@ -3068,6 +3068,101 @@ mod test {
         state
     }
 
+    /// A run store that refuses every verb — the persistence layer mid-outage.
+    /// `accept_chat_turn` treats a refused row best-effort, so this store is
+    /// what probes the other half of that promise: the turn still runs and the
+    /// request still gets an answer, it just cannot be a pollable `202`.
+    struct FailingRunStore;
+
+    #[async_trait::async_trait]
+    impl crate::ports::runs::RunStore for FailingRunStore {
+        async fn create_run(
+            &self,
+            _company: &CompanyId,
+            _spec: crate::ports::runs::NewRun,
+        ) -> crate::Result<crate::ports::runs::RunRecord> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn get_run(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<crate::ports::runs::RunRecord>> {
+            Ok(None)
+        }
+        async fn put_run(
+            &self,
+            _company: &CompanyId,
+            _run: &crate::ports::runs::RunRecord,
+        ) -> crate::Result<()> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn list_runs(
+            &self,
+            _company: &CompanyId,
+            _filter: &crate::ports::runs::RunFilter,
+        ) -> crate::Result<Vec<crate::ports::runs::RunRecord>> {
+            Ok(Vec::new())
+        }
+        async fn append_run_step(
+            &self,
+            _company: &CompanyId,
+            _step: &crate::ports::runs::RunStepRecord,
+        ) -> crate::Result<()> {
+            Err(OpenCompanyError::InvalidRequest(
+                "run store offline".to_string(),
+            ))
+        }
+        async fn list_run_steps(
+            &self,
+            _company: &CompanyId,
+            _run_id: &str,
+        ) -> crate::Result<Vec<crate::ports::runs::RunStepRecord>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// [`state_with_company`] with the run store swapped for one that refuses
+    /// every verb — the setup for the rowless-turn tests.
+    async fn state_with_failing_runs(home: &std::path::Path) -> AppState {
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        use crate::ports::CompanyStore;
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                overlay_desk_tools: Default::default(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(id.clone())
+            .with_runs(Arc::new(FailingRunStore))
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
     #[tokio::test]
     async fn chat_returns_echoed_response() {
         let home_dir = home();
