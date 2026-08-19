@@ -2806,11 +2806,13 @@ impl HarnessBrain {
                     let record = self.record();
                     let turn = self
                         .delegation_runner(&run_turn, &record)
-                        // Issue #1035: the operator's own statement of what this
-                        // message is for. The REST handler already acts on it;
-                        // until now the runtime never saw it, so it could not
-                        // tell a message the handler had carded from one it had
-                        // not.
+                        // Issues #1035 / #1152: the operator's own statement of
+                        // what this message is for. The REST handler already
+                        // acts on it; until #1035 the runtime never saw it, so
+                        // it could not tell a message the handler had carded
+                        // from one it had not — and since #1152 it also carries
+                        // "this is not work", which the runtime has to honour or
+                        // the console's promise holds on one surface only.
                         .requested(*deliverable)
                         .handle_operator_message(&responder, text, chat_id)
                         .await?;

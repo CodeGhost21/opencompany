@@ -32,7 +32,8 @@ use crate::feedback::tool::SEND_EMAIL_TOOL;
 use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
 use crate::ports::runs::{RunOutcome, RunStatus};
-use crate::ports::tasks::{COLUMN_TODO, TaskDeliverable, TaskRecord};
+use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
+use crate::ports::types::MessageIntent;
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
     CycleRequest, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry, OutboundMessage,
@@ -810,7 +811,7 @@ working on):\n{}\n]",
         for event in events.iter_mut() {
             let CompanyEvent::OperatorMessage {
                 text,
-                deliverable: Some(TaskDeliverable::Workflow),
+                deliverable: Some(MessageIntent::Workflow),
                 ..
             } = event
             else {
@@ -2726,6 +2727,12 @@ mod test {
     /// desk agent answering the same message was telling the operator that it
     /// "cannot make it exist". The turn was right about its own toolset and
     /// wrong about the company, because nothing told it.
+    ///
+    /// The `chat` case is issue #1152's, and "nothing else does" is why it is
+    /// pinned here rather than assumed: a "Just chatting" message opens no card,
+    /// so there is no builder pass owning anything, so briefing the turn that a
+    /// build is under way would be telling it something untrue. The injection
+    /// matches `Workflow` exactly and this is what keeps it exact.
     #[test]
     fn only_a_workflow_message_gets_the_builder_briefing() {
         let msg = |deliverable| CompanyEvent::OperatorMessage {
@@ -2741,9 +2748,10 @@ mod test {
         };
 
         let mut events = vec![
-            msg(Some(TaskDeliverable::Workflow)),
-            msg(Some(TaskDeliverable::Once)),
+            msg(Some(MessageIntent::Workflow)),
+            msg(Some(MessageIntent::Once)),
             msg(None),
+            msg(Some(MessageIntent::Chat)),
             // A non-operator event must be left entirely alone.
             CompanyEvent::ScheduleFired {
                 cron: "0 6 * * 5".to_string(),
@@ -2764,14 +2772,18 @@ mod test {
             "{briefed}"
         );
 
-        for (i, label) in [(1, "once"), (2, "no choice")] {
+        for (i, label) in [(1, "once"), (2, "no choice"), (3, "chat")] {
             let text = text_of(&events[i]);
             assert_eq!(
                 text, "set up a weekly AEO audit",
                 "a `{label}` message must reach the brain exactly as typed"
             );
+            assert!(
+                !text.contains(BUILDER_ANNOTATION),
+                "a `{label}` message must carry no builder briefing: {text}"
+            );
         }
-        assert!(matches!(events[3], CompanyEvent::ScheduleFired { .. }));
+        assert!(matches!(events[4], CompanyEvent::ScheduleFired { .. }));
     }
 
     /// Issue #845, the wiring: the briefing actually reaches the brain.
@@ -2815,7 +2827,7 @@ mod test {
         };
 
         let workflow = rt
-            .run_cycle(vec![ask(Some(TaskDeliverable::Workflow))])
+            .run_cycle(vec![ask(Some(MessageIntent::Workflow))])
             .await
             .unwrap();
         let seen = workflow
@@ -2831,7 +2843,7 @@ mod test {
         // …and a one-off is handed through byte-for-byte, so the annotation is
         // not simply always on.
         let once = rt
-            .run_cycle(vec![ask(Some(TaskDeliverable::Once))])
+            .run_cycle(vec![ask(Some(MessageIntent::Once))])
             .await
             .unwrap();
         let seen_once = once
