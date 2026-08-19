@@ -2994,7 +2994,6 @@ async fn resolve_approval_single(
 
 #[cfg(test)]
 mod test {
-    use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
