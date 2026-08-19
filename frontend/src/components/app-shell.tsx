@@ -169,9 +169,9 @@ const NAV: NavItem[] = [
  * are untouched, and re-listing one in `NAV` above is all it takes to bring it
  * back. Conversation and Team are the surfaces the Chat workspace replaces —
  * everything they can do it can do in one screen, including the teammate
- * budget controls `MembersPane` ported from Team (issue #360) — but they
- * keep answering `#/conversation` and `#/team` until the chat covers the
- * last of what they still do better (a desk's persisted transcript).
+ * budget controls `MembersPane` ported from Team (issue #360) — but
+ * Conversation keeps answering `#/conversation` until the chat covers the
+ * last of what it still does better (a desk's persisted transcript).
  *
  * `team` is here for a narrower reason than it used to be (issue #1141). Bare
  * `#/team` no longer resolves to it at all — `REWRITE_RETIRED` sends that to
