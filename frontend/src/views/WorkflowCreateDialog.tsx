@@ -1475,7 +1475,11 @@ export function WorkflowCreateDialog({
           // Matched against the CURRENT rows (`nodesRef`), not the closure's
           // snapshot: the operator may have renamed a node during the write, and
           // a stale `node_id` must fall back to the banner rather than misfile.
-          const row = nodesRef.current.find((n) => n.id === p.node_id);
+          // `.trim()` on our side because the submit path trims every id before
+          // sending it (see `outNodes.push` above) — the host's `problems`
+          // therefore carry the trimmed id, and comparing it against a raw
+          // draft id with surrounding whitespace would never match.
+          const row = nodesRef.current.find((n) => n.id.trim() === p.node_id);
           const configKey = p.field?.startsWith("config.")
             ? p.field.slice("config.".length)
             : undefined;

@@ -244,4 +244,39 @@ describe("the dialog consuming the host's structured workflow_invalid 400", () =
     expect(banner, "the flat banner did not render").toBeTruthy();
     expect(banner!.textContent).toContain("no such node");
   });
+
+  it("matches a problem's node_id against the trimmed draft id, not the raw one", async () => {
+    // The submit path trims every node id before sending it (`n.id.trim()`),
+    // so the host's `problems` refer to the trimmed id even when the draft
+    // row still holds surrounding whitespace the operator typed.
+    const put = vi.fn(() =>
+      Promise.reject(
+        apiError([{ node_id: "greet", field: "config.url", message: "bad url" }]),
+      ),
+    );
+    await openEditing(stubClient({ put }), httpWorkflow());
+
+    await act(async () => {
+      type('[aria-label="Node id"]', " greet ", 1);
+    });
+    await act(async () => {
+      submitButton().click();
+    });
+
+    // Pre-fix: the raw draft id `" greet "` never equals the host's trimmed
+    // `"greet"`, the lookup misses, and the message falls through to the
+    // flat banner instead of landing on the url field.
+    const urlField = inDialog<HTMLElement>('[data-testid="config-field-url"]');
+    expect(urlField, "no url config control").toBeTruthy();
+    expect(urlField!.getAttribute("aria-invalid")).toBe("true");
+    const describedBy = urlField!.getAttribute("aria-describedby") ?? "";
+    const errorNode = describedBy
+      .split(/\s+/)
+      .map((id) => document.getElementById(id))
+      .find((el) => el?.textContent?.includes("bad url"));
+    expect(errorNode, "the url field did not show the host message").toBeTruthy();
+
+    const banner = inDialog<HTMLElement>('[data-testid="create-error"]');
+    expect(banner?.textContent ?? "").not.toContain("bad url");
+  });
 });
