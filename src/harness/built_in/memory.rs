@@ -471,6 +471,10 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].content.contains("quarterly"));
+        // The recalled entry answers with the stored label's tail, not the
+        // requested default: namespace "global" and the real key.
+        assert_eq!(hits[0].namespace.as_deref(), Some("global"));
+        assert_eq!(hits[0].key, "note");
     }
 
     #[tokio::test]
