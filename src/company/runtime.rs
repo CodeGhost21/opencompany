@@ -185,6 +185,9 @@ pub struct CompanyMail {
 /// A running company: its brain, stores, channels, and policy gate, wired
 /// together behind a serial cycle loop.
 pub struct CompanyRuntime {
+    /// Whether this runtime has already said that it cannot dispatch
+    /// (issue #1059). Latched so a board with many cards says it once.
+    pub(crate) inert_board_reported: std::sync::atomic::AtomicBool,
     pub(crate) id: CompanyId,
     pub(crate) brain: Arc<dyn Brain>,
     pub(crate) store: Arc<dyn CompanyStore>,
@@ -407,6 +410,7 @@ impl CompanyRuntime {
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
         Self {
+            inert_board_reported: std::sync::atomic::AtomicBool::new(false),
             // Install-wide, not per-company, so it is set by the builder from
             // resolved config (`set_default_mcp_servers`) rather than taken as a
             // 19th positional argument here.
@@ -894,6 +898,30 @@ impl CompanyRuntime {
         // `in_progress` until a harness cycle (or a human) advances it. No run is
         // minted either — nothing is attempting the card, so an attempt row would
         // be a fiction.
+        //
+        // Issue #1059: say so, once. Dispatching is where the intent shows —
+        // somebody dragged a card into In Progress and is waiting for work — and
+        // until now this returned in silence, so the card simply sat there with
+        // no run, no timeline and nothing in the log to grep for. The builder is
+        // the wrong place to say it: ~200 callers build a runtime with no harness
+        // on purpose and never dispatch, so a warning there is noise on every one
+        // of them and absent from the only case that is a mistake.
+        //
+        // Latched, because an inert board with fifty cards has one problem, not
+        // fifty.
+        if !self
+            .inert_board_reported
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::warn!(
+                company = %self.id,
+                task = %task.id,
+                "[board] a card was dispatched but this runtime has no agent pool, so nothing \
+                 will work it: the card stays in `in_progress` with no attempt row. Wire one with \
+                 `RuntimeBuilder::with_harness(...)` (see `src/bin/opencompany.rs`), or move the \
+                 card by hand. Reported once per runtime."
+            );
+        }
         let _ = task;
     }
 
