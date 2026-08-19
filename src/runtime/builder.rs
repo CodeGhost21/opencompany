@@ -2616,11 +2616,72 @@ impl RuntimeBuilder {
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                             };
-                            // Workflow agent nodes execute on the same pool as the
-                            // brain — clone before both moves into `HarnessBrain`.
+                            // The company's other declared harnesses, each on
+                            // its own pool and its own provider. Empty unless
+                            // `[[harness]]` names more than one, so a company
+                            // that declares none keeps exactly the single-pool
+                            // path it always had.
+                            //
+                            // Built first so `deps.serves` is set before any
+                            // dependency clones it — otherwise the runner (which
+                            // holds `deps.clone()`) would carry `serves: None`,
+                            // and `HarnessPool::ensure` (which does not fingerprint
+                            // `serves`) could build the whole roster on the
+                            // default provider regardless of which agents it
+                            // actually serves.
+                            let lanes = crate::harness::lanes::build(
+                                &record,
+                                &deps,
+                                secrets.clone(),
+                                env_default,
+                            );
+                            if !lanes.lanes.is_empty() || !lanes.unavailable.is_empty() {
+                                tracing::info!(
+                                    company = %id,
+                                    lanes = lanes.lanes.len(),
+                                    unavailable = lanes.unavailable.len(),
+                                    "wired named harnesses"
+                                );
+                            }
+                            // Narrow the default pool to the agents it actually
+                            // serves once other lanes exist; `None` (the
+                            // single-harness case) keeps the whole roster.
+                            deps.serves = lanes.default_serves;
+
+                            // The router every dispatch goes through: the default
+                            // lane plus each named lane, indexed by agent. Shared
+                            // by the brain and the workflow runner so they cannot
+                            // disagree about which agent lands on which engine.
+                            let default_lane: Arc<dyn RunTurn> = Arc::new(
+                                HarnessRunTurn::new(pool.clone(), Arc::new(deps.clone())),
+                            );
+                            let turn: Arc<dyn RunTurn> =
+                                if lanes.lanes.is_empty() && lanes.unavailable.is_empty() {
+                                    default_lane
+                                } else {
+                                    let default_harness = record.manifest.default_harness_id();
+                                    let bindings: HashMap<String, String> = record
+                                        .manifest
+                                        .agents
+                                        .iter()
+                                        .filter_map(|a| a.harness.clone().map(|h| (a.id.clone(), h)))
+                                        .collect();
+                                    Arc::new(HarnessRouter::from_lanes(
+                                        &default_harness,
+                                        default_lane,
+                                        &lanes.lanes,
+                                        &lanes.unavailable,
+                                        &bindings,
+                                    ))
+                                };
+
+                            // Workflow agent nodes route through the shared
+                            // router, so a workflow node addressing a named-lane
+                            // agent lands on that lane's engine instead of the
+                            // default pool.
                             let runner: Arc<dyn WorkflowRunner> =
                                 Arc::new(HarnessWorkflowRunner::new(
-                                    pool.clone(),
+                                    turn,
                                     deps.clone(),
                                     record.clone(),
                                 ));
@@ -2646,29 +2707,6 @@ impl RuntimeBuilder {
                             builder = Some(Arc::new(
                                 crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
                             ));
-                            // The company's other declared harnesses, each on
-                            // its own pool and its own provider. Empty unless
-                            // `[[harness]]` names more than one, so a company
-                            // that declares none keeps exactly the single-pool
-                            // path it always had.
-                            let lanes = crate::harness::lanes::build(
-                                &record,
-                                &deps,
-                                secrets.clone(),
-                                env_default,
-                            );
-                            if !lanes.lanes.is_empty() || !lanes.unavailable.is_empty() {
-                                tracing::info!(
-                                    company = %id,
-                                    lanes = lanes.lanes.len(),
-                                    unavailable = lanes.unavailable.len(),
-                                    "wired named harnesses"
-                                );
-                            }
-                            // Narrow the default pool to the agents it actually
-                            // serves once other lanes exist; `None` (the
-                            // single-harness case) keeps the whole roster.
-                            deps.serves = lanes.default_serves;
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
                                 // choke point mints into and the boot reaper
