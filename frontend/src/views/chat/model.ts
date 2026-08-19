@@ -297,6 +297,24 @@ export function channelTitle(channel: Channel): string {
 }
 
 /**
+ * The face a DM wears — the `Avatar` seed for the teammate on the other end —
+ * or `null` for anything that has no face: a channel, and a DM with no roster
+ * entry behind it (both of those wear a glyph instead).
+ *
+ * One function rather than the same two props written out at each call site,
+ * because the rail row and the header sit on screen together and `Avatar`
+ * derives its mascot from the `name` it is handed. A call site that seeded on
+ * anything else — the teammate's id, its role — would draw a *different* face
+ * for the same person a few pixels away, which is worse than the generic glyph
+ * the header used to show (issue #1170). Deriving both from here is what makes
+ * that drift impossible rather than merely unlikely.
+ */
+export function dmFace(channel: Channel): { name: string; tone?: string } | null {
+  if (channel.kind !== "dm" || !channel.member) return null;
+  return { name: channel.name, tone: channel.tone };
+}
+
+/**
  * Whether this chat target's composer offers "Do it once" / "Build me the
  * workflow" (issues #580, #845).
  *

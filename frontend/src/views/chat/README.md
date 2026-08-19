@@ -162,3 +162,15 @@ first row carries the avatar and the author, and continuation rows leave the
 gutter empty and reveal their timestamp there on hover. A run also breaks on a
 day boundary, and on any row that has replies — a summary row between two lines
 that read as one utterance is worse than an extra avatar.
+
+## One face per teammate
+
+`Avatar` hashes its mascot out of the `name` it is given, so every surface that
+draws the same person must hand it the same string. A DM is where that bites:
+the rail row and `ChatHeader` sit on screen together, and seeding them
+differently would put two faces on one teammate — worse than the generic glyph
+the header drew before issue #1170. Both go through `dmFace(channel)` in
+`model.ts`; a channel and a DM with no roster entry get `null` there and wear a
+glyph (`#`, `Lock`, `CircleDot`) instead, because neither has one person behind
+it. The header draws its tile at 24px, the floor below which `Avatar`'s
+`markOnly` says a mascot is a smudge and the bare tone tile is the honest mark.
