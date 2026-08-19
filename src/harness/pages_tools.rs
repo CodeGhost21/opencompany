@@ -838,8 +838,8 @@ impl Tool for PagesWriteTool {
         // of the few concurrent tool slots) for its whole duration. Run it on
         // the blocking pool instead. The source cap is what bounds swc's
         // recursive-descent nesting depth, so a pathological page cannot drive
-        // the parser past what the pool's threads handle (issue #?): the error
-        // surface here stays a clean tool error, never a wedged runtime.
+        // the parser past what the pool's threads handle: the error surface
+        // here stays a clean tool error, never a wedged runtime.
         let compiled = match source {
             Some(source) => {
                 let owned = source.to_string();
