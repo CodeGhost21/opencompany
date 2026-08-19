@@ -24,9 +24,6 @@ import { expect, test, type Page } from "@playwright/test";
  * proves the rail renders the *roster*, not just whatever replied.
  */
 
-/** Ports nothing is listening on — an instance the harness does not run. */
-const CLOSED = ["http://127.0.0.1:65145", "http://127.0.0.1:65275"];
-
 interface Instance {
   id: string;
   label: string;
