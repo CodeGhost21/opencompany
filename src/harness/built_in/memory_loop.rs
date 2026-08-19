@@ -60,7 +60,12 @@ fn inject_within(message: &str, hits: &[ChunkHit], history_budget: usize) -> Str
     let mut remaining = history_budget;
     let mut skipped = 0usize;
     for hit in hits {
-        let snippet = truncate_chars(hit.snippet.trim(), MAX_SNIPPET_CHARS);
+        // Flatten whitespace (split_whitespace / join(" ")) so embedded newlines
+        // in stored snippets cannot cross the `## Task` boundary below.
+        let snippet = truncate_chars(
+            &hit.snippet.split_whitespace().collect::<Vec<_>>().join(" "),
+            MAX_SNIPPET_CHARS,
+        );
         let cost = snippet.chars().count() + 3; // "- " + "\n"
         if cost > remaining {
             // Skip, don't stop: a later, smaller hit may still fit, and every
