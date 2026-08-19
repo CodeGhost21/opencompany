@@ -70,7 +70,7 @@ use tinyflows::error::{EngineError, Result as TfResult};
 
 use crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN;
 use crate::harness::policy::{ApprovalScope, MAX_APPROVAL_REQUESTS_PER_TURN, PolicyMode};
-use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
+use crate::harness::{HarnessDeps, toolbelt};
 use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::delegation::RunTurn;
 
