@@ -420,10 +420,22 @@ mod test {
         })
         .expect("serialise");
 
-        let object = wire.as_object().expect("an object");
+        // Sorted, for the same reason as the instance row below: the closed set
+        // is the claim. `PairedDevice`'s field order happens to be alphabetical
+        // today, so an ordered comparison passes by coincidence rather than by
+        // design — and would go red the moment a field is inserted out of that
+        // position, for a reason that has nothing to do with what this test is
+        // about.
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
         assert_eq!(
-            object.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["company", "deviceId", "expiresAtMillis"],
+            keys,
+            ["company", "deviceId", "expiresAtMillis"],
             "pairing must answer with these three fields and nothing else"
         );
         assert!(!wire.to_string().to_lowercase().contains("token"));
@@ -450,20 +462,24 @@ mod test {
         })
         .expect("serialise");
 
-        let object = wire.as_object().expect("an object");
-        // Sorted before comparing, because the *set* of keys is what this test
-        // is about and the order is not ours to depend on. The root crate enables
-        // `serde_json/preserve_order` (load-bearing for the operator SSE frames),
-        // which swaps the map from a sorted `BTreeMap` to insertion-ordered
-        // `IndexMap` — and cargo unifies features across the workspace, so this
-        // crate inherits it whether or not it wants it. The assertion read the
-        // old sorted order as though it were the wire contract; it was an
-        // artefact of a dependency's default.
-        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        // Sorted before comparing, because the set is what this asserts and the
+        // order is not. This crate inherits `serde_json`'s `preserve_order`
+        // through its path dependency on `opencompany` (root `Cargo.toml:86`),
+        // so a JSON object is backed by an `IndexMap` and emits **struct field
+        // order**, not alphabetical order. Pinning the order here asserted a
+        // property nothing needs — JSON object order means nothing to the
+        // TypeScript that reads these by name — and it would break again the
+        // next time a field is added in the middle of the struct.
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec![
+            [
                 "baseUrl",
                 "companies",
                 "dataDir",
@@ -473,6 +489,7 @@ mod test {
                 "operatorEmail",
                 "running",
             ],
+            "the instance row answers in exactly these keys: {wire}"
         );
     }
 
@@ -612,10 +629,21 @@ mod test {
         })
         .expect("serialise");
 
-        let object = wire.as_object().expect("an object");
+        // Sorted, as above. `EmbeddedInfo`'s field order is simultaneously
+        // struct order and alphabetical, which is why this test passed either
+        // way and why it could never have established the precedent the
+        // instance-row test cited it for.
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
         assert_eq!(
-            object.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["baseUrl", "dataDir", "instanceId", "operatorEmail"],
+            keys,
+            ["baseUrl", "dataDir", "instanceId", "operatorEmail"],
+            "the embedded record answers in exactly these keys: {wire}"
         );
     }
 }
