@@ -102,6 +102,22 @@ impl CompanyManifest {
             .unwrap_or_else(|| IMPLICIT_HARNESS_ID.to_string())
     }
 
+    /// The default harness's `[harness.inference]`, when that harness declares
+    /// one; `None` when it runs on the company-level `[inference]`.
+    ///
+    /// The default harness is the one the base provider resolves for, and its
+    /// own inference section must beat the company-level one — the same
+    /// precedence a named harness gets in [`lanes::build`](crate::harness::lanes::build).
+    /// `None` (not "empty") because an absent declaration means "fall back to
+    /// `[inference]`", which the caller already holds.
+    pub fn default_harness_inference(&self) -> Option<Inference> {
+        let default_id = self.default_harness_id();
+        self.effective_harnesses()
+            .into_iter()
+            .find(|h| h.id == default_id)
+            .and_then(|h| h.inference)
+    }
+
     /// The harness `agent_id` runs on, resolving an unset binding to the
     /// default. `None` only when the named harness does not exist — which
     /// [`validate`](Self::validate) rejects, so a validated manifest always
