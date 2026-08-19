@@ -2961,6 +2961,45 @@ async fn list_runs(
     // caller was asking about all along.
     runs.reverse();
     runs.truncate(limit);
+
+    // Issue #1143. A blocked node's `approval_ids` is a receipt of what the run
+    // parked, and a receipt cannot go stale — but the *question* it points at
+    // can. `ApprovalParked` is journaled at `Durability::Process` on the stated
+    // reasoning that losing it is harmless because "the agent parks it again on
+    // its next attempt". That holds for a chat turn, which retries; it is false
+    // for a workflow run, which halted at the blocked node and never re-enters
+    // the gate. So a run that outlived its own approvals goes on reporting that
+    // it waits on cards the queue does not have, and the drawer's "decide in
+    // Approvals" links land on an empty page. #1145 carries the durability
+    // decision; this reconciliation deliberately does not pre-empt it.
+    //
+    // Done HERE, on the read, for the same reason `relabel_blocked` above
+    // relabels rather than rewriting the durable node rows: the journal records
+    // what happened and is not edited to reflect what is true now. After the
+    // truncate, so the join costs one journal snapshot and covers only the rows
+    // actually being returned — and skipped entirely when no returned run
+    // parked anything, which is nearly every read.
+    if runs
+        .iter()
+        .any(|r| r.blocked_nodes.iter().any(|b| !b.approval_ids.is_empty()))
+    {
+        let live: std::collections::HashSet<String> = company
+            .runtime
+            .pending_approvals()
+            .into_iter()
+            .map(|a| a.id.as_ref().to_string())
+            .collect();
+        for run in &mut runs {
+            for blocked in &mut run.blocked_nodes {
+                blocked.stranded = blocked
+                    .approval_ids
+                    .iter()
+                    .filter(|id| !live.contains(id.as_str()))
+                    .count();
+            }
+        }
+    }
+
     Ok(Json(runs))
 }
 
@@ -3633,6 +3672,7 @@ mod tests {
                 tools: vec!["publish_artifact".into()],
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -3692,6 +3732,7 @@ mod tests {
                 tools: vec!["publish_artifact".into()],
                 approval_ids: Vec::new(),
                 unparkable: 2,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -5671,6 +5712,7 @@ mod tests {
                             tools: vec!["publish_artifact".to_string()],
                             approval_ids: vec!["appr-1".to_string()],
                             unparkable: 0,
+                            stranded: 0,
                         }],
                         approvals: vec![crate::ports::WorkflowRunApprovalRow {
                             node_id: Some("spec".to_string()),
@@ -5699,6 +5741,147 @@ mod tests {
             assert_eq!(
                 rows[0]["nodes"][0]["status"], "blocked",
                 "the node chip must agree with the run's terminal reading: {body}"
+            );
+        }
+
+        /// Issue #1143. The run's receipt names a card the queue no longer
+        /// holds, so the history says so instead of offering it as a decision.
+        ///
+        /// This is the observed dead end: the drawer rendered "decide in
+        /// Approvals" links for `appr-gone`, the operator followed one, and
+        /// Approvals said "All clear". The run's `approvalIds` is a receipt and
+        /// is right to be immutable; what was missing is anything that reads it
+        /// against the live queue. Nothing is parked in this fixture, so the id
+        /// is stranded.
+        #[tokio::test]
+        async fn run_history_marks_a_blocked_approval_the_queue_no_longer_holds() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            journal_start(&state, &id, "digest", "run-s", false).await;
+            let runtime = state.registry().get(&id).expect("registered");
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "digest".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-s".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["spec".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                            node_id: "spec".to_string(),
+                            tools: vec!["shell".to_string()],
+                            approval_ids: vec!["appr-gone".to_string()],
+                            unparkable: 0,
+                            stranded: 0,
+                        }],
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert_eq!(
+                body[0]["blockedNodes"][0]["stranded"], 1,
+                "an approval id the journal no longer holds must read as stranded, \
+                 or the drawer goes on linking to an empty queue: {body}"
+            );
+        }
+
+        /// The other direction, and the reason the test above proves anything.
+        ///
+        /// A field that marked *every* run stranded would satisfy the assertion
+        /// above and be worse than no field at all — it would retire live work.
+        /// Here the approval is genuinely parked, on both halves the runtime
+        /// reads (the gate's map and the journal), so `stranded` stays zero and
+        /// is skipped off the wire entirely.
+        #[tokio::test]
+        async fn run_history_leaves_a_live_approval_decidable() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+            let runtime = state.registry().get(&id).expect("registered");
+
+            let effect = crate::ports::types::Effect {
+                kind: "filing.submit".into(),
+                group: crate::ports::types::EffectGroup::Sign,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: Some("run-live".to_string()),
+            };
+            let approval_id = runtime
+                .approvals
+                .park(runtime.id(), effect.clone())
+                .await
+                .expect("park");
+            runtime
+                .journal()
+                .record_parked(
+                    &approval_id,
+                    &effect,
+                    crate::ports::now_millis(),
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    crate::runtime::journal::ApprovalConversation {
+                        thread: None,
+                        parent: None,
+                    },
+                    None,
+                )
+                .await
+                .expect("record");
+
+            journal_start(&state, &id, "digest", "run-live", false).await;
+            runtime
+                .events()
+                .append(
+                    &id,
+                    CompanyEvent::WorkflowRunFinished {
+                        workflow_id: "digest".to_string(),
+                        scheduled: true,
+                        run_id: Some("run-live".to_string()),
+                        deliveries: Vec::new(),
+                        pending_approvals: vec!["spec".to_string()],
+                        error: None,
+                        cancelled: false,
+                        notices: Vec::new(),
+                        board: Vec::new(),
+                        blocked_nodes: vec![crate::ports::WorkflowBlockedNode {
+                            node_id: "spec".to_string(),
+                            tools: vec!["shell".to_string()],
+                            approval_ids: vec![approval_id.as_ref().to_string()],
+                            unparkable: 0,
+                            stranded: 0,
+                        }],
+                        approvals: Vec::new(),
+                    },
+                )
+                .await
+                .expect("append");
+
+            let response = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                .await
+                .unwrap();
+            let body = json_body(response).await;
+            assert!(
+                body[0]["blockedNodes"][0].get("stranded").is_none(),
+                "a parked approval is still decidable, so nothing may be marked \
+                 stranded: {body}"
             );
         }
 

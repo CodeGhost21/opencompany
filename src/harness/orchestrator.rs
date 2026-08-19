@@ -7659,6 +7659,7 @@ name = "Morning"
                 tools: vec!["publish_artifact".to_string()],
                 approval_ids: vec!["appr-1".to_string()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![
                 crate::ports::WorkflowRunApprovalRow {

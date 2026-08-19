@@ -369,6 +369,19 @@ export interface WorkflowBlockedNode {
    * operator at Approvals would send them to an empty page. Absent when zero.
    */
   unparkable?: number;
+  /**
+   * How many of `approvalIds` the host no longer holds (issue #1143).
+   *
+   * The same end state as `unparkable`, reached later: the card was opened, so
+   * the run recorded an id for it, but the question did not survive and the
+   * queue has nothing to decide. Pointing the operator at Approvals for these
+   * sends them to an empty page — which is the dead end #1143 was filed for.
+   *
+   * Computed by the host on each read of run history rather than stored, so it
+   * reflects the queue as it is now. Absent when zero, which is every healthy
+   * run.
+   */
+  stranded?: number;
 }
 
 /** What became of one gated tool call a run tried to park (issue #880). */
