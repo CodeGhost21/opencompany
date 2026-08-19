@@ -1530,6 +1530,7 @@ mod tests {
     fn model_for_tier_maps_hints_and_defaults() {
         assert_eq!(model_for_tier(Some("reasoning")), "reasoning-v1");
         assert_eq!(model_for_tier(Some("AGENTIC")), "agentic-v1");
+        assert_eq!(model_for_tier(Some("frontend")), "agentic-v1");
         assert_eq!(model_for_tier(None), "chat-v1");
         assert_eq!(model_for_tier(Some("mystery")), "chat-v1");
     }
