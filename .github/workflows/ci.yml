@@ -1784,8 +1784,15 @@ jobs:
 
       # `--no-deps`, matching the gated lane: the host is a path dependency and
       # its lints are that crate's business, not this one's.
+      #
+      # `--locked` here as well as on `Test` below, and that is the whole point
+      # (issue #1127): this step runs FIRST, so without it a stale lock was
+      # silently regenerated here and `Test`'s `--locked` then inspected a file
+      # the previous step had already fixed. The guard read as present and was
+      # decorative. The console wrapper's clippy below always passed it, so this
+      # was an inconsistency inside one job rather than a deliberate choice.
       - name: Clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-deps -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --no-deps -- -D warnings
 
       # `--locked`, so a manifest edit whose lock was never regenerated is named
       # here rather than absorbed — the desktop keeps its own `Cargo.lock`.

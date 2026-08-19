@@ -50,6 +50,9 @@ mod cap_turn_test;
 /// `Page.tsx` to `Page.compiled.mjs` via `swc_core`. See
 /// `docs/spec/runtime/pages.md`.
 pub mod pages_tools;
+/// First-run company setup's pass: one tool-less model call that designs a
+/// company's starting team from three answers. See [`roster_build`].
+pub mod roster_build;
 
 /// The ACP `RunTurn`, under the path it had before the split.
 ///

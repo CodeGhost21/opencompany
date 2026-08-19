@@ -1830,6 +1830,11 @@ impl RuntimeBuilder {
         let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
         #[cfg(feature = "openhuman")]
         let mut workflow_harness_deps: Option<crate::harness::HarnessDeps> = None;
+        // First-run company setup's polish pass, built from the SAME deps as the
+        // planner and the workflow builder and installed the same way via
+        // `CompanyRuntime::set_roster_builder` below.
+        #[cfg(feature = "openhuman")]
+        let mut roster_builder: Option<Arc<crate::harness::roster_build::RosterBuilder>> = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -1887,6 +1892,7 @@ impl RuntimeBuilder {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         let mut desk_ids = Vec::new();
         let candidates = desk_record
@@ -2015,6 +2021,10 @@ impl RuntimeBuilder {
             .as_ref()
             .and_then(|r| r.template_provenance.clone())
             .or_else(|| self.template_provenance.clone());
+        // First-run setup's answers, carried forward exactly like the provenance
+        // above: a rebuild must not lose what the operator told us about their
+        // business, or the workflow phase would have to ask again.
+        let setup = existing.as_ref().and_then(|r| r.setup.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
         // Issue #752: a company whose roster holds `repo` does not come up on a
@@ -2615,6 +2625,7 @@ impl RuntimeBuilder {
                                 overlay_desk_tools: Default::default(),
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
+                                setup: setup.clone(),
                             };
                             // The company's other declared harnesses, each on
                             // its own pool and its own provider. Empty unless
@@ -2706,6 +2717,12 @@ impl RuntimeBuilder {
                             // second credential path.
                             builder = Some(Arc::new(
                                 crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
+                            ));
+                            // Same deps again, for the same reason: setup must
+                            // polish a roster on whichever credential the rest
+                            // of the company is thinking on.
+                            roster_builder = Some(Arc::new(
+                                crate::harness::roster_build::RosterBuilder::from_deps(&deps),
                             ));
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
@@ -2812,6 +2829,7 @@ impl RuntimeBuilder {
                 overlay_desk_tools,
                 disabled_workflows,
                 template_provenance,
+                setup,
             })
             .await?;
 
@@ -2978,6 +2996,14 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(deps) = workflow_harness_deps {
             runtime.set_workflow_harness_deps(deps);
+        }
+        // Same rebuild treatment again. A setup pass interrupted by a rebuild
+        // needs no recovery at all: it holds no lock, mints no run and writes
+        // nothing, so the console simply re-asks and the operator loses nothing
+        // but the seconds they had waited.
+        #[cfg(feature = "openhuman")]
+        if let Some(roster_builder) = roster_builder {
+            runtime.set_roster_builder(roster_builder);
         }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —
@@ -5411,6 +5437,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -5582,6 +5609,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -5875,6 +5903,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -5992,6 +6021,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -6130,6 +6160,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();

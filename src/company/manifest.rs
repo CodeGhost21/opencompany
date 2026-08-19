@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{OpenCompanyError, Result};
-use crate::ports::{decode_wallet_address, normalize_email};
+use crate::ports::decode_wallet_address;
 
 use super::types::{
     ACP_AGENTS, ACP_TRANSPORTS, AUTH_MODES, BRAIN_MODES, CONNECTION_PRIORITIES, CompanyManifest,
@@ -837,8 +837,7 @@ impl CompanyManifest {
         // email admin it was meant to be. Caught here so it never reaches a
         // running company.
         for admin in &self.users.admins {
-            let normalized = normalize_email(admin);
-            if normalized.is_empty() || !normalized.contains('@') {
+            if !crate::ports::users::is_usable_admin_email(admin) {
                 problems.push(format!(
                     "`[users].admins` has an invalid entry: `{admin}` does not look like an \
                      email address"
