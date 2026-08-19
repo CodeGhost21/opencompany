@@ -185,6 +185,28 @@ impl RunTurn for HarnessRouter {
             .run_steered_background(company, agent_id, message, control, run_sink)
             .await
     }
+
+    async fn run_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+    ) -> Result<TurnOutcome> {
+        self.engine_for(agent_id)?
+            .run_background(company, agent_id, message)
+            .await
+    }
+
+    async fn ensure(&self, company: &CompanyRecord) -> Result<()> {
+        // Warm every engine's roster before the first turn. A declared harness
+        // with no engine here (an `acp` harness in a build without the feature,
+        // say) is not an engine to warm — its turn fails later with the reason,
+        // which is the point of `unavailable`.
+        for engine in self.engines.values() {
+            engine.ensure(company).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
