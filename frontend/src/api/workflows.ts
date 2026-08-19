@@ -336,6 +336,17 @@ export interface WorkflowRunNode {
   status: "ok" | "error" | "blocked";
   /** Wall-clock duration of the node's execution, in milliseconds. */
   elapsedMs: number;
+  /**
+   * The node's null-resolved config paths (issue #1014) — the engine's own list
+   * of the broken wiring behind this step: every config `=`-expression that
+   * resolved to `null`, as its dotted config **location** (e.g. `args.to`).
+   *
+   * Paths only, never a resolved value: a null resolution has no value, and the
+   * host forwards only the config location — the same no-payload stance
+   * `status`/`elapsedMs` take. Absent (the host omits an empty list) for a node
+   * with no unresolved wiring.
+   */
+  diagnostics?: string[];
 }
 
 /** One node a run blocked on a person (issue #881). */
