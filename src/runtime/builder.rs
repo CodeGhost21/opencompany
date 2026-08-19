@@ -2340,11 +2340,18 @@ impl RuntimeBuilder {
                                 // A per-tenant provider that re-resolves the
                                 // effective inference config on every turn, so a
                                 // console BYOK switch takes effect next turn with
-                                // no rebuild.
+                                // no rebuild. The default harness's own
+                                // `[harness.inference]` beats the company-level
+                                // `[inference]` — the same precedence a named
+                                // harness gets — while the scope stays the
+                                // default one so the flat legacy secret keys keep
+                                // working for the company's default harness.
                                 provider: Arc::new(TenantProvider::new(
                                     id.clone(),
                                     secrets.clone(),
-                                    self.manifest.inference.clone(),
+                                    self.manifest
+                                        .default_harness_inference()
+                                        .unwrap_or_else(|| self.manifest.inference.clone()),
                                     env_default.clone(),
                                 )),
                                 // Static fallback only; `HarnessPool::run` reads
