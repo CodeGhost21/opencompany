@@ -1695,12 +1695,14 @@ impl WorkflowRunner for HarnessWorkflowRunner {
         input: Value,
         ctx: &WorkflowRunContext,
     ) -> Result<WorkflowRun> {
-        // Idempotent: builds the roster on first use, a no-op after. The run
-        // addresses the record's own company; `_company` is the routed scope,
-        // which the runtime resolves to this same record.
-        self.pool.ensure(&self.record, &self.deps).await?;
-        run_workflow(
-            self.pool.clone(),
+        // Idempotent: builds the roster on first use, a no-op after. Warmed
+        // through the router so every lane's pool — not just the default's — is
+        // populated before a node addresses it. The run addresses the record's
+        // own company; `_company` is the routed scope, which the runtime
+        // resolves to this same record.
+        self.turn.ensure(&self.record).await?;
+        run_workflow_lane_aware(
+            self.turn.clone(),
             self.deps.clone(),
             &self.record,
             workflow,
