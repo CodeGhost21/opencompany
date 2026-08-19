@@ -293,6 +293,10 @@ export function WorkflowsView({
   // a stale `selectedId` (issue #840 PR-3: guards the copilot-fix race).
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
+  // Issue #1089: guards the company-switch race in the Resume handler — the same
+  // pattern as selectedIdRef: captured in the toast closure, checked after await.
+  const companyRef = useRef<string | null>(company);
+  companyRef.current = company;
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingGraph, setLoadingGraph] = useState(false);
