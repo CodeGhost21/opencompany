@@ -565,6 +565,111 @@ mod test {
         );
     }
 
+    /// The onboarding guarantee: a created instance opens the setup wizard.
+    ///
+    /// Asserted over HTTP on `/spec`, because that is the only thing the
+    /// console actually consults — `ConnectionConsole` enters its `setup`
+    /// phase on `setup_complete === false` and nothing else. And the field is
+    /// computed as `stamp || !registry.is_empty()`, so "did it seed a company"
+    /// and "does the wizard open" are the same question asked twice. Asserting
+    /// an empty company list would prove only the first half.
+    #[tokio::test]
+    async fn a_created_instance_opens_the_setup_wizard() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        let created = hosts.create("Acme").await.expect("it starts");
+
+        assert!(
+            created.companies.is_empty(),
+            "an instance an operator asked for must not be handed a company they did not choose"
+        );
+        let spec: serde_json::Value = reqwest::get(format!(
+            "{}/spec",
+            created.base_url.as_deref().expect("running")
+        ))
+        .await
+        .expect("the reported address answers")
+        .json()
+        .await
+        .expect("a spec document");
+        assert_eq!(
+            spec["setup_complete"],
+            serde_json::json!(false),
+            "a fresh root must report setup as outstanding, or the wizard never opens: {spec}"
+        );
+    }
+
+    /// And the instance at the data root keeps the behaviour #632 gave it.
+    ///
+    /// The pair matters more than either alone: these two hosts differ in
+    /// exactly one decision, and the whole risk of splitting them is that the
+    /// seeding half quietly stops applying to the install that depends on it.
+    #[tokio::test]
+    async fn the_instance_at_the_data_root_is_still_enterable_with_no_decisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        let default = hosts.default_instance().expect("it starts");
+
+        assert_eq!(
+            default.companies.len(),
+            1,
+            "a fresh install still gets its starter company"
+        );
+        let spec: serde_json::Value = reqwest::get(format!(
+            "{}/spec",
+            default.base_url.as_deref().expect("running")
+        ))
+        .await
+        .expect("the reported address answers")
+        .json()
+        .await
+        .expect("a spec document");
+        assert_eq!(spec["setup_complete"], serde_json::json!(true));
+    }
+
+    /// Skipping the *seed* must not skip the *adopt*.
+    ///
+    /// A company the wizard writes into a created instance's root is a bundle
+    /// on disk and nothing else. If `RunSetupWizard` meant "register nothing",
+    /// the instance would come back from every relaunch serving an empty
+    /// registry — and, worse, reporting setup outstanding again, so the
+    /// operator would be walked through the wizard once per launch.
+    #[tokio::test]
+    async fn a_created_instance_keeps_the_company_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        hosts.create("Acme").await.expect("it starts");
+        drop(hosts);
+
+        // What completing the wizard leaves behind: a bundle in that root, put
+        // there by the same seeding path the default instance uses.
+        let root = dir.path().join("instances/acme");
+        let seeded = seed_a_company_into(&root).await;
+
+        let relaunched = relaunch(dir.path()).await;
+        let acme = relaunched
+            .list()
+            .into_iter()
+            .find(|instance| instance.id == "acme")
+            .expect("still rostered");
+        assert_eq!(
+            acme.companies, seeded,
+            "a created instance must adopt what its root already holds"
+        );
+    }
+
+    /// Writes a company into `root` the way completing setup does, and returns
+    /// its id. Uses a seeding host so the bundle is a real one.
+    async fn seed_a_company_into(root: &Path) -> Vec<String> {
+        for _ in 0..50 {
+            if let Ok(host) = embedded::start(root.to_path_buf()).await {
+                return host.companies().to_vec();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("a released root must become takeable");
+    }
+
     #[tokio::test]
     async fn two_instances_may_share_a_label() {
         let dir = tempfile::tempdir().unwrap();
