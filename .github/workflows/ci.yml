@@ -299,6 +299,26 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
+      # Issue #1118. This job had NO build cache, which the comment above
+      # `rust-gated` already noted in passing — "`rust` also has no
+      # `Swatinem/rust-cache`, so a second feature set built there recompiles
+      # cold on every run, in front of everything". It is the workflow's second
+      # longest lane and it was paying a full cold compile of the default
+      # feature set on every push.
+      #
+      # `cache-on-failure` because the common case on a PR is iterating on a red
+      # run: with the default (`false`) a failing lane saves nothing, so the
+      # push that fixes it recompiles cold — the cache is coldest exactly when
+      # it is needed most.
+      #
+      # No `shared-key`: the default key already carries the job id and is
+      # stable run-to-run, and this lane's default feature set is NOT the
+      # `openhuman,tinycortex` set `rust-gated` builds. Pointing both at one key
+      # would have them overwrite each other's `target/` every run.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
+
       # Issue #251. `--locked` on the compiling steps already fails a stale
       # `Cargo.lock` — but it fails inside `Clippy` or `Build`, under a step name
       # that says nothing about the lock, and in both jobs at once. This step is
@@ -497,8 +517,10 @@ jobs:
   # fmt, clippy, the default test run, the SQLite step and the binary build all
   # start later — and `console-e2e` has `needs: rust` for that binary, which
   # puts the wait on the run's CRITICAL PATH to serve a suite none of those
-  # steps touch. `rust` also has no `Swatinem/rust-cache`, so a second feature
-  # set built there recompiles cold on every run, in front of everything.
+  # steps touch. `rust` used to have no `Swatinem/rust-cache` either, so a
+  # second feature set built there recompiled cold on every run, in front of
+  # everything; it caches since issue #1118, but its cache is keyed to the
+  # DEFAULT feature set and would be thrashed by a second one built beside it.
   #
   # A separate job pays a runner, a checkout and a toolchain install, exactly as
   # the SQLite comment says — but pays them IN PARALLEL, where they are compute
@@ -559,7 +581,10 @@ jobs:
         with:
           toolchain: stable
 
+      # Issue #1118: save the cache on a red run too — see the `rust` job.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       # TWO different silent-success modes are guarded below, and neither guard
       # catches the other's failure. Both are needed.
@@ -689,7 +714,10 @@ jobs:
           toolchain: stable
           components: clippy
 
+      # Issue #1118: save the cache on a red run too — see the `rust` job.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-on-failure: true
 
       # Steps are ordered to fail fast and cheap: a compile break (the `E0062`
       # class of bug that motivated this job) surfaces before the lint pass
