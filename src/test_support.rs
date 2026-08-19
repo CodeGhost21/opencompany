@@ -8,9 +8,25 @@
 //!
 //! A lock that lives in one module only serialises that module. All of this
 //! crate's unit tests link into a single test binary, so the lock has to be a
-//! single crate-level static for the guarantee to hold — [`EnvVarGuard`] is
-//! that lock, and holding its guard is the only sanctioned way to mutate env
-//! in this crate's tests.
+//! single crate-level static — [`EnvVarGuard`] is that lock, and holding its
+//! guard is the sanctioned way to mutate env in this crate's tests.
+//!
+//! # What this is not
+//!
+//! It is **not** a soundness proof, and no `unsafe` block here should be read
+//! as discharged by it. A mutex only excludes participants that take it, and
+//! the environment has participants that cannot: every `std::env::var` call in
+//! the crate, `getenv` inside libc (`getaddrinfo`, locale lookups) on some
+//! other thread, and the mutating tests in `server::ops::connections` and
+//! `harness::composio` that do not use this guard. What the lock buys is
+//! narrower and still worth having — it serialises the tests that *do* take
+//! it, and it makes restoration total, including on unwind.
+//!
+//! The end state is no process-environment mutation in tests at all, reading
+//! configuration through the injected [`EnvSource`](crate::app::config::EnvSource)
+//! seam this crate already has (`ProcessEnv` in production, `MapEnv` in tests)
+//! so nothing has to be excluded from anything. Tracked separately; this guard
+//! is the floor under the tests until then, not the destination.
 //!
 //! Integration targets under `tests/` are separate processes with their own
 //! environment, so they are outside this lock's scope and do not need it.
@@ -65,8 +81,10 @@ impl EnvVarGuard {
 
     /// Sets one of the captured keys.
     ///
-    /// The write is safe *because* the guard is held: nothing else in this test
-    /// binary is reading or writing env for as long as it lives.
+    /// Holding the guard is what makes this *restorable* and what keeps the
+    /// other guarded tests off the environment while it is set. It is not what
+    /// makes the write sound — see the module docs; the unguarded readers are
+    /// still out there.
     pub(crate) fn set(&self, key: &str, value: &str) {
         debug_assert!(
             self.saved.iter().any(|(k, _)| k == key),
@@ -75,7 +93,7 @@ impl EnvVarGuard {
         unsafe { std::env::set_var(key, value) };
     }
 
-    /// Removes one of the captured keys.
+    /// Removes one of the captured keys. Same caveat as [`set`](Self::set).
     pub(crate) fn remove(&self, key: &str) {
         debug_assert!(
             self.saved.iter().any(|(k, _)| k == key),
