@@ -203,6 +203,33 @@ impl InflightRegistry {
         Self::default()
     }
 
+    /// Whether any company in this process has a run in flight.
+    ///
+    /// The manager consults this — through the workload's busy endpoint — before
+    /// scaling a tenant to zero. Its own notion of "idle" is inbound proxied
+    /// traffic and nothing else, so a company working through a long turn
+    /// generates none and is indistinguishable from one nobody has opened; the
+    /// tenant then gets parked mid-turn and the work is lost
+    /// (opencompany-microservice#22).
+    ///
+    /// This registry is the right thing to ask because it is already maintained
+    /// by the code that runs turns: [`register`](Self::register) hands back a
+    /// guard that removes the entry on **every** exit path, including panics and
+    /// early returns, so an entry cannot outlive the work it describes and leave
+    /// a tenant permanently un-parkable.
+    ///
+    /// Cheap and synchronous by design — one `std::sync::Mutex` acquisition and
+    /// no I/O. It is called once per idle tenant per reconcile scan, against a
+    /// short client timeout, so anything that could block would turn a slow
+    /// company into a stalled sweep.
+    pub fn any_inflight(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("inflight registry poisoned")
+            .values()
+            .any(|runs| !runs.is_empty())
+    }
+
     /// Registers an in-flight run and returns its shared [`SteerControl`] plus a
     /// [`RegistrationGuard`] that deregisters the entry on drop.
     ///
@@ -354,6 +381,7 @@ pub fn cap_redirect(instruction: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn entry(key: &str, kind: InflightKind) -> InflightEntry {
@@ -366,6 +394,28 @@ mod tests {
             started_at_millis: 0,
             pending_action: None,
         }
+    }
+
+    /// The registry answers "is anything running" across every company, and the
+    /// guard returned by `register` is what makes the answer self-correcting: it
+    /// deregisters on drop, on every exit path, so a crashed or early-returning
+    /// turn cannot leave the workload permanently claiming to be busy and its
+    /// tenant permanently un-parkable.
+    #[test]
+    fn any_inflight_tracks_registration_and_clears_on_drop() {
+        let registry = InflightRegistry::new();
+        let company = CompanyId::new("acme");
+        assert!(!registry.any_inflight(), "an empty registry is not busy");
+
+        {
+            let _guard = registry.register(&company, entry("run-1", InflightKind::Task));
+            assert!(registry.any_inflight(), "a registered run makes it busy");
+        }
+
+        assert!(
+            !registry.any_inflight(),
+            "the guard must clear the entry on drop, or the tenant never parks again"
+        );
     }
 
     #[test]
