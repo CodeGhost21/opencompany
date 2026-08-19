@@ -8960,6 +8960,7 @@ members = ["eng1", "eng2"]
                 reply: self.label.clone(),
                 steps: Vec::new(),
                 hit_iteration_cap: false,
+                halted_for_spend: None,
             })
         }
         async fn run_steered(
