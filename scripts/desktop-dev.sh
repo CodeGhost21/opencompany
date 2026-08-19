@@ -93,7 +93,10 @@ else
 
     if [ ! -d "${REPO_ROOT}/frontend/node_modules" ]; then
         echo "desktop-dev: install the console's dependencies first:" >&2
-        echo "    ${PACKAGE_MANAGER} --dir '${REPO_ROOT}/frontend' install" >&2
+        # `cd` rather than a flag, which pnpm spells `--dir` and npm `--prefix`
+        # — printing one manager's flag beside the other's name is a command
+        # that does not run.
+        echo "    cd '${REPO_ROOT}/frontend' && ${PACKAGE_MANAGER} install" >&2
         exit 1
     fi
     echo "desktop-dev: starting the console dev server on ${DEV_URL}"
@@ -105,6 +108,7 @@ else
     # Waited for rather than slept past: the shell loads `devUrl` the moment it
     # opens its window, and a race here is exactly the blank screen this script
     # exists to prevent.
+    #
     # A wall-clock deadline, not an iteration count. Each `serving` call can
     # burn its full 2s timeout, so counting iterations meant "30 seconds" was
     # anywhere from 30 to 150 depending on how the failures happened to fall.
