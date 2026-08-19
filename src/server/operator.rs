@@ -7820,6 +7820,10 @@ mode = "full"
         rt: Arc<std::sync::OnceLock<Arc<CompanyRuntime>>>,
         /// Fail the continuation cycle, to exercise defect 4.
         fail_continuation: bool,
+        /// Stamp a workflow run id onto every parked effect (issue #1092), so
+        /// the park records the shape a workflow node's gated tool call has:
+        /// explicitly unlinked from any card, and carrying a run.
+        run_id: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -7845,6 +7849,7 @@ mode = "full"
                             let mut effect = gated_tool_call();
                             effect.payload =
                                 crate::policy::test_support::composio_unclassified_args_numbered(i);
+                            effect.run_id = self.run_id.clone();
                             host.park_effect(effect).await?;
                         }
                     }
@@ -7900,6 +7905,18 @@ mode = "full"
         chat: Option<&str>,
         fail_continuation: bool,
     ) -> MultiParkCompany {
+        multi_park_company_run(home, parks, chat, fail_continuation, None).await
+    }
+
+    /// [`multi_park_company`], with the parked effects stamped as a workflow
+    /// run (issue #1092).
+    async fn multi_park_company_run(
+        home: &std::path::Path,
+        parks: usize,
+        chat: Option<&str>,
+        fail_continuation: bool,
+        run_id: Option<&str>,
+    ) -> MultiParkCompany {
         let decisions = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cycles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let rt_slot: Arc<std::sync::OnceLock<Arc<CompanyRuntime>>> =
@@ -7914,6 +7931,7 @@ mode = "full"
                 cycles: cycles.clone(),
                 rt: rt_slot.clone(),
                 fail_continuation,
+                run_id: run_id.map(str::to_string),
             })),
         )
         .await;
@@ -8133,6 +8151,47 @@ mode = "full"
         assert!(
             replies.iter().all(|r| r.starts_with("sales|")),
             "the continuation must land in the channel the approval was raised in, got {replies:?}"
+        );
+    }
+
+    /// **Issue #1092.** A workflow node's parked call, once approved, answers
+    /// on its run — never as a direct message from the teammate that ran it.
+    ///
+    /// This is the wiring test for `continuation_fallback_chat_id`: the unit
+    /// tests pin what the fallback *returns*, and this pins that
+    /// `publish_continuation` actually uses it, through a real park, a real
+    /// resolve and the journal the console reads back.
+    ///
+    /// The assertion is written against the agent id rather than only for the
+    /// run id, because that is the regression: the leak put the re-issued
+    /// turn's narration into `chat/history?desk=<teammate>`, where it rendered
+    /// as an unprompted DM.
+    #[tokio::test]
+    async fn a_workflow_parks_continuation_answers_on_the_run_not_in_a_dm() {
+        let home_dir = home();
+        let c = multi_park_company_run(home_dir.path(), 1, None, false, Some("run-1092")).await;
+
+        let response = c
+            .app
+            .clone()
+            .oneshot(approve_detached(&c.approvals[0]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        settle(&c.runtime, 1).await;
+
+        let replies = agent_replies(&c.runtime).await;
+        assert_eq!(replies.len(), 1, "the re-issue answered once");
+        let (chat_id, _) = replies[0].split_once('|').expect("chat_id|text");
+        assert_eq!(
+            chat_id, "run-1092",
+            "a workflow park's continuation belongs to its run, got {replies:?}"
+        );
+        // The regression, stated as itself: before this fix the fallback was
+        // the answering teammate's own id, so this is what the leaked row held.
+        assert_ne!(
+            chat_id, "ceo",
+            "the re-issue must not be journaled as a DM from the teammate that ran it"
         );
     }
 
