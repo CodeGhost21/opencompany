@@ -4514,6 +4514,9 @@ impl Tool for CreateWorkflowTool {
                 let detail = match &err {
                     OpenCompanyError::InvalidRequest(message)
                     | OpenCompanyError::Conflict(message) => message.clone(),
+                    // A structured workflow rejection (issue #1016) carries the
+                    // joined problem text via `Display`, so the agent reads why.
+                    OpenCompanyError::WorkflowInvalid { .. } => err.to_string(),
                     _ => "the company couldn't save it right now; try again.".to_string(),
                 };
                 Ok(ToolResult::error(format!(

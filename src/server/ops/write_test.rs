@@ -3939,7 +3939,12 @@ async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "invalid_request");
+    // Issue #1016: a dangling edge is now a structured `workflow_invalid` whose
+    // `problems` array names the endpoint and the field, so the console can
+    // highlight the id the author wrote.
+    assert_eq!(body["code"], "workflow_invalid");
+    assert_eq!(body["problems"][0]["node_id"], "ghost");
+    assert_eq!(body["problems"][0]["field"], "to");
 
     // An agent node naming a teammate not on the roster.
     let (status, body) = send(
