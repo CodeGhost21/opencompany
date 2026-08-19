@@ -1211,6 +1211,20 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
             verification: "the notes are live".to_string(),
             scope: "the notes only".to_string(),
             proposed_assignee: Some("maya".to_string()),
+            // Issue #1106. Populated here even though a real plan never carries
+            // both this and `proposed_assignee` — this fixture's job is to make
+            // a silently-dropped field fail, and a field left empty would
+            // round-trip through a backend that drops it entirely.
+            assignee_candidates: vec![
+                crate::ports::tasks::AssigneeCandidate {
+                    id: "maya".to_string(),
+                    reason: "writes the release notes today".to_string(),
+                },
+                crate::ports::tasks::AssigneeCandidate {
+                    id: "devrel".to_string(),
+                    reason: "owns everything that ships to developers".to_string(),
+                },
+            ],
             planned_at_millis: 1_234,
         }),
         ..task("t-planned", "planning", 9)
