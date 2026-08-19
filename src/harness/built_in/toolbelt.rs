@@ -525,6 +525,22 @@ pub fn media_tools(backend: &MediaBackend, workspace: &Path) -> Vec<Box<dyn Tool
         MediaGenerateImageTool, MediaGenerateVideoTool, MediaListModelsTool,
     };
 
+    // Fail closed on any backend that is not exactly HTTPS: the client attaches
+    // the managed platform token and the backend charges real money on submit,
+    // so an `http://` override would ship the credential over the wire. The
+    // default (`https://api.tinyhumans.ai`) passes; a misconfigured host gets
+    // no media tools at all, loudly, rather than a client that leaks.
+    if url::Url::parse(&backend.backend_url)
+        .map(|parsed| parsed.scheme() != "https")
+        .unwrap_or(true)
+    {
+        tracing::warn!(
+            backend_url = %backend.backend_url,
+            "[toolbelt] refusing to wire the media tools: the backend URL must be https"
+        );
+        return Vec::new();
+    }
+
     // The Config-free seam: `IntegrationClient::new(backend_url, auth_token)`
     // takes the managed credential directly, with no OpenHuman global `Config`.
     let client = Arc::new(IntegrationClient::new(
