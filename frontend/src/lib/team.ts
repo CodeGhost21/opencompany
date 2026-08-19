@@ -15,6 +15,8 @@ export interface TeamMember {
   description: string;
   /** Avatar tone key; derived from the id so colors stay stable. */
   tone: string;
+  /** Mascot avatar key; derived from the same seed, for the same reason. */
+  avatar: string;
   /**
    * Whether this teammate has an inbox on the host. Read from `GET …/team` and
    * written by `PUT …/team/{id}/inbox` — never guessed client-side, so the Inbox
@@ -87,6 +89,51 @@ export function toneFor(seed: string): string {
   return TONE_KEYS[Math.abs(hash) % TONE_KEYS.length];
 }
 
+/**
+ * The mascot avatars shipped in `public/avatars/`, one file per colourway.
+ *
+ * Eleven rather than the eight `TONE_KEYS` holds on purpose: the tones are a
+ * hue circle that deliberately avoids amber, green and red, while the mascots
+ * have no such constraint. Keeping the lists separate stops one being trimmed
+ * to match the other.
+ */
+const AVATAR_KEYS = [
+  "amber",
+  "blue",
+  "clay",
+  "cloud",
+  "ember",
+  "graphite",
+  "green",
+  "indigo",
+  "rose",
+  "teal",
+  "violet",
+];
+
+/**
+ * Picks a teammate's mascot from the same seed [`toneFor`] uses.
+ *
+ * A hash rather than a random draw, for the reason that matters to an
+ * operator: a teammate keeps the same face across reloads, browsers and
+ * machines, with nothing persisted anywhere. Drawing randomly at creation
+ * would need a stored field, and drawing randomly at render would give the
+ * same teammate a new face every time the page reloaded.
+ *
+ * Seeded with the id where there is one (`toneFor` is called the same way), so
+ * renaming a teammate does not change its face.
+ */
+export function avatarFor(seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+  return AVATAR_KEYS[Math.abs(hash) % AVATAR_KEYS.length];
+}
+
+/** Where [`avatarFor`]'s key lives on disk. */
+export function avatarSrc(key: string): string {
+  return `/avatars/blob-${key}.webp`;
+}
+
 export function initials(name: string): string {
   return (
     name
@@ -107,6 +154,7 @@ export function fromDto(dto: TeamMemberDto): TeamMember {
     role: dto.role,
     description: dto.description ?? "",
     tone: toneFor(dto.id || name),
+    avatar: avatarFor(dto.id || name),
     inboxEnabled: dto.inboxEnabled ?? false,
     // Carried through as-is: `undefined` means uncapped and must stay
     // `undefined`, never coalesced to `0`.
@@ -156,6 +204,21 @@ function roleHash(role: string): string {
   return (hash >>> 0).toString(36);
 }
 
+function member(name: string, role: string, description: string): TeamMember {
+  return {
+    id: localMemberId(role),
+    name,
+    role,
+    description,
+    tone: toneFor(name),
+    avatar: avatarFor(name),
+    inboxEnabled: false,
+    // A console-invented teammate exists on no host, so it holds no grant and
+    // sits on no desk. Stated, not guessed.
+    effectiveTools: [],
+    desks: [],
+  };
+}
 
 /**
  * A generic starter team that fits any company; the operator edits from here.
@@ -195,6 +258,7 @@ export function newMember(fields: { name: string; role: string; description: str
     role: fields.role.trim(),
     description: fields.description.trim(),
     tone: toneFor(memberId),
+    avatar: avatarFor(memberId),
     inboxEnabled: false,
     // Same as `member` above: nothing on a host has granted this teammate
     // anything or seated it anywhere yet.
