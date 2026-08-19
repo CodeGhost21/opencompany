@@ -1698,7 +1698,7 @@ mod tests {
         let notices = RunNotices::default();
         let board_claim = Arc::new(deps.delegations.claim_board("run-1"));
         let runner = HarnessAgentRunner::new(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             crate::workflows::gated_tool_turn_test::record(),
             CompanyId::new("acme"),
