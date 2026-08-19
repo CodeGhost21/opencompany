@@ -29,7 +29,12 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
-import { addMemberFailure, reportAddMember } from "@/lib/member-feedback";
+import {
+  addMemberFailure,
+  addOutcome,
+  reportAddMember,
+  type MissedStep,
+} from "@/lib/member-feedback";
 import {
   fromDto,
   initials,
@@ -129,7 +134,17 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
     }
   }
 
-  const boot = useCallback(async () => {
+  /**
+   * Re-read the roster. Answers whether it landed.
+   *
+   * The fallback below is right for the case it was written for — a host with
+   * no roster surface at all — and wrong to stay silent about after a write we
+   * know the host took: it swaps the real roster for the starter team, so a
+   * failed read here does not leave a stale list, it leaves a *fictional* one.
+   * `addMember` is the only caller that looks at the answer; the effects and
+   * the Back handler still fire and forget.
+   */
+  const boot = useCallback(async (): Promise<boolean> => {
     try {
       const roster = await client.listTeam(company);
       if (roster.length) {
@@ -139,10 +154,12 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
         setMembers(starterTeam());
         setFromHost(false);
       }
+      return true;
     } catch {
       // No roster surface on this host yet — start from an editable team.
       setMembers(starterTeam());
       setFromHost(false);
+      return false;
     } finally {
       setLoad("ready");
     }
@@ -250,33 +267,33 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
       return;
     }
 
+    const missed: MissedStep[] = [];
     // Enable the inbox against the host's real agent id *before* refetching, so
     // the reloaded roster already reports the toggle as on.
-    let inboxMissed = false;
     if (fields.inbox) {
       try {
         await setInboxEnabled(client, company, created.id, true);
       } catch {
-        inboxMissed = true;
+        missed.push({
+          what: "their inbox couldn't be switched on",
+          fix: "Turn it on from their actions menu.",
+        });
       }
     }
     // Persisted on the host — refetch so the card reflects the real record
     // (id, merge order, inbox state) rather than a locally-guessed one.
-    await boot();
+    if (!(await boot())) {
+      missed.push({
+        what: "the roster couldn't be read back",
+        fix: "These cards are the starter team, not your company — reload to see them.",
+      });
+    }
     setAddOpen(false);
-    // Announced after the refetch, not on the response: the roster the operator
-    // is looking at is the one being claimed about, so a read that contradicted
-    // the write would contradict the toast too rather than follow it.
-    reportAddMember(
-      inboxMissed
-        ? {
-            kind: "partial",
-            name: fields.name,
-            missed: "their inbox couldn't be switched on.",
-            fix: "Turn it on from their actions menu.",
-          }
-        : { kind: "added", name: fields.name },
-    );
+    // Announced after the refetch, not on the response, and only as a clean add
+    // when that refetch actually landed: the roster the operator is looking at
+    // is the one being claimed about, so a read that could not confirm the
+    // write must not be toasted over as though it had.
+    reportAddMember(addOutcome(fields.name, missed));
   }
 
   async function removeMember(member: TeamMember) {
