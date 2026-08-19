@@ -49,9 +49,6 @@ use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 
-/// How many recent traces to load into a cycle's compressed history.
-const HISTORY_LIMIT: usize = 32;
-
 /// The `Effect::kind` for an outbound email send. Shared between where the
 /// effect is built (`CycleHostImpl::send_email`, and the workflow delivery path
 /// in [`crate::workflows::delivery`]) and where it is executed
@@ -415,23 +412,15 @@ impl<'a> CycleRunner<'a> {
             );
         }
 
-        // 3. Load — history, context index, roster.
-        let compressed_history = self
-            .rt
-            .memory
-            .recent_traces(&company, HISTORY_LIMIT)
-            .await?;
-        let context_index = self.rt.context.list(&company, "").await?;
+        // 3. Load — the company record, and nothing else.
+        //
+        // Issue #1175: this step used to also read 32 recent traces and the
+        // *entire* context index (`list(&company, "")` — no prefix, no limit, so
+        // a full scan that grows with every turn the company has ever run) into
+        // `CycleRequest`. No brain read either one. Both loads are gone; see the
+        // note on [`CycleRequest`] for why the fields went with them. Traces are
+        // still written below — only the read was dead.
         let record = self.rt.store.load(&company).await?;
-        let roster = match &record {
-            Some(record) => record
-                .manifest
-                .agents
-                .iter()
-                .map(|agent| agent.id.clone())
-                .collect(),
-            None => Vec::new(),
-        };
 
         // Issue #176 (handed-task awareness): when an operator message is
         // addressed to a desk/agent that already has open work handed to it,
@@ -464,9 +453,6 @@ impl<'a> CycleRunner<'a> {
             company_id: company.clone(),
             events,
             event_seqs,
-            compressed_history,
-            roster,
-            context_index,
         };
 
         // 4. Think + 5. Gate — the host services callbacks and gates effects.
