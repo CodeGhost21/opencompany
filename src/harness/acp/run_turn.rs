@@ -485,19 +485,45 @@ mod test {
     }
 
     /// An agent that answers from a script, so the trait impl can be driven.
+    ///
+    /// `hang` makes `prompt` never resolve (the grace-expiry path) and
+    /// `cancel_fails` makes `cancel` error (the logged-failure path). `cancels`
+    /// counts cancel calls so a test can assert the grace path nudged twice.
     struct Scripted {
         turn: AcpTurn,
-        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        hang: bool,
+        cancel_fails: bool,
+        cancels: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Scripted {
+        fn answering(updates: Vec<AcpUpdate>) -> Self {
+            Self {
+                turn: AcpTurn {
+                    updates,
+                    stop_reason: "end_turn".into(),
+                },
+                hang: false,
+                cancel_fails: false,
+                cancels: Default::default(),
+            }
+        }
     }
 
     #[async_trait]
     impl AcpAgent for Scripted {
         async fn prompt(&self, _c: &CompanyId, _k: &str, _m: &str) -> Result<AcpTurn> {
+            if self.hang {
+                std::future::pending::<()>().await;
+            }
             Ok(self.turn.clone())
         }
         async fn cancel(&self, _c: &CompanyId, _k: &str) -> Result<()> {
-            self.cancelled
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.cancels
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.cancel_fails {
+                return Err(OpenCompanyError::Harness("cancel rejected".into()));
+            }
             Ok(())
         }
     }
