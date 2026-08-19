@@ -773,6 +773,13 @@ export function AppShell({
    * that effect. {@link reReadSettledThread} is that case; see its doc.
    */
   const mountedRef = useRef(true);
+  // The latest company, so an async completion started for one company can
+  // tell whether it still belongs to the active scope (issue #1000).
+  const companyRef = useRef(company);
+  useEffect(() => {
+    companyRef.current = company;
+  }, [company]);
+  // ── The company-clear effects ──────────────────────────────────────────────
   useEffect(() => {
     // Re-armed on mount, which is not redundant with the initial `true`:
     // `main.tsx` renders under `StrictMode`, so in development React mounts,
@@ -1325,6 +1332,10 @@ export function AppShell({
       listRuns(client, company, { status: ["pending", "running"] })
         .then((runs) => {
           if (!mountedRef.current) return;
+          // A company switch that happened while the request was in flight
+          // invalidates the result: the rows belong to the old company and
+          // would restore a stale turn into the new company's openTurns map.
+          if (companyRef.current !== company) return;
           const open = openTurnsFromRuns(runs);
           const durable = open[threadId];
           if (durable) setOpenTurns((prev) => ({ ...prev, [threadId]: durable }));
