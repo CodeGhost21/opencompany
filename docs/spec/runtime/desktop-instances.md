@@ -82,12 +82,17 @@ behaviour instead of to an unhandled command.
 
 ### First run
 
-`embedded::start` calls `opencompany::desktop::bootstrap_companies` before it
-binds, because a host with an empty registry cannot be signed into
+On the `SeedStarterCompany` branch — `embedded::start`, which is the wrapper
+`start_with` exposes for it — `opencompany::desktop::bootstrap_companies` runs
+before the bind, because a host with an empty registry cannot be signed into
 ([issue #632](https://github.com/tinyhumansai/opencompany/issues/632)). Sign-in
 is per-company — `/api/v1/companies/{id}/auth/…`, or the sole-company alias —
 so an empty registry leaves the console rendering a login form for a company
 that does not exist.
+
+That is why a *created* instance is not left at an empty registry either: it
+takes the `RunSetupWizard` branch, where the wizard is what puts a company
+there. The rest of this section describes the seeding branch.
 
 The two ways a company normally reaches the registry are both closed to a
 packaged application. Nobody types `serve --company <dir>` at a double-clicked
