@@ -953,7 +953,7 @@ mod tests {
     /// direct with **no** credential — the platform token must not ride an
     /// arbitrary endpoint the operator pointed it at.
     #[tokio::test]
-    async fn keyless_openrouter_with_a_base_url_override_does_not_leak_the_platform_credential() {
+    async fn keyless_openrouter_never_sends_the_platform_credential_to_an_override() {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
         let env = EnvDefault {
@@ -970,6 +970,10 @@ mod tests {
         assert!(
             !decl.is_proxied(),
             "an arbitrary endpoint is not the subscription"
+        );
+        assert!(
+            !decl.key_configured(),
+            "a keyless config holds no credential to send"
         );
         assert_eq!(decl.telemetry_slug(), "openrouter");
         assert_eq!(
