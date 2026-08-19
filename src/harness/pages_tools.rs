@@ -1396,7 +1396,14 @@ export * from "https://evil.example/x.js";
             }))
             .await
             .expect("initial write ok");
-        assert!(pages.page("revenue").await.expect("read ok").is_some());
+        let rev = pages
+            .page("revenue")
+            .await
+            .expect("read ok")
+            .expect("exists")
+            .source
+            .expect("source node")
+            .updated_at_millis;
 
         // Overwriting existing source without the CAS token must be refused
         // rather than silently clobbering what the agent has not re-read.
@@ -1412,20 +1419,15 @@ export * from "https://evil.example/x.js";
             "an overwrite without `expected_updated_at` must be refused"
         );
         assert!(
-            result
-                .error
-                .contains("`expected_updated_at` is required"),
+            result.error.contains("`expected_updated_at` is required"),
             "the refusal names the missing token: {result:?}"
         );
 
         let after = pages.page("revenue").await.expect("read ok").expect("exists");
         assert_eq!(
-            after
-                .source
-                .expect("source node")
-                .updated_at_millis,
-            after.manifest.expect("manifest").updated_at_millis.max(0) * 0 + after.source.clone().unwrap().updated_at_millis,
-            "nothing may have changed: the original source is still there"
+            after.source.expect("source node").updated_at_millis,
+            rev,
+            "a refused write must not alter the source"
         );
     }
 
