@@ -262,6 +262,12 @@ export interface WorkflowRunResult {
    * never a count of what is still outstanding.
    */
   approvals?: WorkflowRunApprovalRow[];
+  /**
+   * The board writes this run's agent nodes performed (issue #661 / M5) — the
+   * cards it opened or re-owned. Absent when it touched no card, which is
+   * nearly every run. Rendered by the run drawer since issue #1014.
+   */
+  board?: WorkflowRunBoardRow[];
 }
 
 /**
@@ -376,6 +382,52 @@ export interface WorkflowRunApprovalRow {
 }
 
 /**
+ * What a run's node did to the task board, as a closed set (issue #661 / M5).
+ *
+ * The two spawn arms opened (or tried to open) a card; the two assign arms set
+ * (or tried to set) an owner. The `*Failed` arms are NOT run failures — they
+ * record that the store refused a write the node's turn was already told would
+ * happen, the same honesty {@link DeliveryStatus} `failed` gives a report that
+ * did not send. Mirrors the Rust `WorkflowBoardAction` camelCase serde.
+ */
+export type WorkflowBoardAction =
+  | "spawned"
+  | "assigned"
+  | "spawnFailed"
+  | "assignFailed";
+
+/**
+ * One board write a run's agent node performed (issue #661 / M5) — "this run
+ * opened card X", the half the run drawer never rendered (issue #1014).
+ *
+ * Structural only: the action, the ids involved, nothing a model wrote. The
+ * same shape rides all three surfaces — the synchronous run response, the run
+ * history, and the `WorkflowRunFinished` event — so a console reads a run's
+ * board effects identically wherever it finds them. Mirrors the Rust
+ * `WorkflowRunBoardRow` camelCase serde.
+ */
+export interface WorkflowRunBoardRow {
+  /** What was attempted, and whether it landed. */
+  action: WorkflowBoardAction;
+  /**
+   * The card the row is about, so a console can link straight to it. Absent on
+   * a `spawnFailed` row — no card was written, so there is no id to point at.
+   */
+  taskId?: string;
+  /**
+   * The title the node asked for, on the two spawn arms — including
+   * `spawnFailed`, where it is the only thing that explains the failure. Absent
+   * on the assign arms, which name a card by id and carry no title.
+   */
+  title?: string;
+  /**
+   * The owner the node asked for, as it wrote it — the requested name rather
+   * than a resolved roster id. `None` when the node named nobody.
+   */
+  assignee?: string;
+}
+
+/**
  * One finished workflow run, read back from the company's journal (issue #228).
  *
  * Before this, a run's outcome existed only in the moment: a manual run's
@@ -479,6 +531,12 @@ export interface WorkflowRunOutcome {
    * A receipt of what the run opened, never a count of what is outstanding.
    */
   approvals?: WorkflowRunApprovalRow[];
+  /**
+   * The board writes this run's agent nodes performed (issue #661 / M5) — the
+   * same rows a manual run's response carries, durable in the history. Absent
+   * on a run that touched no card.
+   */
+  board?: WorkflowRunBoardRow[];
 }
 
 export function listWorkflows(
