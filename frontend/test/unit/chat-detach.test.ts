@@ -429,14 +429,14 @@ describe("open turns read back from the run store", () => {
  */
 describe("merging armed turn lists", () => {
   it("appends a thread's turns beside an existing row", () => {
-    const merged = mergeOpenTurns(
-      { main: [{ turnId: "turn-1", queued: false }] },
-      { main: [{ turnId: "turn-2", queued: true }] },
-    );
+    const before = { main: [{ turnId: "turn-1", queued: false }] };
+    const merged = mergeOpenTurns(before, {
+      main: [{ turnId: "turn-2", queued: true }],
+    });
 
     expect(merged.main.map((t) => t.turnId)).toEqual(["turn-1", "turn-2"]);
     // A copy, never a mutation of the previous state.
-    expect(merged).not.toBe({ main: [{ turnId: "turn-1", queued: false }] });
+    expect(before.main).toEqual([{ turnId: "turn-1", queued: false }]);
   });
 
   it("collapses the same turn onto one entry, fresh reading wins", () => {
