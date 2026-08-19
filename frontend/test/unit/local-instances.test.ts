@@ -118,6 +118,53 @@ describe("several hosts on this machine", () => {
     expect(readProfiles()).toHaveLength(1);
   });
 
+  it("keeps a stopped instance's id, so starting it again resumes its state", () => {
+    // Stopping is not forgetting. `removeConnection` forgets the persisted
+    // profile, and the connection id is what every browser-local key is scoped
+    // by — so pruning a stopped instance as a ghost orphans its tour state,
+    // last-read channel and mail draft, and it comes back wearing a new id.
+    // That is #615 reached by pressing Stop instead of by relaunching.
+    const [, beam] = adoptLocalHosts([
+      { baseUrl: "http://127.0.0.1:65145", instanceId: ACME },
+      { baseUrl: "http://127.0.0.1:65146", instanceId: BEAM },
+    ]);
+    const key = scopedKey("oc-tour", { connection: beam, company: null });
+
+    // Beam is stopped: no longer a running host, but still on the roster.
+    adoptLocalHosts([{ baseUrl: "http://127.0.0.1:65145", instanceId: ACME }], [ACME, BEAM]);
+
+    expect(listConnections().map((c) => c.id)).not.toContain(beam);
+    expect(readProfiles().map((p) => p.id)).toContain(beam);
+
+    // And started again — on a fresh port, as every restart is.
+    const [, restarted] = adoptLocalHosts(
+      [
+        { baseUrl: "http://127.0.0.1:65145", instanceId: ACME },
+        { baseUrl: "http://127.0.0.1:51002", instanceId: BEAM },
+      ],
+      [ACME, BEAM],
+    );
+
+    expect(restarted).toBe(beam);
+    expect(scopedKey("oc-tour", { connection: restarted, company: null })).toBe(key);
+  });
+
+  it("still forgets a host the core no longer has at all", () => {
+    // The other half: retention must not become "never prune", or the dead
+    // rows #615 is about accumulate again — now permanently, since nothing
+    // would ever remove them.
+    const [, beam] = adoptLocalHosts([
+      { baseUrl: "http://127.0.0.1:65145", instanceId: ACME },
+      { baseUrl: "http://127.0.0.1:65146", instanceId: BEAM },
+    ]);
+
+    // Beam is gone from the roster entirely — forgotten, not stopped.
+    adoptLocalHosts([{ baseUrl: "http://127.0.0.1:65145", instanceId: ACME }], [ACME]);
+
+    expect(listConnections().map((c) => c.id)).not.toContain(beam);
+    expect(readProfiles().map((p) => p.id)).not.toContain(beam);
+  });
+
   it("does not let two instances adopt one id-less profile", () => {
     // What an older shell wrote: one embedded row, no identity recorded,
     // because no version that wrote it reported one. Exactly one instance may
