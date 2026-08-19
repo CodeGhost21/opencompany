@@ -70,7 +70,11 @@ use crate::server::users::admin::require_admin;
 ///
 /// A constant rather than prose invented at the call site, so the two write
 /// routes and the read route cannot describe the timing differently.
-const TAKES_EFFECT: &str =
+///
+/// `pub(crate)` for the same reason [`PolicyDto`] is: the GraphQL suite asserts
+/// the field against **this** string rather than a copy of it, so a test cannot
+/// keep passing while the two surfaces quote different timings at an operator.
+pub(crate) const TAKES_EFFECT: &str =
     "on the next turn — a turn already running finishes under the previous tier";
 
 /// Builds the policy route fragment.
