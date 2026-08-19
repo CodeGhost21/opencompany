@@ -9,9 +9,8 @@
 // not connected. The page now renders one grid (`lib/provider-grid.ts`), whose
 // membership is the backend catalog and whose status is `GET …/connections`.
 //
-// What `CONNECTION_PROVIDERS` still owns is what only the console can know:
-// which ids the host's `well_known` table can run a native handshake for, the
-// Composio slug each maps to, and the brand colours.
+// What `CONNECTION_PROVIDERS` still owns is what only the console can know: the
+// Composio slug each id maps to and the brand colours.
 //
 // ## Two routes, one tile (issue #599)
 //
@@ -20,9 +19,8 @@
 //
 //  - **Composio** — the hosted path. Composio runs the OAuth itself and the
 //    resulting connection is a tool belt the agents actually receive.
-//  - **Native** — this host's own registered provider application, the
-//    self-hosted hatch documented on `src/server/ops/connections.rs`. Reported
-//    as `credentialSource: "static"`.
+//  - **Native** — a legacy credential written by the retired host OAuth flow.
+//    It is reported as `credentialSource: "static"`, but no agent can use it.
 //
 // Until #599 every tile hard-routed to native. On a hosted tenant no
 // `OPENCOMPANY_OAUTH_*` variable is injected, so all eleven Connect buttons
@@ -50,10 +48,9 @@
 //    tile, its `via: ["native"]` and its Disconnect (`lib/provider-grid.ts`).
 //    Retracting the invitation is this issue; releasing what was accepted under
 //    it is the operator's call.
-//  - **The host route itself.** `POST …/connections/{provider}/start` and the
-//    callback are untouched — this is the console declining to offer a path,
-//    not the path being removed. Fixing #396 makes the offer honest again, and
-//    reinstating it is then one arm in this function.
+//  - **The retirement bridge.** `POST …/connections/{provider}/start` and the
+//    callback return an explanation until 2026-09-30, rather than silently
+//    404ing a cached pre-#828 bundle. They never write another credential (#838).
 
 export type ConnectionCategory =
   | "Communication"
@@ -69,13 +66,10 @@ export interface ConnectionProvider {
    * `[[connection]] provider = "…"` and the key `GET …/connections` reports
    * status under.
    *
-   * It is also what `disconnectConnection(id)` is called with, and what the
-   * host's `well_known` table keys the native hatch by
-   * (`src/server/ops/connections.rs`; today `slack`, `github`, `google`,
-   * `gmail`). The console no longer *offers* that hatch (issue #822), so this
-   * is now the id of a connection already held rather than of one on offer —
-   * which is why the ids stay aligned to `well_known` even though nothing here
-   * starts a handshake any more.
+   * It is also what `disconnectConnection(id)` is called with. The console
+   * never starts native OAuth: #838 retains only an explanatory compatibility
+   * response for stale bundles, so this id can describe a connection already
+   * held but never one newly offered through the native catalog.
    */
   id: string;
   /**

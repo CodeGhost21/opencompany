@@ -1817,11 +1817,17 @@ impl CompanyRuntime {
             .approval_conversation(approval_id)
             .unwrap_or_default();
         let thread = conversation.thread;
+        // Where the reply goes when the approval was raised in no conversation
+        // at all — a workflow node's parked tool call, a scheduler tick. Read
+        // once for the whole report: every response of one continuation answers
+        // the same approval, so they cannot land in two places.
+        let nowhere =
+            continuation_fallback_chat_id(self.journal.approval_origin(approval_id).as_ref());
         for response in &mut report.responses {
-            let chat_id = thread.clone().unwrap_or_else(|| response.channel.clone());
+            let chat_id = thread.clone().unwrap_or_else(|| nowhere.clone());
             // Checked against the channel actually being answered into, not
             // against the recorded thread: when `thread` is absent the reply
-            // goes to the responding agent's own channel, and a root belonging
+            // goes to the run or card the work belongs to, and a root belonging
             // to some other channel must not follow it there.
             let parent = self.resolvable_parent(conversation.parent, &chat_id).await;
             match self
@@ -2623,6 +2629,58 @@ fn workflow_run_of(parked: &crate::runtime::journal::PendingApproval) -> Option<
     .flatten()
 }
 
+/// Where a continuation's reply is journaled when the approval it resumes was
+/// raised in **no conversation** (issue #1092), read off the park's own origin.
+///
+/// `publish_continuation` answers in the thread the approval came from. When
+/// there is none it used to fall back to the answering agent's own id — which
+/// `chat_history::owns` resolves as that teammate's DM, so a workflow node's
+/// parked `web_fetch`, once approved, posted the re-issued turn's narration
+/// into the operator's direct messages as though the teammate had written to
+/// them unprompted. `GrantedCall::origin_thread` documents that fallback as
+/// "right for a DM and never right for a desk channel"; a workflow run is a
+/// third case, and it is the one that reaches here.
+///
+/// Every arm below names something that **matches no desk**, so the reply stays
+/// on the event stream and inside the run or card timeline it belongs to
+/// instead of appearing in a chat nobody opened. That is the same device — and
+/// the same reasoning — `HarnessBrain::journal_task_outcome` already uses when
+/// it journals a dispatch reply under the card id.
+///
+/// The order is by specificity, and the workflow arm reuses
+/// [`workflow_run_of`]'s discrimination rather than restating it:
+/// `Effect::run_id` carries two id spaces, and only an explicitly `Unlinked`
+/// park with a run id on it is a workflow run. A park with neither a card nor a
+/// run came from an unaddressed conversation, so it answers in General — the
+/// same reading `chat_history::owns` gives a message journaled with no chat.
+fn continuation_fallback_chat_id(
+    origin: Option<&crate::runtime::journal::ApprovalOrigin>,
+) -> String {
+    // An unaddressed operator message is journaled with no chat on it, and
+    // `chat_history::owns` reads that absence as the General desk — so a park
+    // that carries no run and no card came from a conversation after all, and
+    // General is where its answer is read. It is the destination for the
+    // unknown case too (a pre-#333 line with no recorded link): a reply in the
+    // operator's own line is recoverable, while one in a teammate's DM reads as
+    // a message that teammate never sent.
+    let general = || crate::server::ops::language::DEFAULT_DESK.to_string();
+    let Some(origin) = origin else {
+        return general();
+    };
+    match &origin.task {
+        // A board task's dispatch cycle parked this: the card owns the work,
+        // and its timeline is where the answer is already read.
+        Some(crate::runtime::journal::TaskLink::Task { id }) => id.clone(),
+        // Explicitly unlinked *and* carrying a run id is a workflow park — the
+        // case this issue exists for. The run id matches no desk, so the answer
+        // stays on the run rather than arriving as a teammate's DM.
+        Some(crate::runtime::journal::TaskLink::Unlinked) => {
+            origin.run_id.clone().unwrap_or_else(general)
+        }
+        None => general(),
+    }
+}
+
 impl std::fmt::Debug for CompanyRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompanyRuntime")
@@ -2694,6 +2752,119 @@ mod tests {
         // A pre-#333 line records no link at all, so the park site is unknown.
         // Conservative rather than guessing — the same fallback rule #333 set.
         assert_eq!(super::workflow_run_of(&parked(None, Some("run-1"))), None);
+    }
+
+    /// Issue #1092: a continuation whose approval was raised in no conversation
+    /// must never be journaled into the answering teammate's DM.
+    ///
+    /// The fallback is the whole content of the fix, so it is asserted per park
+    /// site rather than through one happy path: the id it returns is what
+    /// `chat_history::owns` will (or will not) resolve to a chat thread.
+    #[test]
+    fn a_continuation_with_no_conversation_answers_outside_every_chat() {
+        use crate::runtime::journal::{ApprovalOrigin, TaskLink};
+
+        let origin = |task: Option<TaskLink>, run_id: Option<&str>| ApprovalOrigin {
+            at_millis: 1,
+            kind: "web_fetch".to_string(),
+            task,
+            run_id: run_id.map(str::to_string),
+            thread: None,
+            parent: None,
+            cycle: None,
+        };
+
+        // A workflow node's parked call: unlinked, with the run stamped on it.
+        // The run id is the destination — the timeline the operator was already
+        // watching, and a value no desk answers to.
+        assert_eq!(
+            super::continuation_fallback_chat_id(Some(&origin(
+                Some(TaskLink::Unlinked),
+                Some("run-9")
+            ))),
+            "run-9",
+        );
+        // A board card's dispatch: the card owns the work, exactly as
+        // `journal_task_outcome` already records it.
+        assert_eq!(
+            super::continuation_fallback_chat_id(Some(&origin(
+                Some(TaskLink::Task {
+                    id: "card-3".to_string()
+                }),
+                Some("attempt-4"),
+            ))),
+            "card-3",
+        );
+        // Unlinked with nothing stamped is an unaddressed operator turn, and a
+        // pre-#333 line with no link at all is unknown. Both answer in General
+        // — visible to the person who approved, and never a teammate's DM.
+        assert_eq!(
+            super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None))),
+            "General",
+        );
+        assert_eq!(
+            super::continuation_fallback_chat_id(Some(&origin(None, Some("run-9")))),
+            "General",
+        );
+        assert_eq!(super::continuation_fallback_chat_id(None), "General");
+    }
+
+    /// Issue #1092, the property that actually matters: a workflow park's
+    /// continuation must not resolve to a teammate's DM or to a desk.
+    ///
+    /// Asserted through `chat_history::owns` itself rather than by eyeballing
+    /// the string, so a change on either side fails here instead of silently
+    /// re-opening the leak. The General arm is asserted the other way round in
+    /// the same breath — it is *supposed* to be readable — because a fallback
+    /// that hid every continuation would pass a one-directional test and lose
+    /// the operator's answer.
+    #[test]
+    fn a_workflow_parks_continuation_owns_no_desk_and_no_dm() {
+        use crate::ports::types::CompanyEvent;
+        use crate::runtime::journal::{ApprovalOrigin, TaskLink};
+        use crate::server::chat_history::owns;
+
+        let reply = |chat_id: String| CompanyEvent::AgentReply {
+            parent: None,
+            chat_id,
+            agent_id: "copywriter".to_string(),
+            text: "re-issued".to_string(),
+            steps: Vec::new(),
+            task_id: None,
+        };
+        let origin = |task: Option<TaskLink>, run_id: Option<&str>| ApprovalOrigin {
+            at_millis: 1,
+            kind: "web_fetch".to_string(),
+            task,
+            run_id: run_id.map(str::to_string),
+            thread: None,
+            parent: None,
+            cycle: None,
+        };
+
+        // The leak: a workflow node's park, answered into the copywriter's DM.
+        let workflow = super::continuation_fallback_chat_id(Some(&origin(
+            Some(TaskLink::Unlinked),
+            Some("run-9"),
+        )));
+        for (desk_id, desk_name) in [
+            ("copywriter", "Copywriter"),
+            ("creative", "Creative studio"),
+        ] {
+            assert!(
+                !owns(desk_id, desk_name, &reply(workflow.clone())),
+                "`{workflow}` must not be read as the `{desk_id}` conversation",
+            );
+        }
+
+        // And the other direction: an unaddressed operator turn still answers
+        // somewhere the person who approved is looking.
+        let unaddressed =
+            super::continuation_fallback_chat_id(Some(&origin(Some(TaskLink::Unlinked), None)));
+        assert!(
+            owns("main", "General", &reply(unaddressed.clone())),
+            "`{unaddressed}` must still be read as the operator's General line",
+        );
     }
 
     #[cfg(feature = "openhuman")]
