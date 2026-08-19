@@ -393,7 +393,7 @@ async fn run_workflow_inner(
     let blocks = super::caps::RunBlocks::default();
     let approvals = super::caps::RunApprovals::default();
     let capabilities = super::caps::build_capabilities(
-        pool,
+        turn,
         deps,
         record,
         super::caps::RunContext {
