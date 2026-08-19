@@ -485,10 +485,23 @@ pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOv
         MemoryBackend::Store => Ok(None),
         // `embedded` with a driver named is the contract-bound in-pod store
         // (`OPENCOMPANY_MEMORY_DRIVER=namespace`); without one it is the
-        // incumbent engine overlay. Routing on presence rather than value is
-        // deliberate: an unknown driver id must reach `open_driver`'s refusal,
-        // never fall back silently to the engine the operator did not name.
-        MemoryBackend::Tinycortex if settings.memory_driver.is_some() => open_provider(settings),
+        // incumbent engine overlay. Routing on a non-blank value is
+        // deliberate on both halves: an unknown driver id must reach
+        // `open_driver`'s refusal, never fall back silently to the engine the
+        // operator did not name — and a whitespace-only value must mean "not
+        // set" exactly as it does for the remote credential, because the env
+        // reader above does not trim and `open_driver` does, so routing on
+        // bare presence would send `"  "` down a path that binds nothing and
+        // answers `Ok(None)`: no engine, no refusal, memory quietly on the
+        // base store.
+        MemoryBackend::Tinycortex
+            if settings
+                .memory_driver
+                .as_deref()
+                .is_some_and(|driver| !driver.trim().is_empty()) =>
+        {
+            open_provider(settings)
+        }
         MemoryBackend::Tinycortex => open_tinycortex(settings),
         MemoryBackend::Remote | MemoryBackend::Null => open_provider(settings),
     }
@@ -545,6 +558,23 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
         data_dir: settings.data_dir.clone(),
     };
     let Some((provider, class)) = open_driver(&config)? else {
+        // Only `embedded` can answer "no driver to bind", and the caller only
+        // routes `embedded` here when a driver IS named. Reaching this arm
+        // therefore means the routing predicate and `open_driver`'s own
+        // driver-id normalisation have drifted apart — and returning `Ok(None)`
+        // would drop the memory overlay on the floor with no refusal and no
+        // engine, which is the silent shape everything here refuses. Fail the
+        // boot instead, naming the state.
+        if settings.memory_backend == MemoryBackend::Tinycortex {
+            return Err(OpenCompanyError::Config(
+                "OPENCOMPANY_MEMORY=embedded routed to the provider seam with \
+                 OPENCOMPANY_MEMORY_DRIVER set, but no driver bound. This is a \
+                 host bug, not a configuration mistake; unset \
+                 OPENCOMPANY_MEMORY_DRIVER to run the engine overlay while it \
+                 is fixed."
+                    .into(),
+            ));
+        }
         return Ok(None);
     };
     let bound = BoundMemory::bind(provider, class)?;
@@ -1056,6 +1086,38 @@ mod test {
             open_memory_overlay(&settings).is_ok(),
             "null must not be gated on the remote-adapter assertion"
         );
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn a_blank_embedded_driver_id_means_not_set_and_is_never_silent() {
+        // The env reader does not trim, `open_driver` does. If the routing
+        // predicate disagreed with that normalisation, `"  "` would route to
+        // the provider seam, bind nothing, and come back `Ok(None)` — memory
+        // quietly on the base store with no refusal and no engine. So a blank
+        // value must take the engine path (exactly as unset does), and
+        // whatever that path answers under this build's features, it must
+        // never be the silent no-overlay shape.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Tinycortex,
+            memory_driver: Some("  ".into()),
+            ..StorageSettings::default()
+        };
+        match open_memory_overlay(&settings) {
+            Ok(overlay) => assert!(
+                overlay.is_some(),
+                "a blank driver id silently dropped the memory overlay"
+            ),
+            // The engine path refusing (e.g. the `tinycortex` feature is off
+            // in this build) is a loud, correct answer.
+            Err(error) => {
+                let error = error.to_string();
+                assert!(
+                    !error.trim().is_empty(),
+                    "an empty refusal explains nothing"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "tinymemory")]
