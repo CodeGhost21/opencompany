@@ -3342,6 +3342,16 @@ description = "Runs Acme."
             .expect("cycle runs");
         assert_eq!(result.channel_responses.len(), 1);
         assert_eq!(result.channel_responses[0].text, "Acknowledged.");
+        // Issue #966, asserted here rather than only on `system_notice`: this
+        // drives the real cycle, so it pins that the fallback *calls* the
+        // constructor. Asserting the constructor alone leaves the call site free
+        // to go back to an inline bubble with no author, which is the shape that
+        // caused the defect.
+        assert_eq!(
+            result.channel_responses[0].agent.as_deref(),
+            Some(crate::ports::SYSTEM_AUTHOR),
+            "the runtime's own fallback is authored by the runtime, not by its destination"
+        );
     }
 
     #[test]
