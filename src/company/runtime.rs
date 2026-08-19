@@ -2965,35 +2965,71 @@ mod tests {
     }
 
     #[cfg(feature = "openhuman")]
-    /// `is_busy` must see the **cycle lock**, not just the steer registry.
+    /// `is_busy` must see **all three** sources, not just the steer registry.
     ///
     /// The first version of the busy endpoint read only `steer.any_inflight()`,
     /// which covers dispatched board cards and desk delegations. A top-level
     /// operator chat turn registers none of those — it takes `serial` and
-    /// nothing else — so the 15-minute turn opencompany-microservice#22 measured
-    /// reported `busy: false` and got parked mid-flight, which is precisely the
+    /// nothing else — and workflow runs live in `run_supervisor`, a separate
+    /// registry. So the 15-minute turn opencompany-microservice#22 measured
+    /// reported `busy: false` and got parked mid-flight, which is exactly the
     /// failure the endpoint exists to prevent.
     ///
-    /// This asserts the lock is the signal, so a future refactor that drops it
-    /// back to the registry alone fails here rather than silently in production.
+    /// Each source is exercised idle → busy → idle independently, so dropping
+    /// any one of them from `is_busy` fails here rather than silently in
+    /// production. Deliberately outside any feature gate: the steer registry is
+    /// only wired under `openhuman`, so a test that relied on it alone would not
+    /// run in the default build at all.
     #[tokio::test]
-    async fn is_busy_sees_a_cycle_holding_the_serial_lock() {
+    async fn is_busy_sees_every_source_of_work() {
         let (runtime, _record, _home) = runtime_and_record().await;
         assert!(!runtime.is_busy(), "an idle runtime must not report busy");
 
+        // 1. The cycle lock — the operator-chat case the steer registry misses.
         {
             let _cycle = runtime.serial.lock().await;
             assert!(
                 runtime.is_busy(),
-                "a turn holding the cycle lock must report busy — this is the \
-                 operator-chat case the steer registry cannot see"
+                "a turn holding the cycle lock must report busy"
             );
         }
+        assert!(!runtime.is_busy(), "releasing the cycle lock must clear it");
 
+        // 2. A workflow run — tracked in its own registry, invisible to both
+        //    the cycle lock and the steer registry.
+        {
+            let (_ctx, _run) = runtime
+                .run_supervisor()
+                .begin("wf-1", false)
+                .expect("begin a workflow run");
+            assert!(
+                runtime.is_busy(),
+                "a live workflow run must report busy"
+            );
+        }
         assert!(
             !runtime.is_busy(),
-            "releasing the lock must clear it, or the tenant never parks again"
+            "the run guard must clear it on drop, or the tenant never parks again"
         );
+
+        // 3. A steerable in-flight run — the original signal, kept because a
+        //    dispatched card can outlive the cycle that started it.
+        {
+            let _guard = runtime.steer().register(
+                runtime.id(),
+                crate::company::steer::InflightEntry {
+                    key: "run-1".to_string(),
+                    task_id: Some("run-1".to_string()),
+                    kind: crate::company::steer::InflightKind::Task,
+                    title: "Ship the thing".to_string(),
+                    agent_id: "ceo".to_string(),
+                    started_at_millis: 0,
+                    pending_action: None,
+                },
+            );
+            assert!(runtime.is_busy(), "a registered steer run must report busy");
+        }
+        assert!(!runtime.is_busy(), "the steer guard must clear it on drop");
     }
 
     async fn runtime_and_record() -> (

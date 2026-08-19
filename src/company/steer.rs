@@ -223,11 +223,20 @@ impl InflightRegistry {
     /// short client timeout, so anything that could block would turn a slow
     /// company into a stalled sweep.
     pub fn any_inflight(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("inflight registry poisoned")
-            .values()
-            .any(|runs| !runs.is_empty())
+        // Poison-tolerant, and it reports **busy** rather than panicking. A
+        // panic here reaches an axum handler with no `CatchPanicLayer`, so the
+        // connection resets, the manager reads that as "cannot tell", and its
+        // default is to park — losing the very work this exists to protect, at
+        // the one moment the registry is in an unknown state.
+        //
+        // Reporting busy on poison is bounded: the manager parks anyway once a
+        // tenant exceeds its idle timeout plus the busy extension, so a
+        // permanently poisoned registry delays a park rather than preventing
+        // one.
+        let Ok(runs) = self.inner.lock() else {
+            return true;
+        };
+        runs.values().any(|runs| !runs.is_empty())
     }
 
     /// Registers an in-flight run and returns its shared [`SteerControl`] plus a
