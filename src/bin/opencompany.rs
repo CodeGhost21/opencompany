@@ -1394,14 +1394,20 @@ async fn async_main() -> Result<()> {
             // after boot — which the per-company scheduler spawn above does not.
             scheduler_handles.push(spawn_maintenance_ticker(&state, &shutdown));
 
-            // Stop the schedulers on Ctrl-C so background cycle work halts with
-            // the process (lifecycle shutdown).
+            // Stop the schedulers on a termination signal so background cycle
+            // work halts with the process (lifecycle shutdown).
+            //
+            // `SIGTERM` as well as `Ctrl-C` since issue #986: a hosted tenant is
+            // only ever asked to stop by `SIGTERM`, so listening for `SIGINT`
+            // alone meant the schedulers kept firing new cycles right through
+            // the shutdown the server was busy draining. Both listeners resolve
+            // on the same signal — tokio delivers it to every registration — so
+            // this and `serve`'s drain start together rather than in sequence.
             {
                 let shutdown = shutdown.clone();
                 tokio::spawn(async move {
-                    if tokio::signal::ctrl_c().await.is_ok() {
-                        shutdown.notify_waiters();
-                    }
+                    opencompany::server::shutdown::signal().await;
+                    shutdown.notify_waiters();
                 });
             }
 

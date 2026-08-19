@@ -175,6 +175,60 @@ pub fn run_id_from_turn(turn: &str) -> Option<&str> {
         .filter(|run_id| !run_id.is_empty())
 }
 
+/// The prefix a **blocked agent node's** continuation turn key carries
+/// (issue #899, Stage 1).
+///
+/// # Why a third turn-key namespace, distinct from `workflow-run:`
+///
+/// A `requires_approval` **gate** and a policy-gated call *inside an agent
+/// node's own tool loop* block a run in two structurally different ways, and
+/// they must not share a batch:
+///
+/// * A gate parks a `WORKFLOW_APPROVE_KIND` effect (`agent: None`), and
+///   approving it re-runs the graph with the gate's node id in the trigger's
+///   `approvals` array. That is the `workflow-run:` batch ([`workflow_turn_key`]).
+/// * An agent node's gated call parks a **tool-call-shaped** effect
+///   (`agent: Some`, minted by `ApprovalPolicy::effect_for`), and approving it
+///   mints a grant. Nothing re-dispatches the run — the whole hole this issue
+///   closes. The re-run needs no `approvals` array (the call is not a graph
+///   node); it re-runs from the top and the minted grant lets the identical call
+///   pass ([`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue)-armed
+///   at park time, stashed by
+///   [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue)).
+///
+/// Keying per **(run, node)** rather than per run is deliberate: one agent node
+/// blocking on several gated calls is one batch owed one continuation (the #469
+/// property), but two agent nodes of one run that each block are two independent
+/// blocks — a continuation of one is not a continuation of the other.
+pub const WORKFLOW_NODE_TURN_PREFIX: &str = "workflow-node:";
+
+/// The continuation turn key **every gated call one blocked agent node parked**
+/// shares (issue #899, Stage 1).
+///
+/// Per (run, node): all of a node's parked calls carry this one key, so the
+/// [`ContinuationQueue`](crate::runtime::continuation::ContinuationQueue) counts
+/// them as one batch and releases once, when the last decision lands. `node_id`
+/// is the block's resolved node id — the graph node id when the engine gave the
+/// turn one, else the agent ref — so the runner's stash and the parker agree on
+/// the key by construction.
+pub fn workflow_node_turn_key(run_id: &str, node_id: &str) -> String {
+    format!("{WORKFLOW_NODE_TURN_PREFIX}{run_id}:{node_id}")
+}
+
+/// Whether `turn` names a blocked agent node minted by [`workflow_node_turn_key`]
+/// (issue #899, Stage 1).
+///
+/// What `continue_turn` forks on to route a released batch to a workflow-run
+/// continuation rather than a brain cycle. The full key is the
+/// [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue) stash
+/// key, so nothing here parses the run/node back out — the prefix test is the
+/// whole question, and it is disjoint from `workflow-run:` so the gate fork
+/// ([`run_id_from_turn`]) never misfires on it.
+pub fn is_node_turn(turn: &str) -> bool {
+    turn.strip_prefix(WORKFLOW_NODE_TURN_PREFIX)
+        .is_some_and(|rest| !rest.is_empty())
+}
+
 /// The payload key holding the workflow whose run paused.
 pub const PAYLOAD_WORKFLOW_ID: &str = "workflow_id";
 /// The payload key holding the gate node awaiting sign-off.
@@ -914,6 +968,74 @@ async fn spawn_continuation(
         denied = ?denied,
         %run_id,
         "workflow: an approved gate started a continuation run; upstream nodes re-execute"
+    );
+    Ok(())
+}
+
+/// Re-dispatches the workflow run a **blocked agent node** belonged to, by
+/// starting a fresh supervised run with the paused run's own trigger input
+/// (issue #899, Stage 1).
+///
+/// # Why this is simpler than [`spawn_continuation`]
+///
+/// A `requires_approval` gate is a graph node, so approving it threads the
+/// node id into the trigger's `approvals` array and the re-run proceeds past it.
+/// A gated call *inside an agent node's tool loop* is not a graph node — there
+/// is nothing to add to `approvals`. The re-run simply runs the graph again from
+/// the top; the grant minted when the operator approved (a shared
+/// [`GrantSet`](crate::runtime::grants::GrantSet), redeemed at the top of the
+/// policy's `check`) lets the identical call through without re-parking. So this
+/// spawns with the input **unchanged** — no ledger transform, no approvals set.
+///
+/// # The honest Stage-1 limit
+///
+/// If the model **diverges** on the re-run (different arguments, or an extra
+/// call), the grant does not match and the new call parks a fresh card. That is
+/// a genuinely new decision rather than a loop, but it is a re-ask — Stage 2's
+/// at-most-once grant capture is what closes it. Re-delivery of any report an
+/// earlier partial run already sent is guarded independently by the durable
+/// #529 delivery ledger the runner folds in, so it is not re-threaded here.
+///
+/// # Errors
+///
+/// Propagated, on [`spawn_continuation`]'s terms: the approval is already
+/// committed, so a graph that has since been deleted or a build with no workflow
+/// execution has to reach the operator at click time, not vanish.
+pub async fn spawn_blocked_node_continuation(
+    runtime: &CompanyRuntime,
+    workflow_id: &str,
+    input: Value,
+) -> Result<()> {
+    let Some(runner) = runtime.workflow_runner().cloned() else {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "approved a blocked step on workflow `{workflow_id}`, but this runtime has no \
+             workflow execution wired, so there is nothing to continue"
+        )));
+    };
+    let overlays = runtime
+        .store()
+        .load(runtime.id())
+        .await?
+        .map(|record| record.overlay_workflows)
+        .unwrap_or_default();
+    let workflow =
+        load_workflow_union(runtime.source_dir(), &overlays, workflow_id)?.ok_or_else(|| {
+            OpenCompanyError::CompanyNotFound(format!(
+                "workflow {workflow_id} (a blocked step was approved, but the graph no longer \
+                 exists)"
+            ))
+        })?;
+    // Issue #542: a resumed run is always real (`false`). Issue #401: `spawn`
+    // refuses at the concurrency ceiling; propagate it so the caller surfaces
+    // the same refusal rather than losing the run silently.
+    let (run_id, _handle) =
+        WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false)?;
+    tracing::info!(
+        company = %runtime.id(),
+        workflow = %workflow_id,
+        %run_id,
+        "workflow: an approved agent-node call started a continuation run; the whole graph \
+         re-executes and the minted grant lets the identical call pass"
     );
     Ok(())
 }

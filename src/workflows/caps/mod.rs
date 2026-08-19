@@ -228,7 +228,9 @@ pub async fn build_capabilities(
         );
         (
             Arc::new(dry_run::DryRunTools::new(grants, wiring.clone())),
-            Arc::new(dry_run::DryRunHttp),
+            Arc::new(dry_run::DryRunHttp::new(
+                record.manifest.tools.web_allowed_domains.clone(),
+            )),
             Arc::new(NoopState),
             Some(Arc::new(dry_run::DryRunAgent)),
         )
@@ -881,7 +883,7 @@ impl HarnessAgentRunner {
     /// No differencing is needed to know which requests are "ours": the bucket
     /// is already run-scoped ([`ApprovalScope::Run`], issue #439), so everything
     /// the drain returns was queued by this run's own turn.
-    async fn park_gated_calls(&self, node_id: Option<&str>) -> ParkedCalls {
+    async fn park_gated_calls(&self, node_id: Option<&str>, node_turn: &str) -> ParkedCalls {
         let mut summary = ParkedCalls::default();
         let mut rows: Vec<crate::ports::WorkflowRunApprovalRow> = Vec::new();
         let row = |tool: Option<String>,
@@ -1002,13 +1004,18 @@ impl HarnessAgentRunner {
                     request.effect,
                     crate::runtime::journal::TaskLink::Unlinked,
                     None,
-                    // Issue #978: no run turn key, deliberately. These cards are
-                    // tool-call-shaped — `ApprovalPolicy::effect_for` stamps an
-                    // `agent` on them — so approving mints a grant and
-                    // re-dispatches the agent; it never re-dispatches the run.
-                    // Batching them under the run would owe a continuation
-                    // nothing performs.
-                    None,
+                    // Issue #899 (Stage 1): the per-(run, node) continuation turn
+                    // key. Issue #978 deliberately passed `None` here because a
+                    // tool-call-shaped card (`ApprovalPolicy::effect_for` stamps
+                    // an `agent`) only ever minted a grant on approve and nothing
+                    // re-dispatched the run — the run settled Blocked and stayed
+                    // there. Keying the node's calls as one batch is what lets the
+                    // resolve path re-dispatch the run once, when the last of them
+                    // is decided (the runner's stash carries the workflow id and
+                    // trigger input the spawn needs). The grant is still minted, so
+                    // the identical call passes on the re-run; a diverging re-run
+                    // re-asks, which Stage 2 closes.
+                    Some(node_turn.to_string()),
                 )
                 .await
             {
@@ -1118,6 +1125,17 @@ impl AgentRunner for HarnessAgentRunner {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
             .map(str::to_string);
+        // Issue #899 (Stage 1): the continuation turn key every gated call this
+        // node parks will share, so approving them re-dispatches the run once —
+        // the whole hole this closes. Keyed on the block's RESOLVED node id (the
+        // graph node when there is one, else the agent ref), which is exactly the
+        // id the runner's block-settle stashes under, so the two agree by
+        // construction. `park_gated_calls` arms `ContinuationQueue` with it via
+        // `park_and_journal`; the runner arms the sibling stash that carries the
+        // workflow id and trigger input the release needs.
+        let lineage_node = node_id.clone().unwrap_or_else(|| agent_ref.to_string());
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&self.run_id, &lineage_node);
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
@@ -1171,7 +1189,9 @@ impl AgentRunner for HarnessAgentRunner {
             // reclassifying it as "blocked" would hide one behind an approval
             // nobody has answered.
             let parked = claim
-                .scoped(Box::pin(self.park_gated_calls(node_id.as_deref())))
+                .scoped(Box::pin(
+                    self.park_gated_calls(node_id.as_deref(), &node_turn),
+                ))
                 .await;
             // Issue #661 (M5): likewise on both arms, and for the same reason. A
             // turn that failed after calling `spawn_task` had already been told the
@@ -1286,8 +1306,9 @@ fn blocked_diagnosis(node_id: Option<&str>, agent_ref: &str, parked: &ParkedCall
     }
     format!(
         "workflow node '{node}' is blocked: {tools} needed approval before {agent_ref} could \
-         finish, so the node produced no deliverable and nothing after it ran. {}. Approving \
-         does not continue this run — decide the card, then run the workflow again.",
+         finish, so the node produced no deliverable and nothing after it ran. {}. Approving the \
+         card continues this run automatically; because approving re-runs the agent's turn, a \
+         changed decision may ask again.",
         what.join("; ")
     )
 }
@@ -1697,7 +1718,11 @@ mod tests {
                 }
             })
             .await;
-        claim.scoped(runner.park_gated_calls(Some("work"))).await;
+        let node_turn =
+            crate::runtime::workflow_resume::workflow_node_turn_key(&runner.run_id, "work");
+        claim
+            .scoped(runner.park_gated_calls(Some("work"), &node_turn))
+            .await;
         (notices.take(), queue)
     }
 
@@ -2267,12 +2292,18 @@ mod tests {
         .await
         .expect("build_capabilities");
 
-        // http: the stub echoes without sending, carrying the marker.
+        // http: the stub reports without sending, carrying the marker.
+        //
+        // A *public* URL, deliberately. This case used to use `127.0.0.1`, which
+        // the real guard refuses — so it asserted that the dry slot answers `ok`
+        // for a target no real run can reach, pinning issue #1048's false green
+        // in place. The slot being the stub is what this test is about; whether a
+        // given target is refused is `dry_run`'s own suite.
         let http_out = caps
             .http
-            .request(json!({ "url": "http://127.0.0.1:9/" }), None)
+            .request(json!({ "url": "https://example.com/hook" }), None)
             .await
-            .expect("dry http never fails");
+            .expect("an allowed target is not refused by the dry stub");
         assert_eq!(
             http_out["dry_run"],
             json!(true),

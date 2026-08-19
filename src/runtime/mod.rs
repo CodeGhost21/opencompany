@@ -27,6 +27,11 @@ pub mod approval_display;
 /// harness dispatch path and the REST write boundary so the board's assignee
 /// means one thing. See [`assignee`].
 pub mod assignee;
+/// Issue #899 (Stage 1): the workflow id and trigger input each **blocked agent
+/// node** needs to re-dispatch its run when the operator approves a call gated
+/// inside its tool loop — the agent-node companion to [`workflow_gates`]. See
+/// [`blocked_nodes`].
+pub mod blocked_nodes;
 /// Issue #464: [`BoardAnnouncer`] — the [`TaskStore`](crate::ports::tasks::TaskStore)
 /// decorator that announces a board write on the company event log, so a card
 /// opened by *anything* reaches a watching console without a reload. Emitted at
@@ -156,7 +161,7 @@ pub use tools::StubToolProvider;
 pub use turn_sweep::{TURN_INTERRUPTED_BY_RESTART, sweep_interrupted_turns};
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
 pub use workflow_outcome::{
-    delivered_by_unsettled_runs, record_run_finished, sweep_interrupted_runs,
+    FailedRun, delivered_by_unsettled_runs, record_run_finished, sweep_interrupted_runs,
 };
 pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;

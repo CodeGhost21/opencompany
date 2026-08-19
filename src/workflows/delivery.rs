@@ -267,6 +267,14 @@ pub struct DeliveryParking {
     /// decisions are counted but whose gates are not recorded releases a batch
     /// the host cannot re-dispatch.
     pub gates: crate::runtime::workflow_gates::WorkflowGateQueue,
+    /// The workflow id and trigger input each blocked agent node needs to
+    /// re-dispatch its run (issue #899, Stage 1).
+    ///
+    /// Armed by the runner at block-settle (not here, and not in
+    /// [`park_and_journal`](DeliveryParking::park_and_journal) — the parker has
+    /// no trigger input), and released by the runtime's `continue_turn`. The same
+    /// handle both sides share, for [`gates`](Self::gates)' reason.
+    pub blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
 }
 
 impl std::fmt::Debug for WorkflowDeliveryDeps {
@@ -1735,6 +1743,7 @@ admins = [{list}]
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
+                blocked_nodes: Default::default(),
             });
             self.gate = Some(gate);
             self.journal = Some(journal);
@@ -1765,6 +1774,7 @@ admins = [{list}]
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
+                blocked_nodes: Default::default(),
             });
             self.gate = Some(gate);
             self.journal = Some(journal);
@@ -1897,7 +1907,7 @@ admins = [{list}]
         fn subscribe(
             &self,
             _company: &CompanyId,
-        ) -> futures::stream::BoxStream<'static, crate::ports::types::StoredEvent> {
+        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
             Box::pin(futures::stream::empty())
         }
     }

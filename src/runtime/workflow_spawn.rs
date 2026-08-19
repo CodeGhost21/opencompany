@@ -56,7 +56,7 @@ use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyId;
 use crate::ports::{EventLog, WorkflowRun, WorkflowRunContext, WorkflowRunner};
-use crate::runtime::workflow_outcome::record_run_finished;
+use crate::runtime::workflow_outcome::{FailedRun, record_run_finished};
 use crate::runtime::{RunGuard, RunSupervisor};
 
 /// The error stamped on a run whose task **panicked** before it could journal a
@@ -231,7 +231,7 @@ impl WorkflowSpawn {
                             &workflow.id,
                             scheduled,
                             &ctx.run_id,
-                            Err(PANICKED_BEFORE_FINISH),
+                            Err(PANICKED_BEFORE_FINISH.into()),
                         )
                         .await;
                         // Issue #1009 (path B, surfaced): if even this finish
@@ -263,7 +263,11 @@ impl WorkflowSpawn {
                 // closed the tab; the record is what is still there tomorrow.
                 let outcome = match result.as_ref() {
                     Ok(run) => Ok(run),
-                    Err(err) => Err(err.to_string()),
+                    // Issue #1008: the message AND whatever the run had already
+                    // done. `partial_run` is `Some` only when the engine broke
+                    // after nodes had run, so a run refused before it started
+                    // still journals an honestly empty row.
+                    Err(err) => Err((err.to_string(), err.partial_run())),
                 };
                 let journaled = match outcome {
                     Ok(run) => {
@@ -277,14 +281,17 @@ impl WorkflowSpawn {
                         )
                         .await
                     }
-                    Err(err) => {
+                    Err((err, partial)) => {
                         record_run_finished(
                             &self.events,
                             &self.company,
                             &workflow.id,
                             scheduled,
                             &ctx.run_id,
-                            Err(err.as_str()),
+                            Err(FailedRun {
+                                error: err.as_str(),
+                                partial,
+                            }),
                         )
                         .await
                     }

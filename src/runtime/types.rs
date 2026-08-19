@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ports::types::{
-    ApprovalId, CompanyId, Effect, EventSeq, OutboundMessage, TemplateProvenance,
+    ApprovalId, CompanyId, Effect, EffectGroup, EventSeq, OutboundMessage, TemplateProvenance,
 };
 
 /// Which board task an approval was parked for (issue #333).
@@ -120,6 +120,13 @@ pub struct ApprovalSummary {
     /// The USD amount involved, if any.
     pub amount_usd: Option<f64>,
     /// Epoch-millis the effect was parked.
+    ///
+    /// Stamped by `CycleRunner::park` in the same turn that composed the
+    /// effect's arguments, so it dates the PAYLOAD, not the queue: it is read
+    /// back off the journal record on replay rather than re-stamped, so a host
+    /// restart does not reset it to boot time. That is what lets the console
+    /// say how old the content is rather than how long the card has sat
+    /// (issue #1024).
     pub at_millis: u64,
     /// Epoch-millis this approval default-denies if nobody decides it
     /// (issue #971) — `at_millis` plus the gate's TTL.
@@ -141,6 +148,19 @@ pub struct ApprovalSummary {
     /// host does not report deadlines" and renders the card exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_millis: Option<u64>,
+    /// The consequence group of the parked effect (issue #1024).
+    ///
+    /// Copied off [`Effect::group`], which the harness derives from the tool
+    /// AND its arguments — so a `composio_execute` carrying `GMAIL_SEND_EMAIL`
+    /// arrives here as [`EffectGroup::Send`], not as the catch-all its tool
+    /// name alone would suggest.
+    ///
+    /// The console needs it to tell an effect that leaves the company from one
+    /// that does not, and it cannot be derived client-side: for a harness tool
+    /// call `kind` is the TOOL NAME, so a console keying on `kind` would miss
+    /// exactly the outbound sends this exists to mark. Sending the host's own
+    /// classification keeps that judgement in one place.
+    pub group: EffectGroup,
     /// Which board task this approval was parked for (issue #333).
     ///
     /// Three states, and the Task Detail read depends on telling them apart:

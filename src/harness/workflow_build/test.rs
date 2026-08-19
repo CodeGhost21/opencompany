@@ -175,6 +175,10 @@ pub(crate) struct NativeCopilotModel {
     usage: Option<Usage>,
     charged_usd: f64,
     profile: ModelProfile,
+    /// The `request.messages` seen on each `invoke`, in call order — so a test can
+    /// assert whether a later turn's first invoke replayed an earlier turn's
+    /// transcript (issue #1042).
+    seen_messages: StdMutex<Vec<Vec<Message>>>,
 }
 
 impl NativeCopilotModel {
@@ -201,6 +205,7 @@ impl NativeCopilotModel {
                 tool_calling: true,
                 ..ModelProfile::default()
             },
+            seen_messages: StdMutex::new(Vec::new()),
         })
     }
 
@@ -220,6 +225,11 @@ impl NativeCopilotModel {
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    /// The `request.messages` recorded for each invoke so far, in call order.
+    fn seen_messages(&self) -> Vec<Vec<Message>> {
+        self.seen_messages.lock().unwrap().clone()
     }
 
     fn next_step(&self) -> NativeStep {
@@ -242,8 +252,9 @@ impl ChatModel<()> for NativeCopilotModel {
         Some(&self.profile)
     }
 
-    async fn invoke(&self, _state: &(), _request: ModelRequest) -> TaResult<ModelResponse> {
+    async fn invoke(&self, _state: &(), request: ModelRequest) -> TaResult<ModelResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.seen_messages.lock().unwrap().push(request.messages);
         let step = self.next_step();
         let tool_calls: Vec<ToolCall> = step
             .calls
@@ -556,6 +567,71 @@ fn the_not_automatable_reason_covers_every_turn_ending() {
         &[],
     );
     assert!(silent.contains("better done once"), "{silent}");
+}
+
+/// Issue #1042: a clean finish whose closing reply is the raw answer envelope
+/// ({"automatable": false, "reason": "…"}) must surface only the typed `reason` to
+/// the operator — never the raw JSON. Genuine prose still passes through verbatim,
+/// and an envelope with no usable reason falls back to a generic one-off message
+/// rather than leaking a brace.
+#[test]
+fn a_clean_finish_extracts_the_reason_and_never_leaks_json() {
+    // The model closed with the answer envelope instead of prose: the typed reason
+    // is surfaced, and no JSON punctuation survives.
+    let enveloped = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: r#"{"automatable": false, "reason": "this is a one-off"}"#.to_string(),
+            hit_cap: false,
+        },
+        &[],
+    );
+    assert_eq!(enveloped, "this is a one-off");
+    assert!(!enveloped.contains('{'), "no raw brace leaks: {enveloped}");
+    assert!(
+        !enveloped.contains("\"automatable\""),
+        "no envelope key leaks: {enveloped}"
+    );
+
+    // A fenced envelope is handled the same way (parse_draft tolerates a fence).
+    let fenced = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: "```json\n{\"automatable\": false, \"reason\": \"just once\"}\n```".to_string(),
+            hit_cap: false,
+        },
+        &[],
+    );
+    assert_eq!(fenced, "just once");
+
+    // Genuine prose is untouched — the model spoke plainly, so its words stand.
+    let prose = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: "This only ever runs once, so it is not worth a reusable workflow.".to_string(),
+            hit_cap: false,
+        },
+        &[],
+    );
+    assert_eq!(
+        prose,
+        "This only ever runs once, so it is not worth a reusable workflow."
+    );
+
+    // An envelope with no usable reason must not leak its braces either — it falls
+    // back to the generic one-off line.
+    let reasonless = not_automatable_reason(
+        &TurnEnd::Replied {
+            text: r#"{"automatable": false}"#.to_string(),
+            hit_cap: false,
+        },
+        &[],
+    );
+    assert!(
+        !reasonless.contains('{'),
+        "no raw brace leaks: {reasonless}"
+    );
+    assert!(
+        reasonless.contains("better done once"),
+        "falls back to the generic line: {reasonless}"
+    );
 }
 
 /// The host assigns a safe, unique id — slugged from the name, deduped, and
@@ -1612,6 +1688,79 @@ async fn a_description_drafts_a_graph_via_the_agent() {
     assert!(spec.nodes.iter().all(|n| n.requires_approval.is_none()));
     assert_eq!(spec.nodes[0].schedule.as_deref(), Some("0 9 * * 1"));
     assert!(model.calls() >= 1, "the model ran at least once");
+}
+
+/// Issue #1042 regression: drafting the SAME description twice must draft a graph
+/// BOTH times, and the second turn must NOT replay the first turn's session
+/// transcript. Before the per-turn workspace fix, the copilot agent's stable
+/// per-company `workspace_dir` let the second turn's fresh, empty-history agent
+/// discover the first turn's persisted transcript and resume it — so the model saw
+/// its own prior draft and refused ("I already drafted this last turn"), leaving
+/// the dialog empty. The fix mints a unique workspace per turn, so each turn's
+/// resume scan finds nothing. This asserts both the OUTCOME (both are `Graph`) and
+/// the MECHANISM (the second turn's first invoke carries only system + user, no
+/// replayed assistant/tool turn).
+#[tokio::test]
+async fn repeating_a_description_does_not_replay_the_prior_turn() {
+    // Each turn is one propose (accepted) then a closing reply. Scripting both
+    // turns' steps explicitly — rather than relying on the exhausted-script repeat
+    // — so the SECOND turn genuinely proposes a graph too, isolating the transcript
+    // replay as the only thing that could make it refuse.
+    let model = NativeCopilotModel::scripting(vec![
+        propose_step("email the weekly digest", good_workflow()),
+        NativeStep::done("Proposed the weekly digest workflow for your review."),
+        propose_step("email the weekly digest", good_workflow()),
+        NativeStep::done("Proposed the weekly digest workflow for your review."),
+    ]);
+    let (_home, runtime) = runtime_with_agent(model.clone(), None).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    const DESC: &str = "email the weekly digest every Monday";
+
+    let first = draft_workflow_from_description(&runtime, DESC)
+        .await
+        .expect("the first draft runs");
+    if let DescriptionDraftOutcome::NotAutomatable(reason) = &first {
+        panic!("the first draft must be a graph, got not-automatable: {reason}");
+    }
+
+    // The number of invokes the first turn consumed — the next recorded invoke is
+    // the SECOND turn's first invoke.
+    let invokes_before_second = model.calls();
+
+    let second = draft_workflow_from_description(&runtime, DESC)
+        .await
+        .expect("the second draft runs");
+    if let DescriptionDraftOutcome::NotAutomatable(reason) = &second {
+        panic!(
+            "the repeated draft must ALSO be a graph, not a replay-driven refusal, got \
+             not-automatable: {reason}"
+        );
+    }
+
+    // The mechanism: the second turn opened on a FRESH conversation — only the
+    // system prompt and this turn's user message. A replayed prior transcript would
+    // inject the first turn's assistant (propose) + tool-result messages here.
+    let seen = model.seen_messages();
+    let second_turn_first_invoke = &seen[invokes_before_second];
+    let replayed_prior_turn = second_turn_first_invoke
+        .iter()
+        .any(|m| matches!(m, Message::Assistant(_) | Message::Tool(_)));
+    assert!(
+        !replayed_prior_turn,
+        "the second turn's first invoke must not replay the prior turn's transcript; saw \
+         {} messages: {:?}",
+        second_turn_first_invoke.len(),
+        second_turn_first_invoke
+            .iter()
+            .map(|m| match m {
+                Message::System(_) => "system",
+                Message::User(_) => "user",
+                Message::Assistant(_) => "assistant",
+                Message::Tool(_) => "tool",
+            })
+            .collect::<Vec<_>>()
+    );
 }
 
 /// The agent finishes without proposing — it judged the work a one-off — so the
