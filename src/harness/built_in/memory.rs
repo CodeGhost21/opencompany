@@ -30,6 +30,7 @@
 //! A `tinycortex`-backed [`ContextStore`] removes these gaps; the adapter code
 //! is identical because it only speaks the port.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -38,7 +39,7 @@ use openhuman_core::openhuman as oh;
 use oh::memory::{Memory, MemoryCategory, MemoryEntry, MemoryTaint, NamespaceSummary, RecallOpts};
 
 use crate::ports::ContextStore;
-use crate::ports::types::{CompanyId, ContextChunk};
+use crate::ports::types::{ChunkAddr, CompanyId, ContextChunk};
 
 /// openhuman [`Memory`] backed by an opencompany [`ContextStore`], namespaced to
 /// one `{company}/{agent}` pair.
