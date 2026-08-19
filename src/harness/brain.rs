@@ -230,23 +230,6 @@ pub struct HarnessBrain {
     runs: Option<Arc<dyn crate::ports::RunStore>>,
 }
 
-/// The single bubble a workflow-copilot turn returns (issues #416, #966).
-///
-/// Named rather than inlined because its **author** is the load-bearing field
-/// and it was wrong. #885 taught the main operator bubble to carry its
-/// responder and left this branch on `None`, so a genuine copilot reply kept
-/// journaling as `agent_id: "operator"` — the #885 defect still happening, not
-/// history needing a label. A function is what lets that be asserted without
-/// standing up a scripted model endpoint and a whole harness pool.
-///
-/// `CONFINED_AGENT_ID` is deliberately not a roster id (see [`confine`]): it
-/// names no teammate and cannot be addressed. That makes it a **truthful**
-/// author rather than a resolvable one, which is why
-/// `chat_history::is_known_author` has to know it — otherwise this row trades
-/// one wrong answer for a permanent false positive in the attribution audit.
-///
-/// No card, by construction: a confined turn has no `spawn_task` to call, and
-/// the chat handler does not open one from a copilot message either.
 /// A bubble the **runtime** wrote, not an agent (issue #966).
 ///
 /// Two sites emit these on the operator channel: the approval-overflow notice
@@ -271,6 +254,23 @@ fn system_notice(text: String) -> OutboundMessage {
     }
 }
 
+/// The single bubble a workflow-copilot turn returns (issues #416, #966).
+///
+/// Named rather than inlined because its **author** is the load-bearing field
+/// and it was wrong. #885 taught the main operator bubble to carry its
+/// responder and left this branch on `None`, so a genuine copilot reply kept
+/// journaling as `agent_id: "operator"` — the #885 defect still happening, not
+/// history needing a label. A function is what lets that be asserted without
+/// standing up a scripted model endpoint and a whole harness pool.
+///
+/// `CONFINED_AGENT_ID` is deliberately not a roster id (see [`confine`]): it
+/// names no teammate and cannot be addressed. That makes it a **truthful**
+/// author rather than a resolvable one, which is why
+/// `chat_history::is_known_author` has to know it — otherwise this row trades
+/// one wrong answer for a permanent false positive in the attribution audit.
+///
+/// No card, by construction: a confined turn has no `spawn_task` to call, and
+/// the chat handler does not open one from a copilot message either.
 fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
     OutboundMessage {
         message_id: None,
