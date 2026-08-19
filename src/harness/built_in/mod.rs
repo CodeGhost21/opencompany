@@ -766,14 +766,33 @@ impl CompanyAgent {
         let mut agent = self.agent.lock().await;
         agent.set_on_progress(Some(tx));
 
-        // Install the steer hook only when a control is provided; an empty hook
-        // list is exactly the pre-#111 behaviour.
-        let hooks: Vec<Arc<dyn oh::agent::stop_hooks::StopHook>> = match steer {
-            Some(control) => vec![Arc::new(crate::harness::steer::SteerStopHook::new(
+        // Two hooks, both fired by openhuman between tool-loop iterations:
+        //
+        // * the **steer** hook, only when an operator control is provided (#111);
+        // * the **budget** hook, only when this teammate declares a
+        //   `budget_usd_daily` cap (#988) — the in-turn spend brake. A teammate
+        //   with no declared budget gets no hook, which matches the vendored
+        //   runtime's own posture: openhuman constructs `BudgetStopHook` nowhere
+        //   and explicitly "never hard-stops a user-present turn that isn't
+        //   actively burning a live budget". A turn that never outruns a real
+        //   budget has nothing to protect it from, and a blanket magic number no
+        //   operator can see or change would be worse than none.
+        //
+        // A budget halt and an iteration-cap pause are **different outcomes**, not
+        // two spellings of one: openhuman reports the cap through
+        // `Agent::last_turn_hit_cap`, which stays `false` for a hook-driven stop
+        // (the run paused below `max_tool_iterations`, so its cap predicate does
+        // not hold). Part 1 of #926 makes the cap pause operator-visible; it must
+        // not inherit budget halts.
+        let mut hooks: Vec<Arc<dyn oh::agent::stop_hooks::StopHook>> = Vec::new();
+        if let Some(control) = steer {
+            hooks.push(Arc::new(crate::harness::steer::SteerStopHook::new(
                 control.clone(),
-            ))],
-            None => Vec::new(),
-        };
+            )));
+        }
+        if let Some(cap) = self.turn_spend_cap_usd() {
+            hooks.push(Arc::new(oh::agent::stop_hooks::BudgetStopHook::new(cap)));
+        }
 
         // `Box::pin` at the task-local scope boundary (the nested-scope
         // stack-overflow trap). The turn body owns the retry classification and
