@@ -1367,8 +1367,11 @@ export function AppShell({
           // would restore a stale turn into the new company's openTurns map.
           if (companyRef.current !== company) return;
           const open = openTurnsFromRuns(runs);
+          // The fold's whole list for this thread, not just its head: the POST
+          // died mid-queue, so any rows the host kept are this turn's kin and
+          // each has a reply to deliver. The merge appends and collapses by id.
           const durable = open[threadId];
-          if (durable) setOpenTurns((prev) => ({ ...prev, [threadId]: durable }));
+          if (durable) setOpenTurns((prev) => mergeOpenTurns(prev, { [threadId]: durable }));
         })
         .catch(() => {
           /* host without /runs, or offline — nothing to re-arm */
