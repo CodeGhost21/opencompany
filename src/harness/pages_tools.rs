@@ -1419,7 +1419,7 @@ export * from "https://evil.example/x.js";
             "an overwrite without `expected_updated_at` must be refused"
         );
         assert!(
-            result.error.contains("`expected_updated_at` is required"),
+            result.output().contains("`expected_updated_at` is required"),
             "the refusal names the missing token: {result:?}"
         );
 
