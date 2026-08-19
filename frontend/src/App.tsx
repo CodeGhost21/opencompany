@@ -281,6 +281,13 @@ function Console() {
         instanceId: instance.instanceId,
         label: instance.label,
       })),
+      // The whole roster, not just the running half. Without it a stopped
+      // instance is indistinguishable from a data root this application no
+      // longer serves, and the prune forgets its profile — which is the
+      // connection id every `scopedKey` under it is named after.
+      instances
+        .map((instance) => instance.instanceId)
+        .filter((id): id is string => id !== undefined),
     );
     const operatorEmails: Record<ConnectionId, string> = {};
     running.forEach((instance, index) => {
