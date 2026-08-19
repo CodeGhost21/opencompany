@@ -241,30 +241,50 @@ describe("a URL naming a workflow opens it", () => {
 });
 
 describe("leaving a workflow behind", () => {
-  it("closes the per-workflow drawers, so the next one does not inherit them", async () => {
-    const { client } = makeClient();
-    await mountAt("#/workflows/alpha", client);
+  // Both routes back to the index, because the rule lives on the selection
+  // rather than on the back button: the one nobody remembers to update is the
+  // delete, and it is the one that leaves the drawer open the longest.
+  for (const route of ["the back button", "a delete"] as const) {
+    it(`closes the per-workflow drawers on ${route}, so the next one does not inherit them`, async () => {
+      const { client } = makeClient();
+      await mountAt("#/workflows/alpha", client);
 
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>('[data-testid="workflow-history-toggle"]')?.click();
-    });
-    expect(container.querySelector('[data-testid="workflow-run-history"]')).not.toBeNull();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="workflow-history-toggle"]')
+          ?.click();
+      });
+      expect(container.querySelector('[data-testid="workflow-run-history"]')).not.toBeNull();
 
-    await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>('[data-testid="workflow-back-to-index"]')
-        ?.click();
-    });
-    await act(async () => {
-      cards()[1].click();
-    });
+      if (route === "the back button") {
+        await act(async () => {
+          container
+            .querySelector<HTMLButtonElement>('[data-testid="workflow-back-to-index"]')
+            ?.click();
+        });
+      } else {
+        await act(async () => {
+          container.querySelector<HTMLButtonElement>('[data-testid="workflow-delete"]')?.click();
+        });
+        await act(async () => {
+          document
+            .querySelector<HTMLButtonElement>('[data-testid="workflow-delete-confirm"]')
+            ?.click();
+        });
+      }
 
-    expect(detailName()).toBe("Beta report");
-    // `beta`'s history panel was never asked for. Left open across the index it
-    // would come up over a workflow the operator has only just opened, showing
-    // that workflow's runs under a drawer they opened for a different one.
-    expect(container.querySelector('[data-testid="workflow-run-history"]')).toBeNull();
-  });
+      expect(container.querySelector('[data-testid="workflow-index"]')).not.toBeNull();
+      await act(async () => {
+        cards()[route === "the back button" ? 1 : 0].click();
+      });
+
+      expect(detailName()).toBe("Beta report");
+      // `beta`'s history panel was never asked for. Left open across the index
+      // it would come up over a workflow the operator has only just opened,
+      // showing that workflow's runs under a drawer they opened for another.
+      expect(container.querySelector('[data-testid="workflow-run-history"]')).toBeNull();
+    });
+  }
 
   it("returns to the index after deleting the open one, without picking a neighbour", async () => {
     const { client, graphGets, deletes } = makeClient();

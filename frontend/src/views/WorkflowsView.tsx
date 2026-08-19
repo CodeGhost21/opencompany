@@ -849,11 +849,29 @@ export function WorkflowsView({
     else window.location.hash = next.slice(1);
   }, [selectedId]);
 
-  // Issue #1110: the dead-link explanation belongs to the arrival that raised
-  // it, and to nothing after. Opening any workflow answers it, and a company
-  // switch makes it a statement about a company nobody is looking at.
+  // Issue #1110: what leaving a workflow — by any route — settles.
+  //
+  // The dead-link explanation belongs to the arrival that raised it and to
+  // nothing after, so opening any workflow answers it. (A company switch does
+  // too, below: it makes the banner a statement about a company nobody is
+  // looking at.)
+  //
+  // The two body-level drawers are per-workflow surfaces, and going back to the
+  // index is the one selection change that must close them. A workflow-to-
+  // workflow switch deliberately does NOT: an operator comparing two histories
+  // opened that panel and still wants it. But left open across a return to the
+  // index — from the back button, from a delete here, from a delete somewhere
+  // else — the NEXT workflow opened comes up wearing a drawer nobody asked it
+  // for, showing that workflow's runs. One rule here rather than one per route,
+  // because the routes to the index that are not the back button are exactly
+  // the ones nobody remembers to update.
   useEffect(() => {
-    if (selectedId !== null) setMissingWorkflowId(null);
+    if (selectedId !== null) {
+      setMissingWorkflowId(null);
+      return;
+    }
+    setHistoryOpen(false);
+    setCopilotOpen(false);
   }, [selectedId]);
   useEffect(() => {
     setMissingWorkflowId(null);
@@ -1396,8 +1414,6 @@ export function WorkflowsView({
   // not just this one.
   const backToIndex = useCallback(() => {
     setSelectedId(null);
-    setHistoryOpen(false);
-    setCopilotOpen(false);
     const { onWorkflows, workflowId } = readWorkflowHash();
     if (onWorkflows && workflowId !== null) window.location.hash = "/workflows";
   }, []);
