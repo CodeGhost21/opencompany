@@ -965,7 +965,25 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
 /// gate working; an uncurated slug is the gate guessing. Logging both would
 /// bury the second in the first — every `GMAIL_SEND_EMAIL` would look like
 /// drift.
+///
+/// Both miss arms are constructed only by the `openhuman` build of
+/// [`composio_catalog_lookup`]; without that feature the curated catalogue is
+/// not linked in, so the only reachable answer is [`UnknownToolkit`](Self::UnknownToolkit)
+/// and the other two are dead there. The type stays whole across both builds
+/// on purpose — the call site matches one shape, and `is_read` keeps one
+/// definition, so the feature cannot change what classifies as a read. The
+/// expectation is `expect` rather than `allow` and is scoped to the build that
+/// earns it: if a non-`openhuman` build ever does construct these, the
+/// unfulfilled expectation says so instead of staying quietly stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(feature = "openhuman"),
+    expect(
+        dead_code,
+        reason = "without the harness feature there is no catalogue to hit, so only \
+                  UnknownToolkit is constructible; see the note above"
+    )
+)]
 pub(crate) enum CatalogLookup {
     /// The slug is in its toolkit's catalogue, with a hand-assigned scope.
     Curated { read: bool },
