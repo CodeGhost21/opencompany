@@ -530,7 +530,7 @@ mod test {
         assert!(stopped.base_url.is_none());
         drop(hosts);
 
-        let relaunched = relaunch(dir.path()).await;
+        let relaunched = relaunch_until(dir.path(), default_is_running).await;
         let acme = relaunched
             .list()
             .into_iter()
@@ -611,7 +611,7 @@ mod test {
             .await
             .expect("the released root is takeable");
 
-        let relaunched = relaunch(dir.path()).await;
+        let relaunched = relaunch_until(dir.path(), default_is_running).await;
         let listed = relaunched.list();
         assert_eq!(listed.len(), 2, "every instance still has a row");
         let acme = listed.iter().find(|i| i.id == "acme").unwrap();
@@ -666,6 +666,14 @@ mod test {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("released roots must become takeable");
+    }
+
+    /// The condition for a relaunch where some instance is expected *not* to
+    /// come back — only the root instance has to have taken its root.
+    fn default_is_running(listed: &[LocalInstanceInfo]) -> bool {
+        listed
+            .iter()
+            .any(|instance| instance.id == DEFAULT_INSTANCE_ID && instance.running)
     }
 
     /// The ordinary relaunch: every rostered instance that wants to run, runs.
