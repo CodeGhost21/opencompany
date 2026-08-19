@@ -217,7 +217,12 @@ export async function localInstances(): Promise<LocalInstance[] | null> {
   const desktop = tauriCore();
   if (!desktop) return [];
   try {
-    return (await desktop.invoke<LocalInstance[]>("oc_local_instances")) ?? [];
+    const answer = await desktop.invoke<LocalInstance[]>("oc_local_instances");
+    // Anything that is not an array is a shell that does not implement this.
+    // Checked rather than defaulted to `[]`: an unknown command answers
+    // `undefined` on some bridges and rejects on others, and both mean the same
+    // thing — ask `oc_embedded` instead.
+    return Array.isArray(answer) ? answer : null;
   } catch (error) {
     // `null`, not `[]`: "this shell has no roster command" and "this machine
     // runs nothing" are different answers, and only the first has a fallback.
