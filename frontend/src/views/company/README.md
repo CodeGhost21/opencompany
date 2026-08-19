@@ -65,11 +65,14 @@ editing lives here and not on the member pane. See below.
 
 ## A teammate on the chart opens (#1102)
 
-Every name this surface draws is a link to `#/team/<agentId>` — the sub-page
-`TeamView` has routed to `AgentDetailView` since #264. Before this the chart
-drew teammates and wired none of them: a seat's name was plain text, and the
-**Not on a desk** chips were bordered pills with no `href`, no handler and no
-tooltip. The destination was never missing; only the link was.
+Every **roster teammate** this surface names — a staffed seat the roster
+resolves, and a **Not on a desk** chip — is a link to `#/team/<agentId>`, the
+sub-page `TeamView` has routed to `AgentDetailView` since #264. The two
+exceptions are deliberate and are set out below: a seat the roster cannot
+resolve, and the **People** chips. Before this the chart drew teammates and
+wired none of them: a seat's name was plain text, and the chips were bordered
+pills with no `href`, no handler and no tooltip. The destination was never
+missing; only the link was.
 
 Three decisions, so they are not re-argued:
 
