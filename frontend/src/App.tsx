@@ -15,7 +15,6 @@ import { isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
 import {
   createLocalInstance,
   embeddedHost,
-  forgetLocalInstance,
   localInstances,
   startLocalInstance,
   stopLocalInstance,
@@ -257,13 +256,14 @@ function Console() {
       // A shell predating the roster. It runs exactly one host and answers only
       // `oc_embedded`, so ask that instead — the degrade is exact, not partial.
       const host = await embeddedHost();
+      // Adopted once. A second call would re-run the prune against a set it has
+      // already reconciled, for a value this one already has.
+      const id = host ? adoptLocalHosts([host])[0] : null;
       setEmbedded({
         resolved: true,
-        id: host ? adoptLocalHosts([host])[0] : null,
+        id,
         instances: [],
-        operatorEmails: host?.operatorEmail
-          ? { [adoptLocalHosts([host])[0]]: host.operatorEmail }
-          : {},
+        operatorEmails: id && host?.operatorEmail ? { [id]: host.operatorEmail } : {},
       });
       return;
     }
