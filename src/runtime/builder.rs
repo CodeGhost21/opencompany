@@ -32,6 +32,10 @@ use crate::feedback::types::ConsentMode;
 #[cfg(feature = "openhuman")]
 use crate::harness::provider::{HostedProviderConfig, TenantProvider};
 #[cfg(feature = "openhuman")]
+use crate::harness::router::HarnessRouter;
+#[cfg(feature = "openhuman")]
+use crate::harness::built_in::run_turn::HarnessRunTurn;
+#[cfg(feature = "openhuman")]
 use crate::harness::{HarnessBrain, HarnessDeps};
 use crate::openhuman::rpc::OpenHumanRpc;
 use crate::openhuman::{OpenHumanChannelAdapter, OpenHumanToolProvider};
