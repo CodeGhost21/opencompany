@@ -1378,7 +1378,7 @@ export * from "https://evil.example/x.js";
             "deleting a page that does not exist must be refused, got: {result:?}"
         );
         assert!(
-            !result.error.contains("panic"),
+            !result.output().contains("panic"),
             "the refusal is a clean tool error: {result:?}"
         );
     }
