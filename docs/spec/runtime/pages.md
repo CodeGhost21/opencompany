@@ -73,15 +73,20 @@ The pipeline, in [`pages_tools::compile_page`](../../../src/harness/pages_tools.
 
 1. **Parse** as TSX (`Syntax::Typescript { tsx: true, .. }`).
 2. **Check the import allow-list**, on the freshly parsed AST, before any
-   transform runs. Every `import` must name exactly one of:
-   `"react"`, `"react-dom/client"`, `"react/jsx-runtime"`,
-   `"@opencompany/site"`. Anything else — `"node:fs"`, a bare npm package, a
-   relative import — fails the whole call with a diagnostic naming the
-   disallowed specifier. This is a compile-time allow-list check, not a
-   sandbox: the runtime isolation is the sandboxed iframe (see below), and
-   the allow-list exists so a page cannot even *reference* something the
-   pages SDK does not intend to serve, catching a mistake at write time
-   instead of at render time.
+   transform runs. Every specifier a page references must name exactly one
+   of: `"react"`, `"react-dom/client"`, `"react/jsx-runtime"`,
+   `"@opencompany/site"`. The check is a full AST walk, so it covers all
+   three forms that carry a module specifier — a static `import`, a
+   re-export (`export * from "…"` / `export { x } from "…"`), and a dynamic
+   `import("…")` — not just the top-level `import` statements (a page could
+   otherwise smuggle a bare specifier through a form the allow-list never
+   looked at, and the browser would fetch it outside the served import map).
+   Anything else — `"node:fs"`, a bare npm package, a relative import —
+   fails the whole call with a diagnostic naming the disallowed specifier.
+   This is a compile-time allow-list check, not a sandbox: the runtime
+   isolation is the sandboxed iframe (see below), and the allow-list exists
+   so a page cannot even *reference* something the pages SDK does not intend
+   to serve, catching a mistake at write time instead of at render time.
 3. **Strip TypeScript** types (`ecma_transforms_typescript::strip`).
 4. **Transform JSX** via the automatic runtime
    (`ecma_transforms_react::react` with `Runtime::Automatic`), which rewrites
