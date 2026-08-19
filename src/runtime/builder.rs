@@ -4018,9 +4018,6 @@ mod test {
         );
     }
 
-    /// Issue #242: a run row left active by a dead host is reclaimed at the next
-    /// boot, and a parked one is not.
-    ///
     /// **Issue #1059.** A runtime with no agent pool says so when a card is
     /// dispatched, instead of leaving it inert in silence.
     ///
@@ -4124,6 +4121,9 @@ mod test {
         );
     }
 
+    /// Issue #242: a run row left active by a dead host is reclaimed at the next
+    /// boot, and a parked one is not.
+    ///
     /// The store is the default fs backend over the same home, so the second
     /// `build()` is a genuine restart of the same company — this asserts the
     /// reaper is *wired into boot*, not merely that the port function works
