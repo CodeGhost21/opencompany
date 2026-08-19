@@ -217,12 +217,15 @@ export class PendingSyncPosts<F extends LiveReplyFrame = LiveReplyFrame> {
 }
 
 /**
- * A chat turn that has been accepted but has not settled (issue #983).
+ * One chat turn that has been accepted but has not settled (issue #983).
  *
- * Held per thread rather than per turn: a thread has at most one turn the
- * operator is waiting on, and keying by thread is what lets the working
- * indicator be looked up where it renders. Declared here rather than in the
- * shell so the fold below and the views can share it without a type-cycle.
+ * The shell holds these **per thread, as an ordered list** — a thread can have
+ * a running turn and a queued one behind it at once (the per-company serial
+ * lock admits exactly that), and every one of them has a reply the operator is
+ * eventually shown. The first entry is the one the working indicator reads
+ * where it renders; the poll watches the whole list and drains oldest-first.
+ * Declared here rather than in the shell so the fold below and the views can
+ * share it without a type-cycle.
  */
 export type OpenTurn = {
   /**
