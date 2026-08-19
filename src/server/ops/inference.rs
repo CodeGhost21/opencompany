@@ -743,6 +743,28 @@ base_url = "https://byo.example/v1"
         state
     }
 
+    /// [`state_with_company`] over a harness-only-inference manifest. The
+    /// routes read `manifest_inference` from the saved record, so the company
+    /// boots on the echo brain here (no pool attached) while the record it
+    /// reads still carries the harness's `[harness.inference]` — exactly the
+    /// shape of company the fix targets.
+    async fn state_with_harness_inference(home: &std::path::Path) -> AppState {
+        let id = CompanyId::new("acme");
+        save_record(home, &id, &manifest_with_harness_inference()).await;
+        let runtime = RuntimeBuilder::new(
+            home.to_path_buf(),
+            manifest_with_harness_inference(),
+        )
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
     /// A rebuilder that rebuilds over the handover, as the binary's does.
     struct Working {
         home: std::path::PathBuf,
