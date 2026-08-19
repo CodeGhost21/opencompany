@@ -345,6 +345,33 @@ An instance that fails to start is a row carrying its reason, never a launch
 that fails: one busy root must not stop the other instances, or the multi-host
 case would be worse than the single-host one it replaces.
 
+### Which empty root gets a company, and which gets the wizard
+
+The two hosts differ in exactly one decision, `embedded::FirstRun`:
+
+- **The instance at the data root** seeds a starter company from the default
+  preset (`SeedStarterCompany`). That is [issue #632](https://github.com/tinyhumansai/opencompany/issues/632):
+  a double-clicked application must be enterable with no terminal and no
+  decisions.
+- **An instance an operator created** does not (`RunSetupWizard`). They are
+  standing in front of the application having just named a company, so the
+  decisions the first-run wizard asks for — template, sign-in mode, brain
+  credential — are ones they are already making.
+
+Seeding is not merely "adds a company". `AppSpec` reports
+`setup_complete: stamp || !registry.is_empty()`, and the console opens
+`views/setup/SetupWizard.tsx` only on `setup_complete: false` — so a seeded
+company **suppresses the wizard permanently**. That coupling is why the choice
+lives at boot rather than in the UI, and why both halves are pinned by a test
+that reads `/spec` over HTTP rather than counting companies.
+
+`RunSetupWizard` skips the *seed* half of `bootstrap_companies` and keeps the
+*adopt* half (`desktop::adopt_companies`). Adoption is not optional for either
+kind of host: a company the wizard writes into a root is a bundle on disk, and
+a host that skipped adoption would come back from every relaunch serving an
+empty registry — and reporting setup outstanding again, walking the operator
+through the wizard once per launch.
+
 `oc_embedded` survives as the `default` instance's row, because the shell and
 the console ship independently — a `pnpm dev` console against an older `cargo`
 build, or a current console against an older shell, degrades to the one-host
