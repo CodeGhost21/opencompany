@@ -415,12 +415,42 @@ mod tests {
         ceo.store("global", "secret", "ceo-only", MemoryCategory::Core, None)
             .await
             .unwrap();
+        cfo.store("global", "secret", "cfo-only", MemoryCategory::Core, None)
+            .await
+            .unwrap();
 
         // The CFO shares the company + ContextStore but must not see the CEO's
         // namespaced entry.
         assert!(cfo.get("global", "secret").await.unwrap().is_none());
         assert_eq!(ceo.count().await.unwrap(), 1);
-        assert_eq!(cfo.count().await.unwrap(), 0);
+        assert_eq!(cfo.count().await.unwrap(), 1);
+
+        // Both recall methods are scoped the same way: a query both entries
+        // match surfaces only the caller's own chunk, and the recalled entry
+        // carries the stored namespace and key rather than a substituted
+        // default.
+        let ceo_hits = ceo
+            .recall(
+                "only",
+                5,
+                RecallOpts {
+                    namespace: Some("global"),
+                    ..RecallOpts::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ceo_hits.len(), 1);
+        assert_eq!(ceo_hits[0].content, "ceo-only");
+        assert_eq!(ceo_hits[0].namespace.as_deref(), Some("global"));
+        assert_eq!(ceo_hits[0].key, "secret");
+
+        let cfo_vec = cfo
+            .recall_relevant_by_vector("global", "only", 5, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(cfo_vec.len(), 1);
+        assert_eq!(cfo_vec[0].1, "cfo-only");
     }
 
     #[tokio::test]
