@@ -391,10 +391,7 @@ mod tests {
     /// the rest, so tenant B's company ids never reach tenant A's boot log.
     #[test]
     fn the_boot_filter_keeps_only_this_tenants_companies() {
-        let report = find(
-            &[company("tenant-a--acme"), company("tenant-b--beta")],
-            &[],
-        );
+        let report = find(&[company("tenant-a--acme"), company("tenant-b--beta")], &[]);
         let filtered = filter_to_tenant(report, "tenant-a");
 
         let ids: Vec<&str> = filtered.unowned.iter().map(|c| c.id.as_ref()).collect();
