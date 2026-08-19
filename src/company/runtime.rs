@@ -660,6 +660,37 @@ impl CompanyRuntime {
     }
 
     /// This company's live set of cancellable workflow runs (issue #383).
+    /// Whether this company is doing anything the platform must not interrupt.
+    ///
+    /// Three sources, because no one of them sees all the work — the first
+    /// version of this shipped only the third and missed the case
+    /// opencompany-microservice#22 actually measured.
+    ///
+    /// - **[`serial`](Self::serial)**, the per-company cycle lock. This is the
+    ///   broad one: a top-level operator chat turn takes it and registers
+    ///   nothing else, and `chat_and_emit` detaches that turn onto its own task
+    ///   precisely because it outlives reverse-proxy timeouts. Webhook, telegram
+    ///   and mailbox-poller cycles take it too. A `tokio::Mutex`, so `try_lock`
+    ///   is free and never blocks the caller.
+    /// - **[`run_supervisor`](Self::run_supervisor)**, covering workflow runs —
+    ///   the manual run route, the cron scheduler, approved-gate continuations
+    ///   and the orchestrator's `run_workflow` tool. It is a separate registry
+    ///   and the other two never see it.
+    /// - **[`steer`](Self::steer)**, the in-flight registry, for dispatched board
+    ///   cards and desk delegations, which run *inside* a cycle and so would
+    ///   otherwise be covered — it is kept for the case where a turn's steerable
+    ///   run outlives the cycle that started it.
+    ///
+    /// Cheap by construction: a non-blocking `try_lock`, a map emptiness check,
+    /// and one `std::sync::Mutex` acquisition. The platform calls this once per
+    /// idle tenant per reconcile scan against a short timeout, so anything that
+    /// could block would turn a slow company into a stalled sweep.
+    pub fn is_busy(&self) -> bool {
+        self.serial.try_lock().is_err()
+            || !self.run_supervisor.is_empty()
+            || self.steer.any_inflight()
+    }
+
     pub fn run_supervisor(&self) -> &crate::runtime::RunSupervisor {
         &self.run_supervisor
     }
@@ -2934,6 +2965,37 @@ mod tests {
     }
 
     #[cfg(feature = "openhuman")]
+    /// `is_busy` must see the **cycle lock**, not just the steer registry.
+    ///
+    /// The first version of the busy endpoint read only `steer.any_inflight()`,
+    /// which covers dispatched board cards and desk delegations. A top-level
+    /// operator chat turn registers none of those — it takes `serial` and
+    /// nothing else — so the 15-minute turn opencompany-microservice#22 measured
+    /// reported `busy: false` and got parked mid-flight, which is precisely the
+    /// failure the endpoint exists to prevent.
+    ///
+    /// This asserts the lock is the signal, so a future refactor that drops it
+    /// back to the registry alone fails here rather than silently in production.
+    #[tokio::test]
+    async fn is_busy_sees_a_cycle_holding_the_serial_lock() {
+        let (runtime, _record, _home) = runtime_and_record().await;
+        assert!(!runtime.is_busy(), "an idle runtime must not report busy");
+
+        {
+            let _cycle = runtime.serial.lock().await;
+            assert!(
+                runtime.is_busy(),
+                "a turn holding the cycle lock must report busy — this is the \
+                 operator-chat case the steer registry cannot see"
+            );
+        }
+
+        assert!(
+            !runtime.is_busy(),
+            "releasing the lock must clear it, or the tenant never parks again"
+        );
+    }
+
     async fn runtime_and_record() -> (
         super::CompanyRuntime,
         crate::ports::CompanyRecord,

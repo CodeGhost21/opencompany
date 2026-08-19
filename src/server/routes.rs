@@ -409,11 +409,16 @@ async fn healthz() -> Json<HealthResponse> {
 /// budget, so anything that makes that endpoint slower or heavier directly
 /// degrades every cold start — a hard constraint in the issue.
 ///
-/// Reads the in-flight registry, which the turn-running code already maintains:
-/// registration hands back a guard that removes the entry on every exit path, so
-/// `busy: true` cannot outlive the work it describes. It holds no lock across an
-/// await and does no I/O, because the manager calls it once per idle tenant per
-/// scan against a short timeout.
+/// Asks each company runtime, which combines three sources — the per-company
+/// cycle lock, the workflow run supervisor, and the in-flight steer registry.
+/// No one of them sees all the work: the first version of this endpoint read
+/// only the last and therefore missed the top-level operator chat turn, which
+/// is the case #22 actually measured.
+///
+/// Holds no lock across an await and does no I/O. The cost is a non-blocking
+/// `try_lock`, a `RwLock` read to enumerate companies, and one `Mutex`
+/// acquisition each — the manager calls this once per idle tenant per scan
+/// against a short timeout, so anything that could block would stall the sweep.
 ///
 /// Unauthenticated on purpose. It reveals one boolean about the workload the
 /// caller can already reach, and requiring a credential would mean the manager
@@ -424,7 +429,7 @@ async fn busy(State(state): State<AppState>) -> Json<BusyResponse> {
         .list()
         .into_iter()
         .filter_map(|id| state.registry().get(&id))
-        .any(|runtime| runtime.steer().any_inflight());
+        .any(|runtime| runtime.is_busy());
     Json(BusyResponse { busy })
 }
 
@@ -677,9 +682,14 @@ mod tests {
     }
 
     /// An idle workload reports `busy: false`, so the manager parks it as it
-    /// always has. The endpoint has to be right in *this* direction too — a
-    /// workload that always claimed to be busy would make its tenant
-    /// un-parkable, which is a worse failure than a park.
+    /// always has.
+    ///
+    /// Note what this does *not* prove: with an empty registry the handler
+    /// iterates nothing and returns `false` without consulting any runtime, so
+    /// this cannot fail for an aggregation bug. The direction that matters —
+    /// that the endpoint can report `true` — is covered by
+    /// `is_busy_sees_a_cycle_holding_the_serial_lock` in `company::runtime`,
+    /// which exercises the real signal against a real runtime.
     #[tokio::test]
     async fn busy_is_false_when_nothing_is_running() {
         let app = router(AppState::new(AppConfig::default()));
@@ -699,16 +709,12 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            json["busy"],
-            serde_json::Value::Bool(false),
-            "an idle workload must not claim to be busy: {json}"
-        );
+        assert_eq!(json["busy"], serde_json::Value::Bool(false), "{json}");
     }
 
-    /// The shape the manager parses. It reads `{"busy": bool}` and treats
-    /// anything else — a missing field, a different name, a non-boolean — as
-    /// "not busy", so a rename here would silently stop protecting work in
+    /// The wire shape the manager parses. It reads a top-level boolean `busy`
+    /// and treats anything else — a missing field, a rename, a string `"true"` —
+    /// as *not busy*, so a change here would silently stop protecting work in
     /// flight rather than fail loudly.
     #[tokio::test]
     async fn busy_responds_with_the_shape_the_manager_parses() {
@@ -729,9 +735,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(
-            json.get("busy")
-                .and_then(serde_json::Value::as_bool)
-                .is_some(),
+            json.get("busy").and_then(serde_json::Value::as_bool).is_some(),
             "the manager reads a top-level boolean `busy`; got {json}"
         );
     }
