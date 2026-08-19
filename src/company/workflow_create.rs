@@ -157,7 +157,7 @@ use crate::company::{
     list_workflows_union, parse_workflow, raw_workflow_from_toml, render_workflow,
     required_config_problems,
 };
-use crate::error::{OpenCompanyError, Result};
+use crate::error::{OpenCompanyError, Result, WorkflowProblem};
 use crate::ports::events::EventLog;
 use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
@@ -224,7 +224,7 @@ pub(crate) async fn create_company_workflow(
     // every `tool_call` node against the company's wired+granted tools.
     // `parse_workflow` checks the graph's own shape but has no record to validate
     // names against — the same helper gates create and update identically.
-    validate_draft_against_record(&draft, &record)?;
+    validate_draft_against_record(&draft, &record, source_dir)?;
 
     // Id uniqueness against every id this company already answers for: the seed
     // files, the record's overlay bodies, and the manifest-enabled ids. The
@@ -275,9 +275,14 @@ pub(crate) async fn create_company_workflow(
         )));
     }
     let file = parse_workflow(&toml_src).map_err(|err| match err {
-        OpenCompanyError::DataInvalid { problems, .. } => {
-            OpenCompanyError::InvalidRequest(problems.join(" "))
-        }
+        // A structural validation failure of the rendered draft becomes a
+        // structured `WorkflowInvalid` 400 (issue #1016). These graph-level
+        // problems (an inescapable cycle, an unreachable node) name no single
+        // node, so they carry `node_id: None` — the per-node/field problems come
+        // from `validate_draft_against_record`, which runs first.
+        OpenCompanyError::DataInvalid { problems, .. } => OpenCompanyError::WorkflowInvalid {
+            problems: problems.into_iter().map(WorkflowProblem::from).collect(),
+        },
         OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
         other => other,
     })?;
@@ -561,13 +566,22 @@ pub(crate) fn courtesy_validate_draft(draft: &RawWorkflow, record: &CompanyRecor
         )));
     }
     parse_workflow(&toml_src).map_err(|err| match err {
-        OpenCompanyError::DataInvalid { problems, .. } => {
-            OpenCompanyError::InvalidRequest(problems.join(" "))
-        }
+        // A structural validation failure of the rendered draft becomes a
+        // structured `WorkflowInvalid` 400 (issue #1016). These graph-level
+        // problems (an inescapable cycle, an unreachable node) name no single
+        // node, so they carry `node_id: None` — the per-node/field problems come
+        // from `validate_draft_against_record`, which runs first.
+        OpenCompanyError::DataInvalid { problems, .. } => OpenCompanyError::WorkflowInvalid {
+            problems: problems.into_iter().map(WorkflowProblem::from).collect(),
+        },
         OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
         other => other,
     })?;
-    validate_draft_against_record(draft, record)?;
+    // The courtesy pre-check has no source directory to hand; a sub_workflow's
+    // existence is still checked against the record's overlays + enabled ids +
+    // globals, only seed-file ids are out of reach here (the run-time cycle guard
+    // stays the backstop).
+    validate_draft_against_record(draft, record, None)?;
     Ok(())
 }
 
@@ -594,9 +608,14 @@ pub(crate) fn workflow_graph_from_spec(
     let raw = raw_workflow_from_spec(spec)?;
     let toml_src = render_workflow(&raw)?;
     let file = parse_workflow(&toml_src).map_err(|err| match err {
-        OpenCompanyError::DataInvalid { problems, .. } => {
-            OpenCompanyError::InvalidRequest(problems.join(" "))
-        }
+        // A structural validation failure of the rendered draft becomes a
+        // structured `WorkflowInvalid` 400 (issue #1016). These graph-level
+        // problems (an inescapable cycle, an unreachable node) name no single
+        // node, so they carry `node_id: None` — the per-node/field problems come
+        // from `validate_draft_against_record`, which runs first.
+        OpenCompanyError::DataInvalid { problems, .. } => OpenCompanyError::WorkflowInvalid {
+            problems: problems.into_iter().map(WorkflowProblem::from).collect(),
+        },
         OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
         other => other,
     })?;
@@ -701,7 +720,11 @@ fn validate_draft_shape(draft: &RawWorkflow) -> Result<()> {
 /// seed / legacy graphs never pass through this create path at all — so passing
 /// here means the draft was coherent when written, not that a run is forever
 /// permitted.
-fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) -> Result<()> {
+fn validate_draft_against_record(
+    draft: &RawWorkflow,
+    record: &CompanyRecord,
+    source_dir: Option<&Path>,
+) -> Result<()> {
     let roster: HashSet<&str> = record
         .manifest
         .agents
@@ -709,6 +732,14 @@ fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) ->
         .map(|a| a.id.as_str())
         .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
         .collect();
+
+    // Structured problems (issue #1016): the config gate, the sub_workflow
+    // existence check, and dangling edge endpoints each carry the node id and
+    // config field at fault, so the console can highlight the exact node + field.
+    // They accumulate and are raised together as a `WorkflowInvalid` 400. The
+    // roster/tool checks below keep their own early `InvalidRequest` (a bad
+    // teammate/tool name is not a node-config problem the highlighter consumes).
+    let mut problems: Vec<WorkflowProblem> = Vec::new();
 
     for node in &draft.nodes {
         match node.kind.as_str() {
@@ -728,33 +759,105 @@ fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) ->
                 }
             },
             "tool_call" => validate_tool_call_node(node, record)?,
-            // Per-kind required config (issue #661): reject a `condition` with no
-            // `field`, an `http_request` missing `method`/`url`, or a `switch`
-            // with no discriminant at author time — the same gate the on-disk
-            // `validate` applies, surfaced here as a 400 so the console/builder
-            // draft path never persists a graph whose runtime behaviour is
-            // silently wrong. `tool_call` keeps its richer `validate_tool_call_node`
-            // (slug + namespace/grant); the structural kinds share the helper.
-            "condition" | "http_request" | "switch" => {
+            // Per-kind required config (issue #661, extended #1016): reject a
+            // `condition` with no `field`, an `http_request` missing `method` or a
+            // real `url`, a `switch` with no discriminant, a `transform` with no
+            // `config.set`, a `split_out` with no `config.path`, or an
+            // `output_parser` whose present keys are mistyped — the same gate the
+            // on-disk `validate` applies, surfaced here as a structured 400 so the
+            // console/builder draft path never persists a graph whose runtime
+            // behaviour is silently wrong. `tool_call` keeps its richer
+            // `validate_tool_call_node` (slug + namespace/grant); the structural
+            // kinds share the helper.
+            "condition" | "http_request" | "switch" | "transform" | "split_out"
+            | "output_parser" => {
                 let kind = match node.kind.as_str() {
                     "condition" => WorkflowNodeKind::Condition,
                     "http_request" => WorkflowNodeKind::HttpRequest,
-                    _ => WorkflowNodeKind::Switch,
+                    "switch" => WorkflowNodeKind::Switch,
+                    "transform" => WorkflowNodeKind::Transform,
+                    "split_out" => WorkflowNodeKind::SplitOut,
+                    _ => WorkflowNodeKind::OutputParser,
                 };
                 // Report EVERY missing-config problem for the node, not just the
                 // first: an `http_request` missing both `method` AND `url` should
                 // name both, since the draft path is where a human/model iterates.
-                let problems = required_config_problems(
+                problems.extend(required_config_problems(
                     kind,
+                    &node.id,
                     &format!("node `{}`", node.id),
                     node.config.as_ref(),
-                );
-                if !problems.is_empty() {
-                    return Err(OpenCompanyError::InvalidRequest(problems.join(" ")));
+                ));
+            }
+            // A `sub_workflow` node names a saved workflow to run (issue #1016).
+            // `parse_workflow` already rejects a missing/empty/inline/self `workflow_id`
+            // structurally; here — where the record is available — reject a
+            // `workflow_id` that names NO saved workflow this company can resolve,
+            // so a rename or a typo is caught at author time instead of failing at
+            // run. A self-reference is left to the structural check (it names a
+            // clearer problem) rather than reported as "not saved".
+            "sub_workflow" => {
+                if let Some(wid) = node
+                    .config
+                    .as_ref()
+                    .and_then(toml::Value::as_table)
+                    .and_then(|table| table.get("workflow_id"))
+                    .and_then(toml::Value::as_str)
+                    && !wid.trim().is_empty()
+                    && wid != draft.id
+                    && !workflow_id_exists(source_dir, record, wid)
+                {
+                    problems.push(WorkflowProblem::node_field(
+                        &node.id,
+                        "workflow_id",
+                        format!(
+                            "node `{}` runs sub-workflow `{wid}`, which is not a saved workflow in \
+                             this company — check the id or create the workflow first.",
+                            node.id
+                        ),
+                    ));
                 }
             }
             _ => {}
         }
+    }
+
+    // Dangling edge endpoints (issue #1016): an edge whose `from`/`to` names no
+    // node is reported naming the ENDPOINT and the field, so the console can
+    // highlight the id the author actually wrote. `parse_workflow` catches these
+    // too, but only as flat `edge #N` strings — reporting them here first keeps
+    // the structured node/field detail the flat pass would drop.
+    let node_ids: HashSet<&str> = draft
+        .nodes
+        .iter()
+        .filter(|n| !n.id.trim().is_empty())
+        .map(|n| n.id.as_str())
+        .collect();
+    for edge in &draft.edges {
+        if !edge.from.trim().is_empty() && !node_ids.contains(edge.from.as_str()) {
+            problems.push(WorkflowProblem::node_field(
+                &edge.from,
+                "from",
+                format!(
+                    "an edge starts at `{}`, which is not a node in this workflow.",
+                    edge.from
+                ),
+            ));
+        }
+        if !edge.to.trim().is_empty() && !node_ids.contains(edge.to.as_str()) {
+            problems.push(WorkflowProblem::node_field(
+                &edge.to,
+                "to",
+                format!(
+                    "an edge points to `{}`, which is not a node in this workflow.",
+                    edge.to
+                ),
+            ));
+        }
+    }
+
+    if !problems.is_empty() {
+        return Err(OpenCompanyError::WorkflowInvalid { problems });
     }
 
     // Condition branch labels must read `yes`/`no` at author time (issue #661).
@@ -1072,6 +1175,20 @@ pub(crate) fn seed_file_exists(source_dir: Option<&Path>, wid: &str) -> bool {
     source_dir.is_some_and(|dir| dir.join("workflows").join(format!("{wid}.toml")).is_file())
 }
 
+/// Whether `wid` names a workflow this company can actually resolve and run as a
+/// sub-workflow (issue #1016): a seed file, a saved overlay body, a
+/// manifest-`enabled` id, or a global baseline workflow. Deliberately lenient —
+/// it errs toward "exists" (globals are counted whether or not the company
+/// disabled them) so a real reference is never rejected; the run-time resolver
+/// stays the backstop for anything this author-time probe can't see. Used to
+/// reject a `sub_workflow` node whose `workflow_id` names nothing at all.
+fn workflow_id_exists(source_dir: Option<&Path>, record: &CompanyRecord, wid: &str) -> bool {
+    seed_file_exists(source_dir, wid)
+        || record.overlay_workflows.iter().any(|w| w.id == wid)
+        || record.manifest.workflows.enabled.iter().any(|id| id == wid)
+        || crate::globals::workflows().iter().any(|w| w.id == wid)
+}
+
 /// Resolves `wid` to the record's overlay body, or explains why it can't be
 /// written to. Shared by update and delete so the two answer identically.
 ///
@@ -1185,7 +1302,7 @@ pub(crate) async fn update_company_workflow(
     // Same record cross-check as create (roster + tool_call grants):
     // `parse_workflow` validates the graph's own shape but has no record to check
     // `agent`/`tool_call` node names against.
-    validate_draft_against_record(&draft, &record)?;
+    validate_draft_against_record(&draft, &record, source_dir)?;
 
     // Display-name uniqueness, MINUS this workflow's own current name — a
     // re-save that doesn't rename must not collide with itself. Every other
@@ -1218,9 +1335,14 @@ pub(crate) async fn update_company_workflow(
         )));
     }
     let file = parse_workflow(&toml_src).map_err(|err| match err {
-        OpenCompanyError::DataInvalid { problems, .. } => {
-            OpenCompanyError::InvalidRequest(problems.join(" "))
-        }
+        // A structural validation failure of the rendered draft becomes a
+        // structured `WorkflowInvalid` 400 (issue #1016). These graph-level
+        // problems (an inescapable cycle, an unreachable node) name no single
+        // node, so they carry `node_id: None` — the per-node/field problems come
+        // from `validate_draft_against_record`, which runs first.
+        OpenCompanyError::DataInvalid { problems, .. } => OpenCompanyError::WorkflowInvalid {
+            problems: problems.into_iter().map(WorkflowProblem::from).collect(),
+        },
         OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
         other => other,
     })?;
@@ -4423,10 +4545,13 @@ to = "done"
         )
         .await
         .expect_err("condition with no field");
-        assert!(
-            matches!(err, OpenCompanyError::InvalidRequest(_)),
-            "{err:?}"
-        );
+        // Issue #1016: the config gate now raises a structured `WorkflowInvalid`.
+        let problems = match &err {
+            OpenCompanyError::WorkflowInvalid { problems } => problems,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(problems[0].node_id.as_deref(), Some("gate"));
+        assert_eq!(problems[0].field.as_deref(), Some("config.field"));
         assert!(err.to_string().contains("config.field"), "{err}");
     }
 
@@ -4526,10 +4651,21 @@ to = "done"
         let err = create_company_workflow(&company, None, &store, None, draft)
             .await
             .expect_err("http_request with no method or url");
+        // Issue #1016: structured `WorkflowInvalid`, one problem per field, both
+        // pinned to the offending node.
+        let problems = match &err {
+            OpenCompanyError::WorkflowInvalid { problems } => problems,
+            other => panic!("{other:?}"),
+        };
         assert!(
-            matches!(err, OpenCompanyError::InvalidRequest(_)),
-            "{err:?}"
+            problems
+                .iter()
+                .all(|p| p.node_id.as_deref() == Some("fetch")),
+            "{problems:?}"
         );
+        let fields: Vec<&str> = problems.iter().filter_map(|p| p.field.as_deref()).collect();
+        assert!(fields.contains(&"config.method"), "{fields:?}");
+        assert!(fields.contains(&"config.url"), "{fields:?}");
         let message = err.to_string();
         assert!(message.contains("config.method"), "{message}");
         assert!(message.contains("config.url"), "{message}");
@@ -5421,5 +5557,275 @@ to = "done"
             matches!(err, OpenCompanyError::CompanyNotFound(_)),
             "{err:?}"
         );
+    }
+
+    // --- issue #1016: structured, per-node/field workflow problems -----------
+
+    /// A bare node with an optional config table.
+    fn oc_node(id: &str, kind: &str, config: Option<toml::Value>) -> RawNode {
+        RawNode {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            name: id.to_string(),
+            summary: None,
+            agent: None,
+            schedule: None,
+            config,
+            on_error: None,
+            retry: None,
+            requires_approval: None,
+            destination: None,
+        }
+    }
+
+    /// A `trigger → <node>` two-node draft, so the node under test sits on a
+    /// reachable, single-trigger graph the shape check accepts.
+    fn one_node_draft(node: RawNode) -> RawWorkflow {
+        let to = node.id.clone();
+        RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![oc_node("start", "trigger", None), node],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to,
+                label: None,
+            }],
+        }
+    }
+
+    fn problems_of(err: &OpenCompanyError) -> &[WorkflowProblem] {
+        match err {
+            OpenCompanyError::WorkflowInvalid { problems } => problems,
+            other => panic!("expected WorkflowInvalid, got {other:?}"),
+        }
+    }
+
+    /// RED-FIRST #1 (headline): a `transform` with no `config.set` is now rejected
+    /// at save, naming the node and `config.set`. Accepted on unpatched code.
+    #[tokio::test]
+    async fn draft_transform_without_set_is_rejected() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            one_node_draft(oc_node("tf", "transform", None)),
+        )
+        .await
+        .expect_err("transform with no config.set");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].node_id.as_deref(), Some("tf"));
+        assert_eq!(problems[0].field.as_deref(), Some("config.set"));
+    }
+
+    /// RED-FIRST #1 (split_out half): a `split_out` with no `config.path` is
+    /// rejected, naming `config.path`.
+    #[tokio::test]
+    async fn draft_split_out_without_path_is_rejected() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            one_node_draft(oc_node("so", "split_out", None)),
+        )
+        .await
+        .expect_err("split_out with no config.path");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].node_id.as_deref(), Some("so"));
+        assert_eq!(problems[0].field.as_deref(), Some("config.path"));
+    }
+
+    fn http_bad_url_draft() -> RawWorkflow {
+        let mut config = toml::map::Map::new();
+        config.insert("method".to_string(), toml::Value::String("GET".to_string()));
+        config.insert(
+            "url".to_string(),
+            toml::Value::String("not-a-url".to_string()),
+        );
+        one_node_draft(oc_node(
+            "greet",
+            "http_request",
+            Some(toml::Value::Table(config)),
+        ))
+    }
+
+    /// RED-FIRST #2 (create): a create with an http_request `url` of `not-a-url`
+    /// yields a `WorkflowInvalid` whose first problem is pinned to `greet` /
+    /// `config.url`. Asserted on the STRUCT, not the joined message.
+    #[tokio::test]
+    async fn draft_http_request_bad_url_is_rejected_on_create() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(&company, None, &store, None, http_bad_url_draft())
+            .await
+            .expect_err("http_request url = not-a-url");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].node_id.as_deref(), Some("greet"));
+        assert_eq!(problems[0].field.as_deref(), Some("config.url"));
+    }
+
+    /// RED-FIRST #2 (update): the same structured rejection on the update path.
+    #[tokio::test]
+    async fn draft_http_request_bad_url_is_rejected_on_update() {
+        let company = CompanyId::new("acme");
+        let (store, version) = with_one_workflow(&company, "wf", "WF").await;
+        let err = update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            http_bad_url_draft(),
+            Some(&version),
+        )
+        .await
+        .expect_err("update to a bad url");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].node_id.as_deref(), Some("greet"));
+        assert_eq!(problems[0].field.as_deref(), Some("config.url"));
+    }
+
+    /// RED-FIRST #3: a create whose edge has a dangling `from` yields a structured
+    /// problem naming the endpoint (`old-id`) and the `from` field, and the
+    /// message no longer leads with `edge #N`.
+    #[tokio::test]
+    async fn draft_dangling_from_edge_is_structured() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let draft = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![oc_node("start", "trigger", None)],
+            edges: vec![RawEdge {
+                from: "old-id".to_string(),
+                to: "start".to_string(),
+                label: None,
+            }],
+        };
+        let err = create_company_workflow(&company, None, &store, None, draft)
+            .await
+            .expect_err("dangling from");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].node_id.as_deref(), Some("old-id"));
+        assert_eq!(problems[0].field.as_deref(), Some("from"));
+        assert!(!err.to_string().contains("edge #"), "{err}");
+    }
+
+    fn sub_workflow_draft(workflow_id: &str) -> RawWorkflow {
+        let mut config = toml::map::Map::new();
+        config.insert(
+            "workflow_id".to_string(),
+            toml::Value::String(workflow_id.to_string()),
+        );
+        one_node_draft(oc_node(
+            "child",
+            "sub_workflow",
+            Some(toml::Value::Table(config)),
+        ))
+    }
+
+    /// A `sub_workflow` naming a workflow id that this company cannot resolve is
+    /// rejected, pinned to the node and `workflow_id`.
+    #[tokio::test]
+    async fn draft_sub_workflow_with_unknown_id_is_rejected() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let mut draft = sub_workflow_draft("nope");
+        draft.id = "parent".to_string();
+        let err = create_company_workflow(&company, None, &store, None, draft)
+            .await
+            .expect_err("unknown sub-workflow id");
+        let problems = problems_of(&err);
+        assert_eq!(problems[0].node_id.as_deref(), Some("child"));
+        assert_eq!(problems[0].field.as_deref(), Some("workflow_id"));
+    }
+
+    /// A `sub_workflow` referencing an existing saved workflow passes the record
+    /// cross-check.
+    #[tokio::test]
+    async fn draft_sub_workflow_with_existing_id_is_accepted() {
+        let company = CompanyId::new("acme");
+        let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
+        let mut draft = sub_workflow_draft("greeter");
+        draft.id = "parent".to_string();
+        draft.name = "Parent".to_string();
+        create_company_workflow(&company, None, &store, None, draft)
+            .await
+            .expect("sub_workflow referencing a saved workflow is accepted");
+    }
+
+    /// A `sub_workflow` referencing its own id is still rejected (regression): the
+    /// structural self-reference check owns that message.
+    #[tokio::test]
+    async fn draft_sub_workflow_self_reference_is_rejected() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        // draft.id defaults to "wf" — a self reference to the same id.
+        let draft = sub_workflow_draft("wf");
+        let err = create_company_workflow(&company, None, &store, None, draft)
+            .await
+            .expect_err("self-referencing sub_workflow");
+        assert!(err.to_string().contains("run itself"), "{err}");
+    }
+
+    /// An `output_parser` with no schema (a pass-through identity parser) is
+    /// accepted; a `merge` with no config is accepted — the gate does not
+    /// over-reject the config-optional kinds.
+    #[tokio::test]
+    async fn draft_output_parser_and_merge_are_config_optional() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            one_node_draft(oc_node("op", "output_parser", None)),
+        )
+        .await
+        .expect("schema-less output_parser is accepted");
+
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            one_node_draft(oc_node("mg", "merge", None)),
+        )
+        .await
+        .expect("config-less merge is accepted");
     }
 }

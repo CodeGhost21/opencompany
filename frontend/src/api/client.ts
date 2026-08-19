@@ -23,7 +23,6 @@ import {
   type ChatPostResult,
   type ChatResponse,
   type CompanyStatus,
-  type ConnectionStart,
   type ConnectionState,
   type CreateDeskInput,
   type DeskDto,
@@ -857,14 +856,6 @@ export class OpenCompanyClient {
    */
   listConnections(company?: string | null): Promise<ConnectionState[]> {
     return this.request<ConnectionState[]>("GET", `${this.scope(company)}/connections`);
-  }
-
-  /** Begin an OAuth connect flow; returns the provider authorize URL to open. */
-  startConnection(provider: string, company?: string | null): Promise<ConnectionStart> {
-    return this.request<ConnectionStart>(
-      "POST",
-      `${this.scope(company)}/connections/${encodeURIComponent(provider)}/start`,
-    );
   }
 
   /** Revoke a connected provider. */
