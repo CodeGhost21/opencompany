@@ -489,7 +489,10 @@ export function AppShell({
    * `GET {scope}/runs?status=pending,running` on hydration, so the working
    * indicator is re-armed on a console that never saw the POST.
    */
-  const [openTurns, setOpenTurns] = useState<Record<string, OpenTurn>>({});
+  // Per thread, in acceptance order — a thread can hold a running turn and a
+  // queued one behind it, and the poll watches them all (issue #1000). The
+  // working row is the head; `ChatView` and `Conversation` read `[0]`.
+  const [openTurns, setOpenTurns] = useState<Record<string, OpenTurn[]>>({});
   const feed = useCompany(client, company, initialStatus);
   // Issue #379: the inline approval cards' console-local state, owned here
   // rather than in `ChatView` for the same reason `transcripts` is — the shell
