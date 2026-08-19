@@ -461,6 +461,22 @@ impl MessageView {
 ///
 /// Reported rather than repaired. See [`channel_attributed_replies`] for why a
 /// repair is not available.
+///
+/// # The figure is not comparable across the #966 cutover
+///
+/// Host-authored notices — the approval-overflow line, the `"Acknowledged."`
+/// fallback, the failed-continuation report — used to journal under the
+/// operator channel, so every one already on disk is counted here as damage.
+/// Since #966 they journal under [`SYSTEM_AUTHOR`](crate::ports::SYSTEM_AUTHOR)
+/// and are not counted, because they are correct rows and inflating this number
+/// with them would make the one figure that has to be trustworthy the least
+/// trustworthy one.
+///
+/// The consequence is a step in the series that nothing on the wire labels: a
+/// company's `affected` can fall without a single row being repaired, purely
+/// because it stopped minting new false positives. Read a decline across that
+/// boundary as "the bleeding stopped", never as "history got better" — no row
+/// counted here has ever become attributable, and none can.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AttributionAudit {
     /// Every `AgentReply` inspected.
@@ -1287,6 +1303,27 @@ mod test {
             );
             assert_eq!(audit.replies, 2);
             assert_eq!(audit.affected, 0);
+        }
+
+        /// Issue #966. The console reaches the centred system pill by comparing
+        /// the projected author against a literal `"system"`
+        /// (`frontend/src/lib/chat.ts`), and `MessageView` projects an
+        /// `AgentReply`'s `agent_id` straight into that field. So the *value* is
+        /// the contract with the console, not merely the constant's identity.
+        ///
+        /// Redefining `SYSTEM_AUTHOR` to anything else keeps every other test
+        /// here green and silently returns these three notices to rendering as
+        /// company bubbles — the exact appearance this change exists to end.
+        /// Two copies of one literal is the same coupling
+        /// `dispatch_marker_text` already carries with that file, and it is
+        /// deliberate for the same reason.
+        #[test]
+        fn the_notice_author_is_the_literal_the_console_keys_on() {
+            assert_eq!(
+                crate::ports::SYSTEM_AUTHOR,
+                "system",
+                "frontend/src/lib/chat.ts renders `author === \"system\"` as the centred pill"
+            );
         }
 
         /// The whole point of the reserved id: a notice and a damaged reply used
