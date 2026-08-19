@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 import { createContext, runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
-import { runTone } from "@/views/workflows/run-health";
+import { runTone, verdictOf } from "@/views/workflows/run-health";
 import type {
   DeliveryReport,
   WorkflowBlockedNode,
@@ -428,6 +428,20 @@ describe("the host's verdict is what both readers use", () => {
     expect(dropped.verdict).toBeUndefined();
     expect(runVerdict(dropped)).toBe("undelivered");
     expect(runTone(dropped).label).toBe("not delivered");
+  });
+
+  it("ignores a word it cannot read rather than painting it green", () => {
+    // `verdict` is host-controlled and a host may grow an eighth word. Falling
+    // back to "ok" for one we cannot read would be the single arm nothing on
+    // screen could contradict — so an unknown word drops to the ladder, which
+    // reads the rows the host also sent.
+    const dropped = run({
+      deliveries: [delivery("failed")],
+      verdict: "quantum-superposition" as never,
+    });
+    expect(runTone(dropped).label).toBe("not delivered");
+    expect(runTone(dropped).dot).toContain("status-failed");
+    expect(verdictOf(dropped)).toBe("undelivered");
   });
 
   it("agrees with the ladder on every word, so the two are interchangeable", () => {

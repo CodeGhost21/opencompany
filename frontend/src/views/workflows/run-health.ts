@@ -125,32 +125,6 @@ const NOT_DELIVERED = "not delivered";
 const AWAITING_APPROVAL = "awaiting approval";
 
 /**
- * A run's verdict — **the host's when it sends one** (issue #981).
- *
- * The seven words and their precedence order are unchanged; what changed is who
- * owns them. They lived only here, in this console's TypeScript, so every other
- * reader of the same run had to re-derive them — and the obvious derivation,
- * folding `nodes[].status`, is wrong for the one case that matters: delivery
- * runs *after* the engine returns, so a run whose report was refused reports
- * every node `ok`. The QA harness made exactly that mistake and scored a
- * dropped report as a pass.
- *
- * The fallback is not legacy tolerance for its own sake — it is the reading a
- * host predating #981 forces, and it is the same ladder the host now runs, kept
- * here so switching between hosts cannot change what a run means.
- */
-export function verdictOf(run: WorkflowRunOutcome): WorkflowRunVerdict {
-  if (run.verdict) return run.verdict;
-  if (isRunning(run)) return "running";
-  if (run.error) return "failed";
-  if (run.cancelled) return "stopped";
-  if (isBlocked(run)) return "blocked";
-  if (undeliveredCount(run.deliveries) > 0) return "undelivered";
-  if (awaitingCount(run) > 0) return "awaiting-approval";
-  return "ok";
-}
-
-/**
  * The dot and the label for each verdict.
  *
  * The label is not decoration: it ships with the dot at every call site,
@@ -185,6 +159,41 @@ const VERDICT_TONE: Record<WorkflowRunVerdict, { dot: string; label: string }> =
     },
     ok: { dot: "bg-status-done", label: "ok" },
   };
+
+/**
+ * A run's verdict — **the host's when it sends one** (issue #981).
+ *
+ * The seven words and their precedence order are unchanged; what changed is who
+ * owns them. They lived only here, in this console's TypeScript, so every other
+ * reader of the same run had to re-derive them — and the obvious derivation,
+ * folding `nodes[].status`, is wrong for the one case that matters: delivery
+ * runs *after* the engine returns, so a run whose report was refused reports
+ * every node `ok`. The QA harness made exactly that mistake and scored a
+ * dropped report as a pass.
+ *
+ * The fallback is not legacy tolerance for its own sake — it is the reading a
+ * host predating #981 forces, and it is the same ladder the host now runs, kept
+ * here so switching between hosts cannot change what a run means.
+ */
+export function verdictOf(run: WorkflowRunOutcome): WorkflowRunVerdict {
+  // Checked against the map rather than trusted, because `verdict` is
+  // host-controlled and a host is free to grow an eighth word this console has
+  // never heard of — the same reason `DeliveryStatus` is compared through a
+  // widened `string` further up. An unrecognised word falls through to the
+  // ladder below, which reads the rows the host also sent.
+  //
+  // It deliberately does NOT fall back to "ok". Painting a word we cannot read
+  // as a clean run is the exact failure this function exists to close, and it
+  // would be the one arm nothing on screen could contradict.
+  if (run.verdict && run.verdict in VERDICT_TONE) return run.verdict;
+  if (isRunning(run)) return "running";
+  if (run.error) return "failed";
+  if (run.cancelled) return "stopped";
+  if (isBlocked(run)) return "blocked";
+  if (undeliveredCount(run.deliveries) > 0) return "undelivered";
+  if (awaitingCount(run) > 0) return "awaiting-approval";
+  return "ok";
+}
 
 /** The status dot for a whole run.
  *
