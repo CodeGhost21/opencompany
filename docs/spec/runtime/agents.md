@@ -250,11 +250,15 @@ under a cap can finish arbitrarily far over it, and raising the iteration ceilin
 widens that window in proportion.
 
 A running turn is therefore additionally metered by an in-turn brake — openhuman's
-`BudgetStopHook` — checked between iterations and halted the moment cumulative
-spend reaches the cap. The brake is installed **only** for a teammate who
-declares a `budget_usd_daily` cap, and it halts the turn at exactly that value:
-one daily cap then bounds the worst-case overshoot ("one cap" rather than "one
-turn, of unknown size").
+`BudgetStopHook` — an after-call threshold check installed between iterations.
+It records each completed model call, then compares cumulative spend
+(`TurnCost::total_usd()`) against the cap and pauses the turn before the next
+provider call once spend is at or beyond it. The brake is installed **only** for
+a teammate who declares a `budget_usd_daily` cap. Because the check runs after a
+call has already been charged, a crossing call lands on the ledger before the
+next one is prevented — the turn can finish at or slightly above the cap, so the
+worst-case overshoot is bounded by a single model call rather than an entire
+turn ("one call" rather than "one turn, of unknown size").
 
 This mirrors the vendored runtime's own posture rather than inventing one.
 OpenHuman constructs `BudgetStopHook` nowhere — it is an available primitive, not
