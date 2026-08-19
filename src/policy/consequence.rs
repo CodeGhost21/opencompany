@@ -540,6 +540,21 @@ const DECLARED: &[Declared] = &[
     // makes each removal its own card naming its own path.
     d("workspace_delete", EffectGroup::Other, Reach::Consequence),
     d("workspace_rename", EffectGroup::Other, Reach::Consequence),
+    // ---- Agent-authored internal dashboard pages ---------------------------
+    // Same re-derivation as `workspace_*` immediately above, not a copy: reads
+    // are free, and a write or delete reaches past this turn because it lands
+    // in the same shared `WorkspaceStore` tree every operator and teammate
+    // reads (`Pages/<slug>/`), and — once the operator opens the page — is
+    // rendered live in the console. `pages_write` additionally compiles and
+    // publishes a *runnable* artifact, which is strictly more externally
+    // visible than overwriting a note, so it cannot be priced any lower than
+    // `workspace_write`. `PerCall`, not `Grantable`, for the identical reason:
+    // a standing grant on either would let one bad turn silently replace or
+    // remove a page the operator has already put in front of the company.
+    d("pages_list", EffectGroup::Other, Reach::Nothing),
+    d("pages_read", EffectGroup::Other, Reach::Nothing),
+    d("pages_write", EffectGroup::Other, Reach::Consequence),
+    d("pages_delete", EffectGroup::Other, Reach::Consequence),
     // ---- Publishing --------------------------------------------------------
     // Externally visible and not reversible by the company alone.
     // `Reach::Consequence` because a publish does change state, and a
