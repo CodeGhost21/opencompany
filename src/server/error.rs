@@ -45,7 +45,8 @@ impl ApiError {
             OpenCompanyError::ManifestInvalid { .. }
             | OpenCompanyError::ManifestParse(_, _)
             | OpenCompanyError::MissingManifest(_)
-            | OpenCompanyError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+            | OpenCompanyError::InvalidRequest(_)
+            | OpenCompanyError::WorkflowInvalid { .. } => StatusCode::BAD_REQUEST,
             OpenCompanyError::LifecycleConflict(_) | OpenCompanyError::Conflict(_) => {
                 StatusCode::CONFLICT
             }
@@ -90,10 +91,22 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = self.status();
-        let body = Json(json!({
-            "error": self.0.to_string(),
-            "code": self.0.code(),
-        }));
+        // Every error renders the api.md envelope `{ "error", "code" }`. A
+        // `WorkflowInvalid` additively carries a `problems` array (issue #1016)
+        // so the console can highlight the exact node + field; the key is present
+        // ONLY for that variant, so every other error stays byte-for-byte as
+        // before and no existing client sees a new field.
+        let body = match &self.0 {
+            OpenCompanyError::WorkflowInvalid { problems } => Json(json!({
+                "error": self.0.to_string(),
+                "code": self.0.code(),
+                "problems": problems,
+            })),
+            _ => Json(json!({
+                "error": self.0.to_string(),
+                "code": self.0.code(),
+            })),
+        };
         (status, body).into_response()
     }
 }
@@ -139,5 +152,48 @@ mod test {
 
         let upstream = ApiError(OpenCompanyError::tinyplace("http_500", "boom"));
         assert_eq!(upstream.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    /// Issue #1016: a `WorkflowInvalid` renders a `400` whose envelope additively
+    /// carries a `problems` array, each entry naming its node + field.
+    #[tokio::test]
+    async fn workflow_invalid_envelope_carries_problems() {
+        use crate::error::WorkflowProblem;
+        use axum::body::to_bytes;
+
+        let err = ApiError(OpenCompanyError::WorkflowInvalid {
+            problems: vec![WorkflowProblem::node_field(
+                "greet",
+                "config.url",
+                "greet has a bad url.",
+            )],
+        });
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.0.code(), "workflow_invalid");
+
+        let body = err.into_response().into_body();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["code"], "workflow_invalid");
+        assert_eq!(json["problems"][0]["node_id"], "greet");
+        assert_eq!(json["problems"][0]["field"], "config.url");
+        assert!(
+            json["error"].as_str().unwrap().contains("bad url"),
+            "{json}"
+        );
+    }
+
+    /// Every other error keeps the plain `{ error, code }` envelope with NO
+    /// `problems` key — the new field is additive and scoped to `WorkflowInvalid`.
+    #[tokio::test]
+    async fn non_workflow_error_has_no_problems_key() {
+        use axum::body::to_bytes;
+
+        let err = ApiError(OpenCompanyError::CompanyNotFound("acme".into()));
+        let body = err.into_response().into_body();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["code"], "company_not_found");
+        assert!(json.get("problems").is_none(), "{json}");
     }
 }
