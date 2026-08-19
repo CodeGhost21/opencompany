@@ -51,13 +51,24 @@ pub struct Lanes {
 
 /// Which agents are bound to `harness_id`, given the company's default.
 fn agents_on(record: &CompanyRecord, harness_id: &str, default_harness: &str) -> HashSet<String> {
-    record
+    let mut ids: HashSet<String> = record
         .manifest
         .agents
         .iter()
         .filter(|a| a.harness.as_deref().unwrap_or(default_harness) == harness_id)
         .map(|a| a.id.clone())
-        .collect()
+        .collect();
+    // A console-created (overlay) teammate has no manifest row and therefore no
+    // harness binding — `overlay_agent_to_manifest` hardcodes `harness: None` —
+    // so every overlay runs on the default harness. Fold them into the default
+    // lane's serve set, or a multi-harness company would build them on no pool
+    // at all: the default pool's `serves` would exclude them, no other lane
+    // claims them, and the roster would silently drop a teammate the console
+    // is still showing.
+    if harness_id == default_harness {
+        ids.extend(record.overlay_agents.iter().map(|a| a.id.clone()));
+    }
+    ids
 }
 
 /// Builds the lanes for `record`, given the deps the **default** harness runs
