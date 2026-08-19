@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::embedded::{self, EmbeddedHost};
+use crate::embedded::{self, EmbeddedHost, FirstRun};
 
 /// The id of the instance rooted at the data dir itself.
 pub const DEFAULT_INSTANCE_ID: &str = "default";
@@ -297,8 +297,17 @@ impl LocalHosts {
     }
 
     async fn start_at(&mut self, index: usize) {
-        let root = root_of(&self.data_dir, &self.instances[index].entry);
-        match embedded::start(root).await {
+        let entry = &self.instances[index].entry;
+        let root = root_of(&self.data_dir, entry);
+        // The instance at the data root seeds a starter company; one an
+        // operator created runs the setup wizard instead. See `FirstRun` — the
+        // difference is not cosmetic, because a seeded company makes the host
+        // report `setup_complete` and the wizard never opens again.
+        let first_run = match entry.root {
+            None => FirstRun::SeedStarterCompany,
+            Some(_) => FirstRun::RunSetupWizard,
+        };
+        match embedded::start_with(root, first_run).await {
             Ok(host) => {
                 tracing::info!(
                     id = %self.instances[index].entry.id,
