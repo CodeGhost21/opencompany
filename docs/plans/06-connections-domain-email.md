@@ -114,7 +114,7 @@ WS3 (`InboxStore`, ops scaffolding, SecretStore keys). Feeds WS7
 
 Unit: DNS record generation determinism; mock-resolver verify outcomes.
 Feature: the four-case suite per route plus — no token/password material in
-any serialized response; callback with tampered `state` → 401; inbound hook
+any serialized response; callback with any `state` → dated `410` and no credential write; inbound hook
 with bad HMAC → 401 and no event; smtp test with mock sender. Default build
 compiles with no network crates. Exit per
 [09-verification.md](09-verification.md) WS6 row.
