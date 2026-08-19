@@ -1145,7 +1145,7 @@ impl AgentRunner for HarnessAgentRunner {
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
-            "workflow agent node: routing to harness pool"
+            "workflow agent node: routing through harness turn"
         );
         // Issue #439: this run's own approval scope, replacing #395's boundary
         // index. The index was only ever a narrowing — it was taken against a
