@@ -4267,11 +4267,6 @@ mod test {
         drop_db(&s).await;
     }
 
-    /// Shared-single-DB namespacing: two tenants registering the same template
-    /// name land distinct namespaced ids in one database, so the `companies`
-    /// unique index never conflicts, and the `owners` rows carry the right
-    /// tenant for each. Mirrors what the workload does when
-    /// `OPENCOMPANY_TENANT_ID` is set (see `AppConfig::namespaced_company_id`).
     /// Issue #1077: the orphan report composes `list()` and `owners()`
     /// correctly against a real server.
     ///
