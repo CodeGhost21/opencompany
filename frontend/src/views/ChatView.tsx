@@ -610,7 +610,7 @@ export function ChatView({
    * false on every reload and on every walk to another view. An open turn is a
    * fact about the company, so the indicator survives both.
    */
-  const openTurn = activeThreadId ? openTurns?.[activeThreadId] : undefined;
+  const openTurn = activeThreadId ? openTurns?.[activeThreadId]?.[0] : undefined;
   /**
    * The count beside the channel title.
    *
