@@ -1889,4 +1889,30 @@ mod test {
         );
         std::fs::remove_dir_all(&home).ok();
     }
+
+    /// Issue #1077: the `orphans` command refuses to run without a tenant
+    /// namespace.
+    ///
+    /// Without `OPENCOMPANY_TENANT_ID` no durable owner rows are ever written,
+    /// so the report would claim every company is orphaned on every run. The
+    /// gate is the same condition that guards the owner-row write at
+    /// `register_company`, and it fires before storage is even opened — the
+    /// reviewer's false-positive case, with no database needed to hit it.
+    #[tokio::test]
+    async fn orphans_refuses_to_run_without_a_tenant_namespace() {
+        // Save and restore so a box configured for shared-single-DB (or a
+        // parallel test) is unaffected.
+        let previous = std::env::var("OPENCOMPANY_TENANT_ID").ok();
+        unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") };
+        let err = run_orphans(None, false).await.unwrap_err();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", value) },
+            None => unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") },
+        }
+
+        assert!(
+            matches!(&err, opencompany::error::OpenCompanyError::Config(_)),
+            "expected a Config refusal, got: {err:?}"
+        );
+    }
 }
