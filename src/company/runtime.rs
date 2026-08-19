@@ -2964,7 +2964,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "openhuman")]
     /// `is_busy` must see **all three** sources, not just the steer registry.
     ///
     /// The first version of the busy endpoint read only `steer.any_inflight()`,
