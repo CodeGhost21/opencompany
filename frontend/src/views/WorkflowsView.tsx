@@ -318,6 +318,18 @@ export function WorkflowsView({
   // state from `createOpen` rather than a mode flag, so the create path keeps
   // working exactly as it did and neither can be half-open.
   const [editOpen, setEditOpen] = useState(false);
+  // Issue #1006: the graph the OPEN edit dialog is bound to, pinned when it
+  // opens rather than read live off `graph`.
+  //
+  // `graph` moves for reasons that have nothing to do with the edit in
+  // progress: a Back press changes `selectedId`, and the refetch lands a
+  // DIFFERENT workflow's graph, which re-hydrated the dialog and destroyed
+  // whatever was typed; a refetch that FAILS lands `null`, which unmounted the
+  // dialog outright. Pinning makes both a no-op, while the effect that keeps it
+  // in step still lets a re-read of the SAME workflow through — which is what
+  // keeps the conflict banner's Reload and the History restore re-hydrating the
+  // dialog as they are documented to.
+  const [editGraph, setEditGraph] = useState<WorkflowGraph | null>(null);
   // Issue #840 (PR-3): a copilot-corrected graph to open the edit dialog on. When
   // set, the edit dialog hydrates from this correction (keeping `graph`'s version
   // token) instead of from the saved graph, so Save writes a new version.
@@ -788,6 +800,21 @@ export function WorkflowsView({
       live = false;
     };
   }, [client, company, selectedId, graphTick]);
+
+  // Issue #1006: keep the open edit dialog bound to the workflow it was opened
+  // against. Pin on open; afterwards adopt `graph` only while it is still the
+  // SAME workflow — a re-read of it (the conflict banner's Reload, a History
+  // restore) must reach the dialog, a different one must not, and a failed read
+  // must not blank it. Cleared on close so the next Edit pins afresh.
+  useEffect(() => {
+    if (!editOpen) {
+      setEditGraph(null);
+      return;
+    }
+    setEditGraph((pinned) =>
+      pinned === null || pinned.id === graph?.id ? graph : pinned,
+    );
+  }, [editOpen, graph]);
 
   // Load the SELECTED workflow's run history. Re-runs when the selection or
   // company changes, after a manual run, and on every `workflow_run_finished`
@@ -2288,19 +2315,22 @@ export function WorkflowsView({
         onCreated={handleCreated}
       />
 
-      {/* Issue #259: the same dialog in edit mode. `graph` carries the version
+      {/* Issue #259: the same dialog in edit mode. The graph carries the version
           token the save is conditional on, so it is passed as loaded rather
           than copied — and a 409 lands in the banner above, which outlives the
           dialog and holds the way out.
 
-          `open` is gated on `graph` too: without it, a selection that goes away
-          under an open dialog (a company switch, a failed re-read) would leave
-          `workflow` null, which IS create mode — the operator would be looking
-          at a blank New workflow form wearing the Edit title. */}
+          It is `editGraph`, the graph pinned when the dialog opened, not the
+          live `graph` (issue #1006): the selection can move out from under an
+          open dialog, and neither a different workflow's graph nor a failed
+          read may reach an edit in progress. `open` is gated on it for the
+          original reason too — a null `workflow` IS create mode, so the
+          operator would be looking at a blank New workflow form wearing the
+          Edit title. */}
       <WorkflowCreateDialog
         client={client}
         company={company}
-        open={editOpen && graph !== null}
+        open={editOpen && editGraph !== null}
         onOpenChange={(o) => {
           setEditOpen(o);
           // Issue #840 (PR-3): a copilot correction is single-use — dropping it on
@@ -2308,7 +2338,7 @@ export function WorkflowsView({
           // stale correction.
           if (!o) setPrefilledDraft(null);
         }}
-        workflow={graph}
+        workflow={editGraph}
         onSaved={handleSaved}
         onConflict={setConflict}
         prefilledDraft={prefilledDraft}

@@ -13,7 +13,7 @@
 // rather than two because an edit is the same form with the same rules — a
 // second one would drift the moment either side grew a field.
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { History, Loader2, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
@@ -255,6 +255,40 @@ function errorKey(nodeKey: string, field: ValidatedField): string {
  * string, so the sentinel stands in for `destinationKind: ""`. */
 const NO_DESTINATION = "__none__";
 
+/** What the operator is asked before unsaved graph edits are thrown away
+ * (issue #1006). One string, because every path out of the dialog — Esc, a
+ * click outside, Cancel, a hash navigation — has to ask the same question. */
+const DISCARD_PROMPT =
+  "You have unsaved changes to this workflow. Leave without saving them?";
+
+/**
+ * A stable string covering everything the form can change (issue #1006).
+ *
+ * "Has the operator edited anything?" is then ONE comparison against the value
+ * this open hydrated from, rather than a field-by-field diff that goes quietly
+ * wrong the moment `DraftNode` grows a member — which is how half an hour of
+ * graph edits got discarded without a prompt in the first place.
+ *
+ * `key` is excluded on purpose: it is a React row identity handed out by
+ * `nextKey()`, so it differs between two hydrations of the same graph and would
+ * report every freshly-opened dialog as dirty.
+ */
+function draftFingerprint(
+  id: string,
+  name: string,
+  description: string,
+  nodes: DraftNode[],
+  edges: DraftEdge[],
+): string {
+  return JSON.stringify({
+    id,
+    name,
+    description,
+    nodes: nodes.map(({ key: _key, ...rest }) => rest),
+    edges: edges.map(({ key: _key, ...rest }) => rest),
+  });
+}
+
 let seq = 0;
 function nextKey(): string {
   seq += 1;
@@ -489,6 +523,12 @@ export function WorkflowCreateDialog({
   const [readiness, setReadiness] = useState<WorkflowReadiness | null>(null);
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
   const formId = useId();
+  /** The fingerprint of the draft as this open hydrated it (issue #1006).
+   * Rewritten by the hydration effect below — which is the only place the form
+   * is populated from something other than the operator — so a re-hydrate (the
+   * conflict banner's Reload, a History restore) resets the baseline instead of
+   * leaving the dialog permanently "dirty". */
+  const pristineRef = useRef("");
 
   // Reload the roster (for the agent-node picker) and reset the draft each
   // time the dialog opens, so a prior attempt never leaks into the next one.
@@ -512,11 +552,16 @@ export function WorkflowCreateDialog({
     // reopened dialog starts with Draft it inert until a request nobody is
     // waiting for settles.
     setDrafting(false);
-    setId(workflow?.id ?? "");
-    setName(workflow?.name ?? "");
-    setDescription(workflow?.description ?? "");
-    setNodes(workflow ? draftNodes(workflow) : starterNodes());
-    setEdges(workflow ? draftEdges(workflow) : []);
+    // Held as locals rather than read back out of state, so the pristine
+    // fingerprint below is taken from the very values this open hydrates with
+    // (issue #1006). Reading state here would fingerprint the PREVIOUS open —
+    // React has not applied these setters yet — and every field would then
+    // count as edited.
+    let nextId = workflow?.id ?? "";
+    let nextName = workflow?.name ?? "";
+    let nextDescription = workflow?.description ?? "";
+    let nextNodes = workflow ? draftNodes(workflow) : starterNodes();
+    let nextEdges = workflow ? draftEdges(workflow) : [];
     setError(null);
     setFieldErrors({});
     // Issue #274: a fresh open (or a re-hydrate after a restore) must not carry
@@ -547,17 +592,32 @@ export function WorkflowCreateDialog({
     // be a latent bug if that invariant ever drifted.
     if (prefilledDraft) {
       const g = prefilledDraft.workflow;
-      setId(workflow?.id ?? g.id);
-      setName(g.name.trim());
-      setDescription(g.description ?? "");
-      setNodes(draftNodes(g));
-      setEdges(draftEdges(g));
+      nextId = workflow?.id ?? g.id;
+      nextName = g.name.trim();
+      nextDescription = g.description ?? "";
+      nextNodes = draftNodes(g);
+      nextEdges = draftEdges(g);
       setDraftSummary(prefilledDraft.summary ?? null);
       setDraftNotes((prefilledDraft.notes ?? []).filter((n) => n.trim()));
       setReadiness(prefilledDraft.readiness ?? null);
     } else {
       setReadiness(null);
     }
+    setId(nextId);
+    setName(nextName);
+    setDescription(nextDescription);
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    // The baseline every later keystroke is compared against. A copilot
+    // correction counts as pristine for the same reason a saved graph does:
+    // the operator has not touched it yet, so closing loses nothing they wrote.
+    pristineRef.current = draftFingerprint(
+      nextId,
+      nextName,
+      nextDescription,
+      nextNodes,
+      nextEdges,
+    );
     let live = true;
     (async () => {
       try {
@@ -619,6 +679,64 @@ export function WorkflowCreateDialog({
       live = false;
     };
   }, [open, editing, client, company]);
+
+  /**
+   * Whether the form holds edits that closing would destroy (issue #1006).
+   *
+   * Recomputed every render rather than memoised: the fingerprint is a few
+   * hundred bytes of `JSON.stringify` over a form that already re-renders on
+   * every keystroke, and a memo keyed on the draft can go stale against
+   * `pristineRef` on the render where a re-hydrate lands the same values it
+   * replaced — reporting unsaved work that no longer exists.
+   */
+  const dirty =
+    open && draftFingerprint(id, name, description, nodes, edges) !== pristineRef.current;
+
+  /** Close the dialog, asking first if that would throw work away (#1006).
+   * Every deliberate exit routes through here — Esc, a click outside, Cancel —
+   * so there is one answer to "does this lose my edits?" rather than three. */
+  const requestClose = useCallback(() => {
+    if (dirty && !window.confirm(DISCARD_PROMPT)) return;
+    onOpenChange(false);
+  }, [dirty, onOpenChange]);
+
+  // Issue #1006: the tab-level guard. A reload or a close is the one exit the
+  // dialog cannot intercept itself, so it hands the question to the browser.
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      // `preventDefault` is what modern browsers read; `returnValue` is the
+      // legacy spelling some still require. Neither shows our text — the
+      // browser substitutes its own — so there is nothing to word here.
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
+
+  // Issue #1006: the in-app guard. The console routes on the hash, so Back and
+  // every sidebar link arrive here — including the Back press that used to walk
+  // the selection onto a DIFFERENT workflow and re-hydrate this dialog with it
+  // mid-edit. `hashchange` fires after the address bar has already moved, so
+  // declining puts it back; the restore fires the event again, which the
+  // equality check below absorbs.
+  useEffect(() => {
+    if (!dirty) return;
+    let at = window.location.hash;
+    const onHashChange = () => {
+      const moved = window.location.hash;
+      if (moved === at) return;
+      if (window.confirm(DISCARD_PROMPT)) {
+        at = moved;
+        onOpenChange(false);
+        return;
+      }
+      window.location.hash = at;
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [dirty, onOpenChange]);
 
   /**
    * Retires the submit-time banner because the draft it described is gone
@@ -1065,15 +1183,34 @@ export function WorkflowCreateDialog({
     submittingRef.current = true;
     setSubmitting(true);
     setError(null);
-    const graph: WorkflowGraph = {
-      id: id.trim(),
-      name: name.trim(),
-      description: description.trim() || undefined,
-      // Locally-built body; the conditional-write token is passed separately as
-      // `expectedVersion`, so this carries none (issue #1013 makes it explicit).
-      version: null,
-      nodes: nodes.map(
-        (n): WorkflowNode => ({
+    try {
+      // Issue #1006: the graph is assembled INSIDE the `try`. It used to be
+      // built above it, so a serialisation failure escaped past the `finally`
+      // and left `submitting` stuck true — which disables Cancel and gates the
+      // dialog's own `onOpenChange`. The operator was locked in the dialog, and
+      // the only remaining exit, reloading the page, was the one that lost the
+      // edit. Everything that can fail now clears `submitting` on the way out.
+      const outNodes: WorkflowNode[] = [];
+      for (const n of nodes) {
+        // Config: a form kind (#541) rebuilds it from its per-field draft
+        // plus the preserved `extra` bag (so an edit keeps orchestrator keys
+        // it has no control for); a form-less kind passes its raw overlay
+        // straight back out — an edit must not delete what it cannot show.
+        // `undefined` is omitted from the JSON body.
+        let config: unknown = n.config;
+        if (hasConfigForm(n.kind)) {
+          const serialized = configFromDraft(n.kind, n.configDraft, n.configExtra);
+          if (!serialized.ok) {
+            // `validate()` already passed, so this is the form and the
+            // serializer disagreeing — a defect, not something the author did.
+            // Say which node it was and leave the draft exactly as it is: the
+            // dialog stays open, closable, with the work still in it.
+            showError(`${nodeLabel(n)}: ${serialized.error}`);
+            return;
+          }
+          config = serialized.config;
+        }
+        outNodes.push({
           id: n.id.trim(),
           kind: n.kind,
           name: n.name.trim(),
@@ -1095,28 +1232,28 @@ export function WorkflowCreateDialog({
                       : n.destinationTarget.trim() || undefined,
                 }
               : undefined,
-          // Config: a form kind (#541) rebuilds it from its per-field draft
-          // plus the preserved `extra` bag (so an edit keeps orchestrator keys
-          // it has no control for); a form-less kind passes its raw overlay
-          // straight back out — an edit must not delete what it cannot show.
-          // `undefined` is omitted from the JSON body.
-          config: hasConfigForm(n.kind)
-            ? configFromDraft(n.kind, n.configDraft, n.configExtra)
-            : n.config,
+          config,
           onError: n.onError,
           retry: n.retry,
           requiresApproval: n.requiresApproval,
-        }),
-      ),
-      edges: edges.map(
-        (e): WorkflowEdge => ({
-          from: e.from.trim(),
-          to: e.to.trim(),
-          label: e.label.trim() || undefined,
-        }),
-      ),
-    };
-    try {
+        });
+      }
+      const graph: WorkflowGraph = {
+        id: id.trim(),
+        name: name.trim(),
+        description: description.trim() || undefined,
+        // Locally-built body; the conditional-write token is passed separately as
+        // `expectedVersion`, so this carries none (issue #1013 makes it explicit).
+        version: null,
+        nodes: outNodes,
+        edges: edges.map(
+          (e): WorkflowEdge => ({
+            from: e.from.trim(),
+            to: e.to.trim(),
+            label: e.label.trim() || undefined,
+          }),
+        ),
+      };
       if (workflow) {
         // The id keys the saved graph, the schedule and the run history, so it
         // is the graph's own id that is sent, not the (read-only) field —
@@ -1160,7 +1297,17 @@ export function WorkflowCreateDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !submitting && onOpenChange(o)}>
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (submitting) return;
+        // Issue #1006: Base UI reports Esc and an outside click through here,
+        // and both used to close unconditionally. Route them through the same
+        // confirm as Cancel so no exit is quieter than the others.
+        if (o) onOpenChange(true);
+        else requestClose();
+      }}
+    >
       {/* `aria-busy` while a save is in flight (issue #1005): the dialog stays
           on screen and mostly interactive during the round trip, so without it
           a screen reader has nothing to say the form is mid-write. */}
@@ -1169,7 +1316,15 @@ export function WorkflowCreateDialog({
         aria-busy={submitting}
       >
         <DialogHeader>
-          <DialogTitle>{editing ? "Edit workflow" : "New workflow"}</DialogTitle>
+          {/* Issue #1006: an edit names the workflow it is editing. The dialog
+              is reachable from a canvas, a card and a run, and said "Edit
+              workflow" from all of them — so an operator whose selection had
+              moved underneath them had nothing on screen to notice it with. */}
+          <DialogTitle>
+            {editing
+              ? `Edit “${workflow?.name?.trim() || workflow?.id}”`
+              : "New workflow"}
+          </DialogTitle>
           <DialogDescription>
             {editing
               ? "Change the nodes, how they connect, or when it runs. Saving replaces the whole graph."
@@ -1538,7 +1693,7 @@ export function WorkflowCreateDialog({
         )}
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={submitting}>
+          <Button variant="ghost" onClick={requestClose} disabled={submitting}>
             Cancel
           </Button>
           <Button
