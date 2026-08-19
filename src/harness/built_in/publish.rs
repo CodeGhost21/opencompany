@@ -684,11 +684,21 @@ pub fn capture_body(
     source: &str,
     _inferred: ArtifactKind,
 ) -> std::io::Result<PublishPayload> {
+    // Route by size before reading, so the read is bounded by the prose cap: a
+    // file already past it goes straight to bytes, and a file within the cap is
+    // read whole and probed in place.
+    let over_cap = file
+        .metadata()
+        .map(|meta| meta.len() > MAX_ARTIFACT_BODY_BYTES as u64)
+        .unwrap_or(false);
     let bytes = std::fs::read(file)?;
-    if bytes.len() <= MAX_ARTIFACT_BODY_BYTES
-        && let Ok(text) = String::from_utf8(bytes.clone())
-    {
-        return Ok(PublishPayload::Text(text));
+    if !over_cap && std::str::from_utf8(&bytes).is_ok() {
+        // The borrowed probe validates in place; the move below reuses the same
+        // buffer, so a file within the cap is never copied. The probe's `Err`
+        // arm is unreachable here, hence the `expect` on a just-validated vec.
+        return Ok(PublishPayload::Text(
+            String::from_utf8(bytes).expect("probed utf-8 in place"),
+        ));
     }
     Ok(PublishPayload::Bytes {
         mime: mime_guess::from_path(source)
