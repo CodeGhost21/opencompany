@@ -185,13 +185,22 @@ async fn policy_field_reports_the_tier_in_force() {
     let app = router(state_with_company(&home).await);
     let value = query(
         app,
-        r#"{"query":"{ company(id: \"acme\") { policy { mode manifestMode overridden } } }"}"#,
+        r#"{"query":"{ company(id: \"acme\") { policy { mode manifestMode overridden alwaysApprove manifestAlwaysApprove takesEffect tiers { value label description } } } }"}"#,
     )
     .await;
     let policy = &value["data"]["company"]["policy"];
     assert_eq!(policy["mode"], "full", "{value}");
     assert_eq!(policy["manifestMode"], "full", "{value}");
     assert_eq!(policy["overridden"], false, "{value}");
+    assert_eq!(policy["alwaysApprove"].as_array().unwrap().len(), 0, "{value}");
+    assert_eq!(policy["manifestAlwaysApprove"].as_array().unwrap().len(), 0, "{value}");
+    assert!(policy["takesEffect"].as_str().unwrap().contains("next turn"), "{value}");
+    let tiers = policy["tiers"].as_array().unwrap();
+    assert!(tiers.len() >= 4, "expected at least 4 tiers: {value}");
+    assert_eq!(tiers[0]["value"], "readonly");
+    assert!(!tiers[0]["label"].as_str().unwrap().is_empty());
+    assert!(!tiers[0]["description"].as_str().unwrap().is_empty());
+    assert_eq!(tiers[3]["value"], "full");
 }
 
 /// **The anti-drift assertion, and the reason this field maps `PolicyDto`
