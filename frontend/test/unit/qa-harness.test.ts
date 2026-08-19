@@ -27,7 +27,11 @@ import { fileURLToPath } from "node:url";
 import { createContext, runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
-import { runTone, verdictOf } from "@/views/workflows/run-health";
+import {
+  isUndelivered as consoleIsUndelivered,
+  runTone,
+  verdictOf,
+} from "@/views/workflows/run-health";
 import type {
   DeliveryReport,
   WorkflowBlockedNode,
@@ -83,6 +87,7 @@ function loadHarness(fetchImpl?: (path: string, init?: { method?: string }) => P
     _internals: {
       runVerdict: (run: unknown) => string;
       undeliveredCount: (d: DeliveryReport[]) => number;
+      isUndelivered: (d: DeliveryReport) => boolean;
       pendingCount: (d: DeliveryReport[]) => number;
       awaitingCount: (run: unknown) => number;
       isBlocked: (run: unknown) => boolean;
@@ -108,8 +113,11 @@ function run(overrides: Partial<WorkflowRunOutcome>): WorkflowRunOutcome {
   } as WorkflowRunOutcome;
 }
 
-function delivery(status: DeliveryReport["status"]): DeliveryReport {
-  return { node: "report", kind: "channel", target: "operator", status, detail: "" };
+function delivery(
+  status: DeliveryReport["status"],
+  reason?: string,
+): DeliveryReport {
+  return { node: "report", kind: "channel", target: "operator", status, detail: "", reason };
 }
 
 /** The console's label for a run, mapped to the harness's verdict word. */
@@ -392,6 +400,51 @@ describe("runVerdict agrees with the console's runTone", () => {
     ];
     expect(undeliveredCount(deliveries)).toBe(2);
     expect(pendingCount(deliveries)).toBe(1);
+  });
+
+  /**
+   * Issue #981's second half. The harness is pasted against whatever host is in
+   * front of the operator, so its fallback has to move rung-for-rung with the
+   * host's `is_undelivered` and the console's `isUndelivered` — otherwise the
+   * three readings of the same rows diverge exactly where nobody is checking.
+   */
+  it("excuses the same two skipped reasons the console and the host excuse", () => {
+    const { isUndelivered, undeliveredCount } = loadHarness()._internals;
+    expect(isUndelivered(delivery("skipped", "dry-run"))).toBe(false);
+    expect(isUndelivered(delivery("skipped", "already-delivered"))).toBe(false);
+    // The deliberate non-move: this report was produced and then lost.
+    expect(isUndelivered(delivery("skipped", "no-destination-configured"))).toBe(
+      true,
+    );
+    // A host predating issue #248 records no reason; an unreadable one counts.
+    expect(isUndelivered(delivery("skipped"))).toBe(true);
+    // The exemptions are scoped to a skip.
+    expect(isUndelivered(delivery("failed", "dry-run"))).toBe(true);
+    expect(
+      undeliveredCount([
+        delivery("skipped", "dry-run"),
+        delivery("skipped", "already-delivered"),
+        delivery("skipped", "no-destination-configured"),
+      ]),
+    ).toBe(1);
+  });
+
+  it("agrees with the console's isUndelivered on every reason", () => {
+    const { isUndelivered } = loadHarness()._internals;
+    for (const row of [
+      delivery("sent", "channel-posted"),
+      delivery("pending", "parked-for-approval"),
+      delivery("skipped", "dry-run"),
+      delivery("skipped", "already-delivered"),
+      delivery("skipped", "no-destination-configured"),
+      delivery("skipped", "recipient-not-established"),
+      delivery("denied", "email-not-granted"),
+      delivery("failed", "channel-not-wired"),
+    ]) {
+      expect(isUndelivered(row), `${row.status}/${row.reason}`).toBe(
+        consoleIsUndelivered(row),
+      );
+    }
   });
 
   it("reports an unknown run as unknown rather than ok", () => {

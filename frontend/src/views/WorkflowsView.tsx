@@ -98,6 +98,9 @@ import { RunFailurePanel } from "@/views/workflows/RunFailurePanel";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
 import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
+// Issue #981: which nodes produced a report that never went out, so the canvas
+// card can say so beside the DONE badge instead of leaving it to a banner.
+import { undeliveredNodes } from "@/views/workflows/run-health";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
@@ -112,6 +115,11 @@ const EMPTY_FAILED: Record<string, string> = {};
 /** A stable empty default for `runEvents`, so an omitted prop does not hand the
  * fold a fresh array identity on every render. */
 const EMPTY_RUN_EVENTS: CompanyStreamEvent[] = [];
+
+/** A stable empty set for the canvas's undelivered-node marks (issue #981), so
+ * the common case — a run that delivered what it routed — hands `layout` the
+ * same identity every render and does not re-lay the graph out. */
+const EMPTY_UNDELIVERED: Set<string> = new Set();
 
 /** `decodeURIComponent` that survives a hand-edited address bar. A lone `%`
  * makes it throw, and a malformed hash must not take the whole view down —
@@ -1746,13 +1754,27 @@ export function WorkflowsView({
     if (overlayRun) return elapsedFromRun(overlayRun);
     return liveRun?.elapsed ?? {};
   }, [overlayRun, liveRun]);
+  // Issue #981, in the same priority order. The live SSE fold carries no
+  // delivery rows — delivery happens after the engine returns, so they arrive
+  // with the settled body — and correctly contributes nothing here. The
+  // just-finished manual run DOES have them, and is the case the issue was
+  // filed about: an operator presses Run, watches the output node land on DONE,
+  // and the report is gone. It is matched on `runId` so a stale result cannot
+  // mark up a different run's canvas.
+  const paintedUndelivered = useMemo<Set<string>>(() => {
+    if (overlayRun) return undeliveredNodes(overlayRun.deliveries);
+    if (result && (!liveRun || liveRun.runId === result.runId)) {
+      return undeliveredNodes(result.deliveries ?? []);
+    }
+    return EMPTY_UNDELIVERED;
+  }, [overlayRun, result, liveRun]);
 
   const { nodes, edges } = useMemo(
     () =>
       graph
-        ? layout(graph, paintedStates, paintedElapsed)
+        ? layout(graph, paintedStates, paintedElapsed, paintedUndelivered)
         : { nodes: [], edges: [] },
-    [graph, paintedStates, paintedElapsed],
+    [graph, paintedStates, paintedElapsed, paintedUndelivered],
   );
 
   const selected = workflows.find((w) => w.id === selectedId) ?? null;

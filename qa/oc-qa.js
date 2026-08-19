@@ -229,9 +229,30 @@
    * Reports that did not land **and will not without a change**. `pending` is
    * excluded on purpose: it is a report parked for an operator's approval, so
    * counting it here would score a working approvals queue as a failure.
+   *
+   * Two `skipped` reasons are excluded too (issue #981), matching the host's
+   * `is_undelivered` and the console's `isUndelivered`: `already-delivered` (an
+   * earlier run in this approval lineage sent it, issue #438) and `dry-run` (a
+   * test run attempted nothing, on purpose, issue #542). Both describe a report
+   * whose fate is accounted for.
+   *
+   * `no-destination-configured` is deliberately NOT excluded: that report was
+   * produced and then lost, with nothing accounting for it, which is exactly
+   * what issue #925 added the row to make visible.
+   *
+   * An absent `reason` — a host predating issue #248 — counts, which is the
+   * safe direction for a harness that is pasted against whatever host is in
+   * front of the operator.
    */
   function undeliveredCount(deliveries) {
-    return (deliveries || []).filter((d) => d.status !== "sent" && d.status !== "pending").length;
+    return (deliveries || []).filter(isUndelivered).length;
+  }
+
+  /** Whether one delivery row is a report that did not go out. */
+  function isUndelivered(d) {
+    if (d.status === "sent" || d.status === "pending") return false;
+    if (d.status !== "skipped") return true;
+    return d.reason !== "already-delivered" && d.reason !== "dry-run";
   }
 
   /** Reports waiting on an operator's verdict rather than on a fix. */
@@ -1305,6 +1326,7 @@
     _internals: {
       runVerdict,
       undeliveredCount,
+      isUndelivered,
       pendingCount,
       awaitingCount,
       isBlocked,
