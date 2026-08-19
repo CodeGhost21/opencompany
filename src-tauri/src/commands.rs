@@ -13,6 +13,7 @@
 use tauri::State;
 use tauri::ipc::Channel;
 
+use crate::local::LocalInstanceInfo;
 use crate::proxy::{
     Connection, Credential, ProxyRequest, ProxyResponse, SharedProxy, may_carry_a_credential,
 };
@@ -307,15 +308,92 @@ pub async fn oc_forget_device(
     Ok(())
 }
 
-/// Where the in-process host is listening, if one is running.
+/// Where the host rooted at the data dir is listening, if it is running.
+///
+/// Kept alongside [`oc_local_instances`], which supersedes it, because the two
+/// halves of this application ship independently: a `pnpm dev` console built
+/// before the roster existed calls only this, and a shell built before it
+/// answers only this. Both degrade to the single-instance behaviour instead of
+/// to an unhandled `no such command`.
 #[tauri::command]
-pub fn oc_embedded(state: State<'_, crate::AppHandleState>) -> Option<EmbeddedInfo> {
-    state.embedded.as_ref().map(|host| EmbeddedInfo {
-        base_url: host.base_url(),
-        data_dir: state.data_dir.display().to_string(),
-        instance_id: host.instance_id().to_string(),
-        operator_email: host.operator_email().to_string(),
-    })
+pub async fn oc_embedded(state: State<'_, crate::AppHandleState>) -> Result<Option<EmbeddedInfo>, String> {
+    let local = state.local.lock().await;
+    Ok(local.default_instance().and_then(|instance| {
+        Some(EmbeddedInfo {
+            base_url: instance.base_url?,
+            data_dir: instance.data_dir,
+            instance_id: instance.instance_id?,
+            operator_email: instance.operator_email?,
+        })
+    }))
+}
+
+/// Every host this machine runs, listening or not.
+///
+/// The listing is the whole surface: creating, starting and stopping all
+/// answer with the affected instance, and the console re-reads this rather
+/// than keeping its own idea of the roster. One source of truth, on the side
+/// that actually holds the sockets.
+#[tauri::command]
+pub async fn oc_local_instances(
+    state: State<'_, crate::AppHandleState>,
+) -> Result<Vec<LocalInstanceInfo>, String> {
+    Ok(state.local.lock().await.list())
+}
+
+/// Adds a host over a fresh data root on this machine, and starts it.
+///
+/// Its own root, never a second process over an existing one: two hosts over
+/// one root overwrite each other's companies, which is why `prepare_instance`
+/// locks it in the first place.
+#[tauri::command]
+pub async fn oc_create_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    label: String,
+) -> Result<LocalInstanceInfo, String> {
+    state.local.lock().await.create(&label).await
+}
+
+#[tauri::command]
+pub async fn oc_start_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<LocalInstanceInfo, String> {
+    state.local.lock().await.start(&id).await
+}
+
+/// Stops a host, freeing its port and — the part that matters — its data root,
+/// so a terminal `opencompany serve` can take it.
+#[tauri::command]
+pub async fn oc_stop_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<LocalInstanceInfo, String> {
+    state.local.lock().await.stop(&id)
+}
+
+#[tauri::command]
+pub async fn oc_rename_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+    label: String,
+) -> Result<LocalInstanceInfo, String> {
+    state.local.lock().await.rename(&id, &label)
+}
+
+/// Drops a host from the roster. **Leaves its data on disk** — see
+/// [`crate::local::LocalHosts::forget`].
+#[tauri::command]
+pub async fn oc_forget_local_instance(
+    state: State<'_, crate::AppHandleState>,
+    id: String,
+) -> Result<(), String> {
+    let mut local = state.local.lock().await;
+    // Stopping first is what makes the removal complete: a forgotten instance
+    // whose host kept listening would hold its root against the terminal, and
+    // stay reachable from a console row nothing lists any more.
+    let _ = local.stop(&id);
+    local.forget(&id)
 }
 
 #[cfg(test)]
