@@ -346,7 +346,7 @@ pub async fn build_capabilities(
         // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
         // `deps.delegations`) are all done by here.
         let agent: Arc<dyn AgentRunner> = Arc::new(HarnessAgentRunner::new(
-            pool,
+            turn,
             deps,
             record.clone(),
             company.clone(),
