@@ -679,12 +679,14 @@ impl ParkedCalls {
 }
 
 impl HarnessAgentRunner {
-    /// Builds a runner over an already-populated pool for `company`, carrying
-    /// the run's id (issue #395) and the operator's run request (issue #154)
-    /// when one was supplied.
+    /// Builds a runner over `turn` for `company`, carrying the run's id (issue
+    /// #395) and the operator's run request (issue #154) when one was supplied.
+    /// The turn is the lane-aware router where lanes are declared, or the
+    /// default lane over the pool otherwise, so a workflow agent node addressing
+    /// a named-harness agent reaches that harness's engine.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        pool: Arc<HarnessPool>,
+        turn: Arc<dyn crate::runtime::delegation::RunTurn>,
         deps: HarnessDeps,
         record: CompanyRecord,
         company: CompanyId,
@@ -698,7 +700,7 @@ impl HarnessAgentRunner {
         board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
     ) -> Self {
         Self {
-            pool,
+            turn,
             deps,
             record,
             company,
