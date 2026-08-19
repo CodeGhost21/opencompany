@@ -267,6 +267,20 @@ export interface SetupRoster {
    * about it.
    */
   uncovered?: string[];
+  /**
+   * Why this is the curated team, when it is. Absent on the `model` path.
+   *
+   * `"no_model"` — no credential was reachable, so no design pass ran.
+   * `"not_designable"` — a model answered and the answer was unusable: too thin,
+   * unreadable, or the reference team handed back unchanged. In practice, the
+   * answers were too sparse to design from.
+   *
+   * The review screen needs the distinction because the **action differs**. It
+   * used to say "we couldn't reach a model" for every fallback, which is a plain
+   * falsehood in the second case — and it pointed the operator at adding a key
+   * when what they actually needed was to say more about their business.
+   */
+  reason?: "no_model" | "not_designable";
 }
 
 /**

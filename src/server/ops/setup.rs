@@ -44,7 +44,9 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::setup::{ProposedAgent, RosterProposal, SetupAnswers, template_proposal};
+use crate::company::setup::{
+    FallbackReason, ProposedAgent, RosterProposal, SetupAnswers, template_proposal,
+};
 use crate::error::OpenCompanyError;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::CompanyRecord;
@@ -124,6 +126,9 @@ struct RosterProposalDto {
     jobs: Vec<String>,
     /// The jobs no teammate owns — non-empty only on the `model` path.
     uncovered: Vec<String>,
+    /// Why this is the curated team: `no_model` or `not_designable`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
 impl From<RosterProposal> for RosterProposalDto {
@@ -134,6 +139,7 @@ impl From<RosterProposal> for RosterProposalDto {
             source: proposal.source.as_str().to_string(),
             jobs: proposal.jobs,
             uncovered: proposal.uncovered,
+            reason: proposal.reason.map(|r| r.as_str()),
         }
     }
 }
@@ -199,7 +205,7 @@ async fn store_answers(company: &ScopedCompany, answers: &SetupAnswers) -> Resul
 #[cfg(feature = "openhuman")]
 async fn build_proposal(company: &ScopedCompany, answers: &SetupAnswers) -> RosterProposal {
     let Some(builder) = company.runtime.roster_builder().cloned() else {
-        return template_proposal(answers);
+        return template_proposal(answers, FallbackReason::NoModel);
     };
     let provider = builder.provider_slug();
     let (proposal, usage) = builder.propose(answers).await;
@@ -221,7 +227,7 @@ async fn build_proposal(company: &ScopedCompany, answers: &SetupAnswers) -> Rost
 /// curated template is the whole answer, and it is a good one.
 #[cfg(not(feature = "openhuman"))]
 async fn build_proposal(_company: &ScopedCompany, answers: &SetupAnswers) -> RosterProposal {
-    template_proposal(answers)
+    template_proposal(answers, FallbackReason::NoModel)
 }
 
 /// Loads the addressed company's record, or 404s.

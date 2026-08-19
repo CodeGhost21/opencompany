@@ -1351,7 +1351,9 @@ function ReviewStep({
         <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
           {roster.source === "model"
             ? "Built from what you told us. Rename or drop anyone — you can add more later."
-            : "A solid standard team for your industry — we couldn't reach a model to tailor it. Rename or drop anyone, and add a key later to redesign."}
+            : roster.reason === "not_designable"
+              ? "A standard team for your industry — there wasn't enough in your answers to design one around. Go back and say more about the business, or rename and drop anyone here."
+              : "A solid standard team for your industry — we couldn't reach a model to tailor it. Rename or drop anyone, and add a key later to redesign."}
         </p>
       </div>
 

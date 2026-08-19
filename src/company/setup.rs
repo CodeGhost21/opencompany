@@ -181,11 +181,28 @@ impl AgentFocus {
     }
 }
 
-/// The belt for an optional focus. `None` inherits the company belt, which is
-/// what every setup-built agent did before focus existed — so an unreadable or
-/// absent focus degrades to the old behaviour rather than to a mute teammate.
+/// The belt for an optional focus. An unreadable or absent one gets the
+/// **narrowest working belt**, never an empty list.
+///
+/// ## This failed open, and a prompt-injection test found it
+///
+/// It returned `Vec::new()` for `None`, reasoning that an unknown focus should
+/// degrade to the pre-focus behaviour — "worse, but never broken". That was the
+/// wrong default for a permission boundary, and it inverted the whole control:
+/// an empty `tools` list is read as *inherit the company belt* by
+/// [`agent_effective_grants`](crate::runtime::builder), and a setup-built
+/// company's belt is the globals default `["*", "media", "composio"]`. So an
+/// **invalid** focus produced a wider agent than any valid one, and anything able
+/// to influence that string — the operator's own free text reaches a model that
+/// writes it — escaped the narrowing simply by being unrecognisable.
+///
+/// [`WRITING`](AgentFocus::Writing)'s belt is the floor instead: the workspace,
+/// documents and files. A teammate that lands there can still do its work, and
+/// no unrecognised value can ever buy more authority than a recognised one.
+/// Fail closed, then, in the only direction that matters — the failure mode is a
+/// teammate that cannot browse, not one holding a spend authority.
 pub fn tools_for_focus(focus: Option<AgentFocus>) -> Vec<String> {
-    focus.map(AgentFocus::tools).unwrap_or_default()
+    focus.unwrap_or(AgentFocus::Writing).tools()
 }
 
 /// Reads a focus off the wire, treating anything unrecognised as absent.
@@ -707,6 +724,12 @@ pub struct RosterProposal {
     /// makes no claim about a list it never read. A fallback roster reports its
     /// provenance instead, which is the honest thing to say about it.
     pub uncovered: Vec<String>,
+    /// Why this is the curated team, when it is. `None` on the model path.
+    ///
+    /// The review screen said "we couldn't reach a model" for every fallback,
+    /// which is false in the two cases where a model answered and its answer was
+    /// unusable. See [`FallbackReason`].
+    pub reason: Option<FallbackReason>,
 }
 
 /// Who wrote a proposed roster.
@@ -727,6 +750,39 @@ pub enum RosterSource {
     Fallback,
 }
 
+/// Why a roster fell back to the curated team.
+///
+/// ## The copy was telling operators something false
+///
+/// The review screen said "we couldn't reach a model to tailor it" for *every*
+/// fallback, because [`RosterSource::Fallback`] was the only thing it had to go
+/// on. That is true when no credential is wired and false in the two cases where
+/// a model answered and its answer was unusable — the operator is then told the
+/// host could not reach something it reached fine.
+///
+/// It matters because the **action differs**. No model means "add a key". An
+/// unusable answer means "you told us very little; go back and say more". A
+/// single sentence covering both can only be vague enough to be useless.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FallbackReason {
+    /// No credential was reachable, so no design pass ran at all.
+    NoModel,
+    /// A model answered and the answer could not be used: unreadable, too thin
+    /// to be a company, or the reference team handed back unchanged. Almost
+    /// always means the operator's answers were too sparse to design from.
+    NotDesignable,
+}
+
+impl FallbackReason {
+    /// The wire spelling the console reads.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoModel => "no_model",
+            Self::NotDesignable => "not_designable",
+        }
+    }
+}
+
 impl RosterSource {
     /// The wire spelling the console reads.
     pub fn as_str(self) -> &'static str {
@@ -743,12 +799,13 @@ impl RosterSource {
 /// This is both the fast path (no inference credential wired) and the floor
 /// every other path falls back to, which is why it lives here rather than
 /// beside the pass that polishes it.
-pub fn template_proposal(answers: &SetupAnswers) -> RosterProposal {
+pub fn template_proposal(answers: &SetupAnswers, reason: FallbackReason) -> RosterProposal {
     let template = match_template(answers);
     RosterProposal {
         agents: validate_roster(template.proposed()),
         template_key: template.key,
         source: RosterSource::Fallback,
+        reason: Some(reason),
         jobs: job_items(&answers.automate),
         // A curated team was chosen by keyword, not designed against this list,
         // so it claims nothing about it. Saying "all of it is uncovered" would
@@ -1223,7 +1280,10 @@ mod tests {
     /// offline path and every failure path.
     #[test]
     fn the_fallback_is_a_whole_curated_team_and_says_so() {
-        let proposal = template_proposal(&answers("I sell homeware online", ""));
+        let proposal = template_proposal(
+            &answers("I sell homeware online", ""),
+            FallbackReason::NoModel,
+        );
         assert_eq!(proposal.template_key, "ecommerce");
         assert_eq!(proposal.source, RosterSource::Fallback);
         assert_eq!(proposal.source.as_str(), "fallback");
@@ -1490,7 +1550,13 @@ mod tests {
         for invented in ["marketing", "", "  ", "RESEARCH!"] {
             assert_eq!(AgentFocus::from_wire(invented), None, "{invented:?}");
         }
-        assert!(tools_for_focus(None).is_empty());
+        // Fail CLOSED: never an empty list, because empty means "inherit the
+        // company belt" — which for a setup-built company is
+        // `["*", "media", "composio"]`. An unrecognised value must not buy more
+        // authority than a recognised one.
+        let unknown = tools_for_focus(None);
+        assert!(!unknown.is_empty(), "an empty belt inherits everything");
+        assert_eq!(unknown, AgentFocus::Writing.tools());
         // And it must not take the surrounding roster down at the wire.
         let wire = r#"{"name":"A","role":"Analyst","description":"d","focus":"marketing"}"#;
         let parsed: ProposedAgent = serde_json::from_str(wire).expect("unknown focus must parse");
@@ -1503,7 +1569,10 @@ mod tests {
     /// what would happen if only the model path carried a focus.
     #[test]
     fn the_curated_fallback_is_scoped_too() {
-        let proposal = template_proposal(&answers("I sell homeware online", ""));
+        let proposal = template_proposal(
+            &answers("I sell homeware online", ""),
+            FallbackReason::NoModel,
+        );
         assert!(proposal.agents.iter().all(|a| a.focus.is_some()));
         let manifest = manifest_from_setup(
             &answers("I sell homeware online", ""),
@@ -1599,10 +1668,10 @@ mod tests {
     /// reports its provenance rather than a coverage claim it cannot make.
     #[test]
     fn the_fallback_echoes_the_jobs_but_claims_no_coverage() {
-        let proposal = template_proposal(&answers(
-            "I sell homeware online",
-            "Meta ads, order dispatch",
-        ));
+        let proposal = template_proposal(
+            &answers("I sell homeware online", "Meta ads, order dispatch"),
+            FallbackReason::NoModel,
+        );
         assert_eq!(proposal.jobs, vec!["Meta ads", "order dispatch"]);
         assert!(
             proposal.uncovered.is_empty(),
@@ -1666,5 +1735,60 @@ mod tests {
     #[test]
     fn an_empty_roster_is_not_a_copy() {
         assert!(!is_entirely_reference_team(&[], &ECOMMERCE));
+    }
+
+    /// The hole a prompt-injection test found: an **invalid** focus used to
+    /// produce a wider agent than any valid one, because an empty `tools` list is
+    /// read as "inherit the company belt" and that belt is
+    /// `["*", "media", "composio"]`.
+    ///
+    /// Quantified over the whole vocabulary plus the unknown case, so the
+    /// invariant is "no focus, recognised or not, out-grants another" rather than
+    /// four separate assertions about four lists.
+    #[test]
+    fn an_unrecognised_focus_can_never_out_grant_a_recognised_one() {
+        const FORBIDDEN: [&str; 5] = ["media", "composio", "search", "repo", "shell"];
+        let unknown = tools_for_focus(AgentFocus::from_wire("media"));
+        assert!(!unknown.is_empty());
+        for grant in &unknown {
+            let namespace = grant.split(['.', '_', ':']).next().unwrap_or(grant);
+            assert!(
+                !FORBIDDEN.contains(&namespace),
+                "unknown focus grants {grant}"
+            );
+            assert_ne!(grant, "*");
+        }
+        // And the belt it lands on is one a real focus already has, not a
+        // bespoke list that could drift away from the vocabulary.
+        assert!(
+            AgentFocus::ALL.iter().any(|f| f.tools() == unknown),
+            "the fallback belt must be one of the real ones: {unknown:?}"
+        );
+    }
+
+    /// The whole point, end to end: a roster whose focus values were tampered
+    /// with still yields agents that ask for a belt rather than inheriting one.
+    #[test]
+    fn a_tampered_focus_still_narrows_the_agent() {
+        let wire = r#"[
+            {"name":"A","role":"Ops","description":"d","focus":"media"},
+            {"name":"B","role":"Money","description":"d","focus":"composio"},
+            {"name":"C","role":"Writer","description":"d"}
+        ]"#;
+        let roster: Vec<ProposedAgent> = serde_json::from_str(wire).expect("parses");
+        let manifest = manifest_from_setup(&answers("a shop", ""), &roster, None);
+        for agent in &manifest.agents {
+            assert!(!agent.tools.is_empty(), "{} inherits the lot", agent.id);
+            assert!(
+                !agent
+                    .tools
+                    .iter()
+                    .any(|t| t == "media" || t == "composio" || t == "*"),
+                "{} holds {:?}",
+                agent.id,
+                agent.tools
+            );
+        }
+        assert_eq!(manifest.validate(), Vec::<String>::new());
     }
 }

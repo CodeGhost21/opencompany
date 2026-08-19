@@ -48,9 +48,9 @@ use tinyagents::harness::message::Message;
 use tinyagents::harness::model::{ModelRequest, ModelResponse};
 
 use crate::company::setup::{
-    AgentFocus, MAX_AGENTS, MAX_DESCRIPTION, MIN_AGENTS, ProposedAgent, RosterProposal,
-    RosterSource, RosterTemplate, SetupAnswers, is_entirely_reference_team, job_items,
-    match_template, template_proposal, uncovered_indices, validate_roster,
+    AgentFocus, FallbackReason, MAX_AGENTS, MAX_DESCRIPTION, MIN_AGENTS, ProposedAgent,
+    RosterProposal, RosterSource, RosterTemplate, SetupAnswers, is_entirely_reference_team,
+    job_items, match_template, template_proposal, uncovered_indices, validate_roster,
 };
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;
@@ -173,7 +173,10 @@ impl RosterBuilder {
     pub async fn propose(&self, answers: &SetupAnswers) -> (RosterProposal, TokenUsage) {
         let template = match_template(answers);
         let jobs = job_items(&answers.automate);
-        let fallback = || template_proposal(answers);
+        // The reason travels with the fallback, because the operator's next
+        // move depends on it: "add a key" and "tell us more" are different
+        // sentences, and one covering both is too vague to act on.
+        let fallback = |reason: FallbackReason| template_proposal(answers, reason);
         // One deadline for the whole pass, not one per call. The re-ask below is
         // a second call, and the thing being bounded is how long a person stares
         // at a build-out screen — which does not double because the host decided
@@ -188,7 +191,10 @@ impl RosterBuilder {
             .await;
         let mut usage = first.usage;
         let Some(drafted) = first.roster else {
-            return (fallback(), usage);
+            // `attempt` reports no roster for two different reasons, and only it
+            // knows which: a call that never landed, or an answer that could not
+            // be read. Carried through rather than guessed at here.
+            return (fallback(first.reason), usage);
         };
 
         let mut best = drafted;
@@ -244,7 +250,7 @@ impl RosterBuilder {
                 minimum = MIN_AGENTS,
                 "[setup] the model's roster was too thin to be a company; shipping the curated one"
             );
-            return (fallback(), usage);
+            return (fallback(FallbackReason::NotDesignable), usage);
         }
 
         let uncovered: Vec<String> = gaps.iter().filter_map(|i| jobs.get(*i).cloned()).collect();
@@ -258,7 +264,7 @@ impl RosterBuilder {
                 template = template.key,
                 "[setup] the model returned the reference team unchanged; reporting it as curated"
             );
-            let mut proposal = fallback();
+            let mut proposal = fallback(FallbackReason::NotDesignable);
             proposal.jobs = jobs;
             return (proposal, usage);
         }
@@ -278,6 +284,8 @@ impl RosterBuilder {
                 source: RosterSource::Model,
                 jobs,
                 uncovered,
+                // A designed roster has no fallback reason to report.
+                reason: None,
             },
             usage,
         )
@@ -289,7 +297,7 @@ impl RosterBuilder {
     async fn attempt(&self, message: Message, deadline: Instant) -> Attempt {
         let now = Instant::now();
         if now >= deadline {
-            return Attempt::empty();
+            return Attempt::unreachable();
         }
         let budget = deadline - now;
 
@@ -305,29 +313,33 @@ impl RosterBuilder {
             Ok(Ok(response)) => response,
             Ok(Err(err)) => {
                 tracing::info!(error = %err, "[setup] the model could not be reached");
-                return Attempt::empty();
+                return Attempt::unreachable();
             }
             Err(_elapsed) => {
                 tracing::info!(
                     seconds = SETUP_TIMEOUT.as_secs(),
                     "[setup] the model did not answer in time"
                 );
-                return Attempt::empty();
+                return Attempt::unreachable();
             }
         };
 
         let usage = usage_from(&response);
         let Some(draft) = parse_draft(&response.text()) else {
             tracing::info!("[setup] the model's answer could not be read as a roster");
+            // Reached, answered, unreadable. Not a connectivity problem, so the
+            // operator's next move is "say more", not "add a key".
             return Attempt {
                 roster: None,
                 usage,
+                reason: FallbackReason::NotDesignable,
             };
         };
 
         Attempt {
             roster: Some(Drafted::from_draft(draft)),
             usage,
+            reason: FallbackReason::NotDesignable,
         }
     }
 }
@@ -337,13 +349,18 @@ impl RosterBuilder {
 struct Attempt {
     roster: Option<Drafted>,
     usage: TokenUsage,
+    /// Why `roster` is `None`. Meaningless when it is `Some`.
+    reason: FallbackReason,
 }
 
 impl Attempt {
-    fn empty() -> Self {
+    /// No roster, because the call never landed — a timeout, or a provider that
+    /// could not be reached.
+    fn unreachable() -> Self {
         Self {
             roster: None,
             usage: TokenUsage::default(),
+            reason: FallbackReason::NoModel,
         }
     }
 }
@@ -463,7 +480,13 @@ fn system_prompt() -> String {
          that sells things needs someone watching the money and someone answering customers, \
          whether or not they said so. A team that covers only the list is a checklist, not a \
          company. Those roles carry an empty `covers`, which is expected.\n\
-         - If they describe two businesses, staff both.\n\
+         - Count the distinct things they do, and staff EACH one. \"A yoga studio, plus I sell \
+         mats online\" is two businesses with different work — classes and an online shop — and \
+         each needs somebody who owns it end to end. Staffing only the one they happened to \
+         mention first leaves half their company empty.\n\
+         - You may return up to {MAX_AGENTS}. Use the room when the business has more surface \
+         than {MIN_AGENTS} roles can hold; returning the minimum for a business with two \
+         revenue lines under-staffs it.\n\
          - Use the roles that fit THIS business. A reference team for the closest common case is \
          included below — treat it as a quality bar for naming and phrasing, not as a menu. \
          Depart from it whenever what they said calls for something else.\n\n\
@@ -1004,5 +1027,56 @@ mod test {
         // The jobs still ride along: they are the operator's own words, and the
         // review screen shows them whichever way the roster was produced.
         assert_eq!(proposal.jobs, vec!["meta ads", "dispatch"]);
+    }
+
+    /// The copy bug the vague-input test exposed: every fallback reported
+    /// "we couldn't reach a model", including the two where a model answered
+    /// fine and its answer was unusable. The operator was then pointed at adding
+    /// a key when what they needed was to say more.
+    #[tokio::test]
+    async fn an_unusable_answer_reports_a_different_reason_than_an_unreachable_model() {
+        let answers = SetupAnswers {
+            industry: "just me and my laptop".to_string(),
+            team_hint: String::new(),
+            automate: "everything honestly".to_string(),
+        };
+
+        // Reached, answered, and the answer was the reference team verbatim.
+        let echoed = roster_json(&[
+            ("Operations Lead", "operations", &[]),
+            ("Researcher", "research", &[]),
+            ("Writer", "writing", &[]),
+            ("Analyst", "analysis", &[]),
+            ("Support Specialist", "operations", &[]),
+        ]);
+        let (proposal, _) = builder(SequencedModel::new(&[&echoed]))
+            .propose(&answers)
+            .await;
+        assert_eq!(proposal.source, RosterSource::Fallback);
+        assert_eq!(
+            proposal.reason,
+            Some(FallbackReason::NotDesignable),
+            "a model that answered must not be reported as unreachable"
+        );
+
+        // Reached, answered, unreadable — same reason, same next step.
+        let (proposal, _) = builder(SequencedModel::new(&["not json at all"]))
+            .propose(&answers)
+            .await;
+        assert_eq!(proposal.reason, Some(FallbackReason::NotDesignable));
+    }
+
+    /// A designed roster reports no reason at all — there is nothing to explain.
+    #[tokio::test]
+    async fn a_designed_roster_carries_no_fallback_reason() {
+        let model = SequencedModel::new(&[&roster_json(&[
+            ("Bookings", "operations", &[0]),
+            ("Stock", "operations", &[1]),
+            ("Billing", "analysis", &[2]),
+            ("Studio Ops", "operations", &[]),
+        ])]);
+        let (proposal, _) = builder(model).propose(&three_jobs()).await;
+        assert_eq!(proposal.source, RosterSource::Model);
+        assert_eq!(proposal.reason, None);
     }
 }

@@ -957,6 +957,11 @@ pub struct SetupRosterDto {
     /// The jobs no teammate owns. Non-empty only on the `model` path; a curated
     /// team makes no coverage claim about a list it never read.
     uncovered: Vec<String>,
+    /// Why this is the curated team: `no_model` or `not_designable`. Absent on
+    /// the `model` path. The review screen needs it because the operator's next
+    /// move differs — "add a key" versus "tell us more".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
 }
 
 /// What `POST /api/v1/setup/inference/test` accepts.
@@ -1172,6 +1177,7 @@ async fn propose_roster(
         source: proposal.source.as_str().to_string(),
         jobs: proposal.jobs,
         uncovered: proposal.uncovered,
+        reason: proposal.reason.map(|r| r.as_str()),
     }))
 }
 
@@ -1186,7 +1192,11 @@ async fn propose_for_setup(
         // Unmetered on purpose — there is no company to charge yet. See
         // `RosterBuilder::for_setup`.
         Some(builder) => builder.propose(answers).await.0,
-        None => crate::company::setup::template_proposal(answers),
+        // No builder means no credential was reachable at all.
+        None => crate::company::setup::template_proposal(
+            answers,
+            crate::company::setup::FallbackReason::NoModel,
+        ),
     }
 }
 
@@ -1197,5 +1207,8 @@ async fn propose_for_setup(
     answers: &crate::company::setup::SetupAnswers,
     _credential: Option<&str>,
 ) -> crate::company::setup::RosterProposal {
-    crate::company::setup::template_proposal(answers)
+    crate::company::setup::template_proposal(
+        answers,
+        crate::company::setup::FallbackReason::NoModel,
+    )
 }
