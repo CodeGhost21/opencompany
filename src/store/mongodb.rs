@@ -4338,6 +4338,8 @@ mod test {
             !dangling.contains(&owned.as_ref()),
             "a row whose company exists must not be: {report:?}"
         );
+
+        drop_db(&s).await;
     }
 
     /// Shared-single-DB namespacing: two tenants registering the same template
