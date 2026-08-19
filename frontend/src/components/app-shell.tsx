@@ -181,10 +181,10 @@ const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
 const WORKFLOW_EVENT_WINDOW = 300;
 
 /**
- * Operator-facing copy for a `connect_error` code from the host's OAuth
- * callback (issue #300). The host sends a stable code rather than the
- * provider's own error text — that text is attacker-influenced and may carry
- * credential material, so it never leaves the host's logs.
+ * Operator-facing copy for a legacy `connect_error` query from the former
+ * native OAuth callback (issue #300). The callback now ends in its own dated
+ * explanatory page (#838), but an older bookmarked URL still gets a safe
+ * message rather than raw provider-controlled error text.
  *
  * Every message says what to do next: the whole point of the bounce-back is
  * that a failed handshake is recoverable, not a dead end. An unrecognized code
@@ -485,22 +485,20 @@ export function AppShell({
   // in the feed both surfaces read.
   const pending = feed.status.pending_approvals;
 
-  // OAuth connect bounce-back: the host's callback redirects the browser to
-  // `…/connections?connected={provider}` after storing the token, or to
-  // `…/connections?connect_error={code}[&provider={id}]` when the handshake
-  // failed. Land the operator on the Connections page either way, say what
-  // happened, then strip the params so a refresh doesn't re-fire them. Runs
-  // once; StrictMode's double invoke is harmless because the first run clears
-  // the params the second reads.
+  // A legacy native OAuth callback may have left `connected` or `connect_error`
+  // in a bookmarked URL. Land the operator on Connections, say what happened,
+  // then strip the params so a refresh does not re-fire them. The #838 callback
+  // itself now terminates on its explanatory page and never writes a credential.
+  // Runs once; StrictMode's double invoke is harmless because the first run
+  // clears the params the second reads.
   //
   // Connections is a page of the Settings section now (`#/settings/connections`),
   // so the bounce-back lands there rather than on a top-level view.
   //
-  // The failure half matters as much as the success half: before issue #300 the
-  // host answered a cancelled or expired handshake with a JSON body, which the
-  // browser rendered as the page — a dead end with no way back into the
-  // console. The host now always redirects, so this is where it becomes
-  // recoverable.
+  // Before issue #300 the host answered a cancelled or expired handshake with a
+  // JSON body, which the browser rendered as the page — a dead end with no way
+  // back into the console. Preserve the readable landing for legacy URLs even
+  // though #838 no longer redirects new native OAuth callbacks here.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const connected = params.get("connected");
