@@ -53,6 +53,17 @@ pub mod pages_tools;
 /// First-run company setup's pass: one tool-less model call that designs a
 /// company's starting team from three answers. See [`roster_build`].
 pub mod roster_build;
+/// Issue #1032: the in-turn spend brake — the
+/// [`StopHook`](oh::agent::stop_hooks::StopHook) wrapper that makes a budget
+/// halt observable to this crate, and the [`SpendHalt`] record the
+/// operator-facing notice is composed from. Read by
+/// [`TurnOutcome::halted_for_spend`](built_in::TurnOutcome::halted_for_spend).
+pub mod spend;
+/// Issue #1032: end-to-end proof that a turn stopped by its in-turn spend
+/// brake **says so** — and says something different from a turn that paused at
+/// its step cap. Test-only.
+#[cfg(test)]
+mod spend_halt_turn_test;
 
 /// The ACP `RunTurn`, under the path it had before the split.
 ///
