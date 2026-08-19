@@ -1283,18 +1283,43 @@ export function AppShell({
    * rows are a running turn's only visible trace, and `onSendStart` cleared
    * them at the top of this POST, so anything still there arrived during it.
    *
-   * What it pointedly does **not** do is arm an open turn. A throw carries no
-   * turn id, so there would be no row for the poll to read and the working
-   * indicator would spin with nothing able to take it down — a worse lie than
-   * the missing one. The view's `Couldn't send` line is what tells the operator
-   * where they stand; a reply landing afterwards does not make it untrue.
+   * What it pointedly does **not** do is fabricate a turn id. A throw carries
+   * no turn id of its own, so the poll could not be armed from the failure
+   * alone without risking a spinner that nothing would ever take down.
+   *
+   * But a throw is **not** proof the host never accepted the turn — a cut
+   * connection after the host journaled it is the whole premise of this
+   * feature — so the durable row may exist even though the response died.
+   * Re-query the open rows and, if a matching `pending`/`running` turn for this
+   * thread was journaled, register it. That arms the real poll-and-history
+   * recovery path (issue #983), the only delivery that works when `/events` is
+   * buffered or unavailable; the poll's terminal transition re-reads
+   * `chat/history`, so the reply the host went on to write lands on screen
+   * without relying on SSE. If no such row exists, nothing is armed and the
+   * view's `Couldn't send` line stands alone — a throw with no durable turn
+   * behind it is not a working row to be invented.
    */
   const onSendFailed = useCallback(
     (threadId: string) => {
       const held = pendingPostThreadsRef.current.failed(threadId);
       held.forEach((frame) => renderAgentReply(frame));
+
+      // Discover whether the host kept the turn after the request died. The
+      // throw tells us nothing, but the run rows do: a `pending`/`running` row
+      // naming this thread means the turn is durable and worth polling to its
+      // terminal `chat/history` re-read — the SSE-less recovery path.
+      listRuns(client, company, { status: ["pending", "running"] })
+        .then((runs) => {
+          if (!mountedRef.current) return;
+          const open = openTurnsFromRuns(runs);
+          const durable = open[threadId];
+          if (durable) setOpenTurns((prev) => ({ ...prev, [threadId]: durable }));
+        })
+        .catch(() => {
+          /* host without /runs, or offline — nothing to re-arm */
+        });
     },
-    [renderAgentReply],
+    [client, company, renderAgentReply],
   );
 
   // Fold one live turn frame into the in-flight thread's timeline: a `tool_call`
