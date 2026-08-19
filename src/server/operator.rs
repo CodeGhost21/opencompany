@@ -1877,9 +1877,7 @@ async fn chat_and_emit(
         accepted,
     });
 
-    if detach
-        && let Some(turn_id) = turn_id.as_ref()
-    {
+    if detach && let Some(turn_id) = turn_id.as_ref() {
         // Nothing here waits on the turn. The webhook fan-out still owes the
         // report, so it moves onto its own task rather than being dropped — a
         // detached turn must not silently stop notifying subscribers. Same shape
