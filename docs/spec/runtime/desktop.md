@@ -361,8 +361,7 @@ The two hosts differ in exactly one decision, `embedded::FirstRun`:
 Seeding is not merely "adds a company". `AppSpec` reports
 `setup_complete: stamp || !registry.is_empty()`, and the console opens
 `views/setup/SetupWizard.tsx` only on `setup_complete: false` — so a seeded
-company **suppresses the wizard permanently**. That coupling is why the choice
-lives at boot rather than in the UI, and why both halves are pinned by a test
+company **suppresses the wizard permanently**. Both halves are pinned by a test
 that reads `/spec` over HTTP rather than counting companies.
 
 `RunSetupWizard` skips the *seed* half of `bootstrap_companies` and keeps the
@@ -456,6 +455,26 @@ Profiles written before the identity was reported carry neither it nor an
 left: this client's own label for its host, at a loopback address. Narrow on
 purpose — a host an operator added by hand is labelled by authority
 (`127.0.0.1:8080`), never with that string.
+
+## Running the shell in development
+
+A debug build loads `devUrl` rather than the embedded bundle, so without a
+console dev server the window is blank. Use:
+
+```bash
+OPENCOMPANY_DATA_DIR=$PWD/target/desktop-dev ./scripts/desktop-dev.sh
+```
+
+It starts the dev server (reusing one already on `:5173`), waits for it to
+answer, and runs the shell from `src-tauri/`.
+
+**Not** `build.beforeDevCommand`. The Tauri CLI runs that hook from a directory
+it *derives* by scanning for a `package.json`, and which one it picks is not
+stable — on a macOS checkout it lands in `frontend/`, on CI's runner it landed
+in `vendor/openhuman/`. No relative path is correct from both, so both hooks
+are deliberately empty and `ci.yml` packages from two different working
+directories to keep them that way (issue #616). A script can do what the hook
+cannot: derive every path from its own location.
 
 ## Authenticating as a person
 
