@@ -176,3 +176,108 @@ fn built_in_lane(
 pub fn company_of(record: &CompanyRecord) -> &CompanyId {
     &record.id
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ports::types::OverlayAgent;
+
+    /// A two-harness company with a console-created overlay teammate.
+    fn record() -> CompanyRecord {
+        let manifest: crate::company::CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[agent]]
+id = "researcher"
+role = "Researcher"
+harness = "deep"
+
+[[harness]]
+id = "embedded"
+kind = "built_in"
+default = true
+
+[[harness]]
+id = "deep"
+kind = "built_in"
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: vec![OverlayAgent {
+                id: "writer".into(),
+                name: "Writer".into(),
+                role: "Content Writer".into(),
+                description: None,
+                tools: Vec::new(),
+            }],
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: None,
+        }
+    }
+
+    /// The default lane serves the whole default-bound roster **including**
+    /// every overlay teammate, whose only harness is the default.
+    #[test]
+    fn the_default_lane_serves_every_overlay_agent() {
+        let rec = record();
+        let default = agents_on(&rec, "embedded", "embedded");
+        assert!(default.contains("ceo"));
+        assert!(!default.contains("researcher"), "bound to the deep lane");
+        assert!(
+            default.contains("writer"),
+            "a console-created teammate runs on the default harness"
+        );
+
+        // And the named lane must not claim it — the overlay is nobody's but
+        // the default's.
+        let deep = agents_on(&rec, "deep", "embedded");
+        assert!(deep.contains("researcher"));
+        assert!(!deep.contains("writer"));
+        assert!(!deep.contains("ceo"));
+    }
+
+    /// A single-harness company keeps `default_serves: None` (whole roster),
+    /// which is the pre-harness shape every existing tenant already has.
+    #[test]
+    fn a_single_harness_company_is_not_narrowed() {
+        let rec = record();
+        let mut rec = rec;
+        rec.manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+
+[[harness]]
+id = "embedded"
+kind = "built_in"
+default = true
+"#,
+        )
+        .expect("valid manifest");
+        let lanes = build(&rec, todo!("unused base"), todo!("unused"), None);
+        assert!(lanes.default_serves.is_none());
+    }
+}
