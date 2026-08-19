@@ -5783,7 +5783,8 @@ mod tests {
             fn subscribe(
                 &self,
                 id: &CompanyId,
-            ) -> futures::stream::BoxStream<'static, crate::ports::types::StoredEvent> {
+            ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem>
+            {
                 self.inner.subscribe(id)
             }
         }
