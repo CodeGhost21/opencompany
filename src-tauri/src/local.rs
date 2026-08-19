@@ -393,7 +393,17 @@ fn read_roster(data_dir: &Path) -> Roster {
             && entry.id == slugify(&entry.id)
             && entry.root.as_deref().is_none_or(is_contained)
     });
-    roster.instances.dedup_by(|a, b| a.id == b.id);
+    // By id across the whole file, not `dedup_by`, which only compares
+    // neighbours. A roster holding `acme`, `other`, `acme` would keep both
+    // `acme` rows, and two entries sharing an id share a *root*: the second
+    // cannot start because the first holds its lock, so it becomes a permanent
+    // failed row — and `index_of` resolves the first, so `rename`, `stop` and
+    // `forget` could never reach it. Retaining the first occurrence keeps
+    // listing order.
+    let mut seen = HashSet::new();
+    roster
+        .instances
+        .retain(|entry| seen.insert(entry.id.clone()));
 
     // The default is always present, and always first: it is the root every
     // pre-roster install already keeps its company in, and the one the console
@@ -751,6 +761,38 @@ mod test {
         let default = listed.iter().find(|i| i.id == DEFAULT_INSTANCE_ID).unwrap();
         assert!(default.running, "one busy root must not stop the others");
         drop(squatter);
+    }
+
+    /// Duplicate ids are dropped wherever they sit, not only side by side.
+    ///
+    /// `dedup_by` compares neighbours, so the entry between the two `acme` rows
+    /// is enough to defeat it. Two rows sharing an id share a root: the second
+    /// never starts because the first holds the lock, and `index_of` resolves
+    /// only the first, so `stop`, `rename` and `forget` cannot reach the other.
+    #[tokio::test]
+    async fn a_roster_repeating_an_id_out_of_order_keeps_one_row() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(ROSTER_FILE),
+            r#"{"instances":[
+                {"id":"acme","label":"Acme","root":"instances/acme"},
+                {"id":"other","label":"Other","root":"instances/other"},
+                {"id":"acme","label":"Acme again","root":"instances/acme"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        let listed = hosts.list();
+        let acme: Vec<_> = listed.iter().filter(|i| i.id == "acme").collect();
+        assert_eq!(acme.len(), 1, "one row per id: {listed:?}");
+        // The first occurrence, so listing order is what the file said.
+        assert_eq!(acme[0].label, "Acme");
+        assert!(listed.iter().any(|i| i.id == "other"), "{listed:?}");
+        assert!(
+            listed.iter().all(|i| i.running),
+            "no row may be left holding a root another row already took: {listed:?}"
+        );
     }
 
     /// A hand-edited roster cannot point a host outside the data dir.
