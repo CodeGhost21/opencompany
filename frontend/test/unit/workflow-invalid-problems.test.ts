@@ -7,7 +7,7 @@ import type {
   TransportRequest,
   TransportResponse,
 } from "@/api/transport";
-import { ApiError } from "@/api/types";
+import { ApiError, workflowProblemLocator } from "@/api/types";
 
 /**
  * The `problems` breakdown survives the wire (issue #836).
@@ -20,11 +20,12 @@ import { ApiError } from "@/api/types";
  * being the surface where that hurts, because the operator did not author the
  * change and has nothing to reread.
  *
- * These pin the parse, not the rendering. There is no component-test harness in
- * this project (no `@testing-library/react` anywhere under `test/`), so what
- * `ProposalCard` does with the array is guarded by the compiler and by reading.
- * Said out loud rather than implied: the transport is covered here, the markup
- * is not.
+ * These pin the parse, and — since review found a bug in the half that had none
+ * — the locator each problem renders. There is still no component-test harness
+ * in this project (no `@testing-library/react` anywhere under `test/`), so the
+ * markup that *places* that locator is guarded by the compiler and by reading.
+ * Said out loud rather than implied: the transport and the locator are covered
+ * here, the JSX around them is not.
  */
 
 /** Answers with whatever the test staged, so no `fetch` is involved. */
@@ -124,5 +125,44 @@ describe("a refused workflow graph carries its per-node problems", () => {
     expect(wrongShape.problems).toBeUndefined();
     // The envelope itself still parsed, so the operator keeps the sentence.
     expect(wrongShape.code).toBe("workflow_invalid");
+  });
+});
+
+/**
+ * Where a problem says it happened — the half that had no test and was wrong.
+ *
+ * Review caught the field-only shape rendering as a bare message: the locator
+ * was keyed on `node_id`, so a problem carrying a field and no node lost the one
+ * piece of information this feature exists to surface. It could not have been
+ * caught by a test, because the logic lived inside JSX in a project with no
+ * component-test harness. Pulling it into a function is the fix for that, not
+ * only for the bug.
+ */
+describe("a problem's locator", () => {
+  it("joins the node and the field when it has both", () => {
+    expect(workflowProblemLocator({ node_id: "greet", field: "config.url", message: "m" })).toBe(
+      "greet · config.url",
+    );
+  });
+
+  it("names the node alone when there is no field", () => {
+    expect(workflowProblemLocator({ node_id: "greet", message: "m" })).toBe("greet");
+  });
+
+  /** The regression: reachable whenever the host stores a blank node id. */
+  it("names the field alone when there is no node", () => {
+    expect(workflowProblemLocator({ field: "config.url", message: "m" })).toBe("config.url");
+  });
+
+  it("has nothing to say about a graph-level problem", () => {
+    expect(workflowProblemLocator({ message: "the graph has an inescapable cycle." })).toBeUndefined();
+  });
+
+  /** A blank string is not a locator; it would render a dangling separator. */
+  it("ignores blank parts rather than rendering an empty locator", () => {
+    expect(workflowProblemLocator({ node_id: "  ", field: "", message: "m" })).toBeUndefined();
+    expect(workflowProblemLocator({ node_id: "  ", field: "config.url", message: "m" })).toBe(
+      "config.url",
+    );
   });
 });

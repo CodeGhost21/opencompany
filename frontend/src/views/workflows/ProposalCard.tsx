@@ -13,7 +13,7 @@
 
 import { AlertTriangle, Check, Loader2, X } from "lucide-react";
 
-import type { WorkflowProblem } from "@/api/types";
+import { type WorkflowProblem, workflowProblemLocator } from "@/api/types";
 import type { GraphDiff } from "@/api/workflow-proposal";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -101,18 +101,15 @@ export function ProposalCard({
                 render-only and never reordered, so index is stable here. */}
             {problems && problems.length > 0 && (
               <ul className="mt-1 space-y-0.5" data-testid="workflow-proposal-problems">
-                {problems.map((problem, i) => (
-                  <li key={i}>
-                    {problem.node_id && (
-                      <span className="font-medium">
-                        {problem.node_id}
-                        {problem.field ? ` · ${problem.field}` : ""}
-                        {" — "}
-                      </span>
-                    )}
-                    {problem.message}
-                  </li>
-                ))}
+                {problems.map((problem, i) => {
+                  const locator = workflowProblemLocator(problem);
+                  return (
+                    <li key={i}>
+                      {locator && <span className="font-medium">{locator} — </span>}
+                      {problem.message}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </AlertDescription>

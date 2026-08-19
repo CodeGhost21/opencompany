@@ -1277,6 +1277,30 @@ export interface ApiErrorBody {
   problems?: WorkflowProblem[];
 }
 
+/**
+ * The "where" of a {@link WorkflowProblem}, or `undefined` when it names no
+ * location at all.
+ *
+ * A function rather than a conditional inside the card's JSX, because the three
+ * shapes are the whole of this feature's correctness and the console has no
+ * component-test harness to catch a mistake in markup. Extracted after review
+ * caught the field-only case being dropped: the first version keyed the whole
+ * locator on `node_id`, so a problem carrying `field` and no node rendered its
+ * message with no indication of where it came from — and nothing could have
+ * failed, because there was nothing to call.
+ *
+ * All three shapes are real. The host builds a node+field problem through
+ * `WorkflowProblem::node_field`, which stores `node_id` only when it is
+ * non-blank — so a blank node id with a real field emits exactly the field-only
+ * shape — and a graph-level refusal (an inescapable cycle) carries neither.
+ */
+export function workflowProblemLocator(problem: WorkflowProblem): string | undefined {
+  const parts = [problem.node_id, problem.field].filter(
+    (part): part is string => typeof part === "string" && part.trim() !== "",
+  );
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
 export class ApiError extends Error {
   /**
    * The raw response body, kept only when it was **not** the host's envelope
