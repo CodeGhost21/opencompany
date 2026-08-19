@@ -39,6 +39,7 @@ import {
   type TeamMemberDto,
   type UsageDto,
   type Verdict,
+  type WorkflowProblem,
 } from "./types";
 
 export type LifecycleAction = "pause" | "resume" | "suspend" | "archive";
@@ -924,6 +925,39 @@ function errorEnvelope(text: string): ApiErrorBody | undefined {
 }
 
 /**
+ * The host's node-scoped `problems` from a `workflow_invalid` 400 (issue
+ * #1016), or `undefined` when the body carries none.
+ *
+ * Deliberately separate from — and additive to — {@link errorEnvelope}: the
+ * strict `{error, code}` parser is what stands between a foreign body and the
+ * rendered summary, and it stays untouched. This reads the extra array only,
+ * mapping each entry from the wire's snake_case `node_id` to the app's `nodeId`
+ * and keeping `field`/`message` as-is. An entry whose `message` is not a string
+ * is dropped rather than rendered — the same "guessing at a foreign body is how
+ * it becomes UI prose" caution the envelope parser is built on — and an empty
+ * or absent array becomes `undefined` so `ApiError.problems` is set only when
+ * there is something to show.
+ */
+function parseProblems(text: string): WorkflowProblem[] | undefined {
+  const parsed = parseJson(text);
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const { problems } = parsed as Record<string, unknown>;
+  if (!Array.isArray(problems)) return undefined;
+  const mapped: WorkflowProblem[] = [];
+  for (const raw of problems) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const { node_id, field, message } = raw as Record<string, unknown>;
+    if (typeof message !== "string") continue;
+    mapped.push({
+      nodeId: typeof node_id === "string" ? node_id : undefined,
+      field: typeof field === "string" ? field : undefined,
+      message,
+    });
+  }
+  return mapped.length ? mapped : undefined;
+}
+
+/**
  * A short, safe description of a status the host refused on.
  *
  * `statusText` first, but it cannot be the whole answer: HTTP/2 and HTTP/3
@@ -970,6 +1004,11 @@ function httpError(res: TransportResponse, text: string): ApiError {
     err.detail = text.slice(0, DETAIL_CHARS);
     console.debug(`[api] ${res.status} ${res.url}: unrecognised error body`, err.detail);
   }
+  // Node-scoped complaints ride alongside the envelope for a `workflow_invalid`
+  // 400 (issue #1016). Additive — attached only when the host sent a non-empty
+  // array — so every other refusal is byte-for-byte the ApiError it always was.
+  const problems = parseProblems(text);
+  if (problems) err.problems = problems;
   return err;
 }
 
