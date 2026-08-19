@@ -76,6 +76,11 @@ function stubClient(): OpenCompanyClient & { puts: unknown[] } {
  * the honest fix: the production call is correct in a browser, and guarding it
  * in `WorkflowCreateDialog` would only be guarding against jsdom.
  */
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+  Element.prototype,
+  "scrollIntoView",
+);
+
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
@@ -152,6 +157,13 @@ afterEach(() => {
   container.remove();
   vi.unstubAllGlobals();
   configFromDraft.mockClear();
+  // Put the prototype back so the shim does not leak into a later jsdom test
+  // sharing this worker (same discipline as `chat-scroll-anchor.test.ts`).
+  if (originalScrollIntoView) {
+    Object.defineProperty(Element.prototype, "scrollIntoView", originalScrollIntoView);
+  } else {
+    delete (Element.prototype as unknown as Record<string, unknown>).scrollIntoView;
+  }
 });
 
 describe("unsaved graph edits are not thrown away silently (#1006)", () => {
