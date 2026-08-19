@@ -1217,6 +1217,16 @@ async fn async_main() -> Result<()> {
             let tenant_namespace = std::env::var("OPENCOMPANY_TENANT_ID")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
+            if let Some(tenant) = &tenant_namespace {
+                // A namespace containing the `--` id delimiter would make the
+                // `<tenant>--` prefix ambiguous between tenants (see
+                // `validate_tenant_namespace`), so a shared-DB workload with
+                // one would namespace ids that collide with another tenant's.
+                // Refuse to boot rather than misattribute at runtime.
+                if let Err(reason) = opencompany::app::validate_tenant_namespace(tenant) {
+                    return Err(opencompany::error::OpenCompanyError::Config(reason.into()));
+                }
+            }
             // The address the platform records as this instance's creator. A
             // provisioned company's manifest names no admin, so without this
             // nobody is eligible to log in and there is no operator token to
