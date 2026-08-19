@@ -8305,7 +8305,10 @@ label = "ok"
             assert!(body.get("cancelled").is_none(), "{body}");
             // The row is still where the *reason* lives; the verdict is the
             // reading.
-            assert_eq!(body["deliveries"][0]["reason"], "channel-not-wired", "{body}");
+            assert_eq!(
+                body["deliveries"][0]["reason"], "channel-not-wired",
+                "{body}"
+            );
         }
 
         /// The other direction, which is the one that must not regress: a run

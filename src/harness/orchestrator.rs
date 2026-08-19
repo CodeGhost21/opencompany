@@ -8892,7 +8892,10 @@ name = "Morning"
             approvals: Vec::new(),
         };
         let md = summarize_run(&file, &dropped, "run-drop", RunOutputStored::Stored);
-        assert!(md.contains("1 report(s) did NOT reach a destination"), "{md}");
+        assert!(
+            md.contains("1 report(s) did NOT reach a destination"),
+            "{md}"
+        );
         assert!(md.contains("`worker` (channel)"), "{md}");
         // The reason, from the closed set — never `detail`, which quotes what a
         // transport said and is for the operator's own surfaces (issue #248).

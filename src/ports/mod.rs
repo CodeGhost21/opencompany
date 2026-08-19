@@ -87,7 +87,9 @@ pub use workflow_runner::{
     WorkflowBlockedNode, WorkflowBoardAction, WorkflowRun, WorkflowRunApprovalRow,
     WorkflowRunBoardRow, WorkflowRunContext, WorkflowRunNodeRow, WorkflowRunner,
 };
-pub use workflow_verdict::{RunVerdictFacts, WorkflowRunVerdict, awaiting_count, undelivered_count};
+pub use workflow_verdict::{
+    RunVerdictFacts, WorkflowRunVerdict, awaiting_count, undelivered_count,
+};
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 #[cfg(test)]
