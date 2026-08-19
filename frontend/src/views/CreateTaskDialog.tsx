@@ -1,11 +1,11 @@
 // The one place new work enters the board by hand (issue #301, issue #580).
 //
-// Lifted out of `TasksView` when that screen was deleted. The board itself now
-// renders inside the Ledgers section as the `tasks` ledger's columns, but a
-// ledger's own compose box is `record_entry` — which the host refuses for this
-// ledger, because entering a column fires real work. So creation keeps its own
-// dialog, posting to `…/tasks` exactly as it always did, and Ledgers offers it
-// only for the native board.
+// Lifted out of the board screen when that screen was retired (issue #1140).
+// The board itself renders inside the Ledgers section as the `tasks` ledger's
+// columns, but a ledger's own compose box is `record_entry` — which the host
+// refuses for this ledger, because entering a column fires real work. So
+// creation keeps its own dialog, posting to `…/tasks` exactly as it always did,
+// and Ledgers offers it only for the native board.
 //
 // Its labels, ids and headings are unchanged on purpose: "Add task",
 // "New task", `#new-prompt`. They are what the e2e suite drives, and moving a

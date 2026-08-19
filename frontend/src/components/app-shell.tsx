@@ -9,7 +9,6 @@ import {
   Settings2,
   ShieldCheck,
   BookText,
-  SquareKanban,
   Workflow,
 } from "lucide-react";
 
@@ -51,6 +50,8 @@ import { useCompany } from "@/hooks/use-company";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
 import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
+import { BOARD_LEDGER } from "@/lib/board-columns";
+import { taskIdFromSegment } from "@/lib/task-route";
 import { toast } from "sonner";
 
 import {
@@ -85,7 +86,7 @@ import { Conversation } from "@/views/Conversation";
 import { TeamView } from "@/views/TeamView";
 import { ApprovalsView } from "@/views/ApprovalsView";
 import { LedgersView } from "@/views/LedgersView";
-import { TasksView } from "@/views/TasksView";
+import { TaskDetailRoute } from "@/views/TaskDetailRoute";
 import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
@@ -141,15 +142,12 @@ const NAV: NavItem[] = [
   // creation and membership since #302 unmounted the flat Desks page.
   { view: "company", label: "Company", icon: Network },
   { view: "chat", label: "Chat", icon: MessagesSquare },
-  // The board, restored and now driven by the `tasks` ledger: its columns,
-  // their order and their labels are the host's declaration, and the cards are
-  // the task records. It keeps its own entry because it is the surface an
-  // operator lives in, and because a card carries far more than a ledger row.
-  { view: "tasks", label: "Tasks", icon: SquareKanban },
-  // Everything else the company records — goals, decisions, and whatever axis
-  // this workspace declared. The board appears here too, as the `tasks`
-  // ledger, so this screen is the whole record rather than most of it; the
-  // two render through the same component.
+  // Everything the company records — goals, decisions, whatever axis this
+  // workspace declared, **and the task board**, which is the `tasks` ledger and
+  // renders here as its columns. There was a Tasks entry beside this one until
+  // issue #1140, showing the same records through the same component, and an
+  // operator who met their work twice had to learn which of the two was the
+  // real one. There is one.
   { view: "ledgers", label: "Ledgers", icon: BookText },
   { view: "workspace", label: "Workspace", icon: FolderClosed },
   { view: "approvals", label: "Approvals", icon: ShieldCheck },
@@ -173,6 +171,15 @@ const NAV: NavItem[] = [
  * budget controls `MembersPane` ported from Team (issue #360) — but they
  * keep answering `#/conversation` and `#/team` until the chat covers the
  * last of what they still do better (a desk's persisted transcript).
+ *
+ * `tasks` is here for a different reason than the rest, and it is the load-
+ * bearing line of issue #1140. The board page is gone, but `#/tasks/<id>` is
+ * the card detail — the timeline, the plan brief, the discussion, the attempts,
+ * the steer controls — and it is linked from chat, from an approval card, from
+ * a workflow run's rows and from every card on the board. Ledgers deliberately
+ * does not reproduce any of it. Drop `tasks` from this list and `useHashView`
+ * discards the head *and* its sub-page, so every one of those links quietly
+ * lands on Overview instead of the card it named.
  */
 const HIDDEN_VIEWS: View[] = [
   "feedback",
@@ -181,9 +188,30 @@ const HIDDEN_VIEWS: View[] = [
   "finances",
   "conversation",
   "team",
+  "tasks",
 ];
 
 const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
+
+/**
+ * `#/tasks` with no card named the board page, which is retired (issue #1140).
+ *
+ * It lands where the board actually lives now, so a bookmark, a habit, or a
+ * link written before the move all still arrive at a board rather than at a
+ * 404 — and so does `#/tasks/<malformed>`, which names no card either. A real
+ * `#/tasks/<id>` returns `null` from here and resolves untouched.
+ *
+ * Module scope, because `useHashView` holds this in a `useCallback` dependency
+ * list: an inline arrow would be a new identity on every render and would
+ * re-resolve the route on each one.
+ */
+const REWRITE_RETIRED = (
+  head: string,
+  sub: string | null,
+): [View, string | null] | null =>
+  head === "tasks" && taskIdFromSegment(sub) === null
+    ? ["ledgers", BOARD_LEDGER]
+    : null;
 
 /** How many workflow run-progress frames (issue #371) the shell keeps for the
  * Workflows canvas. A run emits roughly one per node, so this holds many runs'
@@ -260,7 +288,11 @@ export function AppShell({
 }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
-  const [view, sub, navigate] = useHashView<View>(VIEWS, "overview");
+  const [view, sub, navigate] = useHashView<View>(
+    VIEWS,
+    "overview",
+    REWRITE_RETIRED,
+  );
   // Track the latest non-default segment per view so returning to a tab with
   // sub-pages restores operator context (for example `#/workflows/<id>`), instead
   // of always dropping it to the parent view.
@@ -1388,21 +1420,19 @@ export function AppShell({
             />
           )}
           {view === "inbox" && <InboxView client={client} company={company} />}
+          {/* All that is left of the Tasks page: the card detail. `sub` is a
+              real id by the time this renders — `REWRITE_RETIRED` sent every
+              other `#/tasks…` address to the board in Ledgers. */}
           {view === "tasks" && (
-            <TasksView
+            <TaskDetailRoute
               client={client}
               company={company}
-              // Issue #464: the board learns that work appeared. The same
-              // counter the chat's in-flight strip reads, so a card opened from
-              // chat lands on the board without a reload.
-              taskEventTick={taskEventTick}
+              taskId={taskIdFromSegment(sub) ?? ""}
               attemptEventTick={attemptEventTick}
-              // Issue #883: a paused card is blocked until every approval its
-              // turn parked is decided, and the board's own read carries none
-              // of them. This is the feed the sidebar badge already polls, so
-              // the card says what it is waiting on without a second request.
-              approvals={feed.approvals}
-              now={feed.now}
+              // Issue #883: so a waiting card can name the blocked call rather
+              // than only counting it. The feed the sidebar badge already polls,
+              // so the screen says what it is waiting on with no second request.
+              parked={feed.approvals}
               // Issue #246: the card → chat half of the round trip. A card
               // opened from a conversation remembers which one, so its detail
               // screen can put the operator back in that thread.
@@ -1410,11 +1440,9 @@ export function AppShell({
                 setActiveThreadId(threadId);
                 setView("conversation");
               }}
-              // Issue #883: "Review" on a blocked card opens the queue narrowed
-              // to that card. Through `navigate` rather than `setView` so the
-              // filter lands in the hash and survives a refresh and the Back
-              // button, like every other sub-page.
-              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
+              // Back, and a deleted card, go to the board — which is the
+              // `tasks` ledger. Through `navigate` so the address follows.
+              onLeave={() => navigate("ledgers", BOARD_LEDGER)}
             />
           )}
           {view === "ledgers" && (
@@ -1431,6 +1459,22 @@ export function AppShell({
               // here; the card's timeline, plan, discussion and attempts stay
               // where they already work.
               onOpenCard={(id) => navigate("tasks", id)}
+              // Issue #464: the board learns that work appeared. The same
+              // counter the chat's in-flight strip reads, so a card opened from
+              // chat lands on the board without a reload.
+              taskEventTick={taskEventTick}
+              // Issue #883: a paused card is blocked until every approval its
+              // turn parked is decided, and neither the ledger's rows nor the
+              // task store carries them. This is the feed the sidebar badge
+              // already polls, so the card says what it is waiting on without a
+              // second request.
+              approvals={feed.approvals}
+              now={feed.now}
+              // Issue #883: "Review" on a blocked card opens the queue narrowed
+              // to that card. Through `navigate` rather than `setView` so the
+              // filter lands in the hash and survives a refresh and the Back
+              // button, like every other sub-page.
+              onReviewApprovals={(taskId) => navigate("approvals", encodeURIComponent(taskId))}
             />
           )}
           {view === "team" && (
