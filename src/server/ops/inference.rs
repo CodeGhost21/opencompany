@@ -1138,6 +1138,56 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp["status"]["provider"], "managed");
         assert_eq!(resp["status"]["source"], "managed");
+        assert_eq!(
+            resp["status"]["keyConfigured"], false,
+            "the reset must clear a stored credential too, or keyConfigured lies"
+        );
+    }
+
+    /// The reset is a *full* reset (issue #993): reverting also clears a stored
+    /// key. This is what keeps a keyless reconfiguration keyless — without it, a
+    /// stale secret would make the company resolve direct even though the console
+    /// shows no key, and `DELETE` would strand it with a credential it can never
+    /// see or clear.
+    #[tokio::test]
+    async fn revert_clears_the_key_so_a_keyless_save_rides_the_subscription() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        // Store a key first, so the reset has something stale to clear.
+        let (status, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openrouter", "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["status"]["slug"], "openrouter");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+
+        let (status, resp, _) = send(&state, "DELETE", "/api/v1/company/inference", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["status"]["keyConfigured"], false);
+
+        // A keyless save afterwards must land on the subscription, not be flung
+        // direct by a credential the reset was supposed to remove.
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openrouter" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["slug"], "subscription");
+        assert_eq!(resp["status"]["keyConfigured"], false);
+
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["slug"], "subscription");
+        assert_eq!(dto["keyConfigured"], false);
+        assert!(!raw.contains(TOKEN), "GET leaked the reset token: {raw}");
     }
 
     /// Issue #585: the company's own key — set, rotate, and clear — is the whole
