@@ -391,8 +391,8 @@ export function TaskDetailView({
   // attempt moved, rather than up to `POLL_MS` later — and at all, which the
   // poll above deliberately does not do while the tab is hidden.
   //
-  // Its own effect rather than a dependency of the one above, for the reason
-  // `TasksView` gives for the same split (issue #464): folding the tick in there
+  // Its own effect rather than a dependency of the one above, for the reason the
+  // board screen gave for the same split (issue #464): folding the tick in there
   // would tear down and restart the fallback timer on every frame, so a busy
   // company would keep resetting the interval and the fallback would effectively
   // stop existing on exactly the companies that need it most.
