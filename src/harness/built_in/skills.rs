@@ -138,8 +138,20 @@ impl EffectiveSkills {
         }
 
         // 2. Apply operator deltas: disables drop, enabled custom docs supersede.
+        //    A delta whose slug is not a safe directory name is skipped — a
+        //    traversal slug must never reach the `skills_out.join(slug)` write
+        //    below (the console validates at write time; this is the belt for a
+        //    row that predates that check or lands through a non-console path).
         let mut disabled: HashSet<String> = HashSet::new();
         for delta in deltas {
+            if !valid_slug(&delta.slug) {
+                log::warn!(
+                    "[harness][skills] skipping a skill delta whose slug is not a safe \
+                     directory name: {:?}",
+                    delta.slug
+                );
+                continue;
+            }
             if !delta.enabled {
                 disabled.insert(delta.slug.clone());
                 continue;
