@@ -652,17 +652,28 @@ mod test {
     /// Loads over `root`, retrying while a just-released `flock` clears.
     ///
     /// See `embedded::test::stopping_a_host_frees_its_root_and_its_port` for
-    /// why the release is not instantaneous.
-    async fn relaunch(root: &Path) -> LocalHosts {
+    /// why the release is not instantaneous. The condition is passed in
+    /// because "settled" differs per test: one of these deliberately relaunches
+    /// into a root something else is holding, where waiting for everything to
+    /// run would wait forever.
+    async fn relaunch_until(root: &Path, settled: impl Fn(&[LocalInstanceInfo]) -> bool) -> LocalHosts {
         for _ in 0..50 {
             let hosts = LocalHosts::load(root.to_path_buf()).await;
-            if hosts.list().iter().all(|instance| instance.running) {
+            if settled(&hosts.list()) {
                 return hosts;
             }
             drop(hosts);
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        LocalHosts::load(root.to_path_buf()).await
+        panic!("released roots must become takeable");
+    }
+
+    /// The ordinary relaunch: every rostered instance that wants to run, runs.
+    async fn relaunch(root: &Path) -> LocalHosts {
+        relaunch_until(root, |listed| {
+            listed.iter().all(|instance| instance.running)
+        })
+        .await
     }
 
     /// Starts `id`, retrying for the same reason `relaunch` does.
