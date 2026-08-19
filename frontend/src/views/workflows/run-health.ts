@@ -112,6 +112,14 @@ export function relativeTime(atMillis: number): string {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+/**
+ * Two of {@link runTone}'s labels, named because {@link runSummaryLine} has to
+ * recognise them: they are the states whose *count* is a separate fact, and the
+ * only ones where repeating the words would say the same thing twice.
+ */
+const NOT_DELIVERED = "not delivered";
+const AWAITING_APPROVAL = "awaiting approval";
+
 /** The status dot for a whole run.
  *
  * Every arm returns one of the console's five run states, so a dot here means
@@ -151,7 +159,7 @@ export function runTone(run: WorkflowRunOutcome): {
   // parked belongs on the row beneath.
   if (isBlocked(run)) return { dot: "bg-status-blocked", label: "blocked" };
   if (undeliveredCount(run.deliveries) > 0)
-    return { dot: "bg-status-failed", label: "not delivered" };
+    return { dot: "bg-status-failed", label: NOT_DELIVERED };
   // Blocked, not running. This was the running colour, which said "the machine
   // is working on it" about the one state that means the opposite: it is
   // parked until a human decides. Amber is the colour that gets looked at.
@@ -161,8 +169,54 @@ export function runTone(run: WorkflowRunOutcome): {
   // read scored it green and the operator was told a run that did none of its
   // work had succeeded.
   if (awaitingCount(run) > 0)
-    return { dot: "bg-status-blocked", label: "awaiting approval" };
+    return { dot: "bg-status-blocked", label: AWAITING_APPROVAL };
   return { dot: "bg-status-done", label: "ok" };
+}
+
+/**
+ * How the most recent run went, as ONE sentence: what it did, where it failed if
+ * it failed, and the counts a card carries as badges beside the words.
+ *
+ * For a fixed-width column (issue #1136: the workflow list's status column is a
+ * fixed 13rem so the dots line up down the page). A badge cannot truncate — one
+ * "2 not delivered" pill beside the label leaves the label four characters and
+ * two pills leave it none — but a sentence can, and it truncates from the right,
+ * which drops the counts before it drops the state. Callers hang the full string
+ * on a `title`, so nothing is unrecoverable.
+ *
+ * `state` is {@link runTone}'s label, passed in rather than recomputed so the
+ * words and the dot beside them can never come from two different readings.
+ *
+ * Nothing is lost against the card's badges: an undelivered report and a waiting
+ * approval are already the run's *state* by the time `runTone` has spoken, so
+ * what the badges add is the number — and that is what this appends.
+ */
+export function runSummaryLine(
+  run: WorkflowRunOutcome,
+  state: string,
+  failedNode?: string | null,
+): string {
+  const undelivered = undeliveredCount(run.deliveries);
+  const pending = pendingCount(run.deliveries);
+
+  let head = `${run.scheduled ? "Scheduled" : "Manual"} run ${state}${
+    failedNode ? ` at “${failedNode}”` : ""
+  }`;
+  // A count goes in brackets beside the words it counts when the state IS that
+  // condition, and spells itself out when the state is something else. Joining
+  // both cases the same way produces "not delivered · 2 not delivered" — the
+  // card's badge has the same redundancy and can afford it; a column that
+  // truncates cannot.
+  const also: string[] = [];
+  if (undelivered > 0) {
+    if (state === NOT_DELIVERED) head += ` (${undelivered})`;
+    else also.push(`${undelivered} ${NOT_DELIVERED}`);
+  }
+  if (pending > 0) {
+    if (state === AWAITING_APPROVAL) head += ` (${pending})`;
+    else also.push(`${pending} ${AWAITING_APPROVAL}`);
+  }
+  return [head, ...also].join(" · ");
 }
 
 /**
