@@ -353,6 +353,11 @@ pub fn provider_slug(provider: &str) -> &'static str {
 /// rather than being deleted for the same reason it existed: a config that named
 /// a provider but dropped the platform key would 401 rather than fall back.
 ///
+/// The one exception is a keyless `openrouter` that also sets its own
+/// `base_url`: that endpoint is not the platform's, so the platform credential
+/// is withheld and the config goes direct (keyless) instead — sending the
+/// platform token to an arbitrary override would leak it.
+///
 /// Every other kind uses its own configured base URL and key verbatim — those
 /// are third-party endpoints we hold no credential for.
 fn resolve_endpoint(
