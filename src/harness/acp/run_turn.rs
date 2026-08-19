@@ -522,11 +522,21 @@ mod test {
     /// `hang` makes `prompt` never resolve (the grace-expiry path) and
     /// `cancel_fails` makes `cancel` error (the logged-failure path). `cancels`
     /// counts cancel calls so a test can assert the grace path nudged twice.
+    ///
+    /// `hold_for_cancel` makes `prompt` wait until the first `cancel` arrives —
+    /// the shape of a turn that is mid-tool-call when the operator steers, which
+    /// is exactly the window the advisory cancel exists for. Without the gate a
+    /// prompt that resolves immediately exits the loop before the steer check
+    /// ever runs, and the cancel path goes unexercised. `cancel_hangs` makes
+    /// `cancel` never answer (the bounded-RPC path).
     struct Scripted {
         turn: AcpTurn,
         hang: bool,
+        hold_for_cancel: bool,
+        cancel_hangs: bool,
         cancel_fails: bool,
         cancels: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        cancel_started: tokio::sync::Notify,
     }
 
     impl Scripted {
@@ -537,8 +547,11 @@ mod test {
                     stop_reason: "end_turn".into(),
                 },
                 hang: false,
+                hold_for_cancel: false,
+                cancel_hangs: false,
                 cancel_fails: false,
                 cancels: Default::default(),
+                cancel_started: tokio::sync::Notify::new(),
             }
         }
     }
@@ -549,11 +562,18 @@ mod test {
             if self.hang {
                 std::future::pending::<()>().await;
             }
+            if self.hold_for_cancel {
+                self.cancel_started.notified().await;
+            }
             Ok(self.turn.clone())
         }
         async fn cancel(&self, _c: &CompanyId, _k: &str) -> Result<()> {
             self.cancels
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.cancel_started.notify_waiters();
+            if self.cancel_hangs {
+                std::future::pending::<()>().await;
+            }
             if self.cancel_fails {
                 return Err(OpenCompanyError::Harness("cancel rejected".into()));
             }
