@@ -204,6 +204,14 @@ function roleHash(role: string): string {
   return (hash >>> 0).toString(36);
 }
 
+/**
+ * A generic starter team that fits any company; the operator edits from here.
+ *
+ * It spans the functional areas a small company actually splits into — product,
+ * engineering, design, growth, operations — rather than a handful of generic
+ * roles, so a company that has not defined its own roster still reads as an org
+ * rather than a list.
+ */
 // `starterTeam()` used to live here: twelve invented agents ("Ops Lead", "Front
 // Desk", "Product Lead", …) rendered whenever the host's roster came back empty
 // or unreadable. It is deleted rather than deprecated.
@@ -236,8 +244,8 @@ export function newMember(fields: { name: string; role: string; description: str
     tone: toneFor(memberId),
     avatar: avatarFor(memberId),
     inboxEnabled: false,
-    // A console-invented teammate exists on no host, so it holds no grant and
-    // sits on no desk. Stated, not guessed.
+    // Nothing on a host has granted this teammate anything or seated it
+    // anywhere yet, so both are stated empty rather than guessed.
     effectiveTools: [],
     desks: [],
   };
