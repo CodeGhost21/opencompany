@@ -976,7 +976,41 @@ impl CompanyAgent {
                             // Retry-guard edge: skip the one-shot retry when an
                             // operator steer already pends, so a cancel/pause
                             // before any text can't restart the work.
-                            if steer.map(|c| c.requested()).unwrap_or(false) {
+                            //
+                            // Issue #1032 adds the second guard, on the same
+                            // reasoning: the work was stopped on purpose, and an
+                            // empty reply is not licence to restart it. The
+                            // retry is a fresh `agent.turn`, so openhuman builds
+                            // it a fresh `TurnCost` — the brake's accumulator
+                            // starts back at zero, and a teammate that had just
+                            // exhausted its cap could spend up to a whole cap
+                            // again before the hook fired a second time. The
+                            // brake is armed per turn, so nothing else here
+                            // would stop it.
+                            //
+                            // **Defence in depth, not a fix to an observed bug,
+                            // and the difference is recorded so nobody re-derives
+                            // it.** The `Empty` arm appears to be unreachable
+                            // after a halt: a halt implies at least one completed
+                            // tool iteration, and openhuman answers the post-halt
+                            // wrap-up with its own synthesised "here's what I did
+                            // this turn" summary — which it substitutes even when
+                            // the wrap-up call returns blank text OR no choices
+                            // at all. Both were scripted against the real turn
+                            // loop and neither reached this arm, so there is no
+                            // test here that would fail without this guard, and
+                            // one was deliberately not left behind pretending
+                            // otherwise. What the guard buys is that the
+                            // invariant stops depending on that substitution
+                            // staying true across a vendored bump.
+                            //
+                            // `halted_for_spend` below still reports the halt
+                            // either way, so the operator gets the notice that
+                            // explains a stub reply rather than silence.
+                            let spend_halted = spend_brake.as_ref().is_some_and(|(_, halted)| {
+                                halted.load(std::sync::atomic::Ordering::SeqCst)
+                            });
+                            if steer.map(|c| c.requested()).unwrap_or(false) || spend_halted {
                                 Ok(crate::harness::mcp_probe::scrub(GRACEFUL_EMPTY_REPLY, &[]))
                             } else {
                                 let second = agent.turn(message).await;
