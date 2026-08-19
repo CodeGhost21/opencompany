@@ -695,6 +695,35 @@ mod tests {
         assert_eq!(written, body);
     }
 
+    /// A delta whose slug is not a safe directory name must never reach the
+    /// `skills_out.join(slug)` write: `..` would escape the scratch tree, and
+    /// the console validates slugs at write time, so such a row is either a
+    /// pre-check row or a non-console write — skip it either way.
+    #[test]
+    fn a_traversal_slug_delta_is_skipped_not_written_outside() {
+        let ws = tempfile::tempdir().unwrap();
+        let body = "---\nname: Escape\ndescription: Should never land\n---\n\n# Escape\n";
+
+        let eff = EffectiveSkills::materialize(
+            ws.path().to_path_buf(),
+            None,
+            &[],
+            &[delta("..", true, Some(body))],
+        )
+        .unwrap();
+
+        // The baseline is intact and the bogus delta contributed nothing.
+        assert_eq!(eff.docs.len(), with_baseline(&[]));
+        // Nothing was written above the skills tree, and no `..` dir appeared
+        // inside it either.
+        assert_eq!(ws.path().join("skills").join("..").canonicalize().is_err(), true);
+        assert_eq!(
+            std::fs::read_dir(ws.path().join("skills")).unwrap().count(),
+            with_baseline(&[]),
+            "only the baseline skills materialize"
+        );
+    }
+
     #[test]
     fn custom_doc_supersedes_company_body() {
         let src = tempfile::tempdir().unwrap();
