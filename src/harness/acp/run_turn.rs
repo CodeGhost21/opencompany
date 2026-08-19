@@ -569,13 +569,7 @@ mod test {
         // `stopReason: "cancelled"`. Abandoning the future on a steer would
         // leave a harness mid-tool-call with nothing reading its output, so the
         // contract is that a steered turn still produces an outcome.
-        let agent = Arc::new(Scripted {
-            turn: AcpTurn {
-                updates: vec![AcpUpdate::MessageChunk("partial".into())],
-                stop_reason: "cancelled".into(),
-            },
-            cancelled: Default::default(),
-        });
+        let agent = Arc::new(Scripted::answering(vec![AcpUpdate::MessageChunk("partial".into())]));
         let run_turn: &dyn RunTurn = &AcpRunTurn::new(agent);
         let control = crate::company::steer::SteerControl::new();
         control.request(crate::company::steer::SteerAction::Cancel);
@@ -590,6 +584,66 @@ mod test {
         assert!(
             control.pending().is_some(),
             "the steer must not be consumed here"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_cancel_is_logged_and_the_turn_still_drains() {
+        // `session/cancel` can fail (the subprocess is mid-shutdown, say), but
+        // that must not turn a cancelled turn into a failure of its own: the
+        // cancel is advisory, the error is logged, and the turn still answers.
+        let mut agent = Scripted::answering(vec![AcpUpdate::MessageChunk("done".into())]);
+        agent.cancel_fails = true;
+        let agent = Arc::new(agent);
+        let run_turn: &dyn RunTurn = &AcpRunTurn::new(agent);
+        let control = crate::company::steer::SteerControl::new();
+        control.request(crate::company::steer::SteerAction::Cancel);
+
+        let outcome = run_turn
+            .run_steered(&CompanyId::new("acme"), "ceo", "go", &control, None, None)
+            .await
+            .expect("a failed cancel still ends in a turn");
+        assert_eq!(outcome.reply, "done");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_that_ignores_the_cancel_is_abandoned() {
+        // A harness inside a tool call that never returns is the one case the
+        // cooperative wait must not honour: past the grace window the waiter
+        // drops the turn with an error, and nudges `cancel` once more on the
+        // way out — the only drain lever the port exposes.
+        let agent = Arc::new(Scripted {
+            turn: AcpTurn {
+                updates: vec![],
+                stop_reason: "end_turn".into(),
+            },
+            hang: true,
+            cancel_fails: false,
+            cancels: Default::default(),
+        });
+        let cancels = agent.cancels.clone();
+        let run_turn = AcpRunTurn::new(agent);
+        let control = crate::company::steer::SteerControl::new();
+        control.request(crate::company::steer::SteerAction::Cancel);
+
+        let err = run_turn
+            .steered_with_grace(
+                &CompanyId::new("acme"),
+                "ceo",
+                "go",
+                &control,
+                Duration::from_millis(20),
+            )
+            .await
+            .expect_err("a hung turn is abandoned, not awaited");
+        assert!(
+            format!("{err}").contains("abandoning the turn"),
+            "the error names the abandonment: {err}"
+        );
+        assert_eq!(
+            cancels.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one cancel on the steer, one best-effort nudge on the way out"
         );
     }
 
