@@ -237,6 +237,23 @@ async function mockApi(page: Page) {
       return json(created, 201);
     }
     if (path.endsWith("/team")) return json(roster);
+    // GET .../team/{agentId} — the detail page the chart's teammate links open
+    // (issue #1102). Stubbed so following one lands on a real screen rather
+    // than on the catch-all's `[]`, which is an agent with none of its fields.
+    const agent = path.match(/\/team\/([^/]+)$/);
+    if (agent && method === "GET") {
+      const found = roster.find((m) => m.id === agent[1]);
+      if (!found) return json({ error: "no such teammate" }, 404);
+      return json({
+        ...found,
+        source: "manifest",
+        editable: [],
+        isOrchestrator: false,
+        tools: { requested: [], companyAllow: [], effective: [] },
+        desks: [],
+        inboxEnabled: false,
+      });
+    }
     if (path.endsWith("/users")) {
       return json([
         {
@@ -872,4 +889,57 @@ test("#311 a seat naming nobody on the roster is shown, not hidden", async ({
   await expect(seats).toHaveCount(2);
   await expect(seats.nth(1)).toContainText("ghost");
   await expect(seats.nth(1)).toContainText("Not on the roster");
+});
+
+test("#1102 a teammate on the chart opens their detail page", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await openChart(page);
+
+  // A **link**, not a handler: the address has to be on the element, because
+  // that is what makes middle-click, cmd-click, the keyboard and the browser's
+  // own hover preview work. `toHaveAttribute` is the assertion a `div` with an
+  // `onClick` — the shape this issue warns against — could never pass.
+  const grace = deskNode(page, "Engineering")
+    .locator('[role="treeitem"][aria-level="3"]')
+    .first()
+    .getByRole("link", { name: "Grace" });
+  await expect(grace).toHaveAttribute("href", "#/team/grace");
+  await grace.click();
+  await expect.poll(() => page.url()).toContain("#/team/grace");
+  await expect(
+    page.getByRole("button", { name: "Back to team" }),
+  ).toBeVisible({ timeout: 30_000 });
+
+  // The chips under "Not on a desk" name the same teammates and were the worse
+  // half of #1102 — bordered pills that read as controls and did nothing.
+  await openChart(page);
+  const unplaced = page
+    .locator("section", {
+      has: page.getByRole("heading", { name: "Not on a desk" }),
+    })
+    .last();
+  const turing = unplaced.getByRole("link", { name: "Turing" });
+  await expect(turing).toHaveAttribute("href", "#/team/turing");
+  await turing.click();
+  await expect.poll(() => page.url()).toContain("#/team/turing");
+});
+
+test("#1102 a seat naming nobody on the roster is not offered as a link", async ({
+  page,
+}) => {
+  reset();
+  desks[0].members = ["grace", "ghost"];
+  await mockApi(page);
+  await openChart(page);
+
+  // `#/team/ghost` is a dead end that only repeats the badge beside the name,
+  // so the ghost seat stays text. The link on the seat above it is the teeth:
+  // without it this would pass on a chart that linked nothing at all.
+  const seats = deskNode(page, "Engineering").locator(
+    '[role="treeitem"][aria-level="3"]',
+  );
+  await expect(seats.first().getByRole("link")).toHaveCount(1);
+  await expect(seats.nth(1).getByRole("link")).toHaveCount(0);
 });
