@@ -3,6 +3,65 @@ use std::path::PathBuf;
 /// Crate-wide result type.
 pub type Result<T> = std::result::Result<T, OpenCompanyError>;
 
+/// One structured problem with a workflow graph draft (issue #1016).
+///
+/// Unlike the flat `Vec<String>` an [`OpenCompanyError::DataInvalid`] carries,
+/// each problem names the node it belongs to and the config field at fault, so
+/// the console can highlight the exact node + field instead of parsing a joined
+/// sentence. `node_id` is the offending node's id — or, for an edge problem, the
+/// dangling endpoint's id — and is `None` for a graph-level problem with no
+/// single owner (an inescapable cycle names several nodes at once). `field` is
+/// the config path at fault (`config.url`, `config.set`, `workflow_id`, `from`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorkflowProblem {
+    /// The node id this problem belongs to (or the dangling endpoint id for an
+    /// edge problem); `None` for a graph-level problem with no single owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    /// The config field at fault (`config.url`, `config.set`, `workflow_id`,
+    /// `from`/`to`); `None` when the problem is not about a single field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// The human-readable problem, in the same prosumer language the flat
+    /// validation messages use.
+    pub message: String,
+}
+
+impl WorkflowProblem {
+    /// A problem pinned to a specific node and config field.
+    pub fn node_field(
+        node_id: impl Into<String>,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let node_id = node_id.into();
+        Self {
+            node_id: (!node_id.trim().is_empty()).then_some(node_id),
+            field: Some(field.into()),
+            message: message.into(),
+        }
+    }
+}
+
+/// A graph-level problem with no single owner keeps its message and leaves both
+/// `node_id` and `field` empty — the fallback for every validation string that
+/// is not enriched with a node/field.
+impl From<String> for WorkflowProblem {
+    fn from(message: String) -> Self {
+        Self {
+            node_id: None,
+            field: None,
+            message,
+        }
+    }
+}
+
+impl From<&str> for WorkflowProblem {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_string())
+    }
+}
+
 /// Errors returned by OpenCompany.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenCompanyError {
@@ -209,6 +268,20 @@ pub enum OpenCompanyError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    /// A workflow graph draft was rejected at author time with one or more
+    /// structured problems (issue #1016). Distinct from [`Self::DataInvalid`]:
+    /// each [`WorkflowProblem`] carries the node id and config field at fault so
+    /// the console can highlight the exact node + field, while `Display` still
+    /// joins every message so the human `error` string stays populated and every
+    /// string-only reader keeps working. Renders as `400 Bad Request`; the HTTP
+    /// envelope additionally carries a `problems` array (see `server::error`).
+    #[error("{}", format_workflow_problems(.problems))]
+    WorkflowInvalid {
+        /// Every problem found, each naming its node and config field where one
+        /// applies.
+        problems: Vec<WorkflowProblem>,
+    },
+
     /// Runtime configuration could not be resolved (bad value, unreadable or
     /// malformed `config.toml`).
     #[error("configuration error: {0}")]
@@ -382,6 +455,7 @@ impl OpenCompanyError {
             Self::Conflict(_) => "conflict".to_string(),
             Self::Quiescing(_) => "quiescing".to_string(),
             Self::InvalidRequest(_) => "invalid_request".to_string(),
+            Self::WorkflowInvalid { .. } => "workflow_invalid".to_string(),
             Self::Config(_) => "config_error".to_string(),
             Self::Orchestration { code, .. } => code.clone(),
             Self::Tinyplace { code, .. } => format!("tinyplace_{code}"),
@@ -394,6 +468,19 @@ impl OpenCompanyError {
             Self::Harness(_) => "harness_error".to_string(),
         }
     }
+}
+
+/// Joins every workflow problem's message into one human-readable string, so a
+/// [`OpenCompanyError::WorkflowInvalid`] renders the same flat sentence a
+/// string-only caller expects even though it carries structured problems. The
+/// per-node/field detail rides in the `problems` vec, surfaced by the HTTP
+/// envelope; `Display` stays a plain join for logs and legacy readers.
+fn format_workflow_problems(problems: &[WorkflowProblem]) -> String {
+    problems
+        .iter()
+        .map(|problem| problem.message.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn format_manifest_problems(path: &std::path::Path, problems: &[String]) -> String {

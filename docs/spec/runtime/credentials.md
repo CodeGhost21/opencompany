@@ -194,12 +194,12 @@ is `managed`, and even then they are the same value for different reasons.
 
 ## What this does not cover
 
-- **The native OAuth catalog.** `…/connections/{provider}/start` still resolves
-  through `HostConnectRoutes` — a stored provider token, else a *projected*
-  instance identity, else this host's own registered provider application. That
-  precedence is unchanged, so `source: "company"` never appears on a native-only
-  provider. That path is entangled with the inert-catalog question in #396 and is
-  left alone deliberately rather than papered over.
+- **Legacy native OAuth credentials.** #838 retires
+  `…/connections/{provider}/start`: through 2026-09-30 it answers a dated
+  `410 native_oauth_retired`, then #1023 removes it. The callback likewise
+  explains an in-flight browser redirect without exchanging its code. Existing
+  `oauth/{provider}` values remain readable and revocable, but no agent can use
+  them and no credential tier treats a configured host provider app as a route.
 - **Chat inference and embeddings.** Both still resolve from the environment via
   `hosted_endpoint_from_env`. Moving them onto this seam is issue #585; when it
   lands they inherit the rotation guarantee by construction, because the seam is

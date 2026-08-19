@@ -229,11 +229,11 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   plus the credential sections above it (MCP, inference, company key, Composio
   token, channels).
 - **Source:** ✅ real (feature `oauth`) — `Company.connections` (GraphQL) reads
-  manifest intent (`[[connection]]`) + live OAuth status; `POST
-  …/connections/{provider}/start` returns the authorize URL,
-  `…/disconnect` drops tokens, and `GET /api/v1/oauth/callback` completes the
-  flow. Without the `oauth` feature the write routes `404 not_wired` and the
-  console shows the read-only catalog.
+  manifest intent (`[[connection]]`) + legacy native OAuth status. `POST
+  …/connections/{provider}/start` and `GET /api/v1/oauth/callback` are dated
+  410 retirement responses (#838); `…/disconnect` remains so a tenant can
+  release a token written before #828. The supported actionable connection path
+  is Composio.
 - **One list, one answer (issue #582).** The page used to render two provider
   lists — `ComposioSection`'s grid off `GET …/composio/connections`, and a
   categorised grid of eleven hardcoded tiles off `GET …/connections` — which
@@ -261,7 +261,7 @@ The console's models are the response contract. Keep host payloads aligned with:
 
 - `src/api/types.ts` — `CompanyStatus`, `ApprovalSummary`, `ChatResponse`,
   `FeedbackResponse`, `TeamMemberDto`, `InboxDto`, `InboxMessageDto`,
-  `ConnectionState`, `ConnectionStart`.
+  `ConnectionState`.
 - `src/lib/threads.ts` `Thread`/`ThreadContact`,
   `src/lib/tasks-sample.ts` `TaskCard`, `src/lib/skills.ts` `InstalledSkill`,
   `src/lib/workspace.ts` `FsNode`, `src/lib/memory.ts` `MemoryEntry`,

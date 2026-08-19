@@ -1,66 +1,48 @@
-# Connections: hosted, the self-hosted hatch, and releasing one
+# Connections: hosted providers and releasing legacy native OAuth
 
 Split out of [README.md](README.md) when that file reached the 500-line cap.
-The write routes are `ops::connections` (feature `oauth`) and `ops::composio`;
-the read plane is `ops::connections_read`.
+The read plane is `ops::connections_read`; Composio owns every currently
+actionable provider connection.
 
-## Hosted versus the self-hosted hatch
+## Retired native OAuth
 
-`ops::connections` (feature `oauth`) runs OAuth with **this host's own provider
-application** — a client id/secret an operator registered themselves and handed
-to the process as `OPENCOMPANY_OAUTH_<PROVIDER>_ID` / `_SECRET`. It is a hatch,
-not a deployment mode — the same framing `ops::composio` uses for its BYO token.
-A hosted tenant is injected no `OPENCOMPANY_OAUTH_*` variable at all, so on that
-host `provider_config` resolves nothing and a local Connect can only fail.
+The former native OAuth flow used this host's own provider application, completed
+a real handshake, and stored `oauth/{provider}`. Nothing under `src/harness/`
+can resolve that credential, so a successful native connection never gave an
+agent any capability.
 
-**The console no longer offers this route** (issue #822). The routes below are
-live and unchanged; what changed is that nothing invites an operator down them.
-The reason is #396: `oauth_key(provider)` — `"oauth/{provider}"` — is written by
-the callback and read by *no agent tool*, zero occurrences under `src/harness/`.
-So the hatch worked and conferred nothing, and a self-hoster could register a
-provider application, complete a real handshake, see the tile turn green, and
-give their agents no ability whatsoever. `frontend/src/lib/connections.ts`'s
-`connectRoute` therefore answers `composio`, `managed` or `unavailable` and never
-`native`, and `provider-grid.ts` builds the grid from the backend's Composio
-catalog rather than from the console's own provider metadata.
+The console stopped offering that flow in #828. #838 keeps its endpoints only as
+a bounded compatibility bridge for console bundles cached before #979:
 
-Two things this deliberately does **not** do. It does not remove the routes —
-settling #396 by wiring the credential into the harness makes the offer honest
-again, and reinstating it is one arm in `connectRoute`. And it does not hide a
-credential already stored: a provider `GET …/connections` reports connected keeps
-its tile, its `via: ["native"]` and its Disconnect, whether or not the Composio
-catalog carries it.
-
-The read plane says which it is. `ops::connections_read::connect_route` answers
-one question per provider — *can a Connect click possibly succeed here, and by
-which route?* — as a `credentialSource` tier, stored-wins:
-
-| Tier | When | Console |
+| Route | Until 2026-09-30 | Afterward |
 | --- | --- | --- |
-| `static` | a token is already stored for this provider (BYO override), **or** this host registered its own provider app *and* has a state signing secret (the hatch) | no local Connect since #822 — Composio's if it has one, else "not available here" |
-| `attested` | no stored token, and the pod carries a platform-**projected** identity (`TINYHUMANS_TOKEN_FILE` naming a file that exists) | "Managed by the platform", no local Connect |
-| `none` | neither | read-only "not available on this host" |
+| `POST …/connections/{provider}/start` | `410 Gone` JSON: explains that native credentials were unreachable by agents, points callers to Composio, and carries a Sunset date | removed by #1023 |
+| `GET /api/v1/oauth/callback` | `410 Gone` HTML: explains to a browser already returning from a provider that nothing was saved | removed by #1023 |
+| `POST …/connections/{provider}/disconnect` | blanks and best-effort revokes a credential written before #828 | stays while legacy credentials exist |
 
-The tier is still the honest answer to *can a Connect click possibly succeed
-here* — it is what the route itself decides by, and `start` still refuses on
-`none`. What #822 changed is that the console stopped acting on `static`: the
-question it renders is no longer "could this succeed" but "would this confer
-anything", and for the native hatch the answer is no until #396 is settled.
+The callback intentionally ignores every query parameter. Once `start` refuses
+it cannot mint a new signed state, but a consent screen opened seconds before a
+deploy can still redirect a real browser afterward. Explaining that outcome,
+rather than accepting the code or returning a 404, prevents an in-flight
+authorization from creating the same agent-unreachable credential.
 
-**The hatch also needs `OPENCOMPANY_OAUTH_STATE_SECRET`** (issue #318). The
-`state` nonce binds an in-flight authorization to one company, provider and
-expiry, and the callback verifies it before exchanging the code — it is the
-flow's CSRF defence. That signing key used to fall back to a literal baked into
-this repository, which made the value public, identical across every
-unconfigured deployment, and constructible rather than obtainable: verifying it
-proved only that it was well-formed. There is now **no default**. A host with a
-registered provider application but no secret reports `none` rather than
-offering a button whose check is void, `start` refuses with a message naming the
-variable, and the process logs the misconfiguration once — a tile has no room to
-name a variable, and an operator reads logs. Whitespace-only counts as unset, so
-an empty shell expansion gets the closed door rather than a secret of `" "`.
+A native credential already stored remains visible in `GET …/connections` with
+`via: ["native"]` and can be released with Disconnect. It does not satisfy a
+planning prerequisite and must not be read as an agent capability.
 
-`attested` deliberately requires the projected-file tier, not
+`credentialSource: "static"` now means only that a legacy native credential
+exists. A host-level `OPENCOMPANY_OAUTH_<PROVIDER>_ID` / `_SECRET` pair does
+not make a connection route available; it is retained solely for best-effort
+revocation of that historical provider grant.
+
+## Hosted connections
+
+Issue `#319` remains the decision point for hosted provider connections. The platform
+backend owns provider applications and token custody; OpenCompany agents reach
+providers through the supported Composio path, never through
+`oauth/{provider}`.
+
+The read projection's `attested` source deliberately requires the projected-file tier, not
 `TinyhumansTokenSource::from_env` as a whole: that resolver also accepts a
 long-lived `TINYHUMANS_API_KEY`, which a self-hoster commonly sets to buy
 inference. Accepting it here would tell such an operator their working Connect
@@ -183,4 +165,3 @@ Composio resolves it for the entity — nothing in this codebase selects, orders
 or defaults an account, and the console's provider detail view says so rather
 than marking one as the default. Changing that means sending a connection id on
 execute, which is a harness change, not a console one.
-
