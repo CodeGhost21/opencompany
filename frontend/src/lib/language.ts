@@ -287,6 +287,22 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // count is the whole difference between it and `edit` above.
   apply_patch: "Edit several files in its workspace at once",
   csv_export: "Save data as a spreadsheet file in its workspace",
+  // Hosting (issue #1079). Only the three that park need words here; the three
+  // read tools are `Reach::Nothing` and never reach an approval card.
+  //
+  // Each label names the thing an operator is actually consenting to, because
+  // these are the cards where a vague one costs the most: two of them change
+  // what the public sees at an address, and the third can write secrets at a
+  // third-party provider. "Use one of its tools" over a live deployment is the
+  // failure this issue is about.
+  hosting_launch_site: "Deploy a site to the public internet",
+  // "point at" rather than "add": the domain already exists and belongs to
+  // somebody — what this call does is aim it at a site.
+  hosting_add_domain: "Point a domain at one of its sites",
+  // Deliberately not worded as a deployment. The tool requires a redeploy
+  // afterwards for a build-time variable to take effect, so a label promising
+  // one would be describing an act that has not happened.
+  hosting_set_env: "Set environment variables on one of its sites",
   // `mcp_registry_tool_call` is deliberately absent: EFFECT_LABELS already
   // names it and is consulted first, so an entry here would be unreachable.
 };
