@@ -335,9 +335,13 @@ test("#311 the org chart is reachable, which it was not before", async ({
   // the page it happened to load on. Before this change there was no nav entry
   // and no hash that reached this surface at all.
   await page.goto("/#/overview");
+  // `exact`, because the sidebar header's host switcher is a button too and its
+  // accessible name ends "… Current company" (#1142). Without it the substring
+  // match picks the switcher — which is above the nav — and clicking it opens a
+  // menu instead of routing.
   const nav = page
-    .getByRole("link", { name: "Company" })
-    .or(page.getByRole("button", { name: "Company" }))
+    .getByRole("link", { name: "Company", exact: true })
+    .or(page.getByRole("button", { name: "Company", exact: true }))
     .first();
   await expect(nav).toBeVisible({ timeout: 30_000 });
 

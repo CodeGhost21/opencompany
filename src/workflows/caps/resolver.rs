@@ -137,6 +137,9 @@ impl StoreWorkflowResolver {
             &self.company,
             child_id,
             &audit.run_id,
+            // Issue #1098: the audit reports calls never offered for approval at
+            // all, so it deliberately does not consult standing permissions.
+            None,
         )
         .await;
 
