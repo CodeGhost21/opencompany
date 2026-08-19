@@ -884,7 +884,7 @@ async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
         // `validate_tenant_namespace`). Reject it here, the boundary that
         // reads the variable.
         if let Err(reason) = opencompany::app::validate_tenant_namespace(tenant) {
-            return Err(opencompany::error::OpenCompanyError::Config(reason.into()));
+            return Err(opencompany::error::OpenCompanyError::Config(reason));
         }
     }
     if tenant_id.is_none() {
