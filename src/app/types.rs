@@ -161,6 +161,26 @@ pub fn namespace_company_id(tenant: &str, id: CompanyId) -> CompanyId {
     }
 }
 
+/// A tenant namespace must not contain the `--` id delimiter.
+///
+/// [`namespace_company_id`] and `app::orphans::filter_to_tenant` both encode a
+/// tenant as the `<tenant>--` prefix, so a namespace containing `--` makes the
+/// encoding ambiguous: `acme` namespacing `other--company` collides with
+/// `acme--other` namespacing `company`, and the shorter tenant's filter then
+/// claims the longer tenant's ids. Reject the delimiter at the boundary that
+/// reads `OPENCOMPANY_TENANT_ID` so a malformed namespace fails loudly instead
+/// of silently misattributing another tenant's companies.
+pub fn validate_tenant_namespace(tenant: &str) -> Result<(), String> {
+    if tenant.contains("--") {
+        Err(format!(
+            "tenant namespace `{tenant}` contains `--`, which is the company-id \
+             delimiter; a namespace may not contain it"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// The canonical form of a tenant identifier for ownership: the bare slug, with
 /// any leading `tenant:` prefix stripped.
 ///
