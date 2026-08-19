@@ -1230,6 +1230,22 @@ export interface ApiErrorBody {
   code: string;
 }
 
+/**
+ * One node-scoped complaint from a `workflow_invalid` 400 (issue #1016).
+ *
+ * The host answers a rejected workflow save with the `{error, code}` envelope
+ * plus a `problems` array so the console can land each complaint on the control
+ * that caused it rather than in one flat banner. `nodeId` names the offending
+ * node (mapped from the wire's snake_case `node_id`); `field` is the dotted
+ * path within it (`config.url`, `from`, `workflow_id`, …). Both are optional:
+ * a graph-level complaint (`needs exactly one trigger`) names neither.
+ */
+export interface WorkflowProblem {
+  nodeId?: string;
+  field?: string;
+  message: string;
+}
+
 export class ApiError extends Error {
   /**
    * The raw response body, kept only when it was **not** the host's envelope
@@ -1244,6 +1260,16 @@ export class ApiError extends Error {
    * that may sit in state for the life of the view.
    */
   detail?: string;
+
+  /**
+   * The host's node-scoped complaints from a `workflow_invalid` 400 (issue
+   * #1016), when it sent any. Additive to the `{error, code}` envelope: `code`
+   * and `message` still carry the summary, and a consumer that ignores this
+   * field renders exactly as before. Populated only by the request path (see
+   * `httpError`), so its absence means "the host sent no `problems`", never
+   * "not parsed yet".
+   */
+  problems?: WorkflowProblem[];
 
   constructor(
     public status: number,
