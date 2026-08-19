@@ -252,9 +252,8 @@ describe("connectRoute", () => {
   });
 
   it("gives the eight ids with no native backend key a working Composio route", () => {
-    // `well_known()` recognises only slack / google / gmail / github, so these
-    // could never complete a native handshake no matter how the host is
-    // configured. Composio is what makes them connectable at all.
+    // Native OAuth is retired, and these provider ids never had a native route
+    // before it retired. Composio is what makes them connectable at all.
     for (const id of [
       "google-calendar",
       "notion",

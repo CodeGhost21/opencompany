@@ -104,8 +104,8 @@ describe("buildGridProviders", () => {
     const tile = bySlug(providers, "googlecalendar");
     expect(tile.connected).toBe(true);
     // The host id stays distinct from the Composio slug: one is what
-    // `startConnection`/`disconnectConnection` take, the other is what
-    // `composio/authorize` takes, and sending either to the other's route fails.
+    // `disconnectConnection` takes for a historical credential, the other is
+    // what `composio/authorize` takes, and sending either to the other's route fails.
     expect(tile.providerId).toBe("google-calendar");
   });
 

@@ -24,7 +24,7 @@ the world as, and which third-party accounts its agents act through:
 | Surface | Admin-scoped |
 |---|---|
 | `composio` | `PUT …/composio/token`, `POST …/composio/authorize`, `DELETE …/composio/connections/{id}`, `PUT`/`DELETE …/composio/connections/{id}/default` |
-| `connections` (`oauth`) | `POST …/connections/{p}/start`, `POST …/connections/{p}/disconnect` |
+| `connections` (`oauth`) | `POST …/connections/{p}/start` (dated `410` retirement bridge), `POST …/connections/{p}/disconnect` |
 | `inference` | `PUT …/inference`, `DELETE …/inference`, `POST …/inference/restart` |
 | `smtp` | `PUT …/smtp`, `POST …/smtp/test` (the caller names the recipient) |
 | `domain` | `PUT …/domain` |

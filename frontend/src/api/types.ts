@@ -859,13 +859,11 @@ export interface InboxMessageDto {
  *   by the Composio plane, which brokers through it. The native OAuth catalog
  *   does **not** route through the company key today, so this value does not
  *   appear on a native-only provider — see `api/credential.ts`.
- * - `static` — a token this company already stored, or this host's own
- *   registered provider application (the self-hosted hatch). The handshake
- *   works; the console stopped offering it in issue #822, because what it
- *   stores is read by no agent tool (#396). So this tier now says what the host
- *   *could* do, and `connectRoute` (`lib/connections.ts`) routes such a
- *   provider through Composio or reports it unavailable.
- * - `none` — neither, so no Connect can succeed on this host.
+ * - `static` — a legacy native OAuth token this company already stored. It is
+ *   visible and revocable, but no agent can use it.
+ * - `none` — neither. A registered native provider application also lands
+ *   here: its start route is a dated 410 retirement bridge (issue #838), not a
+ *   connection route.
  */
 export type ConnectionCredentialSource = "attested" | "company" | "static" | "none";
 
@@ -902,12 +900,6 @@ export interface ConnectionState {
    * distinction rather than a confident disconnected state.
    */
   unverified?: boolean;
-}
-
-/** Response of `POST .../connections/{provider}/start`: where to send the user. */
-export interface ConnectionStart {
-  /** The provider's OAuth authorize URL to redirect the operator to. */
-  url: string;
 }
 
 /** The coarse health tier of an MCP server, from a probe. */
