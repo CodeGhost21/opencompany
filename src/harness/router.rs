@@ -41,7 +41,7 @@ use crate::company::steer::SteerControl;
 use crate::error::OpenCompanyError;
 use crate::harness::built_in::TurnOutcome;
 use crate::harness::built_in::run_trace::RunTraceSink;
-use crate::ports::types::CompanyId;
+use crate::ports::types::{CompanyId, CompanyRecord};
 use crate::runtime::delegation::RunTurn;
 
 /// Routes each agent's turn to the [`RunTurn`] of the harness it is bound to.
