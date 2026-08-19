@@ -192,9 +192,23 @@ async fn policy_field_reports_the_tier_in_force() {
     assert_eq!(policy["mode"], "full", "{value}");
     assert_eq!(policy["manifestMode"], "full", "{value}");
     assert_eq!(policy["overridden"], false, "{value}");
-    assert_eq!(policy["alwaysApprove"].as_array().unwrap().len(), 0, "{value}");
-    assert_eq!(policy["manifestAlwaysApprove"].as_array().unwrap().len(), 0, "{value}");
-    assert!(policy["takesEffect"].as_str().unwrap().contains("next turn"), "{value}");
+    assert_eq!(
+        policy["alwaysApprove"].as_array().unwrap().len(),
+        0,
+        "{value}"
+    );
+    assert_eq!(
+        policy["manifestAlwaysApprove"].as_array().unwrap().len(),
+        0,
+        "{value}"
+    );
+    assert!(
+        policy["takesEffect"]
+            .as_str()
+            .unwrap()
+            .contains("next turn"),
+        "{value}"
+    );
     let tiers = policy["tiers"].as_array().unwrap();
     assert!(tiers.len() >= 4, "expected at least 4 tiers: {value}");
     assert_eq!(tiers[0]["value"], "readonly");
@@ -257,9 +271,23 @@ async fn policy_field_reports_the_override_not_the_manifest() {
         policy["setAtMillis"], 1_700_000_000_000_f64,
         "epoch millis survive the f64 widening exactly: {value}"
     );
-    assert_eq!(policy["alwaysApprove"].as_array().unwrap().len(), 0, "{value}");
-    assert_eq!(policy["manifestAlwaysApprove"].as_array().unwrap().len(), 0, "{value}");
-    assert!(policy["takesEffect"].as_str().unwrap().contains("next turn"), "{value}");
+    assert_eq!(
+        policy["alwaysApprove"].as_array().unwrap().len(),
+        0,
+        "{value}"
+    );
+    assert_eq!(
+        policy["manifestAlwaysApprove"].as_array().unwrap().len(),
+        0,
+        "{value}"
+    );
+    assert!(
+        policy["takesEffect"]
+            .as_str()
+            .unwrap()
+            .contains("next turn"),
+        "{value}"
+    );
     let tiers = policy["tiers"].as_array().unwrap();
     assert!(tiers.len() >= 4, "expected at least 4 tiers: {value}");
     assert_eq!(tiers[0]["value"], "readonly");
