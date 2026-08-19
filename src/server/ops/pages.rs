@@ -381,7 +381,10 @@ mod tests {
             .nth(1)
             .expect("the shell has a module script");
         let react_import = module_script.lines().find(|l| l.contains("React"));
-        assert!(react_import.is_some(), "no `React` import in: {module_script}");
+        assert!(
+            react_import.is_some(),
+            "no `React` import in: {module_script}"
+        );
     }
 
     #[test]

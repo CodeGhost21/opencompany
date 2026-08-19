@@ -846,7 +846,7 @@ impl Tool for PagesWriteTool {
                              {diagnostic}"
                         )));
                     }
-Err(e) => {
+                    Err(e) => {
                         return Ok(ToolResult::error(format!(
                             "Could not compile `{slug}`'s Page.tsx — the compiler task failed: \
                              {e}"
@@ -1414,11 +1414,17 @@ export * from "https://evil.example/x.js";
             "an overwrite without `expected_updated_at` must be refused"
         );
         assert!(
-            result.output().contains("`expected_updated_at` is required"),
+            result
+                .output()
+                .contains("`expected_updated_at` is required"),
             "the refusal names the missing token: {result:?}"
         );
 
-        let after = pages.page("revenue").await.expect("read ok").expect("exists");
+        let after = pages
+            .page("revenue")
+            .await
+            .expect("read ok")
+            .expect("exists");
         assert_eq!(
             after.source.expect("source node").updated_at_millis,
             rev,
