@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{OpenCompanyError, Result};
+use crate::error::{OpenCompanyError, Result, WorkflowProblem};
 
 /// The node kinds a workflow graph may use — the OpenCompany authoring
 /// contract. The first six are the original set; the trailing six (P2) add the
@@ -1123,7 +1123,15 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
         // silently stop a scheduled run. The console-draft path applies the same
         // helper strictly, so the two AUTHOR surfaces reject the same shapes.
         if strict && let Some(kind) = kind {
-            problems.extend(required_config_problems(kind, &label, node.config.as_ref()));
+            // The on-disk/strict pass keeps its flat `Vec<String>` shape; the
+            // structured node/field detail (issue #1016) is consumed on the
+            // author-time draft path, which calls `required_config_problems`
+            // directly.
+            problems.extend(
+                required_config_problems(kind, &node.id, &label, node.config.as_ref())
+                    .into_iter()
+                    .map(|problem| problem.message),
+            );
         }
 
         // `schedule` says *when* the workflow starts, so it is trigger-only —
@@ -1327,30 +1335,32 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
     // Edges: endpoints must reference existing nodes; no self-loops. An
     // "error"-labeled edge and an `on_error = "route"` node imply each other.
     let mut route_nodes_with_error_edge = std::collections::HashSet::new();
-    for (index, edge) in raw.edges.iter().enumerate() {
-        let label = format!("edge #{}", index + 1);
-
+    for edge in &raw.edges {
+        // Edge problems name the ENDPOINT at fault (`old-id`), not a positional
+        // `edge #N` (issue #1016): the author sees a node id they wrote, and the
+        // console can highlight it. The `to → from` label describes the edge only
+        // when neither endpoint has a usable id to name.
         if edge.from.trim().is_empty() {
-            problems.push(format!("{label} is missing a `from` node."));
+            problems.push("an edge is missing a `from` node.".to_string());
         } else if !seen.contains(edge.from.as_str()) {
             problems.push(format!(
-                "{label} starts at `{}`, which is not a node in this workflow.",
+                "an edge starts at `{}`, which is not a node in this workflow.",
                 edge.from
             ));
         }
 
         if edge.to.trim().is_empty() {
-            problems.push(format!("{label} is missing a `to` node."));
+            problems.push("an edge is missing a `to` node.".to_string());
         } else if !seen.contains(edge.to.as_str()) {
             problems.push(format!(
-                "{label} points to `{}`, which is not a node in this workflow.",
+                "an edge points to `{}`, which is not a node in this workflow.",
                 edge.to
             ));
         }
 
         if !edge.from.trim().is_empty() && edge.from == edge.to {
             problems.push(format!(
-                "{label} loops `{}` back to itself — an edge must connect two different nodes.",
+                "an edge loops `{}` back to itself — an edge must connect two different nodes.",
                 edge.from
             ));
         }
@@ -1365,7 +1375,7 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                 && !switch_nodes.contains(edge.from.as_str())
             {
                 problems.push(format!(
-                    "{label} is labeled `error` but its source `{}` is not `on_error = \"route\"` — only a routing node emits an error edge.",
+                    "the edge leaving `{}` is labeled `error` but its source is not `on_error = \"route\"` — only a routing node emits an error edge.",
                     edge.from
                 ));
             }
@@ -1407,7 +1417,7 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
                     .map(|l| format!("`{l}`"))
                     .unwrap_or_else(|| "no label".to_string());
                 problems.push(format!(
-                    "{label} leaves condition node `{}` with {shown} — a condition's branches must be labeled `yes` or `no`.",
+                    "an edge leaves condition node `{}` with {shown} — a condition's branches must be labeled `yes` or `no`.",
                     edge.from
                 ));
             }
@@ -1601,9 +1611,10 @@ pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
 /// tool would run) — so surfacing it at load/author time is the point.
 pub(crate) fn required_config_problems(
     kind: WorkflowNodeKind,
+    node_id: &str,
     label: &str,
     config: Option<&toml::Value>,
-) -> Vec<String> {
+) -> Vec<WorkflowProblem> {
     let table = config.and_then(toml::Value::as_table);
     // A config key set to a non-empty, non-whitespace string.
     let non_empty = |key: &str| -> bool {
@@ -1612,26 +1623,54 @@ pub(crate) fn required_config_problems(
             .and_then(toml::Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
     };
+    // Enriches a message with the node + config field at fault (issue #1016).
+    let problem =
+        |field: &str, message: String| WorkflowProblem::node_field(node_id, field, message);
     let mut problems = Vec::new();
     match kind {
         WorkflowNodeKind::Condition if !non_empty("field") => {
-            problems.push(format!(
-                "{label} is a condition node but sets no `config.field` — give it the boolean \
-                 expression the branch tests (e.g. `field = \"=item.approved\"`)."
+            problems.push(problem(
+                "config.field",
+                format!(
+                    "{label} is a condition node but sets no `config.field` — give it the boolean \
+                     expression the branch tests (e.g. `field = \"=item.approved\"`)."
+                ),
             ));
         }
         WorkflowNodeKind::HttpRequest => {
             if !non_empty("method") {
-                problems.push(format!(
-                    "{label} is an http_request node but sets no `config.method` — name the HTTP \
-                     method (e.g. `method = \"GET\"`)."
+                problems.push(problem(
+                    "config.method",
+                    format!(
+                        "{label} is an http_request node but sets no `config.method` — name the \
+                         HTTP method (e.g. `method = \"GET\"`)."
+                    ),
                 ));
             }
-            if !non_empty("url") {
-                problems.push(format!(
-                    "{label} is an http_request node but sets no `config.url` — give the request \
-                     URL (e.g. `url = \"https://…\"`)."
-                ));
+            // `url` is upgraded from a mere non-empty check to a real URL check
+            // (issue #1016): a value like `not-a-url` was accepted at save then
+            // failed at run. Require a full http(s) URL with a host so the node
+            // can actually reach an endpoint.
+            match table
+                .and_then(|t| t.get("url"))
+                .and_then(toml::Value::as_str)
+            {
+                Some(url) if is_valid_http_url(url) => {}
+                Some(url) if !url.trim().is_empty() => problems.push(problem(
+                    "config.url",
+                    format!(
+                        "{label} has a `config.url` of `{}` that is not a valid URL — give a full \
+                         http:// or https:// URL with a host (e.g. `url = \"https://…\"`).",
+                        url.trim()
+                    ),
+                )),
+                _ => problems.push(problem(
+                    "config.url",
+                    format!(
+                        "{label} is an http_request node but sets no `config.url` — give the \
+                         request URL (e.g. `url = \"https://…\"`)."
+                    ),
+                )),
             }
         }
         // `field` OR `expression` both satisfy a switch — the tinyflows engine
@@ -1640,20 +1679,134 @@ pub(crate) fn required_config_problems(
         // honoured downstream and requiring only that ONE is present matches the
         // runtime.
         WorkflowNodeKind::Switch if !non_empty("field") && !non_empty("expression") => {
-            problems.push(format!(
-                "{label} is a switch node but names no discriminant — set `config.field` or \
-                 `config.expression` to the value that selects the branch."
+            problems.push(problem(
+                "config.field",
+                format!(
+                    "{label} is a switch node but names no discriminant — set `config.field` or \
+                     `config.expression` to the value that selects the branch."
+                ),
             ));
         }
         WorkflowNodeKind::ToolCall if !non_empty("slug") => {
-            problems.push(format!(
-                "{label} is a tool_call but sets no `config.slug` — set `config.slug` to the \
-                 tool to run."
+            problems.push(problem(
+                "config.slug",
+                format!(
+                    "{label} is a tool_call but sets no `config.slug` — set `config.slug` to the \
+                     tool to run."
+                ),
             ));
+        }
+        // A `transform` maps upstream items through a `config.set` table of
+        // expression strings (issue #1016). An author writing `kind = \"transform\"`
+        // with no `set` produced a node that silently passed items through — the
+        // pass-through role is what a `kind = \"output\"` node is for, so require a
+        // real, non-empty mapping here. Every value in the table must be a string
+        // expression.
+        WorkflowNodeKind::Transform => match table.and_then(|t| t.get("set")) {
+            Some(toml::Value::Table(set)) if !set.is_empty() => {
+                for (key, value) in set {
+                    if value.as_str().is_none() {
+                        problems.push(problem(
+                            "config.set",
+                            format!(
+                                "{label} has a `config.set` entry `{key}` that is not a string — \
+                                 each set value is an expression string (e.g. `name = \
+                                 \"=item.name\"`)."
+                            ),
+                        ));
+                    }
+                }
+            }
+            Some(toml::Value::Table(_)) => problems.push(problem(
+                "config.set",
+                format!(
+                    "{label} is a transform node but its `config.set` is empty — map at least one \
+                     output field to an expression (e.g. under `[node.config.set]`, \
+                     `name = \"=item.name\"`)."
+                ),
+            )),
+            Some(_) => problems.push(problem(
+                "config.set",
+                format!(
+                    "{label} has a `config.set` that is not a table — it must map output fields to \
+                     expression strings (e.g. under `[node.config.set]`, `name = \"=item.name\"`)."
+                ),
+            )),
+            None => problems.push(problem(
+                "config.set",
+                format!(
+                    "{label} is a transform node but sets no `config.set` — map at least one \
+                     output field to an expression (e.g. under `[node.config.set]`, \
+                     `name = \"=item.name\"`)."
+                ),
+            )),
+        },
+        // A `split_out` fans one upstream item into many by reading an array at
+        // `config.path` (issue #1016). With no path it has nothing to split on.
+        WorkflowNodeKind::SplitOut if !non_empty("path") => {
+            problems.push(problem(
+                "config.path",
+                format!(
+                    "{label} is a split_out node but sets no `config.path` — name the field \
+                     holding the list to split into separate items (e.g. `path = \"items\"`)."
+                ),
+            ));
+        }
+        // An `output_parser` is legitimately schema-LESS — a bare identity parser
+        // that passes items through — so schema is NOT required (issue #1016).
+        // Only type-check the keys that ARE present: `schema` must be a table,
+        // `auto_fix` a bool, `connection_ref` a string.
+        WorkflowNodeKind::OutputParser => {
+            if let Some(t) = table {
+                if let Some(schema) = t.get("schema")
+                    && !schema.is_table()
+                {
+                    problems.push(problem(
+                        "config.schema",
+                        format!(
+                            "{label} has a `config.schema` that is not a table — a parser schema is \
+                             a table of fields, or leave it out for a pass-through parser."
+                        ),
+                    ));
+                }
+                if let Some(auto_fix) = t.get("auto_fix")
+                    && auto_fix.as_bool().is_none()
+                {
+                    problems.push(problem(
+                        "config.auto_fix",
+                        format!(
+                            "{label} has a `config.auto_fix` that is not a boolean — set it to \
+                             `true` or `false`."
+                        ),
+                    ));
+                }
+                if let Some(connection_ref) = t.get("connection_ref")
+                    && connection_ref.as_str().is_none()
+                {
+                    problems.push(problem(
+                        "config.connection_ref",
+                        format!(
+                            "{label} has a `config.connection_ref` that is not a string — it names \
+                             a saved connection."
+                        ),
+                    ));
+                }
+            }
         }
         _ => {}
     }
     problems
+}
+
+/// Whether `value` is a full http(s) URL with a host (issue #1016). A workflow
+/// `http_request` node needs a real endpoint, so a scheme-less or hostless
+/// string (`not-a-url`, `ftp://x`, `https://`) is refused at author time rather
+/// than accepted at save and failed at run.
+fn is_valid_http_url(value: &str) -> bool {
+    match url::Url::parse(value.trim()) {
+        Ok(url) => matches!(url.scheme(), "http" | "https") && url.has_host(),
+        Err(_) => false,
+    }
 }
 
 /// Whether a TOML config contains a float JSON cannot represent.
@@ -3763,5 +3916,112 @@ to = "done"
             "{CONSOLE_DIALOG_PATH} no longer defines `looksLikeCron` — this test \
              exists to pin the arity that helper assumes"
         );
+    }
+
+    // --- issue #1016: per-kind config gate (transform / split_out / http url /
+    //     output_parser) --------------------------------------------------------
+
+    /// Parses a bare TOML config table for a node.
+    fn cfg(src: &str) -> toml::Value {
+        toml::from_str::<toml::Value>(src).expect("valid config table")
+    }
+
+    fn problems(kind: WorkflowNodeKind, config: Option<&toml::Value>) -> Vec<WorkflowProblem> {
+        required_config_problems(kind, "n", "node `n`", config)
+    }
+
+    #[test]
+    fn transform_without_set_is_rejected_naming_the_field() {
+        let out = problems(WorkflowNodeKind::Transform, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].node_id.as_deref(), Some("n"));
+        assert_eq!(out[0].field.as_deref(), Some("config.set"));
+    }
+
+    #[test]
+    fn transform_with_empty_set_is_rejected() {
+        let config = cfg("[set]\n");
+        assert_eq!(
+            problems(WorkflowNodeKind::Transform, Some(&config))[0]
+                .field
+                .as_deref(),
+            Some("config.set")
+        );
+    }
+
+    #[test]
+    fn transform_with_non_string_set_value_is_rejected() {
+        let config = cfg("[set]\ncount = 3\n");
+        let out = problems(WorkflowNodeKind::Transform, Some(&config));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].field.as_deref(), Some("config.set"));
+    }
+
+    #[test]
+    fn transform_with_string_expressions_is_accepted() {
+        let config = cfg("[set]\nname = \"=item.name\"\n");
+        assert!(problems(WorkflowNodeKind::Transform, Some(&config)).is_empty());
+    }
+
+    #[test]
+    fn split_out_without_path_is_rejected_naming_the_field() {
+        let out = problems(WorkflowNodeKind::SplitOut, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].field.as_deref(), Some("config.path"));
+    }
+
+    #[test]
+    fn split_out_with_path_is_accepted() {
+        let config = cfg("path = \"items\"\n");
+        assert!(problems(WorkflowNodeKind::SplitOut, Some(&config)).is_empty());
+    }
+
+    #[test]
+    fn http_request_url_must_be_a_real_url() {
+        let good = cfg("method = \"GET\"\nurl = \"https://example.com/x\"\n");
+        assert!(problems(WorkflowNodeKind::HttpRequest, Some(&good)).is_empty());
+
+        // "" is rejected as before (regression guard) …
+        let empty = cfg("method = \"GET\"\nurl = \"\"\n");
+        assert_eq!(
+            problems(WorkflowNodeKind::HttpRequest, Some(&empty))[0]
+                .field
+                .as_deref(),
+            Some("config.url")
+        );
+
+        // … and now `ftp://x` and bare `garbage` are rejected too (new).
+        for bad in ["ftp://x", "garbage", "https://"] {
+            let config = cfg(&format!("method = \"GET\"\nurl = \"{bad}\"\n"));
+            let out = problems(WorkflowNodeKind::HttpRequest, Some(&config));
+            assert_eq!(out.len(), 1, "{bad}: {out:?}");
+            assert_eq!(out[0].field.as_deref(), Some("config.url"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn output_parser_is_schema_less_by_default() {
+        // A bare identity parser (no config at all) is accepted.
+        assert!(problems(WorkflowNodeKind::OutputParser, None).is_empty());
+        // A present but mistyped key is rejected, each naming its field.
+        let config = cfg("auto_fix = \"yes\"\nconnection_ref = 5\n");
+        let out = problems(WorkflowNodeKind::OutputParser, Some(&config));
+        let fields: Vec<&str> = out.iter().filter_map(|p| p.field.as_deref()).collect();
+        assert!(fields.contains(&"config.auto_fix"), "{fields:?}");
+        assert!(fields.contains(&"config.connection_ref"), "{fields:?}");
+    }
+
+    #[test]
+    fn output_parser_with_well_typed_keys_is_accepted() {
+        let config =
+            cfg("auto_fix = true\nconnection_ref = \"conn\"\n[schema]\nname = \"string\"\n");
+        assert!(problems(WorkflowNodeKind::OutputParser, Some(&config)).is_empty());
+    }
+
+    #[test]
+    fn merge_stays_config_free() {
+        assert!(problems(WorkflowNodeKind::Merge, None).is_empty());
+        let config = cfg("anything = \"goes\"\n");
+        assert!(problems(WorkflowNodeKind::Merge, Some(&config)).is_empty());
     }
 }
