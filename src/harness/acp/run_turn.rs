@@ -569,7 +569,9 @@ mod test {
         // `stopReason: "cancelled"`. Abandoning the future on a steer would
         // leave a harness mid-tool-call with nothing reading its output, so the
         // contract is that a steered turn still produces an outcome.
-        let agent = Arc::new(Scripted::answering(vec![AcpUpdate::MessageChunk("partial".into())]));
+        let agent = Arc::new(Scripted::answering(vec![AcpUpdate::MessageChunk(
+            "partial".into(),
+        )]));
         let run_turn: &dyn RunTurn = &AcpRunTurn::new(agent);
         let control = crate::company::steer::SteerControl::new();
         control.request(crate::company::steer::SteerAction::Cancel);
