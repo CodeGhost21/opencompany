@@ -72,6 +72,7 @@ impl HarnessRouter {
             by_agent: HashMap::new(),
             engines: HashMap::new(),
             unavailable: HashMap::new(),
+            failures: Mutex::new(HashMap::new()),
         }
     }
 
