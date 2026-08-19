@@ -896,10 +896,16 @@ export function AppShell({
                 : prev,
             );
           })
-          .catch(() => {
-            // A 404 means the row is gone rather than open; anything else is a
-            // blip. Either way, stop claiming a turn is in flight forever.
-            if (!cancelled) settle(threadId);
+          .catch((err: unknown) => {
+            // Only a confirmed missing row — the host answering 404 for this
+            // turn id — is "the turn is over"; a transient network or server
+            // blip is not, and settling on one would tear down the very poll
+            // that is the sole delivery path when `/events` is buffered or
+            // unavailable (issue #1000). The next tick retries; if the host is
+            // genuinely gone it will keep answering and the row eventually
+            // settles through whatever terminal signal it does answer.
+            if (cancelled) return;
+            if (err instanceof ApiError && err.status === 404) settle(threadId);
           });
       }
     };
