@@ -367,10 +367,9 @@ that reads `/spec` over HTTP rather than counting companies.
 
 `RunSetupWizard` skips the *seed* half of `bootstrap_companies` and keeps the
 *adopt* half (`desktop::adopt_companies`). Adoption is not optional for either
-kind of host: a company the wizard writes into a root is a bundle on disk, and
-a host that skipped adoption would come back from every relaunch serving an
-empty registry — and reporting setup outstanding again, walking the operator
-through the wizard once per launch.
+host: a company the wizard writes is a bundle on disk, and skipping adoption
+would mean an instance that came back from every relaunch serving an empty
+registry — and reporting setup outstanding again, once per launch.
 
 `oc_embedded` survives as the `default` instance's row, because the shell and
 the console ship independently — a `pnpm dev` console against an older `cargo`
