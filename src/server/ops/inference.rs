@@ -490,7 +490,17 @@ async fn set_config(
 /// set: reverting decides which model the company thinks with.
 async fn revert_config(company: AdminScopedCompany) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
-    clear_runtime_config(runtime.id(), runtime.secrets().as_ref())
+    let secrets = runtime.secrets();
+    clear_runtime_config(runtime.id(), secrets.as_ref())
+        .await
+        .map_err(ApiError)?;
+    // Also clear any stored credential: a "Reset to managed" is supposed to be a
+    // full reset, not a half-clear that leaves a stale credential behind. The
+    // stored key would otherwise make `keyConfigured` appear false in the UI while
+    // secretly still being present, and the console's remove-key button would
+    // remain hidden — leaving the operator stranded with a credential they cannot
+    // clear. See issue #993 / inference.spec.ts cleanup.
+    inference::clear_key(runtime.id(), secrets.as_ref())
         .await
         .map_err(ApiError)?;
     Ok(Json(MutationResponse {
