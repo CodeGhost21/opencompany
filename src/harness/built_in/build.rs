@@ -2576,6 +2576,7 @@ mod tests {
             tools: Vec::new(),
             delegates_to: Vec::new(),
             context: None,
+            harness: None,
             budget_usd_daily: None,
             prompt: None,
             prompt_files: Vec::new(),
