@@ -3083,6 +3083,41 @@ pub struct CompanyRecord {
     pub setup: Option<crate::company::setup::SetupAnswers>,
 }
 
+/// What a teammate key an operator or a model typed resolves to on a company's
+/// roster (issue #1162).
+///
+/// The three answers a caller has to tell apart. A key that names nothing is a
+/// different fact from a key that names two people: the first is a typo or an
+/// invention, the second is a collision the operator created and can only fix
+/// by renaming or by using an id. Collapsing them — or silently taking the
+/// first match — is the misrouting [`CompanyRecord::overlay_agent_ids_by_name`]
+/// exists to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeammateResolution {
+    /// Exactly one teammate. Carries the **canonical roster id**, never the key
+    /// as typed, so every consumer downstream is working in one namespace.
+    Agent(String),
+    /// Names no teammate at all.
+    Unknown,
+    /// Names more than one operator-added teammate, because they share a
+    /// display name. Carries every colliding id so a refusal can name them.
+    Ambiguous(Vec<String>),
+}
+
+impl TeammateResolution {
+    /// The canonical id when the key named exactly one teammate.
+    ///
+    /// For the callers that have nothing useful to say about the other two
+    /// answers — a cycle guard has no target to compare, a drain has nothing to
+    /// deliver to — and where the caller ahead of them has already refused.
+    pub fn agent(self) -> Option<String> {
+        match self {
+            Self::Agent(id) => Some(id),
+            Self::Unknown | Self::Ambiguous(_) => None,
+        }
+    }
+}
+
 impl CompanyRecord {
     /// The effective member ids of a desk: the desk's declared members first
     /// (from the manifest `[[group_chat]]` or, for an operator-created desk, the
@@ -3372,6 +3407,54 @@ impl CompanyRecord {
             .filter(|a| a.name.eq_ignore_ascii_case(name_key))
             .map(|a| a.id.clone())
             .collect()
+    }
+
+    /// Resolves a teammate key the way every surface that takes one should:
+    /// **id first, then an operator-added teammate's display name** (issue
+    /// #1162).
+    ///
+    /// The single place the two halves of the roster's namespace are joined.
+    /// [`Self::resolve_roster_agent_id`] is deliberately id-only and
+    /// [`Self::overlay_agent_ids_by_name`] deliberately name-only; every caller
+    /// that wants "who did the human mean" needs both, in this order, and
+    /// before #1162 only the board's assignee field had them. `query_company`
+    /// printed an overlay teammate under its display name while
+    /// `delegate_to_teammate` grounded ids alone, so the orchestrator read a
+    /// name off the roster it was told was authoritative and was refused.
+    ///
+    /// **Ids win.** Trying the id namespace first is what stops a display name
+    /// shadowing a real id: a teammate mischievously (or accidentally) named
+    /// `"engineer"` can never intercept work meant for the manifest agent
+    /// `engineer`. That ordering is a guarantee, not an optimisation — it is
+    /// why this is one method rather than a convention each caller re-applies.
+    ///
+    /// **Manifest agents are not matched by role**, only by id. Two teammates
+    /// may legitimately share a role, so role-matching belongs to the surfaces
+    /// that can ask a human which one they meant — the workflow authoring
+    /// resolver does it deliberately, and stays separate for that reason.
+    ///
+    /// **Desks are not in scope here.** A caller that accepts a desk *and* a
+    /// teammate — [`assignee::resolve`] is the one — must try
+    /// [`Self::resolve_desk_id`] itself, first: a desk whose id matches a
+    /// teammate id keeps routing as a desk. Folding desks in here would teach
+    /// `delegate_to_teammate` to accept them, contradicting its own "that is a
+    /// desk, not a teammate" refusal.
+    ///
+    /// [`assignee::resolve`]: crate::runtime::assignee::resolve
+    pub fn resolve_teammate_key(&self, key: &str) -> TeammateResolution {
+        let key = key.trim();
+        if key.is_empty() {
+            return TeammateResolution::Unknown;
+        }
+        if let Some(id) = self.resolve_roster_agent_id(key) {
+            return TeammateResolution::Agent(id);
+        }
+        let mut by_name = self.overlay_agent_ids_by_name(key);
+        match by_name.len() {
+            0 => TeammateResolution::Unknown,
+            1 => TeammateResolution::Agent(by_name.remove(0)),
+            _ => TeammateResolution::Ambiguous(by_name),
+        }
     }
 
     /// This teammate's operator-set budget override, if one exists.
@@ -4954,6 +5037,95 @@ mod test {
         assert_eq!(record.mint_agent_id("Agents"), "agents_2");
         assert_eq!(record.mint_agent_id("desks"), "desks_2");
         assert_eq!(RESERVED_AGENT_IDS, ["operator", "Agents", "Desks"]);
+    }
+
+    /// Issue #1162: the resolve every surface that takes a teammate key runs.
+    /// An id resolves, an overlay teammate's **display name** resolves to the
+    /// id it was minted under, and a key that is nobody resolves to nothing.
+    #[test]
+    fn resolve_teammate_key_takes_an_id_or_a_display_name() {
+        let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "dana_designer".into(),
+            name: "Dana Designer".into(),
+            role: "Designer".into(),
+            description: None,
+            tools: Vec::new(),
+        });
+
+        assert_eq!(
+            record.resolve_teammate_key("ceo"),
+            TeammateResolution::Agent("ceo".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("dana_designer"),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        // The case #1162 is about: the name `query_company` prints, grounding
+        // to the id the delegation tools accept.
+        assert_eq!(
+            record.resolve_teammate_key("Dana Designer"),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("  dana designer  "),
+            TeammateResolution::Agent("dana_designer".into())
+        );
+        assert_eq!(
+            record.resolve_teammate_key("ghost"),
+            TeammateResolution::Unknown
+        );
+        assert_eq!(
+            record.resolve_teammate_key("   "),
+            TeammateResolution::Unknown
+        );
+    }
+
+    /// Ids win. A teammate whose **display name** is another teammate's id can
+    /// never intercept work meant for that id — the ordering is the guarantee
+    /// that makes one shared resolver safe to use everywhere.
+    #[test]
+    fn resolve_teammate_key_never_lets_a_name_shadow_an_id() {
+        let manifest = "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "impostor".into(),
+            name: "ceo".into(),
+            role: "Growth".into(),
+            description: None,
+            tools: Vec::new(),
+        });
+        assert_eq!(
+            record.resolve_teammate_key("ceo"),
+            TeammateResolution::Agent("ceo".into())
+        );
+    }
+
+    /// Two teammates answering to one display name is a collision the operator
+    /// created, and it is reported as one: every colliding id comes back, so a
+    /// caller can name them instead of silently taking the first.
+    #[test]
+    fn resolve_teammate_key_reports_a_name_two_teammates_answer_to() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        for id in ["dana_designer", "dana_designer_2"] {
+            record.overlay_agents.push(OverlayAgent {
+                id: id.into(),
+                name: "Dana Designer".into(),
+                role: "Designer".into(),
+                description: None,
+                tools: Vec::new(),
+            });
+        }
+        assert_eq!(
+            record.resolve_teammate_key("dana designer"),
+            TeammateResolution::Ambiguous(vec!["dana_designer".into(), "dana_designer_2".into()])
+        );
+        // Either id still resolves on its own — the collision is in the name.
+        assert_eq!(
+            record.resolve_teammate_key("dana_designer_2"),
+            TeammateResolution::Agent("dana_designer_2".into())
+        );
     }
 
     /// Whatever is minted is a legal roster id, suffix included — the same
