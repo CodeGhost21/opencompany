@@ -91,6 +91,84 @@ export interface SetupStatus {
   build: SetupBuild;
   /** Companies already registered. Non-empty means the seed step is skipped. */
   companies: string[];
+  /** What this host can already reach without the operator supplying anything. */
+  inference: InferenceReady;
+}
+
+/**
+ * The credential the host already holds.
+ *
+ * A hosted tenant has one injected by the control plane, and its operator has no
+ * key of their own and no way to get one. This is what lets the first step
+ * arrive already answered rather than demanding something unobtainable.
+ */
+export interface InferenceReady {
+  /** A credential is already resolvable — the design pass would run regardless. */
+  ready: boolean;
+  /** The provider behind it, for the picker's initial value. */
+  provider: string | null;
+  /** The endpoint it resolves to. Shown so a green tick is checkable. */
+  base_url: string | null;
+}
+
+/** The providers this host can talk to (`INFERENCE_PROVIDERS`). */
+export const INFERENCE_PROVIDERS = [
+  {
+    id: "managed",
+    label: "TinyHumans",
+    hint: "The managed endpoint. What a hosted company runs on.",
+    needsUrl: false,
+    needsKey: true,
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    hint: "One key, many models. Billed by OpenRouter.",
+    needsUrl: false,
+    needsKey: true,
+  },
+  {
+    id: "openai_compatible",
+    label: "Other endpoint",
+    hint: "Anything speaking the OpenAI chat API — a proxy, vLLM, a gateway.",
+    needsUrl: true,
+    needsKey: true,
+  },
+  {
+    id: "ollama",
+    label: "Ollama",
+    hint: "A model running on this machine. No key needed.",
+    needsUrl: true,
+    needsKey: false,
+  },
+] as const;
+
+export type InferenceProviderId = (typeof INFERENCE_PROVIDERS)[number]["id"];
+
+/** What the connection test answers. */
+export interface InferenceTestResult {
+  ok: boolean;
+  /** The endpoint actually reached — a tick from the wrong URL is not a pass. */
+  baseUrl: string;
+  /** Present only on failure, already summarised into one actionable line. */
+  error?: string;
+}
+
+/**
+ * Probe a credential before anything is written.
+ *
+ * The design pass is deliberately silent about credentials — it falls back to a
+ * curated team on any failure — so without this an operator who mistypes a key
+ * gets a plausible company and finds out five screens later, if at all.
+ *
+ * The key is used and discarded by the host. Testing a credential and committing
+ * to it are separate acts.
+ */
+export function testInference(
+  client: OpenCompanyClient,
+  body: { provider: string; key?: string | null; baseUrl?: string | null },
+): Promise<InferenceTestResult> {
+  return client.post<InferenceTestResult>("/api/v1/setup/inference/test", body);
 }
 
 /**

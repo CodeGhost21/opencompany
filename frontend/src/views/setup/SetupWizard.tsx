@@ -24,7 +24,7 @@
 //     implies its own button performed the restart.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Loader2, Lock, RotateCw } from "lucide-react";
+import { AlertTriangle, Check, Loader2, Lock, RotateCw } from "lucide-react";
 
 import { requestCode } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
@@ -32,7 +32,9 @@ import {
   changedFields,
   fieldsFor,
   getSetup,
+  INFERENCE_PROVIDERS,
   proposeSetupRoster,
+  testInference,
   submitSetup,
   type SetupApplied,
   type SetupField,
@@ -71,10 +73,24 @@ import { cn } from "@/lib/utils";
  * brain, host and tools all have defaults that work, and a knob with a working
  * default is not a decision worth a screen.
  */
+/**
+ * The flow, in order.
+ *
+ * **Model comes first, and it did not used to.** It sat third, after the three
+ * questions, on the reasoning that cheap interesting questions earn the right to
+ * ask for a credential. That reasoning was sound about *motivation* and wrong
+ * about *consequence*: the design pass is silent when a credential is missing or
+ * bad — it falls back to a curated team — so a wrong key produced a plausible
+ * company and an operator found out two screens later, if at all. The one step
+ * whose failure invalidates every answer after it belongs before them.
+ *
+ * It is a gate, not a wall: the step can be skipped outright, and skipping is
+ * what the curated fallback is for.
+ */
 const STEPS: readonly (Step & { fields: readonly string[] })[] = [
+  { id: "power", label: "Model", fields: ["tinyhumans_api_key"] },
   { id: "business", label: "Business", fields: [] },
   { id: "account", label: "You", fields: [] },
-  { id: "power", label: "Model", fields: ["tinyhumans_api_key"] },
   { id: "advanced", label: "Advanced", fields: [] },
   { id: "review", label: "Review", fields: [] },
 ];
@@ -170,6 +186,29 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
   /** Whether the operator has been shown a problem on the current step yet. */
   const [touched, setTouched] = useState(false);
   /**
+   * The model connection, as the first step leaves it.
+   *
+   * `provider` and `baseUrl` start from what the host already holds, so a hosted
+   * operator — who has no key and cannot get one — arrives at a step that is
+   * already answered and only needs testing.
+   */
+  // Seeded from the host once its status arrives — see the fetch effect. Not an
+  // initialiser, because `status` is null until then.
+  const [provider, setProvider] = useState<string>("managed");
+  const [baseUrl, setBaseUrl] = useState<string>("");
+  /**
+   * The verdict on the credential, and the reason the step can gate on it.
+   *
+   * `"untested"` blocks Next; `"ok"` releases it; `"failed"` blocks with the
+   * reason shown. `"skipped"` releases it too — see the skip link. There is no
+   * state in which the operator cannot proceed at all: decision D3 says nobody
+   * gets stuck, and a credential they cannot obtain must not be the one thing
+   * that traps them.
+   */
+  const [tested, setTested] = useState<
+    { kind: "untested" } | { kind: "testing" } | { kind: "ok"; baseUrl: string } | { kind: "failed"; error: string } | { kind: "skipped" }
+  >({ kind: "untested" });
+  /**
    * The team, once the host has designed one — and `null` until then.
    *
    * Held as state rather than refetched per render because the operator edits
@@ -212,6 +251,11 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
         const seeded: Record<string, string> = {};
         for (const f of s.fields) if (f.value !== null) seeded[f.key] = f.value;
         setValues(seeded);
+        // Pre-fill the model step from what the host already holds. A hosted
+        // operator has a credential injected by the control plane, no key of
+        // their own, and no way to get one — the step should arrive answered.
+        if (s.inference.provider) setProvider(s.inference.provider);
+        if (s.inference.base_url) setBaseUrl(s.inference.base_url);
       })
       .catch((err: unknown) => {
         if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
@@ -484,6 +528,13 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
 
   /** Whether this step can be left, and why not when it cannot. */
   const problem = (): string | undefined => {
+    // The gate. Untested is not "probably fine": the whole reason this step
+    // moved to the front is that a bad credential is silent everywhere else.
+    if (current.id === "power" && tested.kind !== "ok" && tested.kind !== "skipped") {
+      return tested.kind === "failed"
+        ? "That connection did not work. Fix it, or continue without a model."
+        : "Test the connection first, or continue without a model.";
+    }
     if (current.id === "business" && !draft.industry.trim()) {
       return "Tell us a little about the company first.";
     }
@@ -598,9 +649,28 @@ export function SetupWizard({ client, onDone, onCancel }: Props) {
         {current.id === "power" && (
           <PowerStep
             status={status}
+            client={client}
+            provider={provider}
+            onProvider={(p) => {
+              setProvider(p);
+              // A changed provider invalidates the verdict. Carrying a green
+              // tick across a provider switch would be the worst kind of lie:
+              // one the operator watched us earn.
+              setTested({ kind: "untested" });
+              setBaseUrl(p === status.inference.provider ? (status.inference.base_url ?? "") : "");
+            }}
+            baseUrl={baseUrl}
+            onBaseUrl={(v) => {
+              setBaseUrl(v);
+              setTested({ kind: "untested" });
+            }}
             value={values.tinyhumans_api_key ?? ""}
-            onChange={(v) => set("tinyhumans_api_key", v)}
-            onEnter={advance}
+            onChange={(v) => {
+              set("tinyhumans_api_key", v);
+              setTested({ kind: "untested" });
+            }}
+            tested={tested}
+            onTested={setTested}
           />
         )}
 
@@ -933,60 +1003,269 @@ function AccountStep({
  */
 function PowerStep({
   status,
+  client,
+  provider,
+  onProvider,
+  baseUrl,
+  onBaseUrl,
   value,
   onChange,
-  onEnter,
+  tested,
+  onTested,
 }: {
   status: SetupStatus;
+  client: OpenCompanyClient;
+  provider: string;
+  onProvider: (p: string) => void;
+  baseUrl: string;
+  onBaseUrl: (v: string) => void;
   value: string;
   onChange: (v: string) => void;
-  onEnter: () => void;
+  tested: TestState;
+  onTested: (t: TestState) => void;
 }) {
   const field = status.fields.find((f) => f.key === "tinyhumans_api_key");
   const locked = field !== undefined && !field.editable;
+  const spec = INFERENCE_PROVIDERS.find((p) => p.id === provider) ?? INFERENCE_PROVIDERS[0];
+  /** Whether the operator asked to supply their own key over the host's. */
+  const [override, setOverride] = useState(false);
+  // The house already holds one, and this operator may have no way to get their
+  // own. The key box is then optional rather than the point of the screen.
+  const onTheHouse = status.inference.ready && provider === status.inference.provider;
+
+  const run = async () => {
+    onTested({ kind: "testing" });
+    try {
+      const result = await testInference(client, {
+        provider,
+        key: value.trim() || null,
+        baseUrl: baseUrl.trim() || null,
+      });
+      onTested(
+        result.ok
+          ? { kind: "ok", baseUrl: result.baseUrl }
+          : { kind: "failed", error: result.error ?? "Could not reach the provider." },
+      );
+    } catch (err: unknown) {
+      onTested({
+        kind: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   return (
-    <div>
-      <Label
-        htmlFor="setup-key"
-        className="text-[15px] font-medium leading-snug"
-        data-testid="setup-question"
-      >
-        What powers your team
-        <span className="ml-1.5 text-[13px] font-normal text-muted-foreground">Optional</span>
-      </Label>
-      <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
-        Your teammates think with a hosted model. With a key we design the team
-        around what you just told us; without one you get a solid standard team
-        for your industry, and you can add a key later.
-      </p>
+    <div className="space-y-7">
+      <div>
+        <Label className="text-[15px] font-medium leading-snug" data-testid="setup-question">
+          What should your team think with?
+        </Label>
+        <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+          {onTheHouse
+            ? "This host already has a model. Test it and carry on — you don't need a key of your own."
+            : "Your teammates need a model to work. We'll check it reaches before going any further."}
+        </p>
 
-      {locked && (
-        <div className="mt-2.5">
-          <LayerLock />
+        {/* Cards, not a select. Four options with a sentence each is a choice
+            someone can make without knowing the vocabulary first — a dropdown
+            of slugs assumes they already do. */}
+        <div className="mt-3 grid gap-2" role="radiogroup" aria-label="Model provider">
+          {INFERENCE_PROVIDERS.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="radio"
+              aria-checked={option.id === provider}
+              data-testid={`setup-provider-${option.id}`}
+              onClick={() => onProvider(option.id)}
+              className={cn(
+                "rounded-lg border p-3 text-left transition-colors",
+                option.id === provider
+                  ? "border-primary bg-primary/5"
+                  : "hover:border-input hover:bg-muted/50",
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">{option.label}</span>
+                {status.inference.ready && option.id === status.inference.provider && (
+                  <Badge variant="secondary">Already set up</Badge>
+                )}
+              </div>
+              <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">{option.hint}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {spec.needsUrl && (
+        <div>
+          <Label htmlFor="setup-base-url" className="text-[15px] font-medium leading-snug">
+            Endpoint
+          </Label>
+          <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+            The base URL of the chat API, ending in <code>/v1</code>.
+          </p>
+          <Input
+            id="setup-base-url"
+            value={baseUrl}
+            placeholder={provider === "ollama" ? "http://127.0.0.1:11434/v1" : "https://…/v1"}
+            data-testid="setup-field-base-url"
+            className="mt-2.5"
+            onChange={(e) => onBaseUrl(e.target.value)}
+          />
         </div>
       )}
 
-      <Input
-        id="setup-key"
-        autoFocus
-        type="password"
-        value={value}
-        disabled={locked}
-        placeholder="th-…"
-        data-testid="setup-field-key"
-        className="mt-2.5"
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") onEnter();
-        }}
-      />
-      <p className="mt-1.5 text-xs text-muted-foreground">
-        Get one at tinyhumans.ai. Leave it blank to carry on without.
-      </p>
+      {spec.needsKey && (
+        <div>
+          <Label htmlFor="setup-key" className="text-[15px] font-medium leading-snug">
+            API key
+          </Label>
+
+          {/* Already configured is a **resolved state**, not an empty field.
+              This was an empty password box with "Using this host's key" as grey
+              placeholder text, and it read exactly like an unanswered question —
+              the one impression it must not give, because on a hosted tenant the
+              operator has no key to put there and nothing is wrong.
+
+              There is no value to pre-fill with, and that is deliberate: the host
+              never sends a credential to a browser, not even masked. `GET
+              /api/v1/setup` reports a secret's *presence*, never its bytes. So
+              the honest fix is to stop drawing an input at all and state the
+              fact, with a way out for someone who wants their own key. */}
+          {onTheHouse && !override ? (
+            <div className="mt-2 flex items-center justify-between gap-3 rounded-lg border bg-muted/40 p-3">
+              <div className="flex items-center gap-2 text-sm">
+                <Check className="size-4 text-emerald-600 dark:text-emerald-400" />
+                <span data-testid="setup-key-on-the-house">
+                  Using this host&apos;s key
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOverride(true)}
+                data-testid="setup-key-override"
+                className="shrink-0 text-[13px] text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              >
+                Use my own
+              </button>
+            </div>
+          ) : (
+            <>
+              <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+                {onTheHouse
+                  ? "This replaces the host's key for this company."
+                  : "Used to test the connection now, and saved when you finish."}
+              </p>
+
+              {locked && (
+                <div className="mt-2.5">
+                  <LayerLock />
+                </div>
+              )}
+
+              <Input
+                id="setup-key"
+                autoFocus
+                type="password"
+                value={value}
+                disabled={locked}
+                placeholder="sk-…"
+                data-testid="setup-field-key"
+                className="mt-2.5"
+                onChange={(e) => onChange(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void run();
+                }}
+              />
+              {onTheHouse && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOverride(false);
+                    onChange("");
+                  }}
+                  data-testid="setup-key-revert"
+                  className="mt-2 text-[13px] text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                >
+                  Go back to using this host&apos;s key
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <Button
+          type="button"
+          variant={tested.kind === "ok" ? "outline" : "default"}
+          disabled={tested.kind === "testing"}
+          onClick={() => void run()}
+          data-testid="setup-test-connection"
+        >
+          {tested.kind === "testing" ? (
+            <>
+              <Loader2 className="size-4 animate-spin" />
+              Testing…
+            </>
+          ) : tested.kind === "ok" ? (
+            "Test again"
+          ) : (
+            "Test connection"
+          )}
+        </Button>
+
+        {/* The verdict names the endpoint it reached. A tick earned against the
+            default endpoint, on a host where the operator meant to point
+            somewhere else, is worse than no tick — it is a wrong answer they
+            watched us produce. */}
+        {tested.kind === "ok" && (
+          <p className="text-[13px] leading-snug text-emerald-600 dark:text-emerald-400" data-testid="setup-test-ok">
+            Reached {tested.baseUrl} and got a reply.
+          </p>
+        )}
+        {tested.kind === "failed" && (
+          <Alert variant="destructive" data-testid="setup-test-failed">
+            <AlertTriangle />
+            <AlertTitle>That didn&apos;t connect</AlertTitle>
+            <AlertDescription>{tested.error}</AlertDescription>
+          </Alert>
+        )}
+      </div>
+
+      {/* Nobody gets stuck (decision D3). A hosted operator with no key must not
+          be trapped behind a credential they cannot obtain — and the curated
+          team exists precisely for this path. Stated plainly, as a consequence
+          rather than a warning, so the choice is informed rather than scary. */}
+      {tested.kind !== "ok" && (
+        <button
+          type="button"
+          onClick={() => onTested({ kind: "skipped" })}
+          data-testid="setup-skip-model"
+          className="text-[13px] text-muted-foreground underline underline-offset-4 hover:text-foreground"
+        >
+          Continue without a model — you&apos;ll get a standard team for your
+          industry, and can add a key later
+        </button>
+      )}
+      {tested.kind === "skipped" && (
+        <p className="text-[13px] leading-snug text-muted-foreground" data-testid="setup-skipped">
+          Carrying on without a model. Your team will be a standard one for your
+          industry rather than designed from your answers.
+        </p>
+      )}
     </div>
   );
 }
+
+/** The connection verdict. See `tested` on the wizard for why each state exists. */
+type TestState =
+  | { kind: "untested" }
+  | { kind: "testing" }
+  | { kind: "ok"; baseUrl: string }
+  | { kind: "failed"; error: string }
+  | { kind: "skipped" };
 
 // ---------------------------------------------------------------------------
 // Review, and the team as reviewed
@@ -1169,7 +1448,24 @@ function ReviewStep({
       {/* Stated, not asked. Nobody five screens in can answer a governance
           question; they can recognise a sentence and change it in Advanced. */}
       <div className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
-        <p>
+        {/* What they can do on day one, said before they find out by trying.
+            A roster reads as a set of capabilities: "Social Media Manager —
+            owns posting and engagement" is taken to mean it can post. It
+            cannot, yet, and nothing on this screen used to say so. Every
+            designed teammate starts with the workspace and nothing outward,
+            because reaching a real account needs an account connected first —
+            an act only a person can perform, and one there has been no
+            opportunity to perform yet.
+
+            This is the same failure as the twelve invented teammates that used
+            to render here: offering something the host cannot honour. The fix
+            is the sentence, not a wider tool grant. */}
+        <p data-testid="setup-reach">
+          Your team starts with its own workspace — reading, writing, drafting.
+          Posting, emailing and anything else that touches an outside account
+          needs that account connected first, from Settings.
+        </p>
+        <p className="mt-1">
           Anything that leaves the company — sending, publishing, spending — waits
           for you until you say otherwise.
         </p>

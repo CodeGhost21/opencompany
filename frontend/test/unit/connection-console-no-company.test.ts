@@ -49,6 +49,7 @@ function client(over: {
         oauth_in_build: false,
       },
       companies: (over.companies ?? []).map((c) => c.id),
+      inference: { ready: false, provider: null, base_url: null },
     }),
   } as unknown as OpenCompanyClient;
 }

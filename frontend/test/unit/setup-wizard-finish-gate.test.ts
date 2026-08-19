@@ -41,19 +41,33 @@ function status(over: Partial<SetupStatus> = {}): SetupStatus {
       oauth_in_build: false,
     },
     companies: [],
+    inference: { ready: false, provider: null, base_url: null },
     ...over,
   };
 }
 
-function clientWith(s: SetupStatus): OpenCompanyClient {
+/**
+ * `over.post` answers the **connection test** only.
+ *
+ * Routed by path rather than replacing `post` wholesale, because the wizard
+ * makes three different calls through it — the test, the roster design, and the
+ * apply — and a blanket override would silently change what the other two see.
+ */
+function clientWith(
+  s: SetupStatus,
+  over: { post?: (path: string, body: unknown) => Promise<unknown> } = {},
+): OpenCompanyClient {
   return {
     get: async () => s,
-    post: async () => ({
-      complete: true,
-      config_path: s.config_path,
-      restart_required: [],
-      seeded_company: null,
-    }),
+    post: async (path: string, body: unknown) => {
+      if (over.post && path.includes("/inference/test")) return over.post(path, body);
+      return {
+        complete: true,
+        config_path: s.config_path,
+        restart_required: [],
+        seeded_company: null,
+      };
+    },
   } as unknown as OpenCompanyClient;
 }
 
@@ -99,14 +113,30 @@ const next = async () =>
     button("Next").click();
   });
 
-/** business -> account -> model -> advanced -> review. */
+/**
+ * Skips the model step, which is now FIRST and is a gate.
+ *
+ * The skip is the honest path for a test with no provider to reach: the step
+ * refuses to advance on an untested credential, which is the whole reason it
+ * moved to the front.
+ */
+async function skipModel() {
+  await act(async () => {
+    (
+      container.querySelector('[data-testid="setup-skip-model"]') as HTMLElement
+    ).click();
+  });
+  await next(); // -> business
+}
+
+/** model -> business -> account -> advanced -> review. */
 async function goToReview() {
+  await skipModel();
   await fill("setup-field-industry", "E-commerce — homeware");
   await next(); // -> account
   // The address is required on any host that asks people to sign in — leaving
   // it blank holds the wizard here, which is its own assertion below.
   await fill("setup-field-email", "ada@example.com");
-  await next(); // -> model
   await next(); // -> advanced
   await next(); // -> review
   // Entering Review kicks off the design call. Let it settle, or the assertions
@@ -153,6 +183,7 @@ describe("finishing setup with no companies on the host", () => {
    */
   it("will not leave the first question empty", async () => {
     await show(clientWith(status()));
+    await skipModel();
 
     await act(async () => {
       button("Next").click();
@@ -172,6 +203,7 @@ describe("finishing setup with no companies on the host", () => {
    */
   it("will not pass the email step on a host that asks people to sign in", async () => {
     await show(clientWith(status()));
+    await skipModel();
     await fill("setup-field-industry", "E-commerce — homeware");
     await next(); // -> account
 
@@ -192,4 +224,156 @@ describe("finishing setup with no companies on the host", () => {
 
     expect(finishButton()?.disabled).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // The model gate (step one)
+  // -------------------------------------------------------------------------
+
+  /**
+   * The reason this step moved to the front.
+   *
+   * The design pass is silent about credentials — it falls back to a curated
+   * team on any failure — so an untested key produces a *plausible* company
+   * rather than an error, and the operator finds out several screens later, if
+   * at all. Untested therefore holds the flow here.
+   */
+  it("will not pass the model step on an untested connection", async () => {
+    await show(clientWith(status()));
+
+    await act(async () => {
+      button("Next").click();
+    });
+    expect(container.querySelector('[data-testid="setup-problem"]')).toBeTruthy();
+    // Still on the model step, not the first question.
+    expect(container.querySelector('[data-testid="setup-field-key"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="setup-field-industry"]')).toBeNull();
+  });
+
+  /**
+   * Nobody gets stuck (decision D3). A hosted operator has no key of their own
+   * and no way to get one, so a credential must never be the single thing that
+   * traps them — the curated team exists for exactly this path.
+   */
+  it("lets an operator continue without a model, explicitly", async () => {
+    await show(clientWith(status()));
+    await skipModel();
+
+    expect(container.querySelector('[data-testid="setup-field-industry"]')).toBeTruthy();
+  });
+
+  /**
+   * A failed test is not a passed one. The step reports the reason and still
+   * holds, because "we could not reach that" is exactly when carrying on
+   * silently would produce the wrong company.
+   */
+  it("holds, and says why, when the connection fails", async () => {
+    await show(
+      clientWith(status(), {
+        post: async () => ({
+          ok: false,
+          baseUrl: "https://api.tinyhumans.ai/openai/v1",
+          error: "That key was rejected by the provider.",
+        }),
+      }),
+    );
+
+    await act(async () => {
+      (
+        container.querySelector('[data-testid="setup-test-connection"]') as HTMLElement
+      ).click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const failure = container.querySelector('[data-testid="setup-test-failed"]');
+    expect(failure?.textContent).toContain("rejected by the provider");
+    await act(async () => {
+      button("Next").click();
+    });
+    expect(container.querySelector('[data-testid="setup-field-industry"]')).toBeNull();
+  });
+
+  /**
+   * A passing test releases the gate, and names the endpoint it reached — a
+   * tick earned against the default endpoint, on a host meant to point
+   * elsewhere, is a wrong answer the operator watched us produce.
+   */
+  it("releases the gate on a passing test, naming the endpoint", async () => {
+    await show(
+      clientWith(status(), {
+        post: async () => ({ ok: true, baseUrl: "https://example.test/v1" }),
+      }),
+    );
+
+    await act(async () => {
+      (
+        container.querySelector('[data-testid="setup-test-connection"]') as HTMLElement
+      ).click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(
+      container.querySelector('[data-testid="setup-test-ok"]')?.textContent,
+    ).toContain("https://example.test/v1");
+    await next();
+    expect(container.querySelector('[data-testid="setup-field-industry"]')).toBeTruthy();
+  });
+
+
+  /**
+   * "This host has a key" must read as **answered**, not as an unanswered
+   * question.
+   *
+   * It shipped as an empty password box with "Using this host's key" as grey
+   * placeholder text, and it read exactly like a field nobody had filled in —
+   * which on a hosted tenant is the one impression it must not give, because the
+   * operator has no key to put there and nothing is wrong. There is no value to
+   * pre-fill with and there never will be: the host reports a secret's presence,
+   * never its bytes.
+   */
+  it("states the host's key as settled rather than drawing an empty field", async () => {
+    await show(
+      clientWith({
+        ...status(),
+        inference: {
+          ready: true,
+          provider: "managed",
+          base_url: "https://api.tinyhumans.ai/openai/v1",
+        },
+      }),
+    );
+
+    expect(
+      container.querySelector('[data-testid="setup-key-on-the-house"]'),
+    ).toBeTruthy();
+    // No empty input pretending to be the question.
+    expect(container.querySelector('[data-testid="setup-field-key"]')).toBeNull();
+
+    // Someone who wants their own key can still get the field.
+    await act(async () => {
+      (
+        container.querySelector('[data-testid="setup-key-override"]') as HTMLElement
+      ).click();
+    });
+    expect(container.querySelector('[data-testid="setup-field-key"]')).toBeTruthy();
+  });
+
+  /**
+   * A regression guard for a bug that reached a screenshot: `\u2014` written
+   * into JSX text, where nothing interprets it, so the operator read a literal
+   * escape sequence where an em dash belonged.
+   *
+   * Asserted over the rendered text rather than the source, because that is
+   * where the defect was visible and where any future one will be.
+   */
+  it("renders no un-interpreted escape sequences", async () => {
+    await show(clientWith(status()));
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(/\\u[0-9a-fA-F]{4}/);
+    expect(text.length).toBeGreaterThan(0);
+  });
+
 });
