@@ -103,6 +103,7 @@ import { classifyRunError } from "@/views/workflows/run-error";
 import { runFailureFrom, type RunFailure } from "@/views/workflows/run-failure";
 import { RunFailurePanel } from "@/views/workflows/RunFailurePanel";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
+import { CanvasShell } from "@/views/workflows/CanvasShell";
 import { approvalsForRun } from "@/views/workflows/run-approvals";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
@@ -2383,17 +2384,26 @@ export function WorkflowsView({
         </div>
       )}
 
-      <div className="relative flex-1">
-        {/* Issue #1110: ONE branch, on the one piece of state that says where
-            the operator is. No workflow open ⇒ the index fills the body; a
-            workflow open ⇒ its canvas does.
+      {/* Issue #1110: ONE branch, on the one piece of state that says where
+          the operator is. No workflow open ⇒ the index fills the body; a
+          workflow open ⇒ its canvas does.
 
-            The index REPLACES the canvas rather than squeezing in above it
-            (issue #303's reasoning, unchanged): a card grid needs the width,
-            and a canvas is meaningless while the operator is still deciding
-            which workflow they want. */}
-        {!detailOpen ? (
-          !loadingList && workflows.length === 0 ? (
+          The index REPLACES the canvas rather than squeezing in above it
+          (issue #303's reasoning, unchanged): a card grid needs the width,
+          and a canvas is meaningless while the operator is still deciding
+          which workflow they want.
+
+          Issue #1107: the same branch also chooses the LAYOUT. The index is
+          one full-width column and stays that way; the detail view is a
+          `CanvasShell`, which is what adds the left rail slot. Run history is
+          per-workflow chrome, so it can only exist on the side of this branch
+          that has a workflow — a list of workflows has no single run to show
+          history for (#1110). Gating the rail here rather than gating the
+          panel makes that structural: the index cannot grow run chrome by
+          accident, because the slot it would mount in does not exist there. */}
+      {!detailOpen ? (
+        <div className="relative flex-1">
+          {!loadingList && workflows.length === 0 ? (
             // Issue #813's on-ramp, which used to live behind the canvas's
             // empty selection. An empty company now lands here instead, so this
             // is where it has to be — and it is shown INSTEAD of the index
@@ -2448,75 +2458,105 @@ export function WorkflowsView({
               loading={loadingList}
               runsLoaded={indexRunsLoaded}
             />
-          )
-        ) : loadingList || loadingGraph ? (
-          <div className="absolute inset-0 p-4">
-            <Skeleton className="h-full w-full rounded-xl" />
-          </div>
-        ) : (
-          <>
-            <ReactFlow
-              nodes={nodes}
-              edges={edges}
-              nodeTypes={NODE_TYPES}
-              colorMode={resolvedTheme === "dark" ? "dark" : "light"}
-              fitView
-              fitViewOptions={{ padding: 0.2 }}
-              nodesDraggable={false}
-              nodesConnectable={false}
-              elementsSelectable
-              onNodeClick={onNodeClick}
-              onPaneClick={() => setSelectedNodeId(null)}
-              proOptions={{ hideAttribution: true }}
-            >
-              <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-              <Controls showInteractive={false} />
-              <MiniMap pannable zoomable className="!hidden sm:!block" />
-            </ReactFlow>
-            {/* Issue #303: the copilot and the node inspector share the canvas's
-                right edge, and the copilot wins while it is open — it was
-                opened deliberately, whereas a node click is incidental and is
-                already cleared when the copilot opens. */}
-            {copilotOpen && graph ? (
-              <CopilotPanel
-                // Remount per workflow. The panel replays that workflow's own
-                // transcript on mount, and keying it means a workflow switch
-                // can never leave the previous conversation on screen — the
-                // "no cross-workflow leakage" criterion, on the client side.
-                key={graph.id}
-                client={client}
-                company={company}
+          )}
+        </div>
+      ) : (
+        /* Issue #1107: canvas and left rail side by side. `CanvasShell` owns
+           the detail view's column layout and documents which slot a new panel
+           belongs in — left rail, right overlay, or bottom strip. */
+        <CanvasShell
+          rail={
+            historyOpen && historySupported ? (
+              <RunHistoryPanel
+                runs={historyRows}
                 graph={graph}
-                runs={runs}
-                runsKnown={historySupported}
-                // The graph on screen and the history in `runs` must be the
-                // same workflow's before anything is grounded on the pair.
-                runsReady={runsFor === graph.id}
-                // Issue #415: an applied proposal lands through the SAME
-                // handler the edit dialog's save does. One place decides what
-                // "the graph is now this" means, so a copilot edit and a canvas
-                // edit cannot leave the view in two different states.
-                onApplied={handleSaved}
-                onConflict={setConflict}
-                onClose={() => setCopilotOpen(false)}
+                workflowName={selected?.name ?? selectedId ?? ""}
+                onClose={() => setHistoryOpen(false)}
+                selectedRunSeq={overlayRun?.seq ?? null}
+                onSelectRun={(picked) =>
+                  // Clicking the row already shown clears it, so the control is
+                  // a toggle rather than a one-way trip into overlay mode.
+                  setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
+                }
+                onFixWithCopilot={handleFixWithCopilot}
+                fixingRunSeq={fixingRunSeq}
+                fixReason={fixReason}
               />
-            ) : (
-              selectedNode && (
-                <NodeDetailPanel
-                  node={selectedNode}
-                  output={selectedNodeOutput}
-                  onClose={() => setSelectedNodeId(null)}
+            ) : null
+          }
+        >
+          {loadingList || loadingGraph ? (
+            <div className="absolute inset-0 p-4">
+              <Skeleton className="h-full w-full rounded-xl" />
+            </div>
+          ) : (
+            <>
+              <ReactFlow
+                nodes={nodes}
+                edges={edges}
+                nodeTypes={NODE_TYPES}
+                colorMode={resolvedTheme === "dark" ? "dark" : "light"}
+                fitView
+                fitViewOptions={{ padding: 0.2 }}
+                nodesDraggable={false}
+                nodesConnectable={false}
+                elementsSelectable
+                onNodeClick={onNodeClick}
+                onPaneClick={() => setSelectedNodeId(null)}
+                proOptions={{ hideAttribution: true }}
+              >
+                <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
+                <Controls showInteractive={false} />
+                <MiniMap pannable zoomable className="!hidden sm:!block" />
+              </ReactFlow>
+              {/* Issue #303: the copilot and the node inspector share the canvas's
+                  right edge, and the copilot wins while it is open — it was
+                  opened deliberately, whereas a node click is incidental and is
+                  already cleared when the copilot opens. */}
+              {copilotOpen && graph ? (
+                <CopilotPanel
+                  // Remount per workflow. The panel replays that workflow's own
+                  // transcript on mount, and keying it means a workflow switch
+                  // can never leave the previous conversation on screen — the
+                  // "no cross-workflow leakage" criterion, on the client side.
+                  key={graph.id}
+                  client={client}
+                  company={company}
+                  graph={graph}
+                  runs={runs}
+                  runsKnown={historySupported}
+                  // The graph on screen and the history in `runs` must be the
+                  // same workflow's before anything is grounded on the pair.
+                  runsReady={runsFor === graph.id}
+                  // Issue #415: an applied proposal lands through the SAME
+                  // handler the edit dialog's save does. One place decides what
+                  // "the graph is now this" means, so a copilot edit and a canvas
+                  // edit cannot leave the view in two different states.
+                  onApplied={handleSaved}
+                  onConflict={setConflict}
+                  onClose={() => setCopilotOpen(false)}
                 />
-              )
-            )}
-          </>
-        )}
-      </div>
+              ) : (
+                selectedNode && (
+                  <NodeDetailPanel
+                    node={selectedNode}
+                    output={selectedNodeOutput}
+                    onClose={() => setSelectedNodeId(null)}
+                  />
+                )
+              )}
+            </>
+          )}
+        </CanvasShell>
+      )}
 
-      {/* Issue #1110: the three drawers below belong to ONE workflow, so
-          none of them may outlive leaving it. Their state is cleared on every
-          selection change, but a drawer is the wrong thing to be wrong about —
-          `detailOpen` makes it structural rather than a promise about ordering. */}
+      {/* Issue #1110: the two strips below belong to ONE workflow, so neither
+          may outlive leaving it. Their state is cleared on every selection
+          change, but a drawer is the wrong thing to be wrong about —
+          `detailOpen` makes it structural rather than a promise about ordering.
+          The third drawer this used to cover, run history, is now the detail
+          view's left rail (#1107) and is gated by the same branch structurally:
+          it renders inside `CanvasShell`, which only the detail side has. */}
       {detailOpen && result && (
         <RunResultPanel
           result={result}
@@ -2544,24 +2584,6 @@ export function WorkflowsView({
         <RunFailurePanel
           failure={runFailure}
           onClose={() => setRunFailure(null)}
-        />
-      )}
-
-      {detailOpen && historyOpen && historySupported && (
-        <RunHistoryPanel
-          runs={historyRows}
-          graph={graph}
-          workflowName={selected?.name ?? selectedId ?? ""}
-          onClose={() => setHistoryOpen(false)}
-          selectedRunSeq={overlayRun?.seq ?? null}
-          onSelectRun={(picked) =>
-            // Clicking the row already shown clears it, so the control is a
-            // toggle rather than a one-way trip into overlay mode.
-            setOverlayRun((prev) => (prev?.seq === picked.seq ? null : picked))
-          }
-          onFixWithCopilot={handleFixWithCopilot}
-          fixingRunSeq={fixingRunSeq}
-          fixReason={fixReason}
         />
       )}
 
