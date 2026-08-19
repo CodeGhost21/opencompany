@@ -39,6 +39,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { FeedbackDialog } from "@/components/feedback-dialog";
+import { HostSwitcher } from "@/components/host-switcher";
 import {
   AutoCollapse,
   RESTING_ROW,
@@ -1237,6 +1238,12 @@ export function AppShell({
       <AutoCollapse view={view} />
       <Sidebar collapsible="icon">
         <SidebarHeader>
+          {/* Which host, and how every host is doing. It sits above the collapse
+              toggle because it names where you are — the first thing the column
+              should answer — and it is the only control here that can take you
+              somewhere else entirely. See `host-switcher.tsx`; it replaced the
+              icon rail that used to stand outside this sidebar (issue #1142). */}
+          <HostSwitcher companyName={feed.status.name} />
           <SidebarCollapseToggle />
         </SidebarHeader>
         <SidebarContent data-tour="sidebar">
