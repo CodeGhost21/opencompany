@@ -4087,7 +4087,7 @@ mod test {
             workflow_proposal: None,
             origin_run_id: None,
             origin_workflow_id: None,
-                    planning_attempts: Vec::new(),
+            planning_attempts: Vec::new(),
         };
 
         // Through `upsert_task`, the real entry point: it reads the To-do →
