@@ -205,6 +205,30 @@ pub fn find(companies: &[CompanySummary], owners: &[(CompanyId, String)]) -> Orp
     OrphanReport { unowned, dangling }
 }
 
+/// Keep only the findings that belong to `tenant` — the *boot* filter.
+///
+/// A company's tenant lives in its id prefix (`<tenant>--`, written by
+/// [`namespace_company_id`](crate::app::namespace_company_id)); a dangling
+/// row's tenant is its persisted `tenant` field, compared canonically. The
+/// [`find`] report is deliberately unfiltered so the `opencompany orphans`
+/// command sees every tenant's findings in one answer; this is what a tenant
+/// pod applies to its own boot warning, so tenant B's ids and tenant strings
+/// never reach tenant A's stderr.
+pub fn filter_to_tenant(report: OrphanReport, tenant: &str) -> OrphanReport {
+    let prefix = format!("{tenant}--");
+    let unowned = report
+        .unowned
+        .into_iter()
+        .filter(|c| c.id.as_ref().starts_with(&prefix))
+        .collect();
+    let dangling = report
+        .dangling
+        .into_iter()
+        .filter(|d| crate::app::canonical_tenant(&d.tenant) == crate::app::canonical_tenant(tenant))
+        .collect();
+    OrphanReport { unowned, dangling }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
