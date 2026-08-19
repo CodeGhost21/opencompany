@@ -42,6 +42,8 @@ use crate::openhuman::{OpenHumanChannelAdapter, OpenHumanToolProvider};
 use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
+#[cfg(feature = "openhuman")]
+use crate::runtime::delegation::RunTurn;
 use crate::ports::types::{
     CompanyId, CompanyRecord, OverlayWorkflow, PolicyOverride, SecretValue, TemplateProvenance,
 };
