@@ -14,7 +14,7 @@ agent any capability.
 The console stopped offering that flow in #828. #838 keeps its endpoints only as
 a bounded compatibility bridge for console bundles cached before #979:
 
-| Route | Until 2026-09-30 | Afterwards |
+| Route | Until 2026-09-30 | Afterward |
 | --- | --- | --- |
 | `POST …/connections/{provider}/start` | `410 Gone` JSON: explains that native credentials were unreachable by agents, points callers to Composio, and carries a Sunset date | removed by #1023 |
 | `GET /api/v1/oauth/callback` | `410 Gone` HTML: explains to a browser already returning from a provider that nothing was saved | removed by #1023 |
@@ -22,7 +22,7 @@ a bounded compatibility bridge for console bundles cached before #979:
 
 The callback intentionally ignores every query parameter. Once `start` refuses
 it cannot mint a new signed state, but a consent screen opened seconds before a
-deploy can still redirect a real browser afterwards. Explaining that outcome,
+deploy can still redirect a real browser afterward. Explaining that outcome,
 rather than accepting the code or returning a 404, prevents an in-flight
 authorization from creating the same agent-unreachable credential.
 
@@ -37,7 +37,7 @@ revocation of that historical provider grant.
 
 ## Hosted connections
 
-#319 remains the decision point for hosted provider connections. The platform
+Issue `#319` remains the decision point for hosted provider connections. The platform
 backend owns provider applications and token custody; OpenCompany agents reach
 providers through the supported Composio path, never through
 `oauth/{provider}`.
