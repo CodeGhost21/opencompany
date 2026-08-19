@@ -92,6 +92,7 @@ import {
   initialRunState,
   layout,
   statesFromRun,
+  windowHasRunStart,
 } from "@/views/workflows/graph";
 import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
@@ -455,9 +456,16 @@ export function WorkflowsView({
   const [indexRunsLoaded, setIndexRunsLoaded] = useState(false);
   // Issue #303: the per-workflow copilot panel is open.
   const [copilotOpen, setCopilotOpen] = useState(false);
-  // Run ids the live fold has actually seen frames for. The fallback above
-  // consults it so a console WITH a working stream never double-paints a run it
-  // already watched, and one without it still gets the journaled answer.
+  // Run ids the live fold has actually seen frames for. The no-stream fallback
+  // above consults it so a console WITH a working stream never double-paints a
+  // run it already watched, and one without it still gets the journaled answer.
+  //
+  // Issue #1010: this is now its ONLY reader, and it is cleared on every
+  // workflow/company switch below. It used to gate `inFlightSeed` too, which
+  // was the bug: a set that only ever grows cannot speak for a 300-frame window
+  // that evicts, so a run whose start had aged out was reported as covered and
+  // the seed was withheld from a fold that had nothing left to fold. The seed
+  // now asks the window itself — see `windowHasRunStart`.
   const liveRanRef = useRef<Set<string>>(new Set());
   // Issue #863: the run this canvas adopted from the history rather than from a
   // start frame. Held so the trail STAYS on screen once that run settles — the
@@ -1318,7 +1326,18 @@ export function WorkflowsView({
       (r) => r.runId && (r.running || r.runId === adoptedFromHistoryRef.current),
     );
     if (!row?.runId) return null;
-    if (liveRanRef.current.has(row.runId) && row.runId !== adoptedFromHistoryRef.current) {
+    // Issue #1010: ask the WINDOW, not a set of every run this console has ever
+    // seen a frame for. The fold only supersedes this seed when it can find the
+    // run's own start frame, and the window is a rolling 300 that evicts — so
+    // the old "has watched it live, ever" reading withheld the seed from a fold
+    // that could no longer cover the run, and the canvas blanked. Switching
+    // workflow away and back mid-run was the reliable way to see it: the ref
+    // survived the switch while `adoptedFromHistoryRef` was cleared, so neither
+    // clause held and `inFlightSeed` returned null for a run still going.
+    if (
+      windowHasRunStart(runEvents, row.runId) &&
+      row.runId !== adoptedFromHistoryRef.current
+    ) {
       return null;
     }
     return {
@@ -1327,7 +1346,10 @@ export function WorkflowsView({
       elapsed: elapsedFromRun(row),
       scheduled: row.scheduled,
     };
-  }, [runs, runsFor, selectedId]);
+    // `runEvents` joins the deps with the guard above (issue #1010): the seed's
+    // answer now depends on what the window holds, so it has to recompute when
+    // the window changes.
+  }, [runs, runsFor, selectedId, runEvents]);
 
   // Issue #921: the runs the HOST reports as no longer in flight. This is the
   // only authority that survives a dead stream — the `workflow_run_finished`
@@ -1469,6 +1491,12 @@ export function WorkflowsView({
     // it across the switch would keep painting one graph's trail onto another's
     // canvas the moment the two share a node id.
     adoptedFromHistoryRef.current = null;
+    // Issue #1010: and its sibling, which was NOT cleared here — the asymmetry
+    // that made switching away and back mid-run blank the canvas. The two refs
+    // answer the same question from opposite sides and have to have the same
+    // lifetime; leaving one behind is how "this console watched that run" came
+    // to outlive the console's view of it.
+    liveRanRef.current = new Set();
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.

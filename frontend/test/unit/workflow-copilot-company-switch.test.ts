@@ -31,6 +31,7 @@ import { CopilotPanel } from "@/views/workflows/CopilotPanel";
 const graph: WorkflowGraph = {
   id: "weekly_report",
   name: "Weekly report",
+  version: null,
   description: "Assemble and send the Monday summary.",
   nodes: [
     {

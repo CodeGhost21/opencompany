@@ -219,7 +219,7 @@ step waiting on a person is not a failure — and says so structurally:
 
 ```jsonc
 {
-  "output": null,
+  "output": { "nodes": { "draft": { "items": [ { "json": { "text": "…" } } ] } } },
   "pendingApprovals": ["spec"],
   "deliveries": [],
   "nodes": [ { "nodeId": "spec", "status": "blocked", "elapsedMs": 42000 } ],
@@ -232,6 +232,17 @@ step waiting on a person is not a failure — and says so structurally:
   ]
 }
 ```
+
+`output` carries what the nodes **upstream** of the block produced (issue
+#1008). It used to be `null`, so the run drawer showed nothing for a step that
+had just written a draft.
+
+The **blocked node itself has no entry**, here or in the durable snapshot behind
+`GET …/workflows/runs/{runId}/output`. A node refused inside its model's tool
+loop ends its turn by writing prose about being blocked, and filing that prose
+as the node's product would re-open, one surface over, exactly the confusion
+issue #881 fixed by stopping it reaching the next node. The node's `blocked`
+chip and the run's notice are what say what happened.
 
 `blockedNodes` and `approvals` are omitted entirely when empty, so a run that
 blocked on nobody is byte-unchanged. Both also ride the `WorkflowRunFinished`
@@ -249,6 +260,36 @@ row carries no `tool`).
 **Approving does not continue the run.** An agent node is not re-enterable, so
 the operator decides the card and runs the workflow again. See
 [`workflow-vocabulary.md`](../../spec/runtime/workflow-vocabulary.md) for why.
+
+### The node a run is executing right now (issue #1010)
+
+`GET …/workflows/runs` folds **both** node brackets, not just the finish. A run
+still in flight carries `startedNodes` — the ids it has begun, in start order —
+beside the `nodes` rows it has finished:
+
+```jsonc
+{
+  "runId": "run-live",
+  "running": true,
+  "startedNodes": ["collect", "draft"],
+  "nodes": [ { "nodeId": "collect", "status": "ok", "elapsedMs": 12000 } ]
+}
+```
+
+Started minus finished is the node executing right now — here, `draft`. Before
+this the fold read `WorkflowNodeStarted` (issue #382) nowhere, so the only
+per-node facts the history carried were finishes, and every console that learned
+about a run from the journal rather than from a live SSE start frame — a reload,
+a cron fire, an `EventSource` reconnect, a workflow switch and back — painted the
+graph with a hole exactly where the work was happening.
+
+`startedNodes` is a **receipt of what started** and deliberately survives the
+finish: an id in it with no matching `nodes` row on a settled run is the node the
+run was standing on when it was cancelled or lost, which neither list says on its
+own. Readers must therefore pair it with `running` before painting anything as
+in flight, or a settled run overlays a spinner nothing can clear. Omitted
+entirely when empty, like `nodes`, so a run journaled before #382 is
+byte-unchanged.
 
 Swap `{ "kind": "owner" }` for `{ "kind": "email", "target": "ada@example.com" }`
 and a recipient who has never written in comes back as
