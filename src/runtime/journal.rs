@@ -2969,6 +2969,7 @@ mod test {
         StandingGrant {
             id: GrantId::new(id),
             agent: "ops".into(),
+            workflow: None,
             tool: tool.into(),
             granted_by: Actor {
                 kind: crate::ports::types::ActorKind::User,

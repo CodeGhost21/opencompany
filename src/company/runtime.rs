@@ -2369,7 +2369,14 @@ impl CompanyRuntime {
                 // is offered on exactly the call the card itself is showing —
                 // which matters for `composio_execute`, where the same tool is
                 // grantable reading a repository and not grantable sending mail.
-                broadly_grantable: p.effect.agent.is_some() && p.effect.may_be_granted_standing(),
+                // Issue #1098 replaced "is there a teammate" with "is there a
+                // subject": a gate has no teammate but names the workflow it
+                // belongs to, and that workflow can hold a permission. Decided by
+                // the same `subject_of` the resolve route's 400 and the mint use,
+                // so the control the card offers and the answer a resolve gets
+                // cannot disagree.
+                broadly_grantable: crate::runtime::grants::subject_of(&p.effect).is_some()
+                    && p.effect.may_be_granted_standing(),
                 // Always false here. Whether a *reader* may see the contents is
                 // a property of who is asking, and this projection is
                 // deliberately principal-free (issue #618) — the redaction
