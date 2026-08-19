@@ -1113,6 +1113,37 @@ base_url = "https://byo.example/v1"
         assert_eq!(body["code"], "not_configured");
     }
 
+    /// A company whose only inference lives in `[harness.inference]` resolves
+    /// the harness's provider for both status and probe — the same
+    /// default-harness fallback [`RuntimeBuilder::build`] applies at boot.
+    ///
+    /// Before the fix `manifest_inference` read only the company-level
+    /// `[inference]`, so such a company reported `managed`, rejected
+    /// `/inference/test` as `not_configured`, and mislabeled its status while
+    /// turns ran on the harness configuration the same record holds.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn harness_only_inference_reports_the_harness_provider_for_status_and_probe() {
+        let home_dir = home();
+        let state = state_with_harness_inference(home_dir.path()).await;
+
+        // Status resolves the default harness's `[harness.inference]`, not the
+        // absent company-level section: the operator sees the provider their
+        // turns actually run on.
+        let (status, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["provider"], "openai_compatible");
+        assert_eq!(dto["source"], "manifest");
+        assert_ne!(dto["provider"], "managed");
+
+        // The probe resolves the same inference, so it is *not* rejected as
+        // `not_configured`; it reaches the (unreachable) host and reports that
+        // failure instead.
+        let (status, body, _) = send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        assert_ne!(status, StatusCode::CONFLICT);
+        assert_ne!(body["code"], "not_configured");
+    }
+
     #[cfg(feature = "openhuman")]
     #[test]
     fn platform_default_follows_the_injected_inference_url() {
