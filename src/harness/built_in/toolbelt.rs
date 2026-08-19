@@ -1124,6 +1124,30 @@ mod tests {
         assert!(shown.contains("api.tinyhumans.ai"), "{shown}");
     }
 
+    /// A backend URL that is not exactly `https` must never reach
+    /// `IntegrationClient::new`: the client attaches the managed token, so an
+    /// `http://` override would send it in the clear. Fail closed with no tools.
+    #[cfg(feature = "media")]
+    #[test]
+    fn a_non_https_media_backend_wires_no_tools() {
+        let ws = Path::new("/tmp/oc-toolbelt-media-http");
+        for url in [
+            "http://api.tinyhumans.ai",
+            "ftp://api.tinyhumans.ai",
+            "not-a-url",
+        ] {
+            let backend = MediaBackend {
+                backend_url: url.to_string(),
+                auth_token: "managed-token".to_string(),
+            };
+            let tools = media_tools(&backend, ws);
+            assert!(
+                tools.is_empty(),
+                "backend `{url}` must not construct any media tool"
+            );
+        }
+    }
+
     #[test]
     fn filter_deny_drops_mapped_but_keeps_intrinsic() {
         // Mix a real intrinsic tool (`file_read`, unmapped) with mapped exec
