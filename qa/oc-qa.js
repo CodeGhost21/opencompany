@@ -830,7 +830,13 @@
     }
     const all = runs.flatMap((r) => (r.deliveries || []).map((d) => ({ run: r, d })));
     const attempted = runs.filter((r) => (r.deliveries || []).length > 0);
-    const dropped = all.filter(({ d }) => d.status !== "sent" && d.status !== "pending");
+    // Issue #981: the shared predicate, not a fourth transcription of it inside
+    // this file. The status-only filter this replaces FAILED the whole check on
+    // a `skipped`/`dry-run` row (a test run attempted nothing, on purpose) and
+    // on a `skipped`/`already-delivered` one (an earlier run in the approval
+    // lineage sent it) — so a company whose most recent runs were tests scored
+    // a red row for a delivery path that is working.
+    const dropped = all.filter(({ d }) => isUndelivered(d));
     const reasons = [...new Set(dropped.map(({ d }) => d.reason || d.status))];
     rows.push(
       row(
@@ -1327,6 +1333,7 @@
       runVerdict,
       undeliveredCount,
       isUndelivered,
+      checkDeliveries,
       pendingCount,
       awaitingCount,
       isBlocked,

@@ -8542,19 +8542,25 @@ label = "ok"
         /// a destination answered `undelivered` — the console badged the safest
         /// thing an operator can do as a failure, every time. The rows stay on
         /// the body: they are what say *where* the report would have gone.
+        ///
+        /// Asked for as a **real dry run** (`dry_run: true`) and the `dryRun`
+        /// discriminator asserted alongside the verdict, so this cannot pass on
+        /// a run that was not one — a stub runner returning a `dry-run` row is
+        /// only half the claim.
         #[tokio::test]
         async fn a_test_run_is_not_a_run_that_lost_its_report() {
             let home_dir = home();
             let app = company_with_runner(home_dir.path(), Arc::new(DryRunRunner)).await;
 
             let response = app
-                .oneshot(run_request(serde_json::json!({})))
+                .oneshot(run_request(serde_json::json!({ "dry_run": true })))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             let body = json_body(response).await;
 
             assert_eq!(body["verdict"], "ok", "{body}");
+            assert_eq!(body["dryRun"], serde_json::json!(true), "{body}");
             assert_eq!(body["deliveries"][0]["reason"], "dry-run", "{body}");
             assert_eq!(body["deliveries"][0]["status"], "skipped", "{body}");
         }

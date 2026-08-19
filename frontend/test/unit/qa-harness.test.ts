@@ -88,6 +88,10 @@ function loadHarness(fetchImpl?: (path: string, init?: { method?: string }) => P
       runVerdict: (run: unknown) => string;
       undeliveredCount: (d: DeliveryReport[]) => number;
       isUndelivered: (d: DeliveryReport) => boolean;
+      checkDeliveries: (
+        rows: { check: string; verdict: string; value: string }[],
+        runs: unknown[],
+      ) => void;
       pendingCount: (d: DeliveryReport[]) => number;
       awaitingCount: (run: unknown) => number;
       isBlocked: (run: unknown) => boolean;
@@ -445,6 +449,48 @@ describe("runVerdict agrees with the console's runTone", () => {
         consoleIsUndelivered(row),
       );
     }
+  });
+
+  /**
+   * The `workflow-deliveries` row is what an operator running the harness
+   * actually reads, and it owned a NINTH copy of the filter. A company whose
+   * most recent runs were **test** runs — the safest thing an operator can do —
+   * scored a red FAIL for a delivery path that is working perfectly.
+   */
+  it("does not fail the delivery check on accounted-for skips", () => {
+    const { checkDeliveries } = loadHarness()._internals;
+    const rows: { check: string; verdict: string; value: string }[] = [];
+    checkDeliveries(rows, [
+      {
+        workflowId: "digest",
+        deliveries: [
+          delivery("skipped", "dry-run"),
+          delivery("skipped", "already-delivered"),
+          delivery("sent", "channel-posted"),
+        ],
+      },
+    ]);
+    const r = rows.find((x) => x.check === "workflow-deliveries");
+    expect(r?.verdict).toBe("PASS");
+    expect(r?.value).toContain("0/3 reports dropped");
+  });
+
+  it("still fails it for a report that was produced and lost", () => {
+    const { checkDeliveries } = loadHarness()._internals;
+    const rows: { check: string; verdict: string; value: string }[] = [];
+    checkDeliveries(rows, [
+      {
+        workflowId: "digest",
+        deliveries: [
+          delivery("failed", "channel-not-wired"),
+          // The deliberate non-move (issue #925).
+          delivery("skipped", "no-destination-configured"),
+        ],
+      },
+    ]);
+    const r = rows.find((x) => x.check === "workflow-deliveries");
+    expect(r?.verdict).toBe("FAIL");
+    expect(r?.value).toContain("2/2 reports dropped");
   });
 
   it("reports an unknown run as unknown rather than ok", () => {
