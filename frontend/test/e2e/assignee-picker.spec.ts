@@ -123,7 +123,7 @@ test("the edit dialog offers Unassigned, desks and teammates instead of a text f
   await expect(page.getByRole("option", { name: /^ceo —/ })).toBeVisible();
 
   // A desk with nobody on it stays assignable (EmptyDesk is real), and says so.
-  await expect(page.getByRole("option", { name: /Legal — no members yet/ })).toBeVisible();
+  await expect(page.getByRole("option", { name: /Legal — no teammates yet/ })).toBeVisible();
   // A staffed desk shows its headcount.
   await expect(page.getByRole("option", { name: /Engineering desk — 1 teammate/ })).toBeVisible();
 });

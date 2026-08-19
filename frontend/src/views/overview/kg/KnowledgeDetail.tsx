@@ -110,7 +110,7 @@ export function DeptOverviewCard({
           <Row color={dept.color} title={head.name} sub={head.role} badge="lead" onClick={() => onPerson(dept.deptId)} />
         ) : (
           <p className="rounded-md-t border border-dashed border-os-border px-3 py-2 font-mono text-2xs text-os-dim">
-            No human lead yet — this team runs on agents.
+            No human lead yet — this team runs on teammates.
           </p>
         )}
 
@@ -177,7 +177,7 @@ export function AgentHarnessCard({
 }) {
   return (
     <div className="flex h-full flex-col">
-      <PanelHeader title={agent.name} sub={`${agent.role} · AI agent`} onBack={onBack} onClose={onClose} />
+      <PanelHeader title={agent.name} sub={`${agent.role} · AI teammate`} onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
         <p className="mb-3 text-2xs leading-relaxed text-os-muted">{agent.description}</p>
 
@@ -284,7 +284,7 @@ export function ToolDetailCard({
         </div>
         <SectionLabel icon={User}>used by ({wiki.usedBy.length})</SectionLabel>
         {wiki.usedBy.length === 0 ? (
-          <p className="font-mono text-2xs text-os-dim">no agents in view</p>
+          <p className="font-mono text-2xs text-os-dim">no teammates in view</p>
         ) : (
           <div className="flex flex-col gap-1">
             {wiki.usedBy.map((n) => (
@@ -340,7 +340,7 @@ export function SopTaskDetailCard({
 }: {
   task: SopTask;
   assigneeName: string;
-  assigneeKindLabel: string; // 'human' | 'AI agent'
+  assigneeKindLabel: string; // 'human' | 'AI teammate'
   assigneeColor: string;
   /** what executes this SOP, e.g. 'builtin · imapflow' or 'human · judgment call' */
   runtime?: string | null;

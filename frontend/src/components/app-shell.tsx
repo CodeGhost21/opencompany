@@ -1112,7 +1112,7 @@ export function AppShell({
       // An approve needs no line: the continuation lands as a real reply, which
       // is the whole point of deciding here.
       if (verdict === "deny") {
-        noteInChannel(approval.thread, "Declined — the agent will not take that action.");
+        noteInChannel(approval.thread, "Declined — the teammate will not take that action.");
       }
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : "something went wrong";

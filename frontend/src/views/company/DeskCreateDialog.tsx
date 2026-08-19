@@ -142,7 +142,7 @@ export function DeskCreateDialog({
         </div>
 
         <div className="grid gap-2">
-          <Label>Members</Label>
+          <Label>Teammates</Label>
           {roster.length === 0 ? (
             <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
               No roster teammates to add — you can add them after the desk exists.
