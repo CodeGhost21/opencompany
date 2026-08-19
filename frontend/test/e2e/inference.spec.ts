@@ -122,18 +122,15 @@ test("a key typed for a BYOK provider does reach the host on save", async ({ pag
     timeout: 30_000,
   });
 
-  // And clear the stored credential, as the first test does. `Reset to managed`
-  // only clears the runtime override — it deliberately leaves the stored key in
-  // place (a manifest provider may still resolve it) — but this company's
-  // default is the platform-injected brain, and every later spec in this lane
-  // (the live-brain workflow and MCP-agent specs) runs against the same host
-  // and secret store. When no runtime override is set, the default resolves
-  // through `resolve_endpoint("openrouter", …)`, whose dual-mode reads a stored
-  // key as "go direct to OpenRouter" instead of staying on the mock brain, so a
-  // key left here reroutes their turns off the mock and 401s the lane. Issue
-  // #993.
-  await page.getByTestId("inference-remove-key").click();
-  await expect(page.getByText("Removed the company key.")).toBeVisible({
+  // The reset is a full one, not a half-clear: the host also wipes the stored
+  // credential on revert (issue #993), so nothing is left behind to reroute the
+  // later specs in this lane (the live-brain workflow and MCP-agent specs) off
+  // the mock brain and 401 them. Assert that here rather than clearing by hand
+  // — the remove-key button exists only while a key is stored, so it being gone
+  // is the observable that the reset actually cleared the key.
+  await expect(page.getByTestId("inference-remove-key")).toHaveCount(0, {
     timeout: 30_000,
   });
+  const cleared = await page.request.get("/api/v1/company/inference");
+  expect((await cleared.json()).keyConfigured).toBe(false);
 });
