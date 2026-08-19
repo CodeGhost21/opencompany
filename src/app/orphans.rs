@@ -107,11 +107,10 @@ impl OrphanReport {
         self.unowned.is_empty() && self.dangling.is_empty()
     }
 
-    /// The unowned companies grouped by nothing — see [`find`] for why this
-    /// report does not group by tenant.
+    /// Both halves of the report, one finding per line.
     ///
-    /// A human-readable block, one finding per line. Empty string when there is
-    /// nothing to say, so a caller can print it unconditionally.
+    /// A human-readable block. Empty string when there is nothing to say, so a
+    /// caller can print it unconditionally.
     pub fn to_text(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
