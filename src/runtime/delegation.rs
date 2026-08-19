@@ -109,7 +109,7 @@ use crate::runtime::delegation_tools;
 ///
 /// The two hand-off delegations differ only in how they get here — a desk key
 /// through [`desk_lead`], a roster id straight through
-/// [`CompanyRecord::resolve_roster_agent_id`] — and this is the type that makes
+/// [`CompanyRecord::resolve_teammate_key`] — and this is the type that makes
 /// that the *only* difference. A hand-off's card, its steer registration, its
 /// depth bound and its relayed reply are properties of handing work over, not
 /// of the namespace the target was named in.
@@ -1398,11 +1398,19 @@ impl<'a> DelegationRunner<'a> {
             let lead = match &delegation {
                 Delegation::DelegateToDesk { desk, .. } => desk_lead(self.record, desk),
                 // Issue #884: resolved directly, with no desk in between — which
-                // is the point. `resolve_roster_agent_id` is pure over the same
+                // is the point. `resolve_teammate_key` is pure over the same
                 // record, so the second resolution inside `run_delegation`
                 // yields the same member, exactly as `desk_lead` does above.
+                //
+                // It grounds the display-name half of the roster too (#1162).
+                // The tool now queues the canonical id, so on the ordinary path
+                // this is the identity — but `ground` fails open for the
+                // orchestrator when the record cannot be read, and that path
+                // queues the key exactly as the model wrote it. Resolving the
+                // same way here is what stops a name that reached the queue
+                // from being dropped at the drain.
                 Delegation::DelegateToTeammate { teammate, .. } => {
-                    self.record.resolve_roster_agent_id(teammate)
+                    self.record.resolve_teammate_key(teammate).agent()
                 }
                 _ => None,
             };
@@ -2281,11 +2289,15 @@ impl<'a> DelegationRunner<'a> {
                 teammate,
                 instruction,
             } => {
-                let Some(member) = self.record.resolve_roster_agent_id(&teammate) else {
+                let Some(member) = self.record.resolve_teammate_key(&teammate).agent() else {
                     // The mirror of the desk arm's warning, and reachable for the
                     // same narrow reason: the tool grounds the target before
                     // queuing, so this is a teammate removed from the roster
-                    // between the call and the drain.
+                    // between the call and the drain — or one named on the
+                    // fail-open path, which queues the key ungrounded. Resolved
+                    // with the same id-then-name resolve the tool boundary used
+                    // (#1162), so a display name cannot be accepted there and
+                    // silently dropped here.
                     tracing::warn!(
                         company = %self.company,
                         teammate = %teammate,
