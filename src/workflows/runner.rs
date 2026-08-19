@@ -682,6 +682,19 @@ async fn run_workflow_inner(
             {
                 notices.push(run_output_persist_failed_notice());
             }
+            // Issue #899 (Stage 1): this is the block-settle arm the DEFAULT
+            // `on_error = "stop"` takes — a blocked agent node reaches here as an
+            // `Err` the containment check reclassifies. Stash each blocked node's
+            // continuation facts so approving its parked calls re-dispatches the
+            // run. (The `on_error = "continue"/"route"` case settles on the main
+            // arm below, which arms the same stash there.)
+            stash_blocked_agent_nodes(
+                delivery.as_ref(),
+                &workflow.id,
+                &run_id,
+                &trigger_input,
+                &blocked,
+            );
             return Ok(blocked_run(BlockedRun {
                 nodes,
                 blocked,
@@ -933,6 +946,17 @@ async fn run_workflow_inner(
     let mut pending_approvals = outcome.pending_approvals;
     let blocked_nodes = blocks.take();
     reclassify_blocked(&mut nodes, &mut pending_approvals, &blocked_nodes);
+    // Issue #899 (Stage 1): stash the workflow id and trigger input each blocked
+    // agent node's continuation needs, keyed by the same per-(run, node) turn key
+    // its parked calls armed `ContinuationQueue` under. The resolve path releases
+    // both together and re-dispatches the run once the last call is decided.
+    stash_blocked_agent_nodes(
+        delivery.as_ref(),
+        &workflow.id,
+        &run_id,
+        &trigger_input,
+        &blocked_nodes,
+    );
     // Issue #900: `blocked_run` (the halt arm) tells the operator what blocked
     // via a `notices` sentence, not only via the node's own status — the
     // per-node chip is easy to miss on a run that otherwise looks fine, and a
@@ -1112,7 +1136,9 @@ pub(super) fn blocked_notice(blocked: &crate::ports::WorkflowBlockedNode) -> Str
     let mut tail = String::new();
     if parked > 0 {
         tail.push_str(&format!(
-            " It parked {parked} approval{}; decide {} in Approvals and run the workflow again.",
+            " It parked {parked} approval{}; approve {} in Approvals and this run continues on \
+             its own. Approving re-runs the step, so if the agent's next turn differs it may ask \
+             again.",
             if parked == 1 { "" } else { "s" },
             if parked == 1 { "it" } else { "them" }
         ));
@@ -1272,6 +1298,40 @@ struct PausedGates<'a> {
 /// continuation an approval starts knows what has already left the process.
 /// Without it, approving a gate re-mails every report upstream of it — the
 /// re-run semantics above applied to a side effect that reaches a real person.
+/// Stashes the facts each blocked agent node's continuation needs — the workflow
+/// id and this run's trigger input — keyed by the per-(run, node) turn key its
+/// gated calls armed `ContinuationQueue` under at park time (issue #899, Stage 1).
+///
+/// # Why here, and not where the calls are parked
+///
+/// The calls are parked mid-turn from `HarnessAgentRunner`, which carries no
+/// trigger input. This is the one place with the workflow id, the trigger input
+/// and the list of blocked nodes together — exactly as `park_pending_gates` is
+/// the one place a gate's facts come together. A node with no parked approval id
+/// is skipped: nothing can be decided, so nothing will ever release a stash.
+///
+/// A build with no approvals queue wired stashes nothing and is silent — the
+/// same node already logged its own "could not be parked" line, and there is no
+/// resolve path to release a stash to.
+fn stash_blocked_agent_nodes(
+    delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
+    workflow_id: &str,
+    run_id: &str,
+    trigger_input: &serde_json::Value,
+    blocked: &[crate::ports::WorkflowBlockedNode],
+) {
+    let Some(parking) = delivery.and_then(|delivery| delivery.parking.as_ref()) else {
+        return;
+    };
+    for node in blocked {
+        if node.approval_ids.is_empty() {
+            continue;
+        }
+        let turn = crate::runtime::workflow_resume::workflow_node_turn_key(run_id, &node.node_id);
+        parking.blocked_nodes.arm(&turn, workflow_id, trigger_input);
+    }
+}
+
 async fn park_pending_gates(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     record: &CompanyRecord,
@@ -3521,6 +3581,7 @@ to = "done"
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
@@ -3820,6 +3881,7 @@ to = "gate"
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
+                blocked_nodes: Default::default(),
             }),
             events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
