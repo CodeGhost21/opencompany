@@ -2719,7 +2719,11 @@ impl HarnessBrain {
         host: &dyn CycleHost,
     ) -> Result<CycleResult> {
         // Idempotent — builds the roster on the first cycle, a no-op after.
-        self.pool.ensure(&self.record(), &self.deps).await?;
+        // Warmed through the router, not the pool alone: a company with named
+        // harnesses has one pool per `built_in` harness, and each named lane's
+        // own pool must be populated before its first turn, or a bound agent
+        // fails with "company not found" while the default lane looks fine.
+        self.run_turn().ensure(&self.record()).await?;
 
         let mut channel_responses = Vec::new();
         for event in &req.events {
