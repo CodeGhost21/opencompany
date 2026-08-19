@@ -1665,19 +1665,24 @@ fn map_engine_error(err: tinyflows::error::EngineError) -> OpenCompanyError {
 }
 
 /// The [`WorkflowRunner`] port backed by the embedded harness: it holds the
-/// shared pool, its deps, and the company record so it can ensure the roster is
-/// built before a run and route agent nodes onto it.
+/// lane-aware router so every agent node dispatches to the engine its harness
+/// demands, plus the deps and company record it needs to warm every lane before
+/// a run.
 pub struct HarnessWorkflowRunner {
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
     record: CompanyRecord,
 }
 
 impl HarnessWorkflowRunner {
-    /// Builds a runner sharing `pool`/`deps` with the rest of the harness surface
-    /// for the company described by `record`.
-    pub fn new(pool: Arc<HarnessPool>, deps: HarnessDeps, record: CompanyRecord) -> Self {
-        Self { pool, deps, record }
+    /// Builds a runner dispatching through `turn`, sharing `deps` with the
+    /// rest of the harness surface for the company described by `record`.
+    pub fn new(
+        turn: Arc<dyn crate::runtime::delegation::RunTurn>,
+        deps: HarnessDeps,
+        record: CompanyRecord,
+    ) -> Self {
+        Self { turn, deps, record }
     }
 }
 
