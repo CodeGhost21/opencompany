@@ -1327,11 +1327,12 @@ struct ChatResponse {
 struct DetachedChatResponse {
     /// The turn's durable row, to poll on `GET {scope}/runs/{turn_id}`.
     ///
-    /// Optional for the same reason [`ChatResponse::turn_id`] is: a run store
-    /// that refused a row does not get to refuse the turn. A console that finds
-    /// it missing cannot poll, and falls back to re-reading `chat/history`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    turn_id: Option<String>,
+    /// Not optional, unlike [`ChatResponse::turn_id`]: this body is only ever
+    /// produced when the row exists (the handler falls through to the
+    /// synchronous settle when the run store refused one), because the console
+    /// arms its poll from this id and that poll is the detached turn's sole
+    /// delivery path when `/events` is buffered or unavailable.
+    turn_id: String,
     /// The durable id the operator's own message was journaled under.
     ///
     /// Never optional here, unlike on the synchronous response: since issue #983
