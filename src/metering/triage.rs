@@ -59,18 +59,21 @@ pub fn triage_sample(usage: &TokenUsage, provider: &str) -> Option<UsageSample> 
 }
 
 /// Records one completed triage escalation: the Finances ledger entry (when it
-/// cost USD) and the usage sample (when it moved tokens or money).
+/// cost USD) and, when a usage meter is wired, the usage sample.
 ///
 /// The ledger entry goes through the same [`inference_ledger_entry`] the cycle's
 /// inference spend uses, under the same `inference.spend` kind — triage spend is
 /// inference spend as far as the money is concerned, and only the *usage*
-/// breakdown cares about the distinction.
+/// breakdown cares about the distinction. The meter is deliberately optional:
+/// a host with no usage meter still records the spend it can prove, exactly as
+/// [`record_turn_cost`](crate::harness::cost::record_turn_cost) preserves its
+/// ledger write without a meter.
 pub async fn record_triage_usage(
     usage: &TokenUsage,
     provider: &str,
     company: &CompanyId,
     store: &dyn CompanyStore,
-    meter: &dyn UsageMeter,
+    meter: Option<&dyn UsageMeter>,
 ) {
     if usage.is_zero() {
         return;
@@ -94,6 +97,7 @@ pub async fn record_triage_usage(
         );
     }
     if let Some(sample) = triage_sample(usage, provider)
+        && let Some(meter) = meter
         && let Err(err) = meter.record(company, &sample).await
     {
         tracing::warn!(
