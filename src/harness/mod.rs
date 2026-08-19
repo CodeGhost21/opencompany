@@ -142,6 +142,9 @@ mod publish_turn_test;
 /// (a full object copy, then every reference back to the mirror severed), plus
 /// the per-turn ledger that deletes it again. See [`repo`].
 pub mod repo;
+/// First-run company setup's pass: one tool-less model call that designs a
+/// company's starting team from three answers. See [`roster_build`].
+pub mod roster_build;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
@@ -3461,6 +3464,7 @@ description = "Builds the product."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -5391,6 +5395,7 @@ description = "Sets direction."
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
