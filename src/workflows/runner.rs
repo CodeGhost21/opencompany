@@ -2206,6 +2206,7 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         // No node row reported `Error` at all — a setup/validation failure the
         // engine raised before any node ran, for instance.
@@ -2226,6 +2227,7 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         let nodes = vec![crate::ports::WorkflowRunNodeRow {
             node_id: "work".to_string(),
@@ -2245,6 +2247,7 @@ to = "done"
             tools: vec!["shell".to_string()],
             approval_ids: vec!["appr-1".to_string()],
             unparkable: 0,
+            stranded: 0,
         }];
         let nodes = vec![
             crate::ports::WorkflowRunNodeRow {
@@ -2429,6 +2432,7 @@ to = "boom"
             tools: vec!["shell".to_string()],
             approval_ids: Vec::new(),
             unparkable: 0,
+            stranded: 0,
         };
 
         let capture = serde_json::json!({

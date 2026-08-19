@@ -678,6 +678,7 @@ mod pure {
             tools: vec!["publish_artifact".to_string()],
             approval_ids: vec!["appr-1".to_string(), "appr-2".to_string()],
             unparkable: 0,
+            stranded: 0,
         });
         assert!(notice.contains("parked 2 approvals"), "{notice}");
         assert!(
@@ -700,6 +701,7 @@ mod pure {
             tools: vec!["publish_artifact".to_string()],
             approval_ids: Vec::new(),
             unparkable: 1,
+            stranded: 0,
         });
         assert!(
             notice.contains("could not be queued for approval"),
