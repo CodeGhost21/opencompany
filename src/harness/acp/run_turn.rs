@@ -43,10 +43,12 @@
 //! no tool call produced.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::error::OpenCompanyError;
 use crate::harness::TurnOutcome;
 use crate::ports::types::{CompanyId, TurnStep, TurnStepKind, TurnStepStatus};
 use crate::runtime::delegation::RunTurn;
