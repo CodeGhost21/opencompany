@@ -878,6 +878,15 @@ async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
     let tenant_id = std::env::var("OPENCOMPANY_TENANT_ID")
         .ok()
         .filter(|v| !v.trim().is_empty());
+    if let Some(tenant) = &tenant_id {
+        // A namespace containing the `--` id delimiter would make the
+        // `<tenant>--` prefix ambiguous between tenants (see
+        // `validate_tenant_namespace`). Reject it here, the boundary that
+        // reads the variable.
+        if let Err(reason) = opencompany::app::validate_tenant_namespace(tenant) {
+            return Err(opencompany::error::OpenCompanyError::Config(reason.into()));
+        }
+    }
     if tenant_id.is_none() {
         return Err(opencompany::error::OpenCompanyError::Config(
             "OPENCOMPANY_TENANT_ID is not set: this deployment does not persist \
