@@ -1340,3 +1340,92 @@ async fn a_host_wide_auth_override_reaches_a_company_provisioned_after_it_is_set
          manifest's own mode, exactly as it does for a company built at boot"
     );
 }
+
+// ── issue #1050: the durable ownership write ────────────────────────────────
+
+/// An [`OwnershipStore`](crate::store::select::OwnershipStore) that fails its
+/// first `fail_first` `set_owner` calls, then succeeds — the transient blip
+/// (mongo election, timeout) issue #1050 names as the cause.
+struct FlakyOwnership {
+    fail_first: std::sync::Mutex<usize>,
+    attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FlakyOwnership {
+    fn new(fail_first: usize) -> (Self, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Self {
+                fail_first: std::sync::Mutex::new(fail_first),
+                attempts: attempts.clone(),
+            },
+            attempts,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::store::select::OwnershipStore for FlakyOwnership {
+    async fn set_owner(&self, _id: &CompanyId, _tenant: &str) -> crate::Result<()> {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut left = self.fail_first.lock().unwrap();
+        if *left > 0 {
+            *left -= 1;
+            return Err(crate::error::OpenCompanyError::Config(
+                "transient ownership write failure".into(),
+            ));
+        }
+        Ok(())
+    }
+    async fn remove_owner(&self, _id: &CompanyId) -> crate::Result<()> {
+        Ok(())
+    }
+    async fn owners(&self) -> crate::Result<Vec<(CompanyId, String)>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A transient failure is retried and the write succeeds, so a mongo blip does
+/// not turn into a refused provision.
+#[tokio::test]
+async fn a_transient_ownership_failure_is_retried_and_succeeds() {
+    let (store, attempts) = FlakyOwnership::new(2);
+    let result = super::persist_owner_with_retry(&store, &CompanyId::new("acme"), "tenant-a").await;
+    assert!(result.is_ok(), "the third attempt succeeds: {result:?}");
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "it retried rather than giving up on the first failure"
+    );
+}
+
+/// A backend that is genuinely down returns the error, which is what the route
+/// turns into a refusal. The bound matters: this must not retry forever with a
+/// caller waiting on the request.
+#[tokio::test]
+async fn a_persistent_ownership_failure_gives_up_and_reports_it() {
+    let (store, attempts) = FlakyOwnership::new(usize::MAX);
+    let result = super::persist_owner_with_retry(&store, &CompanyId::new("acme"), "tenant-a").await;
+    assert!(
+        result.is_err(),
+        "a write that never succeeds must be reported, not swallowed — swallowing it is \
+         issue #1050"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        super::OWNERSHIP_WRITE_ATTEMPTS,
+        "bounded: a caller is waiting on this request"
+    );
+}
+
+/// The happy path costs exactly one write — the retry must not multiply the
+/// normal case.
+#[tokio::test]
+async fn a_successful_ownership_write_is_attempted_once() {
+    let (store, attempts) = FlakyOwnership::new(0);
+    super::persist_owner_with_retry(&store, &CompanyId::new("acme"), "tenant-a")
+        .await
+        .expect("writes first time");
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

@@ -267,9 +267,63 @@ async fn provision(
     if let Some(overlay) = state.memory_overlay() {
         builder = builder.with_memory_overlay(overlay);
     }
+    // Issue #1050: the durable owner row is written BEFORE the company exists.
+    //
+    // It used to be written after, best-effort, and a failure was logged and
+    // swallowed — so a transient write failure returned `201 Created` for a
+    // company with no `owners` row. Boot hydration filters on exactly that row,
+    // so after a restart the company was unattributable to its tenant: not
+    // hydrated, addressable by nobody (`owner_of` → `None` → 403), and **missed
+    // by a tenant-scoped purge or export**. Data surviving a deletion someone
+    // believes they performed is the part that makes this more than untidiness.
+    //
+    // Ordering it first is what makes failing honest. Failing at the old site
+    // could not be atomic: by then the runtime is built and registered, so
+    // returning an error left exactly the orphan it meant to prevent, and there
+    // is no company-deletion path to roll back with (`archive` is a lifecycle
+    // transition plus registry removal, not a purge).
+    //
+    // This inverts the failure direction, deliberately: a crash between here
+    // and a successful build leaves an `owners` row naming a company that was
+    // never created. That is the strictly safer orphan — it hydrates a harmless
+    // in-memory entry and can be removed, whereas a company with no owner row
+    // hides data from a purge. Prefer the failure that leaves data visible over
+    // the one that hides it.
+    if let Some(ownership) = state.stores().and_then(|s| s.ownership.clone())
+        && let Err(err) = persist_owner_with_retry(ownership.as_ref(), &id, &tenant).await
+    {
+        tracing::error!(
+            company = %id,
+            tenant = %tenant,
+            error = %err,
+            "refusing to provision: company ownership could not be persisted"
+        );
+        return envelope(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ownership_not_persisted",
+            "could not record which tenant owns this company, so it was not created. \
+             Nothing was provisioned — retry the request.",
+        );
+    }
+
     let runtime = match builder.build().await {
         Ok(runtime) => runtime,
-        Err(err) => return ApiError(err).into_response(),
+        Err(err) => {
+            // The owner row above now names a company that does not exist.
+            // Best-effort removal keeps the reversed orphan from lingering; if
+            // it fails the row is still the benign direction.
+            if let Some(ownership) = state.stores().and_then(|s| s.ownership.clone())
+                && let Err(cleanup) = ownership.remove_owner(&id).await
+            {
+                tracing::warn!(
+                    company = %id,
+                    error = %cleanup,
+                    "provision failed and its ownership row could not be rolled back; the row \
+                     names a company that was never created"
+                );
+            }
+            return ApiError(err).into_response();
+        }
     };
 
     // The same refusal boot applies to `serve --company`: a company with no
@@ -294,16 +348,51 @@ async fn provision(
     state
         .registry()
         .insert(id.clone(), std::sync::Arc::new(runtime));
+    // The durable row was written and verified above, before the build, so this
+    // is only the in-memory mirror the running process serves from (issue
+    // #1050).
     state.set_owner(id.clone(), tenant.clone());
-    // Persist ownership when the backend supports it, so the tenant map
-    // survives restarts (best-effort: the in-memory map already reflects it).
-    if let Some(ownership) = state.stores().and_then(|s| s.ownership.clone())
-        && let Err(err) = ownership.set_owner(&id, &tenant).await
-    {
-        tracing::warn!(company = %id, error = %err, "failed to persist company ownership");
-    }
 
     (StatusCode::CREATED, Json(status)).into_response()
+}
+
+/// How many times [`persist_owner_with_retry`] attempts the durable write.
+///
+/// The failure this exists for is transient — a mongo blip, an election, a
+/// timeout — so a couple of extra attempts turn most would-be provision
+/// failures back into successes. Small on purpose: a caller is waiting on this
+/// request, and a backend that is genuinely down should be reported as down
+/// rather than held open.
+const OWNERSHIP_WRITE_ATTEMPTS: usize = 3;
+
+/// Writes the company → tenant row, retrying a transient failure (issue #1050).
+///
+/// Returns the last error if every attempt fails, which the caller turns into a
+/// refusal to provision. There is no sleep between attempts: the retry is here
+/// for a failed round-trip rather than a busy one, and a request-scoped backoff
+/// would hold the caller open for a backend that is not coming back inside this
+/// request anyway.
+async fn persist_owner_with_retry(
+    ownership: &dyn crate::store::select::OwnershipStore,
+    id: &CompanyId,
+    tenant: &str,
+) -> crate::Result<()> {
+    let mut last = None;
+    for attempt in 1..=OWNERSHIP_WRITE_ATTEMPTS {
+        match ownership.set_owner(id, tenant).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                tracing::warn!(
+                    company = %id,
+                    attempt,
+                    error = %err,
+                    "persisting company ownership failed; retrying"
+                );
+                last = Some(err);
+            }
+        }
+    }
+    Err(last.expect("at least one attempt ran"))
 }
 
 // ---------------------------------------------------------------------------
