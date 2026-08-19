@@ -208,7 +208,7 @@ each page under the 500-line cap.
     `media_generate_video`, `media_list_models`), but it is **real-money and
     opt-in**: it is granted only by an **explicit** `media` / `media.*` entry in
     `[tools].allow` — the `*` wildcard deliberately does **not** grant it — and
-    it runs exclusively on a **managed platform credential** (resolved from the
+    it runs exclusively on a **platform credential** (resolved from the
     environment, never a tenant BYOK key or secret). It is absent from the
     `free` / `starter` / `pro` tiers (denied there) and uncapped only under
     `unlimited`; a company opts in per-namespace with
