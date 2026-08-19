@@ -4340,6 +4340,11 @@ mod test {
         );
     }
 
+    /// Shared-single-DB namespacing: two tenants registering the same template
+    /// name land distinct namespaced ids in one database, so the `companies`
+    /// unique index never conflicts, and the `owners` rows carry the right
+    /// tenant for each. Mirrors what the workload does when
+    /// `OPENCOMPANY_TENANT_ID` is set (see `AppConfig::namespaced_company_id`).
     #[tokio::test]
     async fn shared_db_namespaced_companies_do_not_conflict() {
         let Some(s) = store().await else { return };
