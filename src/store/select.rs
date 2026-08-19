@@ -483,13 +483,20 @@ pub async fn open_storage(
 pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     match settings.memory_backend {
         MemoryBackend::Store => Ok(None),
+        // `embedded` with a driver named is the contract-bound in-pod store
+        // (`OPENCOMPANY_MEMORY_DRIVER=namespace`); without one it is the
+        // incumbent engine overlay. Routing on presence rather than value is
+        // deliberate: an unknown driver id must reach `open_driver`'s refusal,
+        // never fall back silently to the engine the operator did not name.
+        MemoryBackend::Tinycortex if settings.memory_driver.is_some() => open_provider(settings),
         MemoryBackend::Tinycortex => open_tinycortex(settings),
         MemoryBackend::Remote | MemoryBackend::Null => open_provider(settings),
     }
 }
 
 /// Opens a [`MemoryProvider`](tinymemory_api::provider::MemoryProvider)-backed
-/// overlay for the `remote` and `null` modes.
+/// overlay: the `remote` and `null` modes, and `embedded` when
+/// `OPENCOMPANY_MEMORY_DRIVER=namespace` selects the in-pod contract store.
 ///
 /// Unlike [`open_tinycortex`], this one also carries a `FactStore`: the provider
 /// contract covers all three memory ports, so there is no reason to leave the
@@ -507,14 +514,35 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     let mode = match settings.memory_backend {
         MemoryBackend::Remote => MemoryMode::Remote,
         MemoryBackend::Null => MemoryMode::Null,
-        // Unreachable: the caller matched these two arms.
-        MemoryBackend::Store | MemoryBackend::Tinycortex => return Ok(None),
+        MemoryBackend::Tinycortex => MemoryMode::Embedded,
+        // Unreachable: the caller never routes `store` here.
+        MemoryBackend::Store => return Ok(None),
     };
+    if mode == MemoryMode::Embedded
+        && settings.kind == StorageKind::Mongodb
+        && !settings.allow_ephemeral_memory
+    {
+        // The same refuse-to-open durability contract `open_tinycortex`
+        // enforces, for the same reason: this driver persists to the local
+        // data dir, which the mongodb hosting model treats as ephemeral
+        // scratch, so in-pod memory would be silently lost on restart.
+        return Err(OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY_DRIVER=namespace needs a persistent volume at the data dir, but \
+             OPENCOMPANY_STORAGE=mongodb makes /data ephemeral scratch by default, so in-pod \
+             memory would be silently lost on restart. If you have mounted a genuinely \
+             persistent volume at OPENCOMPANY_DATA_DIR, set OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1 \
+             to assert its durability and open the store anyway. Otherwise use \
+             OPENCOMPANY_STORAGE=fs or sqlite (durable /data), or a hosted engine with \
+             OPENCOMPANY_MEMORY=remote."
+                .into(),
+        ));
+    }
     let config = MemoryDriverConfig {
         mode,
         driver_id: settings.memory_driver.clone(),
         url: settings.memory_url.clone(),
         api_key: settings.memory_api_key.clone(),
+        data_dir: settings.data_dir.clone(),
     };
     let Some((provider, class)) = open_driver(&config)? else {
         return Ok(None);
@@ -562,6 +590,16 @@ fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
 /// served, so they refuse rather than silently resolving to something else.
 #[cfg(not(feature = "tinymemory"))]
 fn open_provider(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
+    // The embedded contract driver needs `tinymemory-embedded` (a superset of
+    // `tinymemory`), so name the feature that would actually fix the build.
+    if settings.memory_backend == MemoryBackend::Tinycortex {
+        return Err(OpenCompanyError::Config(
+            "OPENCOMPANY_MEMORY=embedded with OPENCOMPANY_MEMORY_DRIVER set requires a build \
+             with the `tinymemory-embedded` feature; unset OPENCOMPANY_MEMORY_DRIVER to use \
+             the engine overlay"
+                .into(),
+        ));
+    }
     Err(OpenCompanyError::Config(format!(
         "OPENCOMPANY_MEMORY={} requires a build with the `tinymemory` feature",
         settings.memory_backend.as_str()
@@ -1018,6 +1056,70 @@ mod test {
             open_memory_overlay(&settings).is_ok(),
             "null must not be gated on the remote-adapter assertion"
         );
+    }
+
+    #[cfg(feature = "tinymemory")]
+    #[test]
+    fn an_embedded_driver_id_routes_to_the_provider_seam_not_the_engine() {
+        // `embedded` with a driver named must reach `open_driver` — where an
+        // unknown id refuses by name — and must never fall back silently to
+        // the engine overlay the operator did not ask for.
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Tinycortex,
+            memory_driver: Some("supermemory".into()),
+            ..StorageSettings::default()
+        };
+        let error = open_memory_overlay(&settings)
+            .expect_err("an unknown embedded driver id must refuse, not fall back")
+            .to_string();
+        assert!(error.contains("namespace"), "{error}");
+    }
+
+    #[cfg(feature = "tinymemory-embedded")]
+    #[test]
+    fn the_namespace_driver_refuses_an_ephemeral_data_dir() {
+        // The same refuse-to-open durability contract `open_tinycortex`
+        // enforces: this driver persists to the local data dir, which the
+        // mongodb hosting model treats as ephemeral scratch.
+        let settings = StorageSettings {
+            kind: StorageKind::Mongodb,
+            memory_backend: MemoryBackend::Tinycortex,
+            memory_driver: Some("namespace".into()),
+            data_dir: Some(std::path::PathBuf::from("/data")),
+            ..StorageSettings::default()
+        };
+        let error = open_memory_overlay(&settings)
+            .expect_err("an in-pod store on ephemeral /data must refuse")
+            .to_string();
+        assert!(
+            error.contains("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"),
+            "{error}"
+        );
+    }
+
+    #[cfg(feature = "tinymemory-embedded")]
+    #[test]
+    fn the_namespace_driver_binds_and_reports_the_embedded_backend() {
+        // The wired end state of #1113: `OPENCOMPANY_MEMORY=embedded` +
+        // `OPENCOMPANY_MEMORY_DRIVER=namespace` binds the contract's own
+        // durable store through the same seam as the hosted engines — full
+        // three-port overlay, taint partitions included — while the
+        // descriptor keeps reporting the operator's `embedded` vocabulary.
+        let dir = tempfile::tempdir().unwrap();
+        let settings = StorageSettings {
+            memory_backend: MemoryBackend::Tinycortex,
+            memory_driver: Some("namespace".into()),
+            data_dir: Some(dir.path().to_path_buf()),
+            ..StorageSettings::default()
+        };
+        let overlay = open_memory_overlay(&settings)
+            .expect("a configured namespace driver binds")
+            .expect("the namespace driver yields an overlay");
+        assert_eq!(overlay.descriptor.backend, MemoryBackend::Tinycortex);
+        assert_eq!(overlay.descriptor.driver_id, "namespace");
+        assert!(overlay.facts.is_some(), "a provider serves facts too");
+        assert!(overlay.inbound_context.is_some());
+        assert!(overlay.scratch.is_some());
     }
 
     #[cfg(feature = "tinymemory")]

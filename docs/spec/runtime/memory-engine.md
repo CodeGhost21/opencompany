@@ -18,6 +18,7 @@ dedicated memory engine layered on top of that base. The base still owns every o
 |---|---|---|---|
 | `store` (default) | The base backend's own memory | — | fs substring recall, or sqlite/mongodb |
 | `embedded` (or `tinycortex`) | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; vector-first recall with lexical/recency fallback when no embeddings backend resolves |
+| `embedded` + `OPENCOMPANY_MEMORY_DRIVER=namespace` | In-pod contract store | `tinymemory-embedded` | `tinymemory-core`'s durable `UnifiedMemory`, bound through the `MemoryProvider` contract; no network call |
 | `remote` | A hosted memory service | `tinymemory` | Bound through the `MemoryProvider` contract; needs a URL and a credential |
 | `null` | Nothing | `tinymemory` | Writes accepted and discarded, reads empty |
 
@@ -116,24 +117,40 @@ and OpenHuman's own inlined contract documents `tinycortex-api` as a deprecated
 re-export. The `tinycortex` crate remains pinned as the *engine* behind the
 embedded mode; only the contract moved.
 
-## Why `embedded` does not go through the provider seam
+## `embedded` through the provider seam (`namespace`)
 
-`remote` and `null` bind a provider. `embedded` keeps the `EngineCortex` overlay
-it has always had, and that is a durability decision rather than an unfinished
-edge.
+`remote` and `null` bind a provider. Plain `embedded` keeps the `EngineCortex`
+overlay it has always had — today's companies have their data in those tables,
+and swapping the default out from under them would strand it. But the mode is
+no longer *confined* to that overlay: `OPENCOMPANY_MEMORY_DRIVER=namespace`
+binds `tinymemory-core`'s `UnifiedMemory` — the contract's own durable SQLite
+store, whose `Memory` implementation reports `name() == "namespace"` — through
+the same seam as the hosted engines. Same registry admission (the id is
+host-reserved at class `Embedded`), same bind-time capability audit, same
+`BoundMemory` tenant-namespace facades, full three-port overlay with the
+inbound-taint and scratch partitions. No network call; the store persists
+under `<OPENCOMPANY_DATA_DIR>/memory-namespace/` — beside, never inside, the
+incumbent engine's `memory/`, and nothing migrates between the two. An
+operator who switches starts that store empty.
 
-The obvious construction — `tinymemory_tinycortex::provider(…)` over a
-`tinycortex::memory::Memory` backend — cannot currently be durable. The only
-concrete `Memory` implementation in the vendored engine is `InMemoryMemoryStore`,
-a `BTreeMap` behind an `RwLock`. Binding it would swap the per-company SQLite
-workspaces under `<data_dir>/memory/` for a store that is empty after every
-restart, and would do so *silently*: every read would succeed, returning
-nothing. This page already documents a hard boot refusal for exactly that class
-of failure (see the `/data`-is-scratch caveat below), so introducing it through
-a contract migration would be a strange thing to do.
+It rides the `tinymemory-embedded` feature (which implies `tinymemory`),
+separate on purpose: the store lives in `tinymemory-core`, which pulls the
+in-pod engine weight — `tinycortex` and a bundled SQLite — that a
+hosted-memory tenant deliberately builds without (tinymemory#18 §D). Selecting
+the driver without the feature refuses at boot, naming the feature; naming any
+other driver id under `embedded` refuses too, never a silent fallback to the
+engine the operator did not ask for. The `/data`-is-scratch durability refusal
+below applies to this store exactly as it does to `EngineCortex`, and there is
+no in-memory fallback when the data dir is missing.
 
-Moving the embedded engine onto the seam needs a durable `Memory` implementation
-over the engine's KV tier first.
+Recall honesty: no embedding backend is injected, so every chunk is stored
+vector-less and recall runs on the store's graph and keyword tiers. That is
+the same loud degraded-mode contract `EngineCortex` ships under.
+
+The earlier form of this section said the seam needed "a durable `Memory`
+implementation over the engine's KV tier first". `UnifiedMemory` is that
+implementation — it was the store, not the engine's KV tier, that supplied
+it.
 
 ## Tenant isolation across the seam
 
