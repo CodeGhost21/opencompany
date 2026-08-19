@@ -1082,6 +1082,11 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             node_id,
             status,
             elapsed_ms,
+            // Issue #1014: the null-resolved config paths ride the durable event
+            // and the run-response history, but the live operator SSE frame
+            // stays the three structural scalars it already was — the console
+            // surfaces diagnostics from the run-detail drawer, not this stream.
+            diagnostics: _,
         } => {
             let mut o = envelope("workflow_node_finished");
             o["workflowId"] = json!(workflow_id);
@@ -2910,6 +2915,7 @@ mod test {
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -3072,6 +3078,7 @@ mode = "full"
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -3502,6 +3509,7 @@ mode = "full"
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -3635,6 +3643,7 @@ mode = "full"
                 overlay_desk_tools: Default::default(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -7287,6 +7296,7 @@ mode = "full"
                 tools: vec!["publish_artifact".into()],
                 approval_ids: vec!["appr-1".into()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![crate::ports::WorkflowRunApprovalRow {
                 node_id: Some("spec".into()),
@@ -7346,6 +7356,7 @@ mode = "full"
             node_id: "ceo".into(),
             status: crate::ports::types::WorkflowNodeStatus::Error,
             elapsed_ms: 1234,
+            diagnostics: Vec::new(),
         }))
         .expect("workflow_node_finished reaches the console");
         assert_eq!(node["type"], "workflow_node_finished");
@@ -7721,6 +7732,7 @@ mode = "full"
             .grant_standing(crate::runtime::grants::StandingGrant {
                 id: crate::runtime::grants::GrantId::new("g1"),
                 agent: "ops".into(),
+                workflow: None,
                 tool: "workspace_write".into(),
                 granted_by: Actor {
                     kind: ActorKind::User,

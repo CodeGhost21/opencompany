@@ -191,6 +191,11 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
         // use (query/delegate), so it maps to the capable agentic workload.
         Some("orchestrator") => "agentic-v1",
         Some("reasoning") => "reasoning-v1",
+        // A code-writing tier (the global `page_builder` agent): a capable,
+        // tool-using model, not the conversational default. `frontend` is a
+        // manifest-tier value (see `company::types::TIERS`), so it must be
+        // mapped here rather than relying on the `chat-v1` fallback.
+        Some("frontend") => "agentic-v1",
         Some("agentic") => "agentic-v1",
         Some("vision") => "vision-v1",
         _ => "chat-v1",
@@ -791,6 +796,23 @@ pub fn build_agent(
     let workspace_granted = workspace_tools.is_some();
     if let Some(workspace_tools) = workspace_tools {
         tools.extend(workspace_tools);
+    }
+
+    // Agent-authored internal dashboard pages (`Pages/<slug>/` in the same
+    // workspace store). Unlike workspace reads vs. writes above, there is no
+    // two-tier gate here: per the design, `pages` rides the default `"*"`
+    // grant whole, so a single `grants_cover` check on `pages` is enough —
+    // whoever gets any pages tool gets create/read/write/delete together.
+    // Unwired-store is fail-closed, same as the workspace block: with no
+    // `deps.workspace` no tool is built and the agent is unaffected.
+    if let Some(store) = &deps.workspace
+        && grants_cover(grants, "pages")
+    {
+        tools.extend(crate::harness::pages_tools::pages_tools(
+            store.clone(),
+            company.clone(),
+            manifest_agent.id.clone(),
+        ));
     }
 
     // The company's own record. Ungated, and deliberately: an agent that can
@@ -1551,6 +1573,7 @@ mod tests {
     fn model_for_tier_maps_hints_and_defaults() {
         assert_eq!(model_for_tier(Some("reasoning")), "reasoning-v1");
         assert_eq!(model_for_tier(Some("AGENTIC")), "agentic-v1");
+        assert_eq!(model_for_tier(Some("frontend")), "agentic-v1");
         assert_eq!(model_for_tier(None), "chat-v1");
         assert_eq!(model_for_tier(Some("mystery")), "chat-v1");
     }
@@ -1560,6 +1583,7 @@ mod tests {
             global: false,
             id: "ceo".to_string(),
             role: role.to_string(),
+            name: None,
             description: description.map(str::to_string),
             tier: None,
             tools: Vec::new(),
@@ -1757,6 +1781,7 @@ mod tests {
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -1805,6 +1830,7 @@ mod tests {
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -1849,6 +1875,7 @@ mod tests {
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -1891,6 +1918,7 @@ mod tests {
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -2092,6 +2120,7 @@ mod tests {
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -2538,6 +2567,7 @@ mod tests {
             global: false,
             id: "ceo".to_string(),
             role: "Chief Executive".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),
@@ -2794,6 +2824,7 @@ mod tests {
             global: false,
             id: "desk".to_string(),
             role: "Desk Lead".to_string(),
+            name: None,
             description: None,
             tier: None,
             tools: Vec::new(),

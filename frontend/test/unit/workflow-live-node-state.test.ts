@@ -76,6 +76,7 @@ type Ev = import("@/hooks/use-events").CompanyStreamEvent;
 const GRAPH: WorkflowGraph = {
   id: "digest",
   name: "Weekly digest",
+  version: null,
   nodes: [
     { id: "start", kind: "trigger", name: "Monday morning" },
     { id: "collect", kind: "agent", name: "Collect", agent: "analyst" },
@@ -85,7 +86,6 @@ const GRAPH: WorkflowGraph = {
     { from: "start", to: "collect" },
     { from: "collect", to: "draft" },
   ],
-  version: null,
 };
 
 /** A run in flight: `collect` finished, `draft` started and has not. */

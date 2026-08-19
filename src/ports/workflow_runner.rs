@@ -218,6 +218,27 @@ pub struct WorkflowBlockedNode {
     /// zero, which is the ordinary case.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub unparkable: usize,
+    /// How many of this node's [`approval_ids`](Self::approval_ids) the journal
+    /// no longer holds (issue #1143).
+    ///
+    /// **Computed on the read, never journaled.** Every writer leaves this zero
+    /// and it is skipped when zero, so a run's durable row is byte-for-byte what
+    /// it was; `list_runs` fills it in by asking the journal which of the ids
+    /// this node parked are still parked. It has to be derived rather than
+    /// stored for the same reason the sibling `WorkflowRun::approvals` receipt
+    /// is named for what was parked rather than what is outstanding: a stored
+    /// count of "still waiting" is a fresh lie the moment the queue moves.
+    ///
+    /// Semantically this is [`unparkable`](Self::unparkable) arrived at late.
+    /// Both mean the operator will never be asked and re-running is the only way
+    /// forward — the difference is only *when* that became true. A park is
+    /// unparkable at run time because the gate refused it; it is stranded
+    /// afterwards because the question did not survive (the park record is
+    /// `Durability::Process`, and the "the agent re-parks on its next attempt"
+    /// tolerance that justifies it does not hold for a run that already halted —
+    /// see #1145).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub stranded: usize,
 }
 
 /// `skip_serializing_if` predicate for a count that is almost always zero.
@@ -307,6 +328,22 @@ pub struct WorkflowRunNodeRow {
     pub status: WorkflowNodeStatus,
     /// Wall-clock duration of the node's execution, in milliseconds.
     pub elapsed_ms: u64,
+    /// The node's non-fatal data-binding diagnostics (issue #1014): the config
+    /// path of every `=`-expression that resolved to `null` during this node's
+    /// execution — the engine's own list of the broken wiring behind a bad tool
+    /// call (see `tinyflows::expr::NullResolution::location`).
+    ///
+    /// **Paths only, never a resolved value.** A null resolution has no value by
+    /// definition, and only the config *location* rides here — the same
+    /// no-payload stance the row's `status`/`elapsed_ms` take, so nothing a
+    /// model or upstream node produced can leak onto the run response or the
+    /// journal-folded history.
+    ///
+    /// `#[serde(default)]` + `skip_serializing_if` so a row serialized before
+    /// this field existed folds back with an empty list, and a node with no
+    /// unresolved wiring serializes byte-for-byte as it did before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
 }
 
 /// What a workflow run's node did to the task board, as a closed set (issue

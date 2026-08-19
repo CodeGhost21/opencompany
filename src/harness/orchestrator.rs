@@ -4621,6 +4621,7 @@ mod tests {
             global: false,
             id: id.to_string(),
             role: "Role".to_string(),
+            name: None,
             description: None,
             tier: tier.map(str::to_string),
             tools: Vec::new(),
@@ -6873,6 +6874,7 @@ name = "Morning"
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -7657,6 +7659,7 @@ name = "Morning"
                 tools: vec!["publish_artifact".to_string()],
                 approval_ids: vec!["appr-1".to_string()],
                 unparkable: 0,
+                stranded: 0,
             }],
             approvals: vec![
                 crate::ports::WorkflowRunApprovalRow {
@@ -7848,6 +7851,7 @@ name = "Morning"
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 

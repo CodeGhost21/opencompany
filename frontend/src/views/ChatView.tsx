@@ -33,7 +33,12 @@ import {
 } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { readLastChannel } from "@/lib/last-channel";
-import { fromDto, newMember, starterTeam, type TeamMember } from "@/lib/team";
+import {
+  addMemberFailure,
+  reportAddMember,
+  type AddMemberOutcome,
+} from "@/lib/member-feedback";
+import { fromDto, newMember, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { useAskerNames } from "@/components/approval-card";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
@@ -220,12 +225,17 @@ export function ChatView({
         setMembers(roster.map(fromDto));
         setFromHost(true);
       } else {
-        setMembers(starterTeam());
+        // Nobody, rather than a fabricated roster. A DM list of twelve invented
+        // teammates offers conversations with agents the host has never heard
+        // of, and the first message to one goes nowhere
+        // (`docs/spec/runtime/company-setup.md`).
+        setMembers([]);
         setFromHost(false);
       }
     } catch {
-      // No roster surface on this host yet — start from an editable team.
-      setMembers(starterTeam());
+      // The roster read failed, so we do not know who works here. Still nobody:
+      // guessing a team is what this change exists to stop.
+      setMembers([]);
       setFromHost(false);
     } finally {
       setLoadingTeam(false);
@@ -751,10 +761,11 @@ export function ChatView({
         // No team write plane on this host — keep the add local-only.
         setMembers((m) => [...m, newMember(fields)]);
       } else {
-        toast.error(error instanceof Error ? error.message : "Couldn't add teammate.");
+        reportAddMember(addMemberFailure(error));
         return;
       }
     }
+    let outcome: AddMemberOutcome;
     if (created) {
       const member = fromDto(created);
       setMembers((m) => [...m, member]);
@@ -763,6 +774,7 @@ export function ChatView({
       // `boot`) — flip it so this and later actions (inbox, budget) target
       // the host instead of refusing on a now-stale local-only guard.
       setFromHost(true);
+      outcome = { kind: "added", name: fields.name };
       // A host-backed add has a real agent id, so the inbox request can go
       // straight through rather than waiting for a second save.
       if (fields.inbox) {
@@ -770,15 +782,27 @@ export function ChatView({
           await setInboxEnabled(client, company, member.id, true);
           setMembers((ms) => ms.map((m) => (m.id === member.id ? { ...m, inboxEnabled: true } : m)));
         } catch {
-          toast.error("Couldn't enable the inbox — add it from the member's actions menu.");
+          outcome = {
+            kind: "partial",
+            name: fields.name,
+            missed: "their inbox couldn't be switched on.",
+            fix: "Add it from the teammate's actions menu.",
+          };
         }
       }
-    } else if (fields.inbox) {
+    } else {
       // A locally-added teammate has no host record yet, so there is no agent
       // id to hang an inbox off — say so rather than silently dropping it.
-      toast.error("Save this teammate on the host before giving them an inbox.");
+      outcome = {
+        kind: "console-only",
+        name: fields.name,
+        note: fields.inbox
+          ? "Save them on the host before giving them an inbox."
+          : undefined,
+      };
     }
     setAddOpen(false);
+    reportAddMember(outcome);
   }
 
   /**

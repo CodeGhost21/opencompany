@@ -1296,6 +1296,25 @@ pub enum CompanyEvent {
         status: WorkflowNodeStatus,
         /// Wall-clock duration of the node's execution, in milliseconds.
         elapsed_ms: u64,
+        /// The node's non-fatal data-binding diagnostics (issue #1014): the
+        /// config path of every `=`-expression that resolved to `null` during
+        /// this node's execution — the engine's own list of broken wiring (see
+        /// `crate::ports::WorkflowRunNodeRow::diagnostics`).
+        ///
+        /// **Config paths only, no node output.** A null resolution carries no
+        /// value, and only its config *location* rides here — the same scrubbing
+        /// stance the rest of this event takes, so the operator-SSE projection
+        /// and the inference sidecar see the broken wiring's address and never a
+        /// payload.
+        ///
+        /// `#[serde(default)]` + `skip_serializing_if` so a journal line written
+        /// before this field existed folds back with an empty list — the event
+        /// is replayed at boot, and a field without a default would make every
+        /// pre-existing line fail to parse (silent history loss rather than a
+        /// compile error) — and a node with no unresolved wiring serializes
+        /// byte-for-byte as it did before.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<String>,
     },
     /// One `output` node's report actually left the process (issue #529) — the
     /// durable record of a dispatch that the run's own
@@ -1815,8 +1834,27 @@ impl Effect {
     /// every Composio action under one name, so the same tool is grantable when
     /// it is listing a repository's pull requests and per-call when it is
     /// sending mail.
+    ///
+    /// ## A workflow gate is asked about the call it is stopping (issue #1098)
+    ///
+    /// A gate's `kind` is the wrapper `workflow.approve`, so asking about it
+    /// classifies a name the declaration table has never heard of and returns
+    /// the undeclared fallback — the classifier never sees the `web_fetch` on
+    /// the card. That is a second, independent reason a workflow card is not
+    /// grantable today, on top of its `agent: None`, and fixing only the
+    /// principal would leave this one refusing every gate.
+    ///
+    /// [`gate_inner_call`](crate::runtime::workflow_resume::gate_inner_call)
+    /// reads the tool and arguments issue #846 already writes onto the payload,
+    /// so what is classified is what the card showed. Every other effect takes
+    /// the branch below unchanged, which is what keeps the agent path answering
+    /// exactly as it did.
     pub fn may_be_granted_standing(&self) -> bool {
-        crate::policy::consequence_of(&self.kind, &self.payload)
+        let (kind, payload) = match crate::runtime::workflow_resume::gate_inner_call(self) {
+            Some((tool, args)) => (tool, args),
+            None => (self.kind.as_str(), &self.payload),
+        };
+        crate::policy::consequence_of(kind, payload)
             .standing
             .is_grantable()
     }
@@ -2828,6 +2866,18 @@ pub struct OverlayBlob {
     /// provenance existed (the `#[serde(default)]` keeps those rows loading).
     #[serde(default)]
     pub provenance: Option<TemplateProvenance>,
+    /// The three answers first-run setup was given, when the company came from
+    /// that flow. `None` for every other company and for rows written before it
+    /// existed, which `#[serde(default)]` keeps loading.
+    ///
+    /// Carried in the blob rather than a column for the same reason
+    /// [`provenance`](Self::provenance) is: the SQLite and MongoDB backends
+    /// rebuild a record field by field, so anything not in here is silently
+    /// dropped on the way back out. That would lose the answers Phase 2 builds
+    /// workflows from — on exactly the backends a hosted tenant runs, and only
+    /// there, which is the worst shape a data-loss bug can take.
+    #[serde(default)]
+    pub setup: Option<crate::company::setup::SetupAnswers>,
 }
 
 impl OverlayBlob {
@@ -2844,6 +2894,7 @@ impl OverlayBlob {
             desk_tools: record.overlay_desk_tools.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
+            setup: record.setup.clone(),
         }
     }
 
@@ -2870,6 +2921,9 @@ impl OverlayBlob {
                     desk_tools: Default::default(),
                     disabled_workflows: Vec::new(),
                     provenance: None,
+                    // A legacy bare-array row predates first-run setup by a long
+                    // way; it can carry no answers.
+                    setup: None,
                 })
                 .map_err(|_| original),
         }
@@ -3008,6 +3062,25 @@ pub struct CompanyRecord {
     /// loading without a migration.
     #[serde(default)]
     pub template_provenance: Option<TemplateProvenance>,
+    /// What the operator told first-run setup about their business, stored the
+    /// moment they answer (see `docs/spec/runtime/company-setup.md`).
+    ///
+    /// Kept because **Phase 2 must not ask again.** Phase 1 turns these answers
+    /// into a roster; the workflow phase turns the same answers into workflows,
+    /// and re-interrogating someone who already described their business would
+    /// undo the thing setup exists to buy.
+    ///
+    /// Written even when the operator abandons the flow before the roster
+    /// lands: they told us something true about their company, and it costs
+    /// nothing to remember it. It is deliberately **not** the "has setup run?"
+    /// flag — that question is answered by whether the roster is empty, so a
+    /// record stamped by an abandoned run cannot suppress the offer to try
+    /// again (decision D4).
+    ///
+    /// `None` for every company provisioned before setup existed; the
+    /// `#[serde(default)]` keeps those records loading without a migration.
+    #[serde(default)]
+    pub setup: Option<crate::company::setup::SetupAnswers>,
 }
 
 impl CompanyRecord {
@@ -3598,6 +3671,61 @@ pub struct PaymentReceipt {
 mod test {
     use super::*;
     use crate::ports::workflow_runner::DeliveryStatus;
+
+    /// The answers must survive the **blob**, not merely the record.
+    ///
+    /// `CompanyRecord` gained a `setup` field and the fs store round-tripped it
+    /// for free, because it serialises the whole record. SQLite and MongoDB do
+    /// not: they rebuild a record field by field from `OverlayBlob`, so anything
+    /// missing there is dropped silently on the way back out — losing exactly the
+    /// answers Phase 2 builds workflows from, on exactly the backends a hosted
+    /// tenant runs, and nowhere else. `--all-features` compilation is what
+    /// surfaced it; this is what keeps it surfaced.
+    #[test]
+    fn the_setup_answers_survive_the_overlay_blob() {
+        let answers = crate::company::setup::SetupAnswers {
+            industry: "E-commerce — homeware".into(),
+            team_hint: "someone on dispatch".into(),
+            automate: "meta ads, order dispatch".into(),
+        };
+        let mut record = CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest: toml::from_str("[company]\nname = \"Acme\"\n").expect("manifest"),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            overlay_desk_tools: Default::default(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+            setup: Some(answers.clone()),
+        };
+
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let parsed = OverlayBlob::parse(&json).expect("parse");
+        assert_eq!(
+            parsed.setup,
+            Some(answers),
+            "the answers were dropped by the blob the SQL backends rebuild from"
+        );
+
+        // A company that never went through setup carries nothing, and a row
+        // written before the field existed still loads.
+        record.setup = None;
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        assert_eq!(OverlayBlob::parse(&json).expect("parse").setup, None);
+        assert_eq!(
+            OverlayBlob::parse("{\"agents\":[]}")
+                .expect("legacy row")
+                .setup,
+            None
+        );
+    }
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -4458,6 +4586,7 @@ mod test {
             overlay_desk_tools: Default::default(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -5568,6 +5697,7 @@ mod test {
                 node_id: "ceo".to_string(),
                 status,
                 elapsed_ms: 1234,
+                diagnostics: Vec::new(),
             };
             assert_eq!(round_trip(&event), event);
         }
@@ -5653,6 +5783,7 @@ mod test {
             node_id: "ceo".to_string(),
             status: WorkflowNodeStatus::Error,
             elapsed_ms: 7,
+            diagnostics: Vec::new(),
         })
         .expect("serialize");
         assert_eq!(

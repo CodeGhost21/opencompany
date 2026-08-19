@@ -169,10 +169,20 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   mail renders empty (issue #173 replaced a localStorage fixture that showed the
   same four invented emails for every teammate).
 
-### Tasks (Kanban) — `src/views/TasksView.tsx`, `src/lib/tasks-sample.ts`
-- Columns To-do/Planning/In progress/Paused/In review/Done; drag to move. New work
-  enters through one prompt box on To-do (issue #301); priority + assignee are
+### Tasks (Kanban) — `src/views/LedgersView.tsx`, `src/views/TaskCard.tsx`
+- **The board has no page of its own.** It is the `tasks` ledger, rendered as
+  that ledger's columns under `#/ledgers/tasks` (issue #1140 retired the
+  standalone Tasks page, which showed the same records through the same
+  component). `src/views/LedgerBoard.tsx` is the board; `TaskCard` is the card
+  it renders when the row behind it is a `Task`.
+- Columns To-do/Planning/In progress/Paused/In review/Done, declared by the host
+  and read off the ledger; drag to move. New work enters through one prompt box
+  landing in To-do (issue #301), which keeps its own `POST …/tasks` dialog
+  because `record_entry` is refused for this ledger; priority + assignee are
   edited on the card afterwards.
+- `#/tasks/<id>` survives as the card detail (`TaskDetailView`, routed by
+  `src/views/TaskDetailRoute.tsx`) — a timeline, a plan brief, a discussion, its
+  attempts and the steer controls, none of which fits on a column.
 - **Source:** ✅ real — `Company.tasks` (GraphQL, `TaskStore`-backed) reads the
   board; `POST …/tasks`, `PATCH`/`DELETE …/tasks/{id}` (REST) write it.
 
@@ -294,6 +304,17 @@ feature-gated off.
   dismisses one whose duration plus a grace period is spent. Hovering to read, a
   backgrounded tab, and an explicit `duration: Infinity` are all still honoured,
   so callers keep raising plain `toast.*` calls and need not think about it.
+- **How a write answers:** a toast, everywhere. The inline `role="alert"` banner
+  is reserved for a surface that could not *load* — it is a state of the page and
+  it sits with the Retry that clears it, whereas the answer to an action the
+  operator just took has to survive the dialog closing over it. Issue #1099 is
+  the case that fixed the split: adding a teammate said nothing on success from
+  any of its three surfaces (Team, Company, the chat empty state) and reported
+  failure two different ways. `src/lib/member-feedback.ts` now owns that one
+  answer — the views decide *what happened*, it decides what that is called and
+  how loudly. Half-landed writes stay distinguishable from clean ones
+  (`toast.warning`, as `PeopleView`'s invite already did), because a teammate
+  whose inbox never came up is not a clean add.
 
 ## Implementation order (delivered)
 

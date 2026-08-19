@@ -162,7 +162,7 @@ describe("the dialog consuming the host's structured workflow_invalid 400", () =
   it("lands a config-field problem on that node's field, not in the flat banner", async () => {
     const put = vi.fn(() =>
       Promise.reject(
-        apiError([{ nodeId: "greet", field: "config.url", message: "bad url" }]),
+        apiError([{ node_id: "greet", field: "config.url", message: "bad url" }]),
       ),
     );
     await openEditing(stubClient({ put }), httpWorkflow());
@@ -192,7 +192,7 @@ describe("the dialog consuming the host's structured workflow_invalid 400", () =
   it("falls back to the flat banner when the problem names no current node", async () => {
     const put = vi.fn(() =>
       Promise.reject(
-        apiError([{ nodeId: "ghost", field: "config.url", message: "no such node" }]),
+        apiError([{ node_id: "ghost", field: "config.url", message: "no such node" }]),
       ),
     );
     await openEditing(stubClient({ put }), httpWorkflow());

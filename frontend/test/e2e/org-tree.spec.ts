@@ -55,6 +55,16 @@ const ROSTER = [
   { id: "turing", name: "Turing", role: "Researcher" },
 ];
 
+/**
+ * The toast layer (issue #1099).
+ *
+ * Since #1099 an *action* on this page answers in a toast; the `role="alert"`
+ * banner is left to a chart that could not be loaded. Located by sonner's own
+ * attribute, like `toast-dismissal.spec.ts` — the toast carries `role="status"`,
+ * which several live regions on this page share.
+ */
+const toasts = (page: Page) => page.locator("[data-sonner-toast]");
+
 /** Every write the console made, so the request shape can be asserted on. */
 let writes: { method: string; path: string; body?: unknown }[] = [];
 let roster = [...ROSTER];
@@ -227,6 +237,23 @@ async function mockApi(page: Page) {
       return json(created, 201);
     }
     if (path.endsWith("/team")) return json(roster);
+    // GET .../team/{agentId} — the detail page the chart's teammate links open
+    // (issue #1102). Stubbed so following one lands on a real screen rather
+    // than on the catch-all's `[]`, which is an agent with none of its fields.
+    const agent = path.match(/\/team\/([^/]+)$/);
+    if (agent && method === "GET") {
+      const found = roster.find((m) => m.id === agent[1]);
+      if (!found) return json({ error: "no such teammate" }, 404);
+      return json({
+        ...found,
+        source: "manifest",
+        editable: [],
+        isOrchestrator: false,
+        tools: { requested: [], companyAllow: [], effective: [] },
+        desks: [],
+        inboxEnabled: false,
+      });
+    }
     if (path.endsWith("/users")) {
       return json([
         {
@@ -291,7 +318,7 @@ const memberPane = (page: Page) => page.getByRole("complementary").last();
  * chart, and a blind click would close what a previous call opened.
  */
 async function openMemberPane(page: Page) {
-  const toggle = page.getByRole("button", { name: /members$/i });
+  const toggle = page.getByRole("button", { name: /teammates$/i });
   if ((await toggle.getAttribute("aria-pressed")) !== "true")
     await toggle.click();
   await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
@@ -308,9 +335,13 @@ test("#311 the org chart is reachable, which it was not before", async ({
   // the page it happened to load on. Before this change there was no nav entry
   // and no hash that reached this surface at all.
   await page.goto("/#/overview");
+  // `exact`, because the sidebar header's host switcher is a button too and its
+  // accessible name ends "… Current company" (#1142). Without it the substring
+  // match picks the switcher — which is above the nav — and clicking it opens a
+  // menu instead of routing.
   const nav = page
-    .getByRole("link", { name: "Company" })
-    .or(page.getByRole("button", { name: "Company" }))
+    .getByRole("link", { name: "Company", exact: true })
+    .or(page.getByRole("button", { name: "Company", exact: true }))
     .first();
   await expect(nav).toBeVisible({ timeout: 30_000 });
 
@@ -463,7 +494,7 @@ test("#839 creates a teammate on a selected desk and persists it", async ({
   await dialog.getByLabel("Name").fill("Babbage");
   await dialog.getByLabel("Role").fill("Platform Engineer");
   await dialog.getByLabel("What they do").fill("Builds the platform");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
   await expect(growth).toContainText("Babbage");
   expect(
@@ -491,7 +522,7 @@ test("#839 creates a teammate with no desk as unplaced", async ({ page }) => {
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("No Desk");
   await dialog.getByLabel("Role").fill("Roaming Engineer");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
   await expect(
     page.getByRole("heading", { name: "Not on a desk" }),
@@ -511,12 +542,31 @@ test("#839 refuses a company-page teammate add when the host has no team write p
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Not Saved");
   await dialog.getByLabel("Role").fill("Unavailable");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
-  await expect(page.getByRole("alert")).toContainText(
-    "does not support creating teammates",
-  );
-  await expect(page.locator("text=Not Saved")).toHaveCount(0);
+  await expect(toasts(page)).toContainText("can't create teammates");
+  await expect(chart(page).locator("text=Not Saved")).toHaveCount(0);
+});
+
+test("#1099 a teammate added from the company page is confirmed by name", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await openChart(page);
+
+  await page.getByRole("button", { name: "New teammate" }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Name").fill("Katherine");
+  await dialog.getByLabel("Role").fill("Navigator");
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
+
+  // The whole of #1099 on this surface: the operator is told, by name, rather
+  // than left to infer the add from a chart that repaints a moment later.
+  await expect(toasts(page)).toContainText("Added Katherine.");
+  // And it is a *success*, not the warning a half-landed add gets — asserted
+  // through sonner's own type attribute so the two cannot be confused by
+  // wording alone.
+  await expect(toasts(page).first()).toHaveAttribute("data-type", "success");
 });
 
 test("#311 the lead can be changed from the chart and survives a reload", async ({
@@ -571,12 +621,14 @@ test("#839 a teammate created but not placed is still on the chart to place by h
   const dialog = page.getByRole("dialog");
   await dialog.getByLabel("Name").fill("Hopper");
   await dialog.getByLabel("Role").fill("Compiler");
-  await dialog.getByRole("button", { name: "Add member" }).click();
+  await dialog.getByRole("button", { name: "Add teammate" }).click();
 
-  await expect(page.getByRole("alert")).toContainText(
-    "could not be added to the selected desk",
-  );
-  await expect(page.getByRole("alert")).toContainText("Hopper");
+  const halfLanded = toasts(page).first();
+  await expect(halfLanded).toContainText("couldn't be added to that desk");
+  await expect(halfLanded).toContainText("Hopper");
+  // Not dressed as a success (#1099): a teammate the host took but could not
+  // place is exactly the outcome "Added Hopper." would have lied about.
+  await expect(halfLanded).toHaveAttribute("data-type", "warning");
   // Created on the host, so it must be on the chart's unplaced list — the one
   // place a teammate with no desk belongs, and where the operator picks them
   // up to place by hand. Asserted against that list rather than the page: the
@@ -841,4 +893,57 @@ test("#311 a seat naming nobody on the roster is shown, not hidden", async ({
   await expect(seats).toHaveCount(2);
   await expect(seats.nth(1)).toContainText("ghost");
   await expect(seats.nth(1)).toContainText("Not on the roster");
+});
+
+test("#1102 a teammate on the chart opens their detail page", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await openChart(page);
+
+  // A **link**, not a handler: the address has to be on the element, because
+  // that is what makes middle-click, cmd-click, the keyboard and the browser's
+  // own hover preview work. `toHaveAttribute` is the assertion a `div` with an
+  // `onClick` — the shape this issue warns against — could never pass.
+  const grace = deskNode(page, "Engineering")
+    .locator('[role="treeitem"][aria-level="3"]')
+    .first()
+    .getByRole("link", { name: "Grace" });
+  await expect(grace).toHaveAttribute("href", "#/team/grace");
+  await grace.click();
+  await expect.poll(() => page.url()).toContain("#/team/grace");
+  await expect(
+    page.getByRole("button", { name: "Back to team" }),
+  ).toBeVisible({ timeout: 30_000 });
+
+  // The chips under "Not on a desk" name the same teammates and were the worse
+  // half of #1102 — bordered pills that read as controls and did nothing.
+  await openChart(page);
+  const unplaced = page
+    .locator("section", {
+      has: page.getByRole("heading", { name: "Not on a desk" }),
+    })
+    .last();
+  const turing = unplaced.getByRole("link", { name: "Turing" });
+  await expect(turing).toHaveAttribute("href", "#/team/turing");
+  await turing.click();
+  await expect.poll(() => page.url()).toContain("#/team/turing");
+});
+
+test("#1102 a seat naming nobody on the roster is not offered as a link", async ({
+  page,
+}) => {
+  reset();
+  desks[0].members = ["grace", "ghost"];
+  await mockApi(page);
+  await openChart(page);
+
+  // `#/team/ghost` is a dead end that only repeats the badge beside the name,
+  // so the ghost seat stays text. The link on the seat above it is the teeth:
+  // without it this would pass on a chart that linked nothing at all.
+  const seats = deskNode(page, "Engineering").locator(
+    '[role="treeitem"][aria-level="3"]',
+  );
+  await expect(seats.first().getByRole("link")).toHaveCount(1);
+  await expect(seats.nth(1).getByRole("link")).toHaveCount(0);
 });

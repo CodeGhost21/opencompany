@@ -29,11 +29,11 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
+import { addMemberFailure, reportAddMember } from "@/lib/member-feedback";
 import {
   fromDto,
   initials,
   newMember,
-  starterTeam,
   TEAM_TONES,
   type TeamMember,
 } from "@/lib/team";
@@ -52,14 +52,40 @@ interface Props {
   sub: string | null;
   /** Open an agent, or return to the roster with `null`. */
   onOpenAgent: (agentId: string | null) => void;
+  /**
+   * Bumped when first-run setup staffs the company, so this view re-reads a
+   * roster that now has people on it (`docs/spec/runtime/company-setup.md`).
+   */
+  refreshKey?: number;
+  /**
+   * Reopen first-run setup. Rendered as an in-place prompt while the company has
+   * nobody on it, so skipping the dialog is not a dead end.
+   */
+  onRunSetup?: () => void;
 }
 
 type Load = "loading" | "ready";
 
 /** The company's agents — showcased and operator-definable. */
-export function TeamView({ client, company, sub, onOpenAgent }: Props) {
+export function TeamView({
+  client,
+  company,
+  sub,
+  onOpenAgent,
+  refreshKey,
+  onRunSetup,
+}: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
+  /**
+   * The host answered the roster read **and** answered with nobody
+   * (`docs/spec/runtime/company-setup.md`).
+   *
+   * Distinct from `!fromHost`, which also covers a host with no `…/team` surface
+   * at all. Only the first case is a company waiting to be set up; offering
+   * setup on the second would open a dialog whose first call 404s.
+   */
+  const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [addOpen, setAddOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -134,14 +160,26 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
       if (roster.length) {
         setMembers(roster.map(fromDto));
         setFromHost(true);
+        setHostEmpty(false);
       } else {
-        setMembers(starterTeam());
+        // NOT `starterTeam()`. The host answered, and answered with nobody — so
+        // fabricating twelve agents here would put "Ops Lead", "Front Desk" and
+        // ten more on screen that do not exist on the host, directly under a
+        // prompt saying the company has no team. An honest empty state plus the
+        // setup offer is the whole point of the flow
+        // (`docs/spec/runtime/company-setup.md`).
+        setMembers([]);
         setFromHost(false);
+        setHostEmpty(true);
       }
     } catch {
-      // No roster surface on this host yet — start from an editable team.
-      setMembers(starterTeam());
+      // The roster read failed, so we never learned who is on this company.
+      // Show nobody rather than a fabricated team: an operator cannot tell an
+      // invented roster from a real one, and every action on a fake row fails.
+      // NOT `hostEmpty` — that means "the host answered, with nobody".
+      setMembers([]);
       setFromHost(false);
+      setHostEmpty(false);
     } finally {
       setLoad("ready");
     }
@@ -151,7 +189,9 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
     setLoad("loading");
     void boot();
     void loadViewer();
-  }, [boot, loadViewer]);
+    // `refreshKey` re-runs the read after setup staffs the company; without it
+    // the operator lands on the roster they had before their team was built.
+  }, [boot, loadViewer, refreshKey]);
 
   /**
    * Re-read the roster on the way back from the agent sub-page (issue #264).
@@ -237,27 +277,45 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
         // No team write plane on this host — keep the edit local-only. An inbox
         // needs a persisted teammate to hang off, so it can't be enabled here.
         setMembers((m) => [...m, newMember(fields)]);
-        if (fields.inbox) toast.error("This host can't persist teammates, so no inbox was created.");
+        reportAddMember({
+          kind: "console-only",
+          name: fields.name,
+          note: fields.inbox ? "No inbox was created." : undefined,
+        });
         setAddOpen(false);
         return;
       }
-      toast.error(error instanceof Error ? error.message : "Couldn't add teammate.");
+      reportAddMember(addMemberFailure(error));
       return;
     }
 
     // Enable the inbox against the host's real agent id *before* refetching, so
     // the reloaded roster already reports the toggle as on.
+    let inboxMissed = false;
     if (fields.inbox) {
       try {
         await setInboxEnabled(client, company, created.id, true);
       } catch {
-        toast.error("Teammate added, but their inbox couldn't be switched on.");
+        inboxMissed = true;
       }
     }
     // Persisted on the host — refetch so the card reflects the real record
     // (id, merge order, inbox state) rather than a locally-guessed one.
     await boot();
     setAddOpen(false);
+    // Announced after the refetch, not on the response: the roster the operator
+    // is looking at is the one being claimed about, so a read that contradicted
+    // the write would contradict the toast too rather than follow it.
+    reportAddMember(
+      inboxMissed
+        ? {
+            kind: "partial",
+            name: fields.name,
+            missed: "their inbox couldn't be switched on.",
+            fix: "Turn it on from their actions menu.",
+          }
+        : { kind: "added", name: fields.name },
+    );
   }
 
   async function removeMember(member: TeamMember) {
@@ -297,13 +355,37 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
           <div className="space-y-1">
             <h2 className="text-2xl font-semibold tracking-tight">Team</h2>
             <p className="text-sm text-muted-foreground">
-              The agents that make up your company. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
+              The teammates that make up your company. {fromHost ? "Defined by this company." : "Start from these and shape your own."}
             </p>
           </div>
           <Button onClick={() => setAddOpen(true)}>
-            <UserPlus className="size-4" /> Add member
+            <UserPlus className="size-4" /> Add teammate
           </Button>
         </div>
+
+        {/*
+          The other half of "blocking but skippable": while nobody is on this
+          company, keep a visible way back into setup. Skipping the dialog leaves
+          an operator on an empty page, and burying the offer would make that a
+          dead end. Gated on `fromHost` too, so the pre-connection fabricated
+          starter roster — which is not a real team — cannot hide the prompt.
+        */}
+        {load === "ready" && onRunSetup && hostEmpty && (
+          <div
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed px-4 py-3"
+            data-testid="setup-prompt"
+          >
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">This company has no team yet</p>
+              <p className="text-sm text-muted-foreground">
+                Answer three questions and we'll build you a starting team.
+              </p>
+            </div>
+            <Button variant="secondary" onClick={onRunSetup} data-testid="setup-prompt-run">
+              <Sparkles className="size-4" /> Set up my company
+            </Button>
+          </div>
+        )}
 
         {load === "loading" ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -339,7 +421,7 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
               className="flex min-h-32 flex-col items-center justify-center gap-2 rounded-xl border border-dashed text-sm text-muted-foreground transition-colors hover:border-primary/40 hover:bg-accent/40 hover:text-foreground"
             >
               <Plus className="size-5" />
-              Define an agent
+              Define a teammate
             </button>
           </div>
         )}
@@ -455,7 +537,7 @@ function MemberCard({
           )}
           <DropdownMenu>
             <DropdownMenuTrigger
-              render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Member actions" />}
+              render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Teammate actions" />}
             >
               <MoreHorizontal className="size-4" />
             </DropdownMenuTrigger>
@@ -463,7 +545,7 @@ function MemberCard({
               {onOpen && (
                 <>
                   <DropdownMenuItem onClick={onOpen} data-testid="team-open-agent">
-                    View agent
+                    View teammate
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                 </>
@@ -499,7 +581,7 @@ function MemberCard({
         <DailyBudgetLine member={member} setByLabel={setByLabel} />
         <div className="mt-auto flex items-center justify-between gap-2 border-t pt-3">
           <Badge variant="secondary" className="gap-1">
-            <Sparkles className="size-3" /> Agent
+            <Sparkles className="size-3" /> Teammate
           </Badge>
           <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
             <Mail className="size-3.5" />
@@ -507,7 +589,7 @@ function MemberCard({
             <Switch
               checked={inboxOn}
               onCheckedChange={onToggleInbox}
-              aria-label="Give this agent an inbox"
+              aria-label="Give this teammate an inbox"
               data-testid="team-inbox-toggle"
             />
           </label>
@@ -647,7 +729,7 @@ function AddMemberDialog({
   canSetBudget: boolean;
 }) {
   // The same three authored fields the detail view edits, held in the same
-  // shape (issue #264) so "Define an agent" and "Edit agent" cannot drift into
+  // shape (issue #264) so "Define a teammate" and "Edit teammate" cannot drift into
   // two different sets of labels for one set of values.
   const [draft, setDraft] = useState<AgentDraft>(emptyDraft);
   const [inbox, setInbox] = useState(false);
@@ -690,7 +772,7 @@ function AddMemberDialog({
     >
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Define an agent</DialogTitle>
+          <DialogTitle>Define a teammate</DialogTitle>
           <DialogDescription>Add a teammate to your company&apos;s roster.</DialogDescription>
         </DialogHeader>
         <AgentFields
@@ -716,9 +798,9 @@ function AddMemberDialog({
         )}
         <label className="flex items-center justify-between rounded-lg border p-3">
           <span className="flex items-center gap-2 text-sm">
-            <Mail className="size-4 text-muted-foreground" /> Give this agent an inbox
+            <Mail className="size-4 text-muted-foreground" /> Give this teammate an inbox
           </span>
-          <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this agent an inbox" />
+          <Switch checked={inbox} onCheckedChange={setInbox} aria-label="Give this teammate an inbox" />
         </label>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
@@ -728,7 +810,7 @@ function AddMemberDialog({
             onClick={submit}
             disabled={!draft.name.trim() || !draft.role.trim() || budgetInvalid}
           >
-            Add member
+            Add teammate
           </Button>
         </DialogFooter>
       </DialogContent>

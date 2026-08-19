@@ -27,17 +27,16 @@ import { expect, test, type APIRequestContext, type Locator, type Page } from "@
  *
  * # Why this one drives `#/ledgers/tasks`
  *
- * There are two boards now, and they are the same component: `LedgerBoard`
- * renders the task board at `#/tasks` and every ledger's columns under
- * `#/ledgers/<slug>`, with the card as a slot. The drag mechanics — all three
- * fixes above — live in that component, so testing either entry point tests
- * them.
+ * Because that is where the board is. `LedgerBoard` renders every ledger's
+ * columns under `#/ledgers/<slug>`, and the task board is one of them — the
+ * `tasks` ledger — since issue #1140 retired the standalone Tasks page that had
+ * been showing the same records through the same component.
  *
- * This spec drives the **ledger** one deliberately. It is the newer path and the
- * one whose layout differs (a nav beside it, the board inside a pane rather
- * than filling the window), so it is where a geometry regression would show up
- * first; `board-columns.spec.ts` covers the task board's own screen. Between
- * them both entry points are exercised, and neither can regress silently.
+ * The drag mechanics, all three fixes above, live in that shared component. So
+ * this spec and `board-columns.spec.ts` now drive the same address for
+ * different claims: this one owns the *gesture* (geometry, the miss, the edge
+ * scroll) and that one owns the board's *shape* (which columns, in what order,
+ * and where new work enters).
  *
  * Two things about the port are worth stating, because both are places where a
  * lazy rewrite would have quietly stopped testing anything:
@@ -93,7 +92,30 @@ async function dismissTour(page: Page) {
 }
 
 const board = (page: Page) => page.getByTestId("ledger-board");
-const column = (page: Page, index: number) => board(page).locator("div.w-72").nth(index);
+const column = (page: Page, index: number) => board(page).getByTestId("board-column").nth(index);
+
+/**
+ * Opens every column that has collapsed itself to a rail (issue #1101).
+ *
+ * An empty column is now ~40px wide, and every geometry claim in this file is
+ * about the board at its full six-column width: whether the last one is a
+ * whole drop target, and whether a drag held against the edge can scroll to
+ * reach it. A board of five rails and one column does not overflow at all, so
+ * without this the edge-scroll assertion would pass by never being tested.
+ *
+ * Clicking a rail pins it open, which is the operator's own control — so this
+ * puts the board in a state a person can reach, rather than defeating the
+ * feature with a style override.
+ */
+async function expandAll(page: Page) {
+  const rails = board(page).locator("button[aria-label^='Expand ']");
+  // Bounded: each click removes one rail, and the board has six columns.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if ((await rails.count()) === 0) return;
+    await rails.first().click();
+  }
+  await expect(rails).toHaveCount(0);
+}
 
 /** Opens the board and waits for the host's columns to arrive. */
 async function openBoard(page: Page) {
@@ -103,6 +125,7 @@ async function openBoard(page: Page) {
   // has one. Every assertion below measures a column's box; none of them mean
   // anything against a board still showing none.
   await expect(column(page, DONE)).toHaveCount(1, { timeout: 15_000 });
+  await expandAll(page);
 }
 
 /** Seeds a card straight into In review and opens the board on it. */

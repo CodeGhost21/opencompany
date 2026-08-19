@@ -342,6 +342,17 @@ export interface WorkflowRunNode {
   status: "ok" | "error" | "blocked";
   /** Wall-clock duration of the node's execution, in milliseconds. */
   elapsedMs: number;
+  /**
+   * The node's null-resolved config paths (issue #1014) — the engine's own list
+   * of the broken wiring behind this step: every config `=`-expression that
+   * resolved to `null`, as its dotted config **location** (e.g. `args.to`).
+   *
+   * Paths only, never a resolved value: a null resolution has no value, and the
+   * host forwards only the config location — the same no-payload stance
+   * `status`/`elapsedMs` take. Absent (the host omits an empty list) for a node
+   * with no unresolved wiring.
+   */
+  diagnostics?: string[];
 }
 
 /** One node a run blocked on a person (issue #881). */
@@ -358,6 +369,19 @@ export interface WorkflowBlockedNode {
    * operator at Approvals would send them to an empty page. Absent when zero.
    */
   unparkable?: number;
+  /**
+   * How many of `approvalIds` the host no longer holds (issue #1143).
+   *
+   * The same end state as `unparkable`, reached later: the card was opened, so
+   * the run recorded an id for it, but the question did not survive and the
+   * queue has nothing to decide. Pointing the operator at Approvals for these
+   * sends them to an empty page — which is the dead end #1143 was filed for.
+   *
+   * Computed by the host on each read of run history rather than stored, so it
+   * reflects the queue as it is now. Absent when zero, which is every healthy
+   * run.
+   */
+  stranded?: number;
 }
 
 /** What became of one gated tool call a run tried to park (issue #880). */
