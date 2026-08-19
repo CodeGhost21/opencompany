@@ -169,7 +169,7 @@ pub struct RunContext<'a> {
 /// rather than proceeding with effects pointed at a directory that does not
 /// exist. A dry run builds no workspace and is infallible.
 pub async fn build_capabilities(
-    pool: Arc<HarnessPool>,
+    turn: Arc<dyn crate::runtime::delegation::RunTurn>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     run: RunContext<'_>,
