@@ -274,6 +274,20 @@ impl AcpRunTurn {
         message: &str,
         control: &crate::company::steer::SteerControl,
     ) -> Result<TurnOutcome> {
+        self.steered_with_grace(company, agent_id, message, control, Self::CANCEL_GRACE)
+            .await
+    }
+
+    /// [`Self::steered`] with the post-cancel grace made explicit, so the tests
+    /// can expire it in milliseconds rather than waiting out the real window.
+    async fn steered_with_grace(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        control: &crate::company::steer::SteerControl,
+        grace: Duration,
+    ) -> Result<TurnOutcome> {
         let key = Self::session_key(company, agent_id);
         let turn = self.agent.prompt(company, &key, message);
         tokio::pin!(turn);
@@ -290,7 +304,7 @@ impl AcpRunTurn {
                         if let Err(err) = self.agent.cancel(company, &key).await {
                             tracing::warn!(%err, "[harness::acp] cancel failed for session {key}");
                         }
-                        match tokio::time::timeout(Self::CANCEL_GRACE, &mut turn).await {
+                        match tokio::time::timeout(grace, &mut turn).await {
                             Ok(outcome) => return Ok(fold(outcome?)),
                             Err(_elapsed) => {
                                 // The agent ignored the cancel past the grace
@@ -308,7 +322,7 @@ impl AcpRunTurn {
                                 return Err(OpenCompanyError::Harness(format!(
                                     "the agent did not stop within {}s of a cancel; \
                                      abandoning the turn",
-                                    Self::CANCEL_GRACE.as_secs()
+                                    grace.as_secs()
                                 )));
                             }
                         }
