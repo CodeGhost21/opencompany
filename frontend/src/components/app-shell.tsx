@@ -754,8 +754,10 @@ export function AppShell({
         // `openTurnsFromRuns` so it is assertable without a React tree.
         const open = openTurnsFromRuns(runs);
         // Merged rather than assigned: a turn POSTed while this request was in
-        // flight is already in the map and is the more recent truth.
-        if (Object.keys(open).length) setOpenTurns((prev) => ({ ...open, ...prev }));
+        // flight is already in the map and is the more recent truth. The merge
+        // appends per thread and collapses the same turn onto one entry, so a
+        // re-arm never evicts a row the POST leg is already watching.
+        if (Object.keys(open).length) setOpenTurns((prev) => mergeOpenTurns(prev, open));
       })
       .catch(() => {
         /* host without `/runs`, or offline — nothing to re-arm */
