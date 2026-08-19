@@ -1,5 +1,7 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 
+import { expectWorkflowIndex, openWorkflow, workflowCard } from "./workflows";
+
 /**
  * Issue #259: a saved workflow used to be write-once. There was no `PUT` and no
  * `DELETE`, so a typo'd cron or a node pointed at the wrong teammate was
@@ -115,17 +117,24 @@ async function removeWorkflow(request: APIRequestContext, id: string) {
 }
 
 /**
- * Selects the workflow named `name` in the picker and waits for the selection
- * to settle.
+ * Opens the workflow named `name`, from the index, and waits for its detail
+ * view to settle.
  *
- * Asserts the trigger shows the **name**. It used to show the raw id — the
- * picker binds `<SelectItem value={w.id}>` and Base UI's `SelectValue` renders
- * the value, not the item's children — which is #270, fixed on this branch
- * because it is the same picker this issue's Delete affordance sits next to.
+ * Issue #1110: `#/workflows` is the index, and Edit and Delete are controls of
+ * one workflow — they exist only once one is open. This used to drive the
+ * toolbar picker, which was reachable on arrival because the view auto-selected
+ * the first row.
+ *
+ * The picker itself is still there — inside a workflow, where it switches
+ * between them — so the assertion #270 was pinned by is kept as a second line
+ * here rather than dropped: the trigger must show the **name**, not the raw id.
+ * (The picker binds `<SelectItem value={w.id}>` and Base UI's `SelectValue`
+ * renders the value, not the item's children, which is how #270 happened; #406
+ * is the other half, that the picker is controlled from its first render and so
+ * follows a selection this view made for itself.)
  */
 async function selectWorkflow(page: Page, name: string) {
-  await page.getByRole("combobox").first().click();
-  await page.getByRole("option", { name, exact: true }).click();
+  await openWorkflow(page, name);
   await expect(page.getByRole("combobox").first()).toContainText(name);
 }
 
@@ -251,11 +260,15 @@ test("confirming the delete removes it from the picker and from the host", async
       "confirming must dismiss the dialog, not leave its backdrop blocking the app",
     ).toBeHidden({ timeout: 15_000 });
 
-    // Gone from the picker: the selection moves off it and it is no longer an
-    // option.
-    await expect(page.getByRole("combobox").first()).not.toContainText(name, {
-      timeout: 15_000,
-    });
+    // Issue #1110: back on the INDEX, and the deleted workflow is not in it.
+    // The old assertion — that the picker no longer names it — could only be
+    // made from inside whichever neighbouring workflow the view auto-selected
+    // next, which is the behaviour this issue removed: deleting what you were
+    // working on returns you to the list, it does not hand you somebody else's
+    // graph. The URL going back to `#/workflows` is the other half of that.
+    await expectWorkflowIndex(page);
+    await expect(page).toHaveURL(/#\/workflows$/, { timeout: 15_000 });
+    await expect(workflowCard(page, name)).toHaveCount(0, { timeout: 15_000 });
 
     // And gone from the host — the console did not merely hide it.
     await expect
