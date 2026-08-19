@@ -1876,7 +1876,9 @@ async fn chat_and_emit(
         accepted,
     });
 
-    if detach {
+    if detach
+        && let Some(turn_id) = turn_id.as_ref()
+    {
         // Nothing here waits on the turn. The webhook fan-out still owes the
         // report, so it moves onto its own task rather than being dropped — a
         // detached turn must not silently stop notifying subscribers. Same shape
@@ -1885,6 +1887,15 @@ async fn chat_and_emit(
         // The turn task is otherwise left to itself: it journals its own replies
         // and settles its own row (issue #983), which is what the operator reads
         // back. Detaching is the entire point.
+        //
+        // The row is what the detached contract is built on: the console arms
+        // its poll from this `202`'s `turnId` (issue #983), and that poll is
+        // the only delivery path when `/events` is buffered or unavailable
+        // (`opencompany-microservice#23`) — which is exactly the state #983
+        // exists for. A `202` with no row would strand the reply until reload,
+        // so a detach whose row the run store refused falls through to the
+        // synchronous settle below instead: the console learns it never
+        // detached, and the reply arrives in the body like any settled turn.
         let state = state.clone();
         let company = id.clone();
         tokio::spawn(async move {
@@ -1905,7 +1916,7 @@ async fn chat_and_emit(
             }
         });
         return Ok(ChatOk::Detached(DetachedChatResponse {
-            turn_id,
+            turn_id: turn_id.clone(),
             message_id,
             detached: true,
         }));
