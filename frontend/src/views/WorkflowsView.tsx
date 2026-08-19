@@ -14,6 +14,8 @@ import {
   Bot,
   FlaskConical,
   History,
+  LayoutGrid,
+  List as ListIcon,
   Loader2,
   Pause,
   Pencil,
@@ -2198,6 +2200,43 @@ export function WorkflowsView({
           </span>
             </>
           )}
+          {/* Issue #1110: the index's Cards/List toggle, in the tab's one
+              toolbar. It used to sit in a header the index drew for itself,
+              which was fine while the index was a panel over the canvas and
+              wrong the moment it became the page — "Workflows 7" and "All
+              workflows 7" one above the other, with the toggle stranded under
+              the duplicate.
+
+              Segmented rather than two loose buttons, because the pair is one
+              question with two answers and reads as a switch. Shown only on the
+              index: it decides how the list is drawn, and there is no list to
+              draw inside a workflow. */}
+          {!detailOpen && workflows.length > 0 && (
+            <div className="flex items-center gap-1 rounded-lg border p-0.5">
+              {(
+                [
+                  { value: "cards", label: "Cards", Icon: LayoutGrid },
+                  { value: "list", label: "List", Icon: ListIcon },
+                ] as const
+              ).map(({ value, label, Icon }) => (
+                <Button
+                  key={value}
+                  size="sm"
+                  variant={indexMode === value ? "secondary" : "ghost"}
+                  className="h-7 px-2"
+                  onClick={() => {
+                    setIndexMode(value);
+                    writeIndexMode(value);
+                  }}
+                  aria-pressed={indexMode === value}
+                  data-testid={`workflow-index-${value}`}
+                >
+                  <Icon className="mr-1.5 size-3.5" />
+                  {label}
+                </Button>
+              ))}
+            </div>
+          )}
           {/* Issue #341: THE control named "New workflow". It is in the
               toolbar in every state, so it is the one an operator — or a
               screen reader, or a spec — should find under that name. The
@@ -2397,10 +2436,6 @@ export function WorkflowsView({
               selectedId={null}
               onSelect={(id) => setSelectedId(id)}
               mode={indexMode}
-              onModeChange={(mode) => {
-                setIndexMode(mode);
-                writeIndexMode(mode);
-              }}
               loading={loadingList}
               runsLoaded={indexRunsLoaded}
             />

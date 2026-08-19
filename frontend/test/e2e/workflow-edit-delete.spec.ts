@@ -1,6 +1,11 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 
-import { expectWorkflowIndex, openWorkflow, workflowCard } from "./workflows";
+import {
+  expectWorkflowIndex,
+  openWorkflow,
+  workflowCard,
+  workflowDetailName,
+} from "./workflows";
 
 /**
  * Issue #259: a saved workflow used to be write-once. There was no `PUT` and no
@@ -233,7 +238,7 @@ test("deleting is confirm-gated, and the confirmation says what goes and what st
   }
 });
 
-test("confirming the delete removes it from the picker and from the host", async ({
+test("confirming the delete returns to the index, and removes it from the host", async ({
   page,
   request,
 }) => {
@@ -522,7 +527,16 @@ test("a field error raised on one graph never appears on another", async ({
     // on the node id (rather than on the freshly minted row key) would carry
     // this complaint straight over to the second graph, attached to a field the
     // author never touched.
-    await selectWorkflow(page, second.name);
+    // Issue #1110: switched through the PICKER, not back out through the index.
+    // The picker survives inside a workflow precisely for this — moving from one
+    // graph to the next without a round trip through the list — and it is the
+    // path an author debugging two workflows actually takes. It is also the
+    // harder case for the defect under test: the view never unmounts the
+    // toolbar, so a stale error map has every chance to ride across.
+    await page.getByRole("combobox").first().click();
+    await page.getByRole("option", { name: second.name, exact: true }).click();
+    await expect(workflowDetailName(page)).toHaveText(second.name);
+
     const other = await openEditDialog(page, second.name);
     await expect(
       other,
