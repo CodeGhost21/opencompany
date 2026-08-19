@@ -283,6 +283,91 @@ export function destinationCheckDeferred(
   return "still checking which channels this company can deliver to — try Save again in a moment.";
 }
 
+/** An edge endpoint as {@link EdgeRow} needs it: the id it offers in the two
+ * pickers, plus the two fields the host's branch-label rule keys off. */
+export interface EdgeEndpoint {
+  id: string;
+  kind: string;
+  /** Carried verbatim off the node row (see {@link DraftNode.config}); the
+   * dialog has no control for it, so it can only be read, never assumed. */
+  onError?: string;
+}
+
+/** The branch labels the host accepts on an edge leaving a `condition` node.
+ * Protocol strings, not display text: the host matches on these values, so they
+ * are never translated. */
+const CONDITION_BRANCHES = ["yes", "no"] as const;
+
+/** What {@link EdgeRow} should render for one edge's label field. */
+export interface BranchChoice {
+  /** The options to offer, in order. */
+  options: string[];
+  /** The option to show as chosen; `""` when the row has no label yet. */
+  value: string;
+  /** Set when the host would refuse this row as it stands. The value is left
+   * alone — it is shown, not corrected. */
+  problem: string | null;
+}
+
+/**
+ * The label control for the edge leaving `source` — a fixed set of branches when
+ * that node is a `condition`, or `null` meaning "any label is legal here, keep
+ * the free-text input".
+ *
+ * # Why this is an affordance and not a validator
+ *
+ * The host refuses an edge out of a `condition` unless its label reads `yes` or
+ * `no` — or exactly `error`, and only when that node is also `on_error =
+ * "route"` (`src/company/workflow_create.rs`). Issue #1074 is about a dialog that
+ * could not pre-empt that rule without *mirroring* it, and a mirrored rule
+ * drifts. This does not mirror it: it offers only values the host accepts, so it
+ * can never invent a refusal the host would not make. It can only fail to offer
+ * something, and the host then says so in its own words. The host stays the
+ * authority — see `POST …/workflows/validate`, the other half of #1074.
+ *
+ * # Matching, exactly as the host matches
+ *
+ * `yes`/`no` are compared trimmed and lowercased, so a graph that stored `Yes`
+ * is represented by the `yes` option rather than reported as unrepresentable.
+ * `error` is compared **verbatim**, because the host compares it verbatim. A
+ * label neither rule accepts is returned as-is with a `problem`: an existing
+ * graph can legally carry one (`parse_workflow` is lenient on this rule since
+ * issue #682, so a pre-#661 graph still loads), and quietly rewriting an
+ * author's label to a legal one is a worse answer than showing it to them.
+ */
+export function conditionBranchChoice(
+  source: EdgeEndpoint | undefined,
+  label: string,
+): BranchChoice | null {
+  if (!source || source.kind !== "condition") return null;
+  const options: string[] =
+    source.onError === "route" ? [...CONDITION_BRANCHES, "error"] : [...CONDITION_BRANCHES];
+  // Verbatim, like the host: `Error` is not the recovery branch.
+  if (label === "error" && options.includes("error")) {
+    return { options, value: "error", problem: null };
+  }
+  const folded = label.trim().toLowerCase();
+  if (folded === "yes" || folded === "no") {
+    return { options, value: folded, problem: null };
+  }
+  if (!label.trim()) {
+    return {
+      options,
+      value: "",
+      problem: `pick a branch — an edge out of \`${source.id}\` must be labeled ${options
+        .map((o) => `\`${o}\``)
+        .join(" or ")}.`,
+    };
+  }
+  return {
+    options,
+    value: label,
+    problem: `\`${label}\` is not a branch of \`${source.id}\` — it must be labeled ${options
+      .map((o) => `\`${o}\``)
+      .join(" or ")}.`,
+  };
+}
+
 /** How a validation message names a node.
  *
  * Issue #260: the dialog reported `Node \`2\`` — the id, which on a row the
@@ -1724,7 +1809,13 @@ export function WorkflowCreateDialog({
                 <EdgeRow
                   key={e.key}
                   edge={e}
-                  nodeIds={nodes.map((n) => n.id.trim()).filter(Boolean)}
+                  nodes={nodes
+                    .map((n) => ({
+                      id: n.id.trim(),
+                      kind: n.kind,
+                      onError: n.onError,
+                    }))
+                    .filter((n) => n.id)}
                   onChange={(fields) => updateEdge(e.key, fields)}
                   onRemove={() => removeEdge(e.key)}
                 />
@@ -2262,15 +2353,24 @@ function relativeTime(millis: number): string {
 
 function EdgeRow({
   edge,
-  nodeIds,
+  nodes,
   onChange,
   onRemove,
 }: {
   edge: DraftEdge;
-  nodeIds: string[];
+  /** Every node the edge may point at. Rows rather than bare ids (issue #1074):
+   * the label control depends on the SOURCE node's `kind` and `onError`, and an
+   * id alone cannot answer either. */
+  nodes: EdgeEndpoint[];
   onChange: (fields: Partial<DraftEdge>) => void;
   onRemove: () => void;
 }) {
+  const source = nodes.find((n) => n.id === edge.from);
+  // `null` = not a condition, so any label is legal and the row keeps its
+  // free-text input. Recomputed from `from` on every render, so re-pointing an
+  // edge at (or away from) a condition swaps the control immediately — and
+  // never rewrites the label it finds there.
+  const branch = conditionBranchChoice(source, edge.label);
   return (
     <div className="grid grid-cols-[1fr_auto_1fr_1fr_auto] items-center gap-2 rounded-lg border p-2">
       <Select value={edge.from} onValueChange={(v) => onChange({ from: v ?? "" })}>
@@ -2278,9 +2378,9 @@ function EdgeRow({
           <SelectValue placeholder="from" />
         </SelectTrigger>
         <SelectContent>
-          {nodeIds.map((nid) => (
-            <SelectItem key={nid} value={nid}>
-              {nid}
+          {nodes.map((n) => (
+            <SelectItem key={n.id} value={n.id}>
+              {n.id}
             </SelectItem>
           ))}
         </SelectContent>
@@ -2291,19 +2391,46 @@ function EdgeRow({
           <SelectValue placeholder="to" />
         </SelectTrigger>
         <SelectContent>
-          {nodeIds.map((nid) => (
-            <SelectItem key={nid} value={nid}>
-              {nid}
+          {nodes.map((n) => (
+            <SelectItem key={n.id} value={n.id}>
+              {n.id}
             </SelectItem>
           ))}
         </SelectContent>
       </Select>
-      <Input
-        value={edge.label}
-        onChange={(e) => onChange({ label: e.target.value })}
-        placeholder="label (optional)"
-        aria-label="Edge label"
-      />
+      {branch ? (
+        <div className="space-y-1">
+          <Select value={branch.value} onValueChange={(v) => onChange({ label: v ?? "" })}>
+            <SelectTrigger className="h-8" aria-label="Edge label">
+              <SelectValue placeholder="branch" />
+            </SelectTrigger>
+            <SelectContent>
+              {branch.options.map((option) => (
+                <SelectItem key={option} value={option}>
+                  {option}
+                </SelectItem>
+              ))}
+              {/* A saved graph can carry a label this rule does not accept, and
+                  a Select shows nothing for a value it has no item for. Carrying
+                  it as an item is what makes the operator SEE what is there
+                  instead of watching it vanish. */}
+              {branch.value && !branch.options.includes(branch.value) && (
+                <SelectItem value={branch.value}>{branch.value}</SelectItem>
+              )}
+            </SelectContent>
+          </Select>
+          {branch.problem && (
+            <p className="text-xs text-destructive">{branch.problem}</p>
+          )}
+        </div>
+      ) : (
+        <Input
+          value={edge.label}
+          onChange={(e) => onChange({ label: e.target.value })}
+          placeholder="label (optional)"
+          aria-label="Edge label"
+        />
+      )}
       <Button
         type="button"
         variant="ghost"

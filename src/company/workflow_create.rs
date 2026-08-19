@@ -552,12 +552,29 @@ pub(crate) fn workflow_spec_from_graph(file: WorkflowFile) -> WorkflowGraphSpec 
 /// taken by the time it is approved, and that is the roster-drift case apply
 /// surfaces by keeping the card In Review.
 ///
-/// Gated with the builder it serves: the only caller is
-/// `crate::harness::workflow_build`, so in the default build (no harness) this
-/// would be dead code.
-#[cfg(feature = "openhuman")]
+/// Ungated, and deliberately so. It used to be `#[cfg(feature = "openhuman")]`
+/// because its only caller was `crate::harness::workflow_build`. Issue #1074
+/// gave it a second one — `POST …/workflows/validate`, which is in the default
+/// build — and gating a shared validator behind a feature the caller does not
+/// have is precisely what let the create surfaces drift apart in issue #168
+/// (see the `create_company_workflow` re-export note in `super`). Every callee
+/// below is already ungated.
 pub(crate) fn courtesy_validate_draft(draft: &RawWorkflow, record: &CompanyRecord) -> Result<()> {
     validate_draft_shape(draft)?;
+    // Record cross-check BEFORE the render → parse round trip, matching
+    // `create_company_workflow`'s order (`validate_draft_against_record` at the
+    // top of its write section, `parse_workflow` after). It used to run after,
+    // which meant a draft violating both a record rule and a graph rule was
+    // refused here for the graph problem and there for the record one — the same
+    // verdict, a different sentence. Issue #1074 made that visible by putting a
+    // pre-flight route on this function: a pre-flight that names a different
+    // problem than the submit is worse than none.
+    //
+    // The courtesy pre-check has no source directory to hand; a sub_workflow's
+    // existence is still checked against the record's overlays + enabled ids +
+    // globals, only seed-file ids are out of reach here (the run-time cycle guard
+    // stays the backstop).
+    validate_draft_against_record(draft, record, None)?;
     let toml_src = render_workflow(draft)?;
     if toml_src.len() > MAX_WORKFLOW_TOML_BYTES {
         return Err(OpenCompanyError::InvalidRequest(format!(
@@ -577,11 +594,6 @@ pub(crate) fn courtesy_validate_draft(draft: &RawWorkflow, record: &CompanyRecor
         OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
         other => other,
     })?;
-    // The courtesy pre-check has no source directory to hand; a sub_workflow's
-    // existence is still checked against the record's overlays + enabled ids +
-    // globals, only seed-file ids are out of reach here (the run-time cycle guard
-    // stays the backstop).
-    validate_draft_against_record(draft, record, None)?;
     Ok(())
 }
 
