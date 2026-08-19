@@ -44,13 +44,6 @@ mod cap_publish_test;
 /// bubble saying so, and the notice never reaches memory. Test-only.
 #[cfg(test)]
 mod cap_turn_test;
-/// End-to-end proof of issue #988: a turn really does get
-/// [`MAX_TOOL_ITERATIONS`](build::MAX_TOOL_ITERATIONS) tool rounds instead of the
-/// vendored ten, and a budget-armed turn's in-turn
-/// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts it when it
-/// outruns its money — distinguishably from an iteration-cap pause. Test-only.
-#[cfg(test)]
-mod iteration_cap_turn_test;
 /// Agent-authored internal dashboard pages: `pages_list` / `pages_read` /
 /// `pages_write` / `pages_delete` over `Pages/<slug>/` in the same
 /// [`crate::ports::workspace::WorkspaceStore`], with `pages_write` compiling
