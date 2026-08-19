@@ -400,13 +400,37 @@ export function adoptEmbeddedHost(host: EmbeddedHostInfo): ConnectionId {
  * that reason: the prune needs to see every live instance before it removes
  * anything, and N calls each see one.
  *
- * A **stopped** instance is deliberately not passed here. It has no address,
- * so a connection for it could only sit in the rail failing its probe; the
- * roster is where a stopped instance is visible, and starting it is what turns
- * it into a connection.
+ * A **stopped** instance is not passed as a host — it has no address, so a
+ * connection for it could only sit in the rail failing its probe. But its id
+ * must still be passed in `knownInstanceIds`, and the difference is the whole
+ * of the second bug this signature exists to prevent.
+ *
+ * `removeConnection` forgets the *persisted profile*, and a connection id is
+ * what every browser-local key is scoped by (see `scopedKey`). So pruning a
+ * stopped instance as though it were a ghost means its tour state, last-read
+ * channel and mail draft are orphaned the moment it is stopped, and it comes
+ * back from a restart wearing a freshly minted id — #615 again, reached by
+ * pressing Stop instead of by relaunching.
+ *
+ * A stopped instance therefore has its live entry retired and its profile
+ * kept: no row in the rail, no lost namespace. Only a profile matching *no*
+ * instance the core knows about is a genuine ghost, and only that is forgotten.
  */
-export function adoptLocalHosts(hosts: EmbeddedHostInfo[]): ConnectionId[] {
+export function adoptLocalHosts(
+  hosts: EmbeddedHostInfo[],
+  /**
+   * Every instance the core holds, running or not.
+   *
+   * Defaulted to the running set so a caller that passes one argument keeps
+   * the old meaning — but `App` always passes the whole roster, because the
+   * running set alone cannot tell "stopped" from "gone".
+   */
+  knownInstanceIds: readonly string[] = hosts
+    .map((host) => host.instanceId)
+    .filter((id): id is string => id !== undefined),
+): ConnectionId[] {
   const known = embeddedProfiles();
+  const rostered = new Set(knownInstanceIds);
   // Matched first, all of them, before anything is removed. `thisHost` falls
   // back to an id-less profile — the one an older version wrote — and two
   // hosts must not both adopt it, or two connections share one namespace.
@@ -420,12 +444,21 @@ export function adoptLocalHosts(hosts: EmbeddedHostInfo[]): ConnectionId[] {
     return match;
   });
 
-  // What is left claims to be a host inside this application and is not one:
-  // a previous launch's address, or a data root this application no longer
-  // serves. Nothing is listening there and nothing ever will be again, so it is
-  // dropped rather than left failing its probe in the rail forever.
-  for (const stale of known) {
-    if (!claimed.has(stale.id)) removeConnection(stale.id);
+  for (const profile of known) {
+    if (claimed.has(profile.id)) continue;
+    if (profile.instanceId !== undefined && rostered.has(profile.instanceId)) {
+      // A stopped instance. Its entry goes — nothing is listening, and a row
+      // that cannot answer is the dead row this whole function exists to
+      // prevent — but its profile stays, so starting it again lands on the
+      // same connection id and the same scoped state.
+      retireConnection(profile.id);
+      continue;
+    }
+    // A genuine ghost: a previous launch's address, or a data root this
+    // application no longer serves. Nothing is listening there and nothing
+    // ever will be again, so it is dropped rather than left failing its probe
+    // in the rail forever.
+    removeConnection(profile.id);
   }
 
   return hosts.map((host, index) => adoptOne(host, mine[index]));
@@ -578,6 +611,23 @@ export function adoptSession(id: ConnectionId, session: string): void {
 export function removeConnection(id: ConnectionId): void {
   entries = entries.filter((e) => e.connection.id !== id);
   forgetProfile(id);
+  if (isDesktopRuntime()) forgetConnection(id);
+  emit();
+}
+
+/**
+ * Drops a connection from this session **without forgetting who it was.**
+ *
+ * The difference from {@link removeConnection} is one line — `forgetProfile` —
+ * and it is the difference between "this host is gone" and "this host is not
+ * running right now". A stopped local instance is the second: there is nothing
+ * to talk to, so it must not hold a row, but it still owns a connection id
+ * that every `scopedKey` under it is named after.
+ */
+function retireConnection(id: ConnectionId): void {
+  const present = entries.some((e) => e.connection.id === id);
+  if (!present) return;
+  entries = entries.filter((e) => e.connection.id !== id);
   if (isDesktopRuntime()) forgetConnection(id);
   emit();
 }
