@@ -301,7 +301,7 @@ const memberPane = (page: Page) => page.getByRole("complementary").last();
  * chart, and a blind click would close what a previous call opened.
  */
 async function openMemberPane(page: Page) {
-  const toggle = page.getByRole("button", { name: /members$/i });
+  const toggle = page.getByRole("button", { name: /teammates$/i });
   if ((await toggle.getAttribute("aria-pressed")) !== "true")
     await toggle.click();
   await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
