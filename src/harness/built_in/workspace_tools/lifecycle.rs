@@ -611,6 +611,33 @@ impl Tool for WorkspaceRenameTool {
             }
         };
 
+        // Refuse a parent-cycle before the store is asked to create one: a
+        // folder landing inside its own subtree (`a` → `a/b`) would leave the
+        // tree unreadable for every agent from then on. Only a folder moving to
+        // a new parent can cycle — a bare rename keeps the parent, which is
+        // never a descendant of the node. Walking the destination's ancestry
+        // via the index reaches the moved node (refuse) or the tree root first.
+        if entry.node.kind == NodeKind::Folder
+            && let Some(parent) = &destination
+        {
+            let mut cursor = parent.node.id.as_str();
+            loop {
+                if cursor == entry.node.id {
+                    return Ok(ToolResult::error(format!(
+                        "Refused: `{shown}` is `{node}` itself or a folder inside it, so moving \
+                         the folder into it would make the tree unreadable. Pick a `new_parent` \
+                         that is not the folder or one of its subfolders.",
+                        shown = echo_path(&parent.path),
+                        node = echo_path(&entry.path),
+                    )));
+                }
+                match index.by_id.get(cursor).and_then(|e| e.node.parent_id.as_deref()) {
+                    Some(parent_id) => cursor = parent_id,
+                    None => break,
+                }
+            }
+        }
+
         // Where this lands, so the "already taken" check below asks about the
         // path that will actually exist rather than about one of its halves.
         // The node resolved strictly inside the home, so it always has a parent
