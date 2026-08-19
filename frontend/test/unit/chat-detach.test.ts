@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { OpenCompanyClient } from "@/api/client";
 import { isDetachedChat, type ChatPostResult } from "@/api/types";
-import { openTurnsFromRuns, PendingSyncPosts } from "@/lib/live-reply";
+import { mergeOpenTurns, openTurnsFromRuns, PendingSyncPosts } from "@/lib/live-reply";
 import { reconcileIds, type ChatMessage } from "@/lib/chat";
 import type { Transport, TransportRequest, TransportResponse } from "@/api/transport";
 
