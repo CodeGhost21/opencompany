@@ -305,8 +305,8 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
         }
 
         fn visit_call_expr(&mut self, n: &CallExpr) {
-            if matches!(n.callee, Callee::Import(_)) {
-                if self.disallowed.is_none() {
+            if matches!(n.callee, Callee::Import(_)) && self.disallowed.is_none() {
+                {
                     let spec = match n.args.first() {
                         Some(spread) => match &*spread.expr {
                             swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(s)) => {
