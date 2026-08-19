@@ -103,7 +103,11 @@ were dropped in every deployed tenant: an operator saw a degraded run begin and
 never learned that it continued, that it ended, or how many observations went
 missing. `DEFAULT_LOG_FILTER` in `src/bin/opencompany.rs` is therefore
 `error,tinyagents::observability=warn` — today's default plus that one target.
-`RUST_LOG`, when set, still replaces the whole thing. The desktop shell
+`RUST_LOG`, when set, still replaces the whole thing — and is parsed *lossily*,
+carrying the same `error` default the binary had before this constant existed, so
+one unparseable directive drops itself rather than the operator's whole
+configuration, and an empty value still reports errors rather than silencing the
+binary outright. The desktop shell
 (`src-tauri/src/lib.rs`) names the same target for a sharper reason: its fallback
 has no global directive at all, so an unnamed target is dropped at every level
 including `error`.

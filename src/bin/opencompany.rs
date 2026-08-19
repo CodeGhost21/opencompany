@@ -1908,4 +1908,38 @@ mod test {
             "the valid directive must survive the invalid one beside it; captured {events:?}"
         );
     }
+
+    /// `RUST_LOG=` — set, but empty — must not silence the binary.
+    ///
+    /// This is the sharper half of the same mistake as
+    /// `a_malformed_directive_does_not_discard_the_rest_of_rust_log`, and it is
+    /// worth its own test because it fails in the opposite direction from the
+    /// bug this file's constant exists to fix. `from_default_env` carries an
+    /// `ERROR` default directive; `try_from_default_env` carries none, so an
+    /// empty value parsed strictly yields a filter with no directives at all
+    /// and drops **everything** — errors included. That is worse than the
+    /// silence issue #450 is about, and it is reachable from an empty
+    /// environment variable in a compose file or a shell export.
+    #[test]
+    fn an_empty_rust_log_still_reports_errors() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(Captured(std::sync::Arc::clone(&captured)))
+            .with(log_filter(Some("")));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "opencompany::anything", "something broke");
+        });
+
+        let events = captured.lock().expect("capture lock").clone();
+        assert!(
+            events
+                .iter()
+                .any(|(t, l)| t == "opencompany::anything" && *l == tracing::Level::ERROR),
+            "an empty RUST_LOG must keep the ERROR default, not silence the binary; \
+             captured {events:?}"
+        );
+    }
 }
