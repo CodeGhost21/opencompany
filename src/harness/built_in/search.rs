@@ -591,8 +591,7 @@ fn fence_nonce() -> String {
     // to cite a prior fence token forge the closing marker and speak as the
     // harness.
     let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes)
-        .expect("the OS CSPRNG is unavailable; cannot mint a content fence");
+    getrandom::fill(&mut bytes).expect("the OS CSPRNG is unavailable; cannot mint a content fence");
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

@@ -178,7 +178,11 @@ mod test {
         record_triage_usage(&usage(), "openrouter", &company, &store, None).await;
 
         let ledger = store.ledger.lock().unwrap();
-        assert_eq!(ledger.len(), 1, "the spend row must survive without a meter");
+        assert_eq!(
+            ledger.len(),
+            1,
+            "the spend row must survive without a meter"
+        );
         let entry = &ledger[0];
         assert_eq!(entry.kind, super::super::inference::INFERENCE_SPEND_KIND);
         assert_eq!(entry.memo, UNATTRIBUTED_AGENT);
@@ -213,7 +217,14 @@ mod test {
         let store = RecordingStore::default();
         let meter = RecordingMeter::default();
         let company = CompanyId::new("acme");
-        record_triage_usage(&TokenUsage::default(), "managed", &company, &store, Some(&meter)).await;
+        record_triage_usage(
+            &TokenUsage::default(),
+            "managed",
+            &company,
+            &store,
+            Some(&meter),
+        )
+        .await;
         assert!(store.ledger.lock().unwrap().is_empty());
         assert!(meter.samples.lock().unwrap().is_empty());
     }

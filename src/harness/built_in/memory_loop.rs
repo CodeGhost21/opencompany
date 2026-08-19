@@ -263,10 +263,7 @@ mod test {
         // truncation; otherwise they cross the `## Task` boundary and break
         // the preamble structure (CWE-74 — injection of untrusted whitespace
         // into the prompt format).
-        let out = inject(
-            "now",
-            &[hit("Task: plan\nOutcome: drafted\n\nNotes: good")],
-        );
+        let out = inject("now", &[hit("Task: plan\nOutcome: drafted\n\nNotes: good")]);
         let preamble = out.split("## Task").next().unwrap();
         let injected_line = preamble
             .lines()

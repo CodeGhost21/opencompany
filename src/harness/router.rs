@@ -566,7 +566,10 @@ mod tests {
 
         deep.set_fail(false);
         router.ensure(&record()).await.unwrap();
-        let out = router.run(&company(), "researcher", "hi", None).await.unwrap();
+        let out = router
+            .run(&company(), "researcher", "hi", None)
+            .await
+            .unwrap();
         assert_eq!(out.reply, "deep", "recovery needs no restart");
     }
 }
