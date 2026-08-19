@@ -752,6 +752,7 @@ base_url = "https://byo.example/v1"
     /// boots on the echo brain here (no pool attached) while the record it
     /// reads still carries the harness's `[harness.inference]` — exactly the
     /// shape of company the fix targets.
+    #[cfg(feature = "openhuman")]
     async fn state_with_harness_inference(home: &std::path::Path) -> AppState {
         let id = CompanyId::new("acme");
         save_record(home, &id, &manifest_with_harness_inference()).await;
