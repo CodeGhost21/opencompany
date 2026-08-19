@@ -597,6 +597,25 @@ async fn a_per_call_tool_is_refused_a_workflow_permission() {
         refused.is_err(),
         "a per-call tool must refuse a standing permission even on a workflow gate"
     );
+
+    // An `Err` return says only what the resolver *answered*. `resolve_approval`
+    // checks grantability before it touches anything precisely so "a bad request
+    // changes nothing at all" — the approval stays parked, no verdict is
+    // journaled, and the operator can approve it once instead. That invariant was
+    // asserted only by a comment; these three pin it, so a future reordering that
+    // minted first and refused second fails here rather than silently opening
+    // `shell` for a week.
+    assert_eq!(
+        rt.grants.standing_count(),
+        0,
+        "a refused request must mint no standing permission"
+    );
+    assert_eq!(rt.grants.live_count(), 0, "and no single-use grant either");
+    assert_eq!(
+        gate_cards(&rt).len(),
+        1,
+        "the card must still be there to decide again"
+    );
 }
 
 /// The invariant `crate::workflows::gate` exists to protect: **no single-use
