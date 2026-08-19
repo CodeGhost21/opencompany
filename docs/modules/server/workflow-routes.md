@@ -211,6 +211,32 @@ curl -X POST "$HOST/api/v1/company/workflows/weekly_digest/run" \
 }
 ```
 
+### Structured validation errors (issue #1016)
+
+A `POST`/`PUT …/workflows` whose graph fails author-time validation answers
+`400 { "code": "workflow_invalid" }` with an **additive** `problems` array — one
+entry per fault, each naming the node and config field so the console can
+highlight the exact spot. The `error` string stays the joined human sentence, so
+older string-only clients are unaffected; only this one code carries `problems`.
+
+```jsonc
+{
+  "error": "node `greet` has a `config.url` of `not-a-url` that is not a valid URL — …",
+  "code": "workflow_invalid",
+  "problems": [
+    { "node_id": "greet", "field": "config.url", "message": "node `greet` has a `config.url` …" }
+  ]
+}
+```
+
+The author-time config gate (issue #661, extended #1016) now also requires a
+`transform` to carry a non-empty `config.set` (a table of expression strings), a
+`split_out` to carry `config.path`, and an `http_request` `config.url` to be a
+real `http(s)` URL with a host (a bare `not-a-url` / `ftp://…` is refused at save
+instead of failing at run). An `output_parser` stays schema-optional (a bare
+identity parser is valid) and `merge` stays config-free; a `sub_workflow` whose
+`workflow_id` names no saved workflow this company can resolve is refused too.
+
 ### A run that stopped for a person (issues #881, #880)
 
 When a tool call inside an agent node's turn is parked for approval, the node
