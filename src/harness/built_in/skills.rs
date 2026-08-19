@@ -53,6 +53,19 @@ mod naming;
 
 pub use naming::{DESCRIBE_SKILL_TOOL, LIST_SKILLS_TOOL, READ_SKILL_RESOURCE_TOOL};
 
+/// Whether `slug` is a safe directory name for `skills/<slug>/`: the same
+/// `^[a-z0-9][a-z0-9-]*$` shape the page tools enforce. Anything else — a
+/// traversal (`..`), a path separator, a dotfile — would escape the scratch
+/// tree via [`Path::join`], so it is refused wherever a slug enters.
+fn valid_slug(slug: &str) -> bool {
+    let mut chars = slug.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// One agent's effective, enabled skill set, materialized on disk so OpenHuman's
 /// skill read tools can scan it.
 pub struct EffectiveSkills {
