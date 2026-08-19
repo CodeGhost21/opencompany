@@ -283,10 +283,13 @@ export function HostSwitcher({ variant = "sidebar", companyName }: Props) {
     return (
       <DropdownMenu>
         <DropdownMenuTrigger
+          // No `aria-label`: the name has to come from the content, the same
+          // way it does in the sidebar. A label saying "Switch host" would
+          // override the host's own name and its status — which on this chrome
+          // is the whole reason the control is on screen.
           render={
             <button
               type="button"
-              aria-label="Switch host"
               className="flex w-64 max-w-[calc(100vw-2rem)] items-center gap-2 rounded-lg border bg-sidebar p-2 text-left shadow-sm transition hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             />
           }

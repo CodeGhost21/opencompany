@@ -5,14 +5,10 @@ import { expect, type Page } from "@playwright/test";
  *
  * The rail was permanently on screen, so a spec could read any host's status
  * straight off it. A dropdown cannot be read until it is open — so the trigger
- * carries the two things worth knowing without opening it, and this module
- * holds the one gesture that gets at the rest.
+ * carries the two things worth knowing without opening it (`data-host-count`
+ * and `data-worst-status`, both asserted directly by the specs), and this
+ * module holds the one gesture that gets at the rest.
  */
-
-/** The switcher's trigger: on screen in every phase, sidebar or not. */
-export function hostSwitcher(page: Page) {
-  return page.getByTestId("host-switcher");
-}
 
 /**
  * Opens the menu and waits for it to be there.
@@ -22,13 +18,8 @@ export function hostSwitcher(page: Page) {
  * is exactly when the menu matters most.
  */
 export async function openHostMenu(page: Page): Promise<void> {
-  const trigger = hostSwitcher(page);
+  const trigger = page.getByTestId("host-switcher");
   await expect(trigger).toBeVisible({ timeout: 30_000 });
   await trigger.click();
   await expect(page.getByTestId("host-switcher-add")).toBeVisible();
-}
-
-/** A host's row inside the open menu. */
-export function hostRow(page: Page, id: string) {
-  return page.getByTestId(`host-row-${id}`);
 }
