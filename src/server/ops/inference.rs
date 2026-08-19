@@ -682,6 +682,28 @@ mod tests {
         toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
     }
 
+    /// A manifest whose **only** inference lives in the default harness's
+    /// `[harness.inference]` — no company-level `[inference]` section at all.
+    fn manifest_with_harness_inference() -> CompanyManifest {
+        toml::from_str(
+            r#"[company]
+name = "Acme"
+[policy]
+mode = "full"
+
+[[harness]]
+id = "embedded"
+kind = "built_in"
+default = true
+
+[harness.inference]
+provider = "openai_compatible"
+base_url = "https://byo.example/v1"
+"#,
+        )
+        .unwrap()
+    }
+
     /// Commits `manifest` as `id`'s record — what `manifest_inference` reads.
     async fn save_record(home: &std::path::Path, id: &CompanyId, manifest: &CompanyManifest) {
         use crate::ports::CompanyStore;
