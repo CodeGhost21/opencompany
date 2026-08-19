@@ -142,30 +142,59 @@ impl Memory for OcMemory {
         limit: usize,
         opts: RecallOpts<'_>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
+        // `search` scans the whole company, so a hit is only this agent's when
+        // its addr carries one of our labels. Fetch the in-scope label set once
+        // and filter by addr; the stored `{ns}/{key}` tail also corrects the
+        // entry metadata, which previously reported the requested namespace
+        // with an empty key.
+        let prefix = match opts.namespace {
+            Some(ns) => self.namespace_prefix(ns),
+            None => format!("{}/", self.scope()),
+        };
+        let in_scope: HashMap<ChunkAddr, String> = self
+            .context
+            .list(&self.company, &prefix)
+            .await
+            .map_err(|e| anyhow::anyhow!("context list failed: {e}"))?
+            .into_iter()
+            .map(|meta| (meta.addr, meta.label))
+            .collect();
         let hits = self
             .context
             .search(&self.company, query, limit)
             .await
             .map_err(|e| anyhow::anyhow!("context search failed: {e}"))?;
         let min = opts.min_score.unwrap_or(0.0);
-        let namespace = opts.namespace.unwrap_or("global");
         Ok(hits
             .into_iter()
             .filter(|h| h.score >= min)
-            .map(|h| {
+            .filter_map(|h| {
+                let label = in_scope.get(&h.addr)?;
+                let (ns, key) = self.split_label(label)?;
                 let id: String = h.addr.as_ref().to_string();
-                self.entry_from(id, namespace, "", h.snippet, Some(h.score))
+                Some(self.entry_from(id, ns, key, h.snippet, Some(h.score)))
             })
             .collect())
     }
 
     async fn recall_relevant_by_vector(
         &self,
-        _namespace: &str,
+        namespace: &str,
         query: &str,
         limit: usize,
         min_vector_similarity: f64,
     ) -> anyhow::Result<Vec<(String, String)>> {
+        // Same scoping rule as `recall`: `search` scans the whole company, so a
+        // hit is only relevant when its addr is one of ours. The label set is
+        // read once, before the search, so a degrading search still filters.
+        let in_scope: std::collections::HashSet<ChunkAddr> = self
+            .context
+            .list(&self.company, &self.namespace_prefix(namespace))
+            .await
+            .map_err(|e| anyhow::anyhow!("context list failed: {e}"))?
+            .into_iter()
+            .map(|meta| meta.addr)
+            .collect();
         // fs backend has no vectors — degrade to substring/FTS search and never
         // error (per the trait contract). A failed search yields an empty recall.
         let hits = match self.context.search(&self.company, query, limit).await {
@@ -178,6 +207,7 @@ impl Memory for OcMemory {
         Ok(hits
             .into_iter()
             .filter(|h| h.score >= min_vector_similarity)
+            .filter(|h| in_scope.contains(&h.addr))
             .map(|h| {
                 let addr: String = h.addr.as_ref().to_string();
                 (addr, h.snippet)
