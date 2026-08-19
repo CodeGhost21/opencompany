@@ -3612,7 +3612,7 @@ to = "done"
         let (store, version) = with_one_workflow(&company, "greeter", "Greeter").await;
 
         // Pause it — the id lands in `disabled_workflows`.
-        set_company_workflow_enabled(&company, None, &store, None, "greeter", false)
+        set_company_workflow_enabled(&company, None, &store, None, "greeter", false, true, &[])
             .await
             .expect("pausing must never be refused");
         let paused = store.load(&company).await.unwrap().unwrap();
