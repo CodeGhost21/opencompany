@@ -26,7 +26,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  clearTaskCard,
   makeMessage,
   reconcileIds,
   toHostMessageId,
@@ -63,6 +62,7 @@ import {
   firstChannel,
   historyReady,
   HISTORY_UNTRACKED,
+  clearTaskCardEverywhere,
   offersDeliverableChoice,
   resolveDmChannelId,
   toggleReaction,
@@ -730,28 +730,40 @@ export function ChatView({
    * host first, clear the chip only on success, and leave it exactly where it
    * was on a refusal.
    *
-   * Clears by CARD id, not by the row clicked — see {@link clearTaskCard}.
-   * Once the card is gone every chip naming it is a link to a 404, and they
-   * can sit on different lines.
+   * Clears by CARD id, not by the row clicked, and across every channel rather
+   * than the active one — see {@link clearTaskCardEverywhere}. Once the card is
+   * gone every chip naming it is a link to a 404, and they can sit on different
+   * lines and in different channels.
    */
   async function dismissCard(taskId: string) {
     if (dismissingCardId) return;
     setDismissingCardId(taskId);
     try {
       await deleteTask(client, company, taskId);
-      setTranscripts((t) => ({ ...t, [active.id]: clearTaskCard(t[active.id] ?? [], taskId) }));
+      clearCardEverywhere(taskId);
       toast.success("Card dismissed.");
     } catch (error) {
-      toast.error(
-        error instanceof ApiError && error.status === 404
-          ? "That card is already gone."
-          : error instanceof Error
-            ? error.message
-            : "Couldn't dismiss that card.",
-      );
+      // A 404 is positive proof the card is gone — most likely deleted from the
+      // board itself, where nothing tells the open chat surface about it. The
+      // chip is then a permanent link to a 404 that no amount of clicking can
+      // remove, so this is a success for the operator's purpose: clear it and
+      // say so. Only a refusal we cannot interpret leaves the chip in place.
+      if (error instanceof ApiError && error.status === 404) {
+        clearCardEverywhere(taskId);
+        toast.success("That card was already gone — chip cleared.");
+      } else {
+        toast.error(
+          error instanceof Error && error.message ? error.message : "Couldn't dismiss that card.",
+        );
+      }
     } finally {
       setDismissingCardId(null);
     }
+  }
+
+  /** Drop the card from every channel — see {@link clearTaskCardEverywhere}. */
+  function clearCardEverywhere(taskId: string) {
+    setTranscripts((t) => clearTaskCardEverywhere(t, taskId));
   }
 
   /**

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { clearTaskCard, type ChatMessage } from "@/lib/chat";
+import { clearTaskCardEverywhere } from "@/views/chat/model";
 
 /**
  * Dropping a dismissed card's chip from a transcript (issue #984).
@@ -37,9 +38,12 @@ describe("clearTaskCard", () => {
     const next = clearTaskCard([message({ id: "a", taskId: "card-1" })], "card-1");
 
     // `"taskId" in row` is the assertion that matters: a present-and-undefined
-    // key passes a truthiness test at every render site but survives a
-    // `JSON.stringify` round trip differently from an absent one, and these
-    // rows are persisted.
+    // key passes a truthiness test at every render site, but is not the same
+    // thing to `Object.keys`, a spread, or a deep-equality assertion — and an
+    // absent key is what "this line has no card" means everywhere else in the
+    // module. (Not a persistence argument: these rows are never serialised.
+    // The persisted copy is the host's, and the host is what stops the chip
+    // coming back on a reload.)
     expect("taskId" in next[0]).toBe(false);
   });
 
@@ -72,5 +76,43 @@ describe("clearTaskCard", () => {
 
     expect(next[0]).toBe(rows[0]);
     expect("taskId" in next[1]).toBe(false);
+  });
+});
+
+describe("clearTaskCardEverywhere", () => {
+  const transcripts = () => ({
+    general: [message({ id: "a", taskId: "card-1" }), message({ id: "b" })],
+    // A dispatch marker lands in the origin thread's channel, which is not
+    // necessarily the one the operator is looking at.
+    engineering: [message({ id: "c", taskId: "card-1" })],
+    design: [message({ id: "d", taskId: "card-2" })],
+  });
+
+  it("clears the card from every channel, not just one", () => {
+    const next = clearTaskCardEverywhere(transcripts(), "card-1");
+
+    expect(next.general.map((m) => m.taskId)).toEqual([undefined, undefined]);
+    expect(next.engineering.map((m) => m.taskId)).toEqual([undefined]);
+  });
+
+  it("leaves a channel that never named the card alone, by identity", () => {
+    const before = transcripts();
+
+    const next = clearTaskCardEverywhere(before, "card-1");
+
+    // Identity, not deep equality: a new array for an untouched channel is a
+    // needless re-render of a transcript that did not change.
+    expect(next.design).toBe(before.design);
+    expect(next.design[0].taskId).toBe("card-2");
+  });
+
+  it("returns the same object when no channel names the card", () => {
+    const before = transcripts();
+
+    expect(clearTaskCardEverywhere(before, "card-404")).toBe(before);
+  });
+
+  it("handles a console with no transcripts yet", () => {
+    expect(clearTaskCardEverywhere({}, "card-1")).toEqual({});
   });
 });

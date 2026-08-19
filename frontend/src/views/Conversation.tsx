@@ -194,7 +194,12 @@ function ChatPane({
   const [sending, setSending] = useState(false);
   /** The message whose "Add to board" create is in flight (issue #246). */
   const [addingId, setAddingId] = useState<string | null>(null);
-  const [dismissingId, setDismissingId] = useState<string | null>(null);
+  /**
+   * The **card** whose delete is in flight — a task id, unlike its sibling
+   * `addingId` above, which is a message id. Named for the namespace it holds
+   * so the two cannot be read as the same kind of thing.
+   */
+  const [dismissingCardId, setDismissingCardId] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
 
   const messages = thread.messages;
@@ -303,19 +308,29 @@ function ChatPane({
    */
   const dismissCard = useCallback(
     async (taskId: string) => {
-      if (dismissingId) return;
-      setDismissingId(taskId);
+      if (dismissingCardId) return;
+      setDismissingCardId(taskId);
       try {
         await deleteTask(client, company, taskId);
         setMessages(thread.id, (all) => clearTaskCard(all, taskId));
         toast.success("Card dismissed.");
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : "could not dismiss this card");
+        // A 404 means the card is already gone — deleted from the board, most
+        // likely, which tells this surface nothing. The chip would otherwise be
+        // a permanent link to a 404 that clicking can never clear. Treat it as
+        // the success it is for the operator. Copy matches `ChatView`: the same
+        // action on two surfaces should not report itself two ways.
+        if (e instanceof ApiError && e.status === 404) {
+          setMessages(thread.id, (all) => clearTaskCard(all, taskId));
+          toast.success("That card was already gone — chip cleared.");
+        } else {
+          toast.error(e instanceof Error && e.message ? e.message : "Couldn't dismiss that card.");
+        }
       } finally {
-        setDismissingId(null);
+        setDismissingCardId(null);
       }
     },
-    [client, company, dismissingId, setMessages, thread.id],
+    [client, company, dismissingCardId, setMessages, thread.id],
   );
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -365,7 +380,7 @@ function ChatPane({
               onAddToBoard={addToBoard}
               addingId={addingId}
               onDismissCard={dismissCard}
-              dismissingId={dismissingId}
+              dismissingCardId={dismissingCardId}
             />
           ))}
           {sending && (
@@ -644,7 +659,7 @@ function MessageGroup({
   onAddToBoard,
   addingId,
   onDismissCard,
-  dismissingId,
+  dismissingCardId,
 }: {
   group: Group;
   prev?: Group;
@@ -655,7 +670,7 @@ function MessageGroup({
   /** Deletes the card a line opened and drops its chip (issue #984). */
   onDismissCard: (taskId: string) => void;
   /** The card whose delete is in flight, if any. */
-  dismissingId: string | null;
+  dismissingCardId: string | null;
 }) {
   const showDay = !prev || !sameDay(prev.at, group.at);
 
@@ -706,7 +721,7 @@ function MessageGroup({
                   mine={mine}
                   last={i === group.messages.length - 1}
                   onDismissCard={onDismissCard}
-                  dismissingId={dismissingId}
+                  dismissingCardId={dismissingCardId}
                 />
                 <AddToBoardAction
                   message={m}
@@ -728,13 +743,13 @@ function Bubble({
   mine,
   last,
   onDismissCard,
-  dismissingId,
+  dismissingCardId,
 }: {
   message: ChatMessage;
   mine: boolean;
   last: boolean;
   onDismissCard: (taskId: string) => void;
-  dismissingId: string | null;
+  dismissingCardId: string | null;
 }) {
   return (
     <div
@@ -766,8 +781,8 @@ function Bubble({
         <CardChip
           taskId={message.taskId}
           mine={mine}
-          busy={dismissingId === message.taskId}
-          disabled={dismissingId !== null && dismissingId !== message.taskId}
+          busy={dismissingCardId === message.taskId}
+          disabled={dismissingCardId !== null && dismissingCardId !== message.taskId}
           onDismiss={onDismissCard}
         />
       )}

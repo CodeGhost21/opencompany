@@ -412,6 +412,16 @@ export function reconcileIds(
  *
  * Pure and total: an unknown id passes through, and a list with nothing to
  * change is returned as-is so React sees no new array.
+ *
+ * # This is the client half only
+ *
+ * It clears the chip from state that is never serialised, so on its own it
+ * survives a thread switch and **not** a reload: the console rehydrates from
+ * `GET …/chat/history` (see {@link fromHistory}) and merges by message id, so an
+ * empty transcript takes every row back. The host is what stops the chip
+ * returning — its history projection blanks `task_id` for a card the board no
+ * longer has, whoever deleted it (`server::chat_history::drop_dead_cards`,
+ * issue #984). Neither half is sufficient alone.
  */
 export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMessage[] {
   let changed = false;
@@ -419,9 +429,15 @@ export function clearTaskCard(messages: ChatMessage[], taskId: string): ChatMess
     if (m.taskId !== taskId) return m;
     changed = true;
     // Drop the key rather than setting it to `undefined`: `taskId` is an
-    // optional field, and every render site tests it for truthiness, but a
-    // present-and-undefined key survives a `JSON.stringify` round trip
-    // differently from an absent one — and these rows are persisted.
+    // optional field and every render site tests it for truthiness, but the two
+    // are not interchangeable to `Object.keys`, a spread, or a deep-equality
+    // assertion, and an absent key is what "this line has no card" means
+    // everywhere else in this module.
+    //
+    // NOT because these rows are persisted — they are not. `transcripts` is
+    // React state and is never serialised. The rows that persist are the
+    // host's, and they are why this helper is only half the dismissal: see the
+    // note on the function above.
     const { taskId: _dropped, ...rest } = m;
     return rest;
   });
