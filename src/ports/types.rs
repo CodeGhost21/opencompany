@@ -1834,8 +1834,27 @@ impl Effect {
     /// every Composio action under one name, so the same tool is grantable when
     /// it is listing a repository's pull requests and per-call when it is
     /// sending mail.
+    ///
+    /// ## A workflow gate is asked about the call it is stopping (issue #1098)
+    ///
+    /// A gate's `kind` is the wrapper `workflow.approve`, so asking about it
+    /// classifies a name the declaration table has never heard of and returns
+    /// the undeclared fallback — the classifier never sees the `web_fetch` on
+    /// the card. That is a second, independent reason a workflow card is not
+    /// grantable today, on top of its `agent: None`, and fixing only the
+    /// principal would leave this one refusing every gate.
+    ///
+    /// [`gate_inner_call`](crate::runtime::workflow_resume::gate_inner_call)
+    /// reads the tool and arguments issue #846 already writes onto the payload,
+    /// so what is classified is what the card showed. Every other effect takes
+    /// the branch below unchanged, which is what keeps the agent path answering
+    /// exactly as it did.
     pub fn may_be_granted_standing(&self) -> bool {
-        crate::policy::consequence_of(&self.kind, &self.payload)
+        let (kind, payload) = match crate::runtime::workflow_resume::gate_inner_call(self) {
+            Some((tool, args)) => (tool, args),
+            None => (self.kind.as_str(), &self.payload),
+        };
+        crate::policy::consequence_of(kind, payload)
             .standing
             .is_grantable()
     }

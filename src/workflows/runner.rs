@@ -262,7 +262,18 @@ async fn run_workflow_inner(
     let gated = if ctx.dry_run {
         Vec::new()
     } else {
-        super::gate::apply_policy_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
+        super::gate::apply_policy_gates(
+            &mut graph,
+            record,
+            &workflow.id,
+            &ctx.run_id,
+            // Issue #1098: the company's live permission set, so a workflow the
+            // operator granted standing permission does not park again. Reached
+            // through the queue the rest of the approval round-trip already
+            // travels on, so nothing new threads through the runner.
+            &deps.approval_requests.grants(),
+        )
+        .await
     };
     // Issue #846: a node whose call already left the building in an earlier run
     // of this lineage replays its recorded result instead of calling again.
