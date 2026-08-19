@@ -2,7 +2,7 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { WorkflowGraph } from "@/api/workflows";
@@ -157,8 +157,16 @@ afterEach(() => {
   container.remove();
   vi.unstubAllGlobals();
   configFromDraft.mockClear();
-  // Put the prototype back so the shim does not leak into a later jsdom test
-  // sharing this worker (same discipline as `chat-scroll-anchor.test.ts`).
+});
+
+// The shim stays up for the whole FILE, not per test: a failed save scrolls the
+// error banner from a `requestAnimationFrame`, and the callback can fire after
+// a test body has already returned. Removing the shim in `afterEach` strands
+// that callback with no `scrollIntoView` and Vitest reports an unhandled error.
+// `afterAll` keeps it present throughout the file and still restores the
+// prototype so it does not leak into a later jsdom test sharing this worker
+// (same discipline as `chat-scroll-anchor.test.ts`).
+afterAll(() => {
   if (originalScrollIntoView) {
     Object.defineProperty(Element.prototype, "scrollIntoView", originalScrollIntoView);
   } else {
