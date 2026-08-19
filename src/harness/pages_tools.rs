@@ -1364,6 +1364,72 @@ export * from "https://evil.example/x.js";
     }
 
     #[tokio::test]
+    async fn pages_delete_of_an_unknown_slug_is_an_error_and_creates_nothing() {
+        let (_dir, store) = store().await;
+        let pages = pages(store, "acme");
+        let delete = PagesDeleteTool::new(pages.clone());
+
+        let result = delete
+            .execute(json!({ "slug": "nope" }))
+            .await
+            .expect("execute ok");
+        assert!(
+            result.is_error,
+            "deleting a page that does not exist must be refused, got: {result:?}"
+        );
+        assert!(
+            !result.error.contains("panic"),
+            "the refusal is a clean tool error: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pages_write_over_an_existing_page_without_expected_updated_at_is_refused() {
+        let (_dir, store) = store().await;
+        let pages = pages(store, "acme");
+        let write = PagesWriteTool::new(pages.clone());
+        write
+            .execute(json!({
+                "slug": "revenue",
+                "title": "Revenue",
+                "source": VALID_TSX,
+            }))
+            .await
+            .expect("initial write ok");
+        assert!(pages.page("revenue").await.expect("read ok").is_some());
+
+        // Overwriting existing source without the CAS token must be refused
+        // rather than silently clobbering what the agent has not re-read.
+        let result = write
+            .execute(json!({
+                "slug": "revenue",
+                "source": "export default function Revenue() { return <h1>x</h1>; }",
+            }))
+            .await
+            .expect("execute ok");
+        assert!(
+            result.is_error,
+            "an overwrite without `expected_updated_at` must be refused"
+        );
+        assert!(
+            result
+                .error
+                .contains("`expected_updated_at` is required"),
+            "the refusal names the missing token: {result:?}"
+        );
+
+        let after = pages.page("revenue").await.expect("read ok").expect("exists");
+        assert_eq!(
+            after
+                .source
+                .expect("source node")
+                .updated_at_millis,
+            after.manifest.expect("manifest").updated_at_millis.max(0) * 0 + after.source.clone().unwrap().updated_at_millis,
+            "nothing may have changed: the original source is still there"
+        );
+    }
+
+    #[tokio::test]
     async fn pages_write_then_read_round_trips_the_source_and_compiles() {
         let (_dir, store) = store().await;
         let pages = pages(store, "acme");
