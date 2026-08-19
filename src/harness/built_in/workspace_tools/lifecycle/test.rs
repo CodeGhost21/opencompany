@@ -615,6 +615,49 @@ async fn a_name_and_a_parent_can_change_in_one_call() {
     assert_eq!(node.parent_id.as_deref(), Some("f-archive"));
 }
 
+/// A folder must never land inside its own subtree: `archive` → `archive/deep`
+/// would make the tree unreadable for every agent from then on. Refused before
+/// the store is asked to create the cycle.
+#[tokio::test]
+async fn a_folder_cannot_be_moved_into_its_own_subfolder() {
+    let home = own_home("acme").await;
+    let mine = home.home_id().await;
+    home.store
+        .create(&home.company, &folder("f-deep", "deep", Some("f-archive")), None)
+        .await
+        .unwrap();
+
+    // By path, into the descendant.
+    let out = home
+        .renamer()
+        .execute(json!({
+            "path": "Agents/ceo/archive",
+            "new_parent": "Agents/ceo/archive/deep",
+        }))
+        .await
+        .unwrap();
+    assert!(out.is_error, "{}", text(&out));
+    assert!(
+        text(&out).contains("unreadable"),
+        "the refusal says the tree would be unreadable: {}",
+        text(&out)
+    );
+
+    // By id, into itself — the same guard at the end of the ancestry walk.
+    let out = home
+        .renamer()
+        .execute(json!({ "id": "f-archive", "new_parent": "Agents/ceo/archive" }))
+        .await
+        .unwrap();
+    assert!(out.is_error, "{}", text(&out));
+
+    // The tree is untouched.
+    assert_eq!(
+        home.node("f-archive").await.parent_id.as_deref(),
+        Some(mine.as_str())
+    );
+}
+
 /// A binary node renames like any other — the port moves the payload with it.
 #[tokio::test]
 async fn a_binary_node_can_be_renamed_and_keeps_its_payload() {
