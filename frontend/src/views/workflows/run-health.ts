@@ -41,7 +41,10 @@ const SKIPPED_STATUS: string = "skipped";
  * added the row to make visible; excusing it restores the silence issues #947
  * and #963 were filed about. See docs/modules/server/run-verdict.md.
  */
-const ACCOUNTED_FOR_REASONS: readonly string[] = ["already-delivered", "dry-run"];
+const ACCOUNTED_FOR_REASONS: readonly string[] = [
+  "already-delivered",
+  "dry-run",
+];
 
 /**
  * Whether THIS one report did not reach a destination and will not without a

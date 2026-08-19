@@ -117,6 +117,7 @@ describe("what counts as a report that did not go out", () => {
 const GRAPH: WorkflowGraph = {
   id: "digest",
   name: "Digest",
+  version: "v1",
   nodes: [
     { id: "draft", kind: "agent", name: "Draft" },
     { id: "report", kind: "output", name: "Report" },
@@ -184,7 +185,14 @@ describe("the history panel's node chips", () => {
   it("keeps the node's `ok` AND says the report did not go out", () => {
     act(() => {
       root.render(
-        createElement(RunHistoryPanel, { runs: [RUN], graph: GRAPH }),
+        createElement(RunHistoryPanel, {
+          runs: [RUN],
+          graph: GRAPH,
+          workflowName: "Digest",
+          onClose: () => {},
+          selectedRunSeq: null,
+          onSelectRun: () => {},
+        }),
       );
     });
     // The fact that must NOT have moved: the engine ran both nodes.
@@ -210,10 +218,16 @@ describe("the history panel's node chips", () => {
             {
               ...RUN,
               verdict: "ok",
-              deliveries: [delivery({ status: "sent", reason: "channel-posted" })],
+              deliveries: [
+                delivery({ status: "sent", reason: "channel-posted" }),
+              ],
             },
           ],
           graph: GRAPH,
+          workflowName: "Digest",
+          onClose: () => {},
+          selectedRunSeq: null,
+          onSelectRun: () => {},
         }),
       );
     });
