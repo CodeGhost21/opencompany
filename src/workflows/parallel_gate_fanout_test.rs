@@ -255,6 +255,7 @@ async fn runtime(
         journal: rt.journal().clone(),
         continuations: rt.continuations.clone(),
         gates: rt.workflow_gates().clone(),
+        blocked_nodes: rt.blocked_nodes().clone(),
     });
 
     let pool = Arc::new(crate::harness::HarnessPool::new());

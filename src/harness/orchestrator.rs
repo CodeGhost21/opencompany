@@ -1573,6 +1573,21 @@ fn truncate_chars(s: &str, max: usize) -> String {
 fn summarize_event(event: &CompanyEvent) -> String {
     match event {
         CompanyEvent::OperatorMessage { .. } => "operator message".to_string(),
+        // Issue #983. Structural only, like every arm here: the turn id, which
+        // is a minted identifier, and nothing else. Neither the desk nor the
+        // failure reason is named — the desk is operator-authored free text on
+        // an overlay-created chat, and the reason is our own prose about the
+        // host, which is exactly what a non-sensitive one-liner should not
+        // carry.
+        CompanyEvent::TurnStarted { turn_id, .. } => format!("turn accepted: {turn_id}"),
+        CompanyEvent::TurnFailed { turn_id, .. } => format!("turn unanswered: {turn_id}"),
+        // Issue #1015. Structural only: the minted id and the status word, a
+        // fixed vocabulary. The failure reason is our own prose about the host
+        // and is tenant-scoped, so it stays off this surface exactly as
+        // `TurnFailed`'s does.
+        CompanyEvent::RunStatusChanged { run_id, to, .. } => {
+            format!("attempt {run_id}: {to}")
+        }
         CompanyEvent::AgentReply { agent_id, .. } => format!("reply from {agent_id}"),
         CompanyEvent::TaskDispatched { task_id, .. } => format!("task dispatched: {task_id}"),
         // Issue #464. Structural only, like every arm here: the id, the change
@@ -3656,13 +3671,21 @@ impl Tool for RunWorkflowTool {
             Err(err) => {
                 tracing::debug!(company = %self.company, workflow = %wid, error = %err, "run_workflow: run failed");
                 if let Some(events) = self.events.as_ref() {
+                    let message = err.to_string();
                     crate::runtime::record_run_finished(
                         events,
                         &self.company,
                         &wid,
                         false,
                         &ctx.run_id,
-                        Err(err.to_string().as_str()),
+                        // Issue #1008: an agent-started run journals what it did
+                        // before it broke on exactly the same terms as a console
+                        // or scheduled one — the three entry points share this
+                        // helper so their history cannot drift.
+                        Err(crate::runtime::FailedRun {
+                            error: message.as_str(),
+                            partial: err.partial_run(),
+                        }),
                     )
                     .await;
                 }
@@ -4491,6 +4514,9 @@ impl Tool for CreateWorkflowTool {
                 let detail = match &err {
                     OpenCompanyError::InvalidRequest(message)
                     | OpenCompanyError::Conflict(message) => message.clone(),
+                    // A structured workflow rejection (issue #1016) carries the
+                    // joined problem text via `Display`, so the agent reads why.
+                    OpenCompanyError::WorkflowInvalid { .. } => err.to_string(),
                     _ => "the company couldn't save it right now; try again.".to_string(),
                 };
                 Ok(ToolResult::error(format!(
@@ -6305,7 +6331,10 @@ members = ["legal_counsel"]
                     .cloned()
                     .collect())
             }
-            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
                 Box::pin(stream::empty())
             }
         }
@@ -6407,7 +6436,10 @@ members = ["legal_counsel"]
                     .cloned()
                     .collect())
             }
-            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
                 Box::pin(stream::empty())
             }
         }

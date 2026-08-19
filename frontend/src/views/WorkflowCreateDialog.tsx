@@ -13,8 +13,8 @@
 // rather than two because an edit is the same form with the same rules — a
 // second one would drift the moment either side grew a field.
 
-import { useEffect, useId, useRef, useState } from "react";
-import { History, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { History, Loader2, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
   CREATABLE_NODE_KINDS,
@@ -46,7 +46,7 @@ import {
   configFromDraft,
   hasConfigForm,
 } from "@/lib/workflow-node-config";
-import { draftBanners } from "@/lib/workflow-draft";
+import { draftBanners, draftLanding } from "@/lib/workflow-draft";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
@@ -169,6 +169,34 @@ function scheduleProblem(schedule: string): string | null {
   return null;
 }
 
+/** What the console knows about the channels this company can deliver to
+ * (issue #981).
+ *
+ * Three states, deliberately not collapsed into `string[]`. They used to be:
+ * `[]` meant "loading", "the host has no such route", and "the host answered,
+ * this company has nowhere to deliver" all at once, and the pre-flight treated
+ * all three as "don't check". Only the last of those is knowledge, and it is
+ * the one the host refuses a channel target against — so the console skipped
+ * exactly the check the host applies, and skipped it on a timer.
+ *
+ * - `loading` — the request is in flight. We know nothing YET, and the answer
+ *   is coming: {@link destinationCheckDeferred} holds Save rather than passing.
+ * - `unavailable` — the request failed, or the host predates the route. We know
+ *   nothing and never will, so the channel target degrades to free text and the
+ *   host's save-time 400 is the only gate. Never blocks Save.
+ * - `ready` — the host answered. `ids` is the answer, **including `[]`**, which
+ *   means this company genuinely has nowhere to post a report.
+ */
+export type WiredChannels =
+  | { status: "loading" }
+  | { status: "unavailable" }
+  | { status: "ready"; ids: string[] };
+
+/** The `ids` a picker may offer: only a settled, non-empty answer has any. */
+function channelOptions(channels: WiredChannels): string[] {
+  return channels.status === "ready" ? channels.ids : [];
+}
+
 /** What is wrong with an output node's `destination.target` for `kind`, or
  * `null` when it is postable. Mirrors the host's per-kind target contract in
  * `src/company/workflow_file.rs`; `owner` and "no destination" carry no target
@@ -185,7 +213,7 @@ function scheduleProblem(schedule: string): string | null {
 export function destinationTargetProblem(
   kind: DraftNode["destinationKind"],
   target: string,
-  wiredChannels: string[],
+  channels: WiredChannels,
 ): string | null {
   const value = target.trim();
   if (kind === "email" && !value.includes("@")) {
@@ -194,19 +222,64 @@ export function destinationTargetProblem(
   if (kind === "channel" && !value) {
     return "A channel destination needs a channel id — name the channel to post the report to.";
   }
-  // #813: when the host told us which channels are wired, a target that is not
-  // one of them would only fail at delivery (`ChannelNotWired`) — catch it at
-  // author time instead. Skipped when the list is empty (host offered none), so
-  // a degraded free-text box is never wrongly rejected.
+  // #813: when the host told us which channels it can deliver to, a target that
+  // is not one of them is refused when the workflow is saved (#981) and, for a
+  // graph saved before a desk went away, fails at delivery (`ChannelNotWired`) —
+  // catch it at author time instead.
+  //
+  // #981: the same sentence the host's save-time rejection carries, so an author
+  // who trips the pre-flight and an author who trips the 400 are told the same
+  // thing. `operator` is no longer in the list the host serves — it never was a
+  // delivery target — so this is what now catches it.
+  //
+  // Gated on `status === "ready"`, NOT on the list being non-empty. Those were
+  // the same test until the host started answering `[]` for a company with no
+  // desks and no connected channels (#981): that list is knowledge, and the
+  // host refuses every channel target against it, so the pre-flight must too.
+  // While the answer is still in flight, or when the request failed, we know
+  // nothing — {@link destinationCheckDeferred} is what keeps that from reading
+  // as a pass.
   if (
     kind === "channel" &&
     value &&
-    wiredChannels.length > 0 &&
-    !wiredChannels.includes(value)
+    channels.status === "ready" &&
+    !channels.ids.includes(value)
   ) {
-    return `\`${value}\` is not a wired channel — this deployment has: ${wiredChannels.join(", ")}.`;
+    return `\`${value}\` is not a workflow delivery channel — this runtime has: ${
+      channels.ids.length > 0 ? channels.ids.join(", ") : "no durable channels"
+    }.`;
   }
   return null;
+}
+
+/** Why the channel pre-flight cannot answer yet, or `null` when it can (or when
+ * there is nothing for it to check).
+ *
+ * Issue #981: {@link destinationTargetProblem} has to return `null` while the
+ * wired-channel list is loading — it genuinely does not know — and `null` is
+ * indistinguishable from "checked and fine". That made the check a race: an
+ * author who hit Save before the fetch settled got no pre-flight at all, while a
+ * slower one got the full one. Same draft, different validation, decided by
+ * network timing.
+ *
+ * So `validate()` asks this FIRST and defers instead: Save is held for as long
+ * as the answer is genuinely in flight, and released the moment it lands. A
+ * failed or absent request settles as `unavailable`, never `loading`, so a host
+ * that cannot answer degrades to free text and the host's own 400 rather than
+ * blocking the save forever.
+ *
+ * Not wired into the blur handler: a field is blurred constantly, and "still
+ * checking" is not a mistake the author made.
+ */
+export function destinationCheckDeferred(
+  kind: DraftNode["destinationKind"],
+  target: string,
+  channels: WiredChannels,
+): string | null {
+  if (kind !== "channel" || !target.trim() || channels.status !== "loading") {
+    return null;
+  }
+  return "still checking which channels this company can deliver to — try Save again in a moment.";
 }
 
 /** How a validation message names a node.
@@ -248,6 +321,40 @@ function errorKey(nodeKey: string, field: ValidatedField): string {
 /** The "no destination" option's value. A Select item cannot carry an empty
  * string, so the sentinel stands in for `destinationKind: ""`. */
 const NO_DESTINATION = "__none__";
+
+/** What the operator is asked before unsaved graph edits are thrown away
+ * (issue #1006). One string, because every path out of the dialog — Esc, a
+ * click outside, Cancel, a hash navigation — has to ask the same question. */
+const DISCARD_PROMPT =
+  "You have unsaved changes to this workflow. Leave without saving them?";
+
+/**
+ * A stable string covering everything the form can change (issue #1006).
+ *
+ * "Has the operator edited anything?" is then ONE comparison against the value
+ * this open hydrated from, rather than a field-by-field diff that goes quietly
+ * wrong the moment `DraftNode` grows a member — which is how half an hour of
+ * graph edits got discarded without a prompt in the first place.
+ *
+ * `key` is excluded on purpose: it is a React row identity handed out by
+ * `nextKey()`, so it differs between two hydrations of the same graph and would
+ * report every freshly-opened dialog as dirty.
+ */
+function draftFingerprint(
+  id: string,
+  name: string,
+  description: string,
+  nodes: DraftNode[],
+  edges: DraftEdge[],
+): string {
+  return JSON.stringify({
+    id,
+    name,
+    description,
+    nodes: nodes.map(({ key: _key, ...rest }) => rest),
+    edges: edges.map(({ key: _key, ...rest }) => rest),
+  });
+}
 
 let seq = 0;
 function nextKey(): string {
@@ -410,17 +517,47 @@ export function WorkflowCreateDialog({
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
   /** The chat channels this company can actually deliver to (#813): the picker
    * options for an output node's `channel` destination. Degrades to a free-text
-   * box when the host offers no list, so authoring is never blocked. */
-  const [wiredChannels, setWiredChannels] = useState<string[]>([]);
+   * box when the host offers no list, so authoring is never blocked. Carries
+   * its own load status (#981) — see {@link WiredChannels} for why an empty
+   * list and an unanswered request must not be the same value. */
+  const [wiredChannels, setWiredChannels] = useState<WiredChannels>({
+    status: "loading",
+  });
   /** The company's workflows, for the `sub_workflow` config picker (#541). The
    * graph's own id is dropped at render time — a sub-workflow can't call
    * itself. Degrades to a free-text id field when the host offers no list. */
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  /** The same "a write is in flight" fact as `submitting`, held where `submit()`
+   * can read it SYNCHRONOUSLY (issue #1005). `submitting` is captured from the
+   * render that produced the handler, so two calls landing before React commits
+   * `setSubmitting(true)` — a double activation, an Enter keypress arriving with
+   * a click, any caller added later — would both read `false` and both post. The
+   * state stays because the render needs it; the ref is what actually guards. */
+  const submittingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   /** The submit-time error banner, so a failed submit can scroll it into view
    * and focus it rather than leave the message off-screen (#813 defect 6). */
   const errorRef = useRef<HTMLDivElement>(null);
+  /**
+   * Identity of the dialog's current contents (issue #1052).
+   *
+   * Bumped by the reset effect below, i.e. on every open and every re-hydrate.
+   * `runDraft` captures it before its request and compares after, so a draft the
+   * operator walked away from cannot hydrate whatever is on screen later. The
+   * file's other async paths use an effect-scoped `live` flag; an event handler
+   * has no cleanup to flip, so the same idea is carried on a ref.
+   */
+  const draftEpochRef = useRef(0);
+  /**
+   * Whether the form holds operator work, readable **after** an await.
+   *
+   * `isDraftDirty()` closes over its render's state, so calling it again when a
+   * response lands re-reads the values captured when the request was issued —
+   * it would look like a re-check and answer the old question. This ref is
+   * refreshed on every render, so the post-await read sees what is on screen now.
+   */
+  const draftDirtyRef = useRef(false);
   /** Per-field problems raised on blur (issue #261), keyed by
    * {@link errorKey}. Separate from `error`, the submit-time banner: this one
    * is inline, scoped to the control that caused it, and never blocks Save on
@@ -457,6 +594,12 @@ export function WorkflowCreateDialog({
   const [readiness, setReadiness] = useState<WorkflowReadiness | null>(null);
   const [cognition, setCognition] = useState<CognitionPath | null>(null);
   const formId = useId();
+  /** The fingerprint of the draft as this open hydrated it (issue #1006).
+   * Rewritten by the hydration effect below — which is the only place the form
+   * is populated from something other than the operator — so a re-hydrate (the
+   * conflict banner's Reload, a History restore) resets the baseline instead of
+   * leaving the dialog permanently "dirty". */
+  const pristineRef = useRef("");
 
   // Reload the roster (for the agent-node picker) and reset the draft each
   // time the dialog opens, so a prior attempt never leaks into the next one.
@@ -472,11 +615,24 @@ export function WorkflowCreateDialog({
   // and keeping the edit would keep the stale token with it.
   useEffect(() => {
     if (!open) return;
-    setId(workflow?.id ?? "");
-    setName(workflow?.name ?? "");
-    setDescription(workflow?.description ?? "");
-    setNodes(workflow ? draftNodes(workflow) : starterNodes());
-    setEdges(workflow ? draftEdges(workflow) : []);
+    // Issue #1052: a draft still in flight belongs to the contents being
+    // replaced right now, not to these. Bumping first is what makes its
+    // response land as `drop` instead of overwriting a freshly-reset form.
+    draftEpochRef.current += 1;
+    // …and the button it disabled belongs to that abandoned request too, or a
+    // reopened dialog starts with Draft it inert until a request nobody is
+    // waiting for settles.
+    setDrafting(false);
+    // Held as locals rather than read back out of state, so the pristine
+    // fingerprint below is taken from the very values this open hydrates with
+    // (issue #1006). Reading state here would fingerprint the PREVIOUS open —
+    // React has not applied these setters yet — and every field would then
+    // count as edited.
+    let nextId = workflow?.id ?? "";
+    let nextName = workflow?.name ?? "";
+    let nextDescription = workflow?.description ?? "";
+    let nextNodes = workflow ? draftNodes(workflow) : starterNodes();
+    let nextEdges = workflow ? draftEdges(workflow) : [];
     setError(null);
     setFieldErrors({});
     // Issue #274: a fresh open (or a re-hydrate after a restore) must not carry
@@ -507,17 +663,32 @@ export function WorkflowCreateDialog({
     // be a latent bug if that invariant ever drifted.
     if (prefilledDraft) {
       const g = prefilledDraft.workflow;
-      setId(workflow?.id ?? g.id);
-      setName(g.name.trim());
-      setDescription(g.description ?? "");
-      setNodes(draftNodes(g));
-      setEdges(draftEdges(g));
+      nextId = workflow?.id ?? g.id;
+      nextName = g.name.trim();
+      nextDescription = g.description ?? "";
+      nextNodes = draftNodes(g);
+      nextEdges = draftEdges(g);
       setDraftSummary(prefilledDraft.summary ?? null);
       setDraftNotes((prefilledDraft.notes ?? []).filter((n) => n.trim()));
       setReadiness(prefilledDraft.readiness ?? null);
     } else {
       setReadiness(null);
     }
+    setId(nextId);
+    setName(nextName);
+    setDescription(nextDescription);
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    // The baseline every later keystroke is compared against. A copilot
+    // correction counts as pristine for the same reason a saved graph does:
+    // the operator has not touched it yet, so closing loses nothing they wrote.
+    pristineRef.current = draftFingerprint(
+      nextId,
+      nextName,
+      nextDescription,
+      nextNodes,
+      nextEdges,
+    );
     let live = true;
     (async () => {
       try {
@@ -543,12 +714,19 @@ export function WorkflowCreateDialog({
     // Issue #813: the wired-channel picker's options. Same degrade-on-failure
     // shape — a host that can't list channels leaves the channel target a
     // free-text box rather than blocking authoring.
+    //
+    // #981: the two outcomes are recorded as DIFFERENT states. A settled answer
+    // is knowledge the pre-flight checks against (even when it is `[]`); a
+    // failure is not, and must never be mistaken for one. Reset to `loading` on
+    // every open so a reopened dialog re-asks rather than validating against the
+    // previous company's answer.
+    setWiredChannels({ status: "loading" });
     (async () => {
       try {
         const channels = await listWiredChannels(client, company);
-        if (live) setWiredChannels(channels);
+        if (live) setWiredChannels({ status: "ready", ids: channels });
       } catch {
-        if (live) setWiredChannels([]);
+        if (live) setWiredChannels({ status: "unavailable" });
       }
     })();
     return () => {
@@ -580,12 +758,115 @@ export function WorkflowCreateDialog({
     };
   }, [open, editing, client, company]);
 
+  /**
+   * Whether the form holds edits that closing would destroy (issue #1006).
+   *
+   * Recomputed every render rather than memoised: the fingerprint is a few
+   * hundred bytes of `JSON.stringify` over a form that already re-renders on
+   * every keystroke, and a memo keyed on the draft can go stale against
+   * `pristineRef` on the render where a re-hydrate lands the same values it
+   * replaced — reporting unsaved work that no longer exists.
+   */
+  const dirty =
+    open && draftFingerprint(id, name, description, nodes, edges) !== pristineRef.current;
+
+  /** Close the dialog, asking first if that would throw work away (#1006).
+   * Every deliberate exit routes through here — Esc, a click outside, Cancel —
+   * so there is one answer to "does this lose my edits?" rather than three. */
+  const requestClose = useCallback(() => {
+    if (dirty && !window.confirm(DISCARD_PROMPT)) return;
+    onOpenChange(false);
+  }, [dirty, onOpenChange]);
+
+  // Issue #1006: the tab-level guard. A reload or a close is the one exit the
+  // dialog cannot intercept itself, so it hands the question to the browser.
+  useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      // `preventDefault` is what modern browsers read; `returnValue` is the
+      // legacy spelling some still require. Neither shows our text — the
+      // browser substitutes its own — so there is nothing to word here.
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
+
+  // Issue #1006: the in-app guard. The console routes on the hash, so Back and
+  // every sidebar link arrive here — including the Back press that used to walk
+  // the selection onto a DIFFERENT workflow and re-hydrate this dialog with it
+  // mid-edit. `hashchange` fires after the address bar has already moved, so
+  // declining puts it back; the restore fires the event again, which the
+  // equality check below absorbs.
+  useEffect(() => {
+    if (!dirty) return;
+    let at = window.location.hash;
+    const onHashChange = () => {
+      const moved = window.location.hash;
+      if (moved === at) return;
+      if (window.confirm(DISCARD_PROMPT)) {
+        at = moved;
+        onOpenChange(false);
+        return;
+      }
+      window.location.hash = at;
+    };
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, [dirty, onOpenChange]);
+
+  /**
+   * Retires the submit-time banner because the draft it described is gone
+   * (issue #1005).
+   *
+   * `error` is the verdict on ONE graph — the client checks' first complaint or
+   * the host's rejection — so it stops being true the moment the author changes
+   * that graph. Left up it reads as the verdict on the graph now on screen, and
+   * the next failed Create is indistinguishable from the last one: same text,
+   * no new event.
+   *
+   * Every handler that mutates the draft calls this, structural ones included.
+   * The banner routinely names something an add or a remove fixes ("Add at
+   * least one node.", a duplicate node id, an edge pointing at nothing), so a
+   * split where only the field edits clear it leaves the complaint up through
+   * exactly the action that answers it. Field-level `fieldErrors` are NOT
+   * touched here — those are scoped to their own control and each clears on its
+   * own edit.
+   */
+  function clearSubmitError() {
+    setError(null);
+  }
+
   function addNode() {
     setNodes((rows) => [...rows, blankNode()]);
+    clearSubmitError();
+  }
+
+  /** Edits the name and drops the stale submit banner with it — `validate()`
+   * and the host both complain about the name, so an author fixing one is
+   * looking straight at a complaint they have already addressed (#1005). */
+  function changeName(value: string) {
+    setName(value);
+    clearSubmitError();
+  }
+
+  /** Same for the id, which is what `validate()` complains about FIRST (missing,
+   * or not a safe id) and the most common 409 from the host — so it is the
+   * banner an author is most often looking at while fixing its cause. */
+  function changeId(value: string) {
+    setId(value);
+    clearSubmitError();
+  }
+
+  function changeDescription(value: string) {
+    setDescription(value);
+    clearSubmitError();
   }
 
   function updateNode(key: string, fields: Partial<DraftNode>) {
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    clearSubmitError();
     // Clear whatever the edit invalidated. This MUST stay in step with
     // `changeKind`: that reset exists so the draft never holds a value whose
     // control is off screen, and an error is a value too — leaving one behind
@@ -636,6 +917,7 @@ export function WorkflowCreateDialog({
         r.key === nodeKey ? { ...r, configDraft: { ...r.configDraft, [key]: value } } : r,
       ),
     );
+    clearSubmitError();
     setFieldErrors((prev) => {
       const k = errorKey(nodeKey, `config:${key}`);
       if (!(k in prev)) return prev;
@@ -674,6 +956,7 @@ export function WorkflowCreateDialog({
   function removeNode(key: string) {
     const removed = nodes.find((n) => n.key === key);
     setNodes((rows) => rows.filter((r) => r.key !== key));
+    clearSubmitError();
     // The row is gone, so its errors have nothing left to point at.
     setFieldErrors((prev) => {
       const next = Object.fromEntries(
@@ -690,14 +973,17 @@ export function WorkflowCreateDialog({
 
   function addEdge() {
     setEdges((rows) => [...rows, { key: nextKey(), from: "", to: "", label: "" }]);
+    clearSubmitError();
   }
 
   function updateEdge(key: string, fields: Partial<DraftEdge>) {
     setEdges((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    clearSubmitError();
   }
 
   function removeEdge(key: string) {
     setEdges((rows) => rows.filter((r) => r.key !== key));
+    clearSubmitError();
   }
 
   /** Client-side validation, mirroring the host's checks so most mistakes
@@ -728,6 +1014,17 @@ export function WorkflowCreateDialog({
       // "destination on a non-output node" check: `changeKind` makes that state
       // unreachable, and re-adding the check would only recreate the trap of an
       // error the author has no visible control to clear.
+      //
+      // #981: ask the deferral FIRST. While the wired-channel list is in
+      // flight the target check below cannot answer, and its `null` would read
+      // as a pass — which made the strength of the pre-flight depend on how
+      // fast the author clicked Save.
+      const deferred = destinationCheckDeferred(
+        n.destinationKind,
+        n.destinationTarget,
+        wiredChannels,
+      );
+      if (deferred) return `Node \`${nodeLabel(n)}\`: ${deferred}`;
       const destinationProblem = destinationTargetProblem(
         n.destinationKind,
         n.destinationTarget,
@@ -847,6 +1144,13 @@ export function WorkflowCreateDialog({
     );
   }
 
+  // Issue #1052: refresh the post-await view of dirtiness on every render. See
+  // `draftDirtyRef` for why re-calling `isDraftDirty()` after an await cannot
+  // work on its own.
+  useEffect(() => {
+    draftDirtyRef.current = isDraftDirty();
+  });
+
   /** Draft a graph from the description and hydrate the form with it (issue
    * #753). The hydrated, editable form IS the review surface — there is no
    * read-only diff — so on success the operator lands in the ordinary create
@@ -854,16 +1158,14 @@ export function WorkflowCreateDialog({
   async function runDraft() {
     const description = copilotPrompt.trim();
     if (!description || drafting || echoing) return;
-    // Overwriting work the operator has already started is a confirm, not a
-    // silent clobber — the same courtesy the History restore extends.
-    if (
-      isDraftDirty() &&
-      !window.confirm(
-        "Replace what you've started with the drafted workflow? You can still edit it before creating.",
-      )
-    ) {
-      return;
-    }
+    // Issue #1052: the consent for overwriting the operator's work is taken
+    // AFTER the await, not here. A model call takes seconds and the operator is
+    // invited to keep typing through it, so a confirm asked now would be
+    // answered about a form that no longer exists when the draft lands — and
+    // the answer would then authorise replacing work started after it was
+    // given. It also asked at all for a draft that turns out not automatable,
+    // which leaves the form untouched and needed no permission.
+    const requestedEpoch = draftEpochRef.current;
     setDrafting(true);
     setDraftError(null);
     setDraftSummary(null);
@@ -871,8 +1173,30 @@ export function WorkflowCreateDialog({
     setDraftNotes([]);
     try {
       const drafted = await draftWorkflowFromDescription(client, company, description);
+      // Issue #1052: what this response is allowed to do to the form it came
+      // back to, decided against the form as it is NOW.
+      const landing = draftLanding({
+        requestedEpoch,
+        currentEpoch: draftEpochRef.current,
+        dirtyNow: draftDirtyRef.current,
+      });
+      // The dialog moved on — closed, reopened, re-hydrated. Drop it silently:
+      // nothing was asked of the operator, so nothing needs explaining, and the
+      // banners below belong to a form that is gone.
+      if (landing === "drop") return;
       const banners = draftBanners(drafted);
       if (drafted.automatable && drafted.workflow) {
+        // Only a draft that will actually replace something asks. `confirm`
+        // means the form holds work right now; declining leaves it exactly as
+        // the operator left it, prompt and all, so they can draft again.
+        if (
+          landing === "confirm" &&
+          !window.confirm(
+            "Replace what you've started with the drafted workflow? You can still edit it before creating.",
+          )
+        ) {
+          return;
+        }
         const graph = drafted.workflow;
         // Hydrate via the same helpers edit mode uses, so a drafted graph and a
         // saved one populate the form identically.
@@ -881,9 +1205,10 @@ export function WorkflowCreateDialog({
         setDescription(graph.description ?? "");
         setNodes(draftNodes(graph));
         setEdges(draftEdges(graph));
-        // A fresh draft clears both the submit banner and the per-field blur
-        // errors — they belonged to whatever was on screen before.
-        setError(null);
+        // A fresh draft replaces the whole graph, so it clears both the submit
+        // banner and the per-field blur errors — they belonged to whatever was
+        // on screen before.
+        clearSubmitError();
         setFieldErrors({});
         setDraftSummary(banners.summary);
         // Any host corrections (issue #813) — e.g. a role→id rewrite — so the
@@ -898,32 +1223,83 @@ export function WorkflowCreateDialog({
       // operator can still author by hand.
       setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
     } finally {
-      setDrafting(false);
+      // Issue #1052: only the request that owns the current contents may clear
+      // the spinner — a stale one would switch off a draft the operator is
+      // actually waiting on.
+      if (draftEpochRef.current === requestedEpoch) setDrafting(false);
     }
   }
 
+  /**
+   * Raise the submit-time banner and take the operator to it (issue #1005).
+   *
+   * Issue #813 gave the CLIENT-validation failure this treatment: the banner
+   * sits inline in a scrollable dialog with the Create button below it, so on a
+   * long graph the message lands off-screen and the button just looks dead.
+   * A host rejection has exactly the same geometry and was getting none of it,
+   * so both branches go through here rather than one of them setting `error`
+   * on its own — the version that skips this is the one that reads as nothing
+   * happening. The scroll/focus runs the frame AFTER the state change, because
+   * `errorRef` points at a node that does not exist until the banner renders.
+   */
+  function showError(message: string) {
+    setError(message);
+    requestAnimationFrame(() => {
+      errorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+      errorRef.current?.focus();
+    });
+  }
+
   async function submit() {
+    // Re-entrancy guard (issue #1005). The Create button disables while a write
+    // is in flight, but `disabled` is a property of one DOM node: a second
+    // activation landing in the same tick as the first, an Enter keypress, or
+    // any future caller would otherwise post the graph twice — and for create
+    // that means two workflows, or a 409 the operator did nothing to earn.
+    //
+    // It reads the REF, not `submitting`: the state value here is the one from
+    // the render that built this closure, so two calls in the same tick would
+    // both see `false` and the guard would pass twice. The ref is written below
+    // before the first `await`, which makes it true for every later caller.
+    if (submittingRef.current) return;
     const problem = validate();
     if (problem) {
-      setError(problem);
-      // Issue #813: the banner sits inline in a scrollable dialog and the Create
-      // button is below it, so on a long graph the message can land off-screen —
-      // the button then looks dead. Bring it into view and focus it (announced,
-      // deterministic — no timer) the frame after it renders.
-      requestAnimationFrame(() => {
-        errorRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
-        errorRef.current?.focus();
-      });
+      showError(problem);
       return;
     }
+    // Set before the first `await` — after `validate()`, so a draft the client
+    // rejects never latches the guard and the operator can fix it and retry.
+    submittingRef.current = true;
     setSubmitting(true);
     setError(null);
-    const graph: WorkflowGraph = {
-      id: id.trim(),
-      name: name.trim(),
-      description: description.trim() || undefined,
-      nodes: nodes.map(
-        (n): WorkflowNode => ({
+    try {
+      // Issue #1006: the graph is assembled INSIDE the `try`. It used to be
+      // built above it, so a serialisation failure escaped past the `finally`
+      // and left `submitting` stuck true — which disables Cancel and gates the
+      // dialog's own `onOpenChange`. The operator was locked in the dialog, and
+      // the only remaining exit, reloading the page, was the one that lost the
+      // edit. Everything that can fail now clears `submitting` on the way out.
+      const outNodes: WorkflowNode[] = [];
+      for (const n of nodes) {
+        // Config: a form kind (#541) rebuilds it from its per-field draft
+        // plus the preserved `extra` bag (so an edit keeps orchestrator keys
+        // it has no control for); a form-less kind passes its raw overlay
+        // straight back out — an edit must not delete what it cannot show.
+        // `undefined` is omitted from the JSON body.
+        let config: unknown = n.config;
+        if (hasConfigForm(n.kind)) {
+          const serialized = configFromDraft(n.kind, n.configDraft, n.configExtra);
+          if (!serialized.ok) {
+            // `validate()` already passed, so this is the form and the
+            // serializer disagreeing — a defect, not something the author did.
+            // Say which node it was and leave the draft exactly as it is: the
+            // dialog stays open, closable, with the work still in it.
+            showError(`${nodeLabel(n)}: ${serialized.error}`);
+            return;
+          }
+          config = serialized.config;
+        }
+        outNodes.push({
           id: n.id.trim(),
           kind: n.kind,
           name: n.name.trim(),
@@ -945,28 +1321,28 @@ export function WorkflowCreateDialog({
                       : n.destinationTarget.trim() || undefined,
                 }
               : undefined,
-          // Config: a form kind (#541) rebuilds it from its per-field draft
-          // plus the preserved `extra` bag (so an edit keeps orchestrator keys
-          // it has no control for); a form-less kind passes its raw overlay
-          // straight back out — an edit must not delete what it cannot show.
-          // `undefined` is omitted from the JSON body.
-          config: hasConfigForm(n.kind)
-            ? configFromDraft(n.kind, n.configDraft, n.configExtra)
-            : n.config,
+          config,
           onError: n.onError,
           retry: n.retry,
           requiresApproval: n.requiresApproval,
-        }),
-      ),
-      edges: edges.map(
-        (e): WorkflowEdge => ({
-          from: e.from.trim(),
-          to: e.to.trim(),
-          label: e.label.trim() || undefined,
-        }),
-      ),
-    };
-    try {
+        });
+      }
+      const graph: WorkflowGraph = {
+        id: id.trim(),
+        name: name.trim(),
+        description: description.trim() || undefined,
+        // Locally-built body; the conditional-write token is passed separately as
+        // `expectedVersion`, so this carries none (issue #1013 makes it explicit).
+        version: null,
+        nodes: outNodes,
+        edges: edges.map(
+          (e): WorkflowEdge => ({
+            from: e.from.trim(),
+            to: e.to.trim(),
+            label: e.label.trim() || undefined,
+          }),
+        ),
+      };
       if (workflow) {
         // The id keys the saved graph, the schedule and the run history, so it
         // is the graph's own id that is sent, not the (read-only) field —
@@ -989,7 +1365,7 @@ export function WorkflowCreateDialog({
       }
       onOpenChange(false);
     } catch (e) {
-      setError(
+      showError(
         e instanceof Error
           ? e.message
           : workflow
@@ -1004,15 +1380,40 @@ export function WorkflowCreateDialog({
         onConflict?.(e.message);
       }
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !submitting && onOpenChange(o)}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        if (submitting) return;
+        // Issue #1006: Base UI reports Esc and an outside click through here,
+        // and both used to close unconditionally. Route them through the same
+        // confirm as Cancel so no exit is quieter than the others.
+        if (o) onOpenChange(true);
+        else requestClose();
+      }}
+    >
+      {/* `aria-busy` while a save is in flight (issue #1005): the dialog stays
+          on screen and mostly interactive during the round trip, so without it
+          a screen reader has nothing to say the form is mid-write. */}
+      <DialogContent
+        className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
+        aria-busy={submitting}
+      >
         <DialogHeader>
-          <DialogTitle>{editing ? "Edit workflow" : "New workflow"}</DialogTitle>
+          {/* Issue #1006: an edit names the workflow it is editing. The dialog
+              is reachable from a canvas, a card and a run, and said "Edit
+              workflow" from all of them — so an operator whose selection had
+              moved underneath them had nothing on screen to notice it with. */}
+          <DialogTitle>
+            {editing
+              ? `Edit “${workflow?.name?.trim() || workflow?.id}”`
+              : "New workflow"}
+          </DialogTitle>
           <DialogDescription>
             {editing
               ? "Change the nodes, how they connect, or when it runs. Saving replaces the whole graph."
@@ -1087,7 +1488,11 @@ export function WorkflowCreateDialog({
               value={copilotPrompt}
               onChange={(e) => setCopilotPrompt(e.target.value)}
               placeholder="e.g. Every Monday morning, have the writer draft the weekly digest and email it to the team."
-              disabled={drafting || echoing}
+              // Also dead while a create is in flight (issue #1005): drafting
+              // replaces the whole form, and the graph being posted is the one
+              // on screen — so a draft landing mid-write would leave the
+              // operator looking at a graph that is not the one they created.
+              disabled={drafting || echoing || submitting}
             />
             <div className="flex items-center justify-between gap-2">
               <p className="text-2xs leading-snug text-muted-foreground">
@@ -1100,10 +1505,14 @@ export function WorkflowCreateDialog({
                 variant="outline"
                 size="sm"
                 onClick={() => void runDraft()}
-                disabled={drafting || echoing || !copilotPrompt.trim()}
+                disabled={drafting || echoing || submitting || !copilotPrompt.trim()}
                 data-testid="workflow-copilot-draft"
               >
-                <Sparkles className="mr-1 size-3.5" />
+                {drafting ? (
+                  <Loader2 className="mr-1 size-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="mr-1 size-3.5" />
+                )}
                 {drafting ? "Drafting…" : "Draft it"}
               </Button>
             </div>
@@ -1136,122 +1545,147 @@ export function WorkflowCreateDialog({
           </div>
         )}
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="grid gap-2">
-            <Label htmlFor={`${formId}-id`}>Id</Label>
-            {/* Read-only in edit mode, not merely rejected on save: the id keys
-                the saved graph, the scheduler and every past run, so the host
-                answers 400 to a rename. Letting an author type a new one and
-                then refusing it would be a trap. */}
-            <Input
-              id={`${formId}-id`}
-              value={id}
-              onChange={(e) => setId(e.target.value)}
-              readOnly={editing}
-              aria-readonly={editing || undefined}
-              className={editing ? "text-muted-foreground" : undefined}
-              placeholder="e.g. campaign_pipeline"
-            />
-            {editing && (
-              <p className="text-2xs leading-snug text-muted-foreground">
-                A workflow&apos;s id can&apos;t change. It keys the saved graph, its
-                schedule and its run history.
-              </p>
-            )}
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor={`${formId}-name`}>Name</Label>
-            <Input
-              id={`${formId}-name`}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Campaign pipeline"
-            />
-          </div>
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor={`${formId}-desc`}>Description</Label>
-          <Textarea
-            id={`${formId}-desc`}
-            rows={2}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="What does this workflow do?"
-          />
-        </div>
+        {/*
+          Every control that can change the draft goes dead while a save is in
+          flight (issue #1005). `submit()` snapshots the graph before it awaits,
+          so an edit landing during the round trip is in neither the request nor
+          the result — and on success the dialog closes, taking that edit with
+          it. The operator would have watched themselves type it.
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label>Nodes</Label>
-            <Button type="button" variant="outline" size="sm" onClick={addNode}>
-              <Plus className="size-3.5" /> Add node
-            </Button>
-          </div>
-          <div className="space-y-2">
-            {nodes.map((n) => (
-              <NodeRow
-                key={n.key}
-                node={n}
-                client={client}
-                company={company}
-                roster={roster}
-                wiredChannels={wiredChannels}
-                workflows={workflows}
-                createMode={!editing}
-                errors={{
-                  schedule: fieldErrors[errorKey(n.key, "schedule")],
-                  destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
-                }}
-                configErrors={Object.fromEntries(
-                  configFieldSpecs(n.kind).map((s) => [
-                    s.key,
-                    fieldErrors[errorKey(n.key, `config:${s.key}`)],
-                  ]),
-                )}
-                onValidateField={(field, value) => validateField(n.key, field, value)}
-                onConfigChange={(key, value) => updateConfigField(n.key, key, value)}
-                onChange={(fields) => updateNode(n.key, fields)}
-                onRemove={() => removeNode(n.key)}
+          A `fieldset` rather than a `disabled` prop threaded through `NodeRow`,
+          `EdgeRow`, `ScheduleField` and `NodeConfigFields`: `disabled`
+          propagates natively to every form control underneath, so a control
+          added later is covered by construction rather than by remembering.
+          `display: contents` keeps it out of the layout — the grids below still
+          see their own children.
+        */}
+        <fieldset disabled={submitting} className="contents">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-2">
+              <Label htmlFor={`${formId}-id`}>Id</Label>
+              {/* Read-only in edit mode, not merely rejected on save: the id keys
+                  the saved graph, the scheduler and every past run, so the host
+                  answers 400 to a rename. Letting an author type a new one and
+                  then refusing it would be a trap. */}
+              <Input
+                id={`${formId}-id`}
+                value={id}
+                onChange={(e) => changeId(e.target.value)}
+                readOnly={editing}
+                aria-readonly={editing || undefined}
+                className={editing ? "text-muted-foreground" : undefined}
+                placeholder="e.g. campaign_pipeline"
               />
-            ))}
-            {nodes.length === 0 && (
-              <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
-                No nodes yet.
-              </p>
-            )}
+              {editing && (
+                <p className="text-2xs leading-snug text-muted-foreground">
+                  A workflow&apos;s id can&apos;t change. It keys the saved graph, its
+                  schedule and its run history.
+                </p>
+              )}
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={`${formId}-name`}>Name</Label>
+              <Input
+                id={`${formId}-name`}
+                value={name}
+                onChange={(e) => changeName(e.target.value)}
+                placeholder="e.g. Campaign pipeline"
+              />
+            </div>
           </div>
-        </div>
+          <div className="grid gap-2">
+            <Label htmlFor={`${formId}-desc`}>Description</Label>
+            <Textarea
+              id={`${formId}-desc`}
+              rows={2}
+              value={description}
+              onChange={(e) => changeDescription(e.target.value)}
+              placeholder="What does this workflow do?"
+            />
+          </div>
 
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <Label>Edges</Label>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={addEdge}
-              disabled={nodes.length < 2}
-            >
-              <Plus className="size-3.5" /> Add edge
-            </Button>
-          </div>
           <div className="space-y-2">
-            {edges.map((e) => (
-              <EdgeRow
-                key={e.key}
-                edge={e}
-                nodeIds={nodes.map((n) => n.id.trim()).filter(Boolean)}
-                onChange={(fields) => updateEdge(e.key, fields)}
-                onRemove={() => removeEdge(e.key)}
-              />
-            ))}
-            {edges.length === 0 && (
-              <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
-                No edges yet — nodes won&apos;t be connected.
-              </p>
-            )}
+            <div className="flex items-center justify-between">
+              <Label>Nodes</Label>
+              {/* Off while a save is in flight (issue #1005): the graph being
+                  posted is the one on screen, and a row added mid-write is in
+                  neither the request nor the result. */}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={addNode}
+                disabled={submitting}
+              >
+                <Plus className="size-3.5" /> Add node
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {nodes.map((n) => (
+                <NodeRow
+                  key={n.key}
+                  node={n}
+                  client={client}
+                  company={company}
+                  roster={roster}
+                  wiredChannels={wiredChannels}
+                  workflows={workflows}
+                  createMode={!editing}
+                  errors={{
+                    schedule: fieldErrors[errorKey(n.key, "schedule")],
+                    destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
+                  }}
+                  configErrors={Object.fromEntries(
+                    configFieldSpecs(n.kind).map((s) => [
+                      s.key,
+                      fieldErrors[errorKey(n.key, `config:${s.key}`)],
+                    ]),
+                  )}
+                  onValidateField={(field, value) => validateField(n.key, field, value)}
+                  onConfigChange={(key, value) => updateConfigField(n.key, key, value)}
+                  onChange={(fields) => updateNode(n.key, fields)}
+                  onRemove={() => removeNode(n.key)}
+                />
+              ))}
+              {nodes.length === 0 && (
+                <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+                  No nodes yet.
+                </p>
+              )}
+            </div>
           </div>
-        </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Edges</Label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={addEdge}
+                disabled={nodes.length < 2 || submitting}
+              >
+                <Plus className="size-3.5" /> Add edge
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {edges.map((e) => (
+                <EdgeRow
+                  key={e.key}
+                  edge={e}
+                  nodeIds={nodes.map((n) => n.id.trim()).filter(Boolean)}
+                  onChange={(fields) => updateEdge(e.key, fields)}
+                  onRemove={() => removeEdge(e.key)}
+                />
+              ))}
+              {edges.length === 0 && (
+                <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+                  No edges yet — nodes won&apos;t be connected.
+                </p>
+              )}
+            </div>
+          </div>
+        </fieldset>
 
         {error && (
           // Wrapper carries the ref/focus target so it works regardless of
@@ -1259,6 +1693,14 @@ export function WorkflowCreateDialog({
           <div
             ref={errorRef}
             tabIndex={-1}
+            // Announced, not merely rendered (issue #1005): `assertive`
+            // because the write the operator just asked for did not happen,
+            // and `showError`'s focus move is the only other thing that
+            // reports it. `role="alert"` already implies the live region;
+            // both are stated so a later refactor of one does not silently
+            // take the other with it.
+            role="alert"
+            aria-live="assertive"
             data-testid="create-error"
             className="outline-none"
           >
@@ -1324,7 +1766,11 @@ export function WorkflowCreateDialog({
                         disabled={restoringId !== null || submitting}
                         aria-label={`Restore ${rev.name}`}
                       >
-                        <RotateCcw className="mr-1 size-3.5" />
+                        {restoringId === rev.id ? (
+                          <Loader2 className="mr-1 size-3.5 animate-spin" />
+                        ) : (
+                          <RotateCcw className="mr-1 size-3.5" />
+                        )}
                         {restoringId === rev.id ? "Restoring…" : "Restore"}
                       </Button>
                     </li>
@@ -1336,7 +1782,7 @@ export function WorkflowCreateDialog({
         )}
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={submitting}>
+          <Button variant="ghost" onClick={requestClose} disabled={submitting}>
             Cancel
           </Button>
           <Button
@@ -1344,6 +1790,7 @@ export function WorkflowCreateDialog({
             disabled={submitting}
             data-testid="workflow-dialog-submit"
           >
+            {submitting && <Loader2 className="mr-1.5 size-4 animate-spin" />}
             {editing
               ? submitting
                 ? "Saving…"
@@ -1390,8 +1837,9 @@ function NodeRow({
   company: string | null;
   roster: TeamMemberDto[];
   /** The company's wired chat channels (#813): the output-node channel-destination
-   * picker's options. Empty → the channel target degrades to a free-text box. */
-  wiredChannels: string[];
+   * picker's options. Anything but a settled, non-empty answer degrades the
+   * channel target to a free-text box (#981). */
+  wiredChannels: WiredChannels;
   /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
   workflows: WorkflowSummary[];
   /** True while creating a new workflow (not editing an existing one), so the
@@ -1408,6 +1856,10 @@ function NodeRow({
 }) {
   const rowId = useId();
   const targetErrorId = `${rowId}-target-error`;
+  // The channels there are to offer, which is none until the host has answered
+  // (#981). A picker with no options is worse than the free-text fallback, so
+  // this drives both which control renders and which explanation sits under it.
+  const channelIds = channelOptions(wiredChannels);
   return (
     <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-[1fr_1fr_1.4fr_auto] sm:items-start">
       <div className="grid gap-1">
@@ -1522,10 +1974,14 @@ function NodeRow({
                 ))}
               </SelectContent>
             </Select>
-            {node.destinationKind === "channel" && wiredChannels.length > 0 && (
+            {node.destinationKind === "channel" && channelIds.length > 0 && (
               <>
-                {/* #813: pick from the channels actually wired for this company,
-                    instead of a free-text box that only fails at delivery time. */}
+                {/* #813: pick from the channels this company can actually
+                    deliver to, instead of a free-text box that only fails at
+                    delivery time. #981: the host no longer includes `operator`
+                    in that list — it is an in-memory response surface with no
+                    durable reader, and delivery refuses it by name — so the
+                    picker can no longer offer it. */}
                 <Select
                   value={node.destinationTarget || ""}
                   onValueChange={(v) => {
@@ -1537,7 +1993,7 @@ function NodeRow({
                     <SelectValue placeholder="pick a wired channel" />
                   </SelectTrigger>
                   <SelectContent>
-                    {wiredChannels.map((channelId) => (
+                    {channelIds.map((channelId) => (
                       <SelectItem key={channelId} value={channelId}>
                         {channelId}
                       </SelectItem>
@@ -1548,7 +2004,7 @@ function NodeRow({
               </>
             )}
             {(node.destinationKind === "email" ||
-              (node.destinationKind === "channel" && wiredChannels.length === 0)) && (
+              (node.destinationKind === "channel" && channelIds.length === 0)) && (
               <>
                 <Input
                   value={node.destinationTarget}
@@ -1568,10 +2024,40 @@ function NodeRow({
             )}
             {node.destinationKind === "email" && (
               <p className="text-2xs leading-snug text-muted-foreground">
-                Only sends if this company grants email and the recipient has
-                already written in.
+                Needs this company to grant email — the save is refused
+                otherwise — and the recipient to have already written in.
               </p>
             )}
+            {/* #981: an empty list is now a legitimate answer — a company with
+                no desks and no connected channels has nowhere to post a report,
+                so the free-text box above is the honest fallback rather than a
+                picker of one bad option. Say why it is empty; without this the
+                author sees a blank box and no reason.
+
+                Gated on `ready`: while the request is in flight, or when it
+                failed, the box is equally empty and this sentence would be a
+                claim we cannot make. Each of those states says its own thing
+                below instead. */}
+            {node.destinationKind === "channel" &&
+              wiredChannels.status === "ready" &&
+              wiredChannels.ids.length === 0 && (
+                <p className="text-2xs leading-snug text-muted-foreground">
+                  No delivery channels are wired for this company — add a desk,
+                  or connect a channel, before a report can be posted to one.
+                </p>
+              )}
+            {node.destinationKind === "channel" && wiredChannels.status === "loading" && (
+              <p className="text-2xs leading-snug text-muted-foreground">
+                Checking which channels this company can deliver to…
+              </p>
+            )}
+            {node.destinationKind === "channel" &&
+              wiredChannels.status === "unavailable" && (
+                <p className="text-2xs leading-snug text-muted-foreground">
+                  This host did not say which channels it can deliver to, so the
+                  target is checked when the workflow is saved.
+                </p>
+              )}
           </>
         )}
         {/* The five kinds that need config to run (issue #541). Rendered here,

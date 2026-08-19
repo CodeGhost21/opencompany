@@ -267,6 +267,14 @@ pub struct DeliveryParking {
     /// decisions are counted but whose gates are not recorded releases a batch
     /// the host cannot re-dispatch.
     pub gates: crate::runtime::workflow_gates::WorkflowGateQueue,
+    /// The workflow id and trigger input each blocked agent node needs to
+    /// re-dispatch its run (issue #899, Stage 1).
+    ///
+    /// Armed by the runner at block-settle (not here, and not in
+    /// [`park_and_journal`](DeliveryParking::park_and_journal) — the parker has
+    /// no trigger input), and released by the runtime's `continue_turn`. The same
+    /// handle both sides share, for [`gates`](Self::gates)' reason.
+    pub blocked_nodes: crate::runtime::blocked_nodes::BlockedNodeQueue,
 }
 
 impl std::fmt::Debug for WorkflowDeliveryDeps {
@@ -1336,24 +1344,20 @@ async fn post_to_channel(
     // The built-in operator adapter is an in-memory response spy, not a
     // durable delivery surface. Interactive chat journals its own replies
     // after the cycle; workflow delivery has no such reader, so naming
-    // `operator` must fail rather than report a successful discard.
-    if channel_id == crate::runtime::channel::OPERATOR_CHANNEL {
-        let wired: Vec<&str> = delivery
+    // `operator` must fail rather than report a successful discard. The rule
+    // and this sentence both live beside the operator-channel constant (issue
+    // #981) — the save-time guard on the write routes reads the same two, so a
+    // destination this refuses is one the author was never offered.
+    if !crate::runtime::channel::is_deliverable_channel(channel_id) {
+        let deliverable: Vec<&str> = delivery
             .channels
             .iter()
-            .filter(|channel| channel.channel_id() != crate::runtime::channel::OPERATOR_CHANNEL)
             .map(|channel| channel.channel_id())
+            .filter(|id| crate::runtime::channel::is_deliverable_channel(id))
             .collect();
         return Err((
             DeliveryReason::ChannelNotWired,
-            format!(
-                "`{channel_id}` is not a workflow delivery channel — this runtime has: {}",
-                if wired.is_empty() {
-                    "no durable channels".to_string()
-                } else {
-                    wired.join(", ")
-                }
-            ),
+            crate::runtime::channel::undeliverable_channel_message(channel_id, &deliverable),
         ));
     }
     let Some(adapter) = delivery
@@ -1740,6 +1744,7 @@ admins = [{list}]
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
+                blocked_nodes: Default::default(),
             });
             self.gate = Some(gate);
             self.journal = Some(journal);
@@ -1770,6 +1775,7 @@ admins = [{list}]
                 // path releases.
                 continuations: Default::default(),
                 gates: Default::default(),
+                blocked_nodes: Default::default(),
             });
             self.gate = Some(gate);
             self.journal = Some(journal);
@@ -1902,7 +1908,7 @@ admins = [{list}]
         fn subscribe(
             &self,
             _company: &CompanyId,
-        ) -> futures::stream::BoxStream<'static, crate::ports::types::StoredEvent> {
+        ) -> futures::stream::BoxStream<'static, crate::ports::events::EventStreamItem> {
             Box::pin(futures::stream::empty())
         }
     }

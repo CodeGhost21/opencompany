@@ -23,7 +23,7 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::company::artifact_mirror;
-use crate::company::steer::{InflightEntry, InflightKind, SteerAction, cap_redirect};
+use crate::company::steer::{InflightEntry, InflightKind, SteerAction, SteerControl, cap_redirect};
 use crate::harness::build::agent_workspace;
 use crate::harness::confine;
 // The note shape is shared with the ungated system paths (issue #337): the
@@ -189,6 +189,35 @@ pub struct HarnessBrain {
     /// missing. That is the right direction for a purely observational store —
     /// and it is why every test construction can leave it unset.
     runs: Option<Arc<dyn crate::ports::RunStore>>,
+}
+
+/// The single bubble a workflow-copilot turn returns (issues #416, #966).
+///
+/// Named rather than inlined because its **author** is the load-bearing field
+/// and it was wrong. #885 taught the main operator bubble to carry its
+/// responder and left this branch on `None`, so a genuine copilot reply kept
+/// journaling as `agent_id: "operator"` — the #885 defect still happening, not
+/// history needing a label. A function is what lets that be asserted without
+/// standing up a scripted model endpoint and a whole harness pool.
+///
+/// `CONFINED_AGENT_ID` is deliberately not a roster id (see [`confine`]): it
+/// names no teammate and cannot be addressed. That makes it a **truthful**
+/// author rather than a resolvable one, which is why
+/// `chat_history::is_known_author` has to know it — otherwise this row trades
+/// one wrong answer for a permanent false positive in the attribution audit.
+///
+/// No card, by construction: a confined turn has no `spawn_task` to call, and
+/// the chat handler does not open one from a copilot message either.
+fn confined_bubble(outcome: crate::harness::TurnOutcome) -> OutboundMessage {
+    OutboundMessage {
+        message_id: None,
+        task_id: None,
+        channel: "operator".to_string(),
+        agent: Some(confine::CONFINED_AGENT_ID.to_string()),
+        text: outcome.reply,
+        reply_to: None,
+        steps: outcome.steps,
+    }
 }
 
 impl HarnessBrain {
@@ -1965,6 +1994,85 @@ impl HarnessBrain {
         Ok(written)
     }
 
+    /// Files one drained batch of conversation publishes onto the right card —
+    /// same destination rule (`spawned_task` vs a fresh card), same
+    /// publisher-attribution fallback, same failure escalation into the
+    /// operator's own reply (issue #445) — and returns the card it landed on.
+    ///
+    /// `claimed` mirrors the belt-and-suspenders guard every call site already
+    /// used inline (`!published.is_empty() && publish_claim.is_some()`): an
+    /// unclaimed queue can only ever drain empty, so this is defensive rather
+    /// than load-bearing, but it keeps both conditions visible together instead
+    /// of only at the call site.
+    ///
+    /// Extracted for issue #989: a capped chat turn's unpublished-work nudge
+    /// (below) is a **second** turn that can ALSO publish, staged into the same
+    /// queue while the same claim is still live. Filing its batch through this
+    /// exact path — rather than a re-derived one — is what keeps a publish made
+    /// during the nudge from being the one publish in this whole module that
+    /// silently drops on the floor.
+    async fn file_conversation_batch(
+        &self,
+        responder: &str,
+        spawned_task: Option<&str>,
+        chat_id: Option<&str>,
+        claimed: bool,
+        published: Vec<publish::PendingPublish>,
+        operator_reply: &mut String,
+    ) -> Option<String> {
+        if published.is_empty() || !claimed {
+            return None;
+        }
+        let count = published.len();
+        // Issue #463: the agent that actually called the tool, not the turn's
+        // responder. A desk lead publishing inside a hand-off used to be filed
+        // under the orchestrator that relayed for it — the card named the wrong
+        // person for work it did not do.
+        //
+        // The **card** takes one owner, so one agent is picked; each artifact
+        // keeps its own author further down, in `record_published_artifacts`,
+        // because a turn can stage publishes from more than one agent.
+        let publisher = published
+            .first()
+            .map(|p| p.agent.clone())
+            .filter(|agent| !agent.is_empty())
+            .unwrap_or_else(|| responder.to_string());
+        // Issue #463: file onto the card THIS message already opened when
+        // there is one. Minting is the no-card-in-scope case, and the fallback
+        // inside `file_publishes_on_card` for a card deleted mid-turn.
+        let filed = match spawned_task {
+            Some(card_id) => {
+                self.file_publishes_on_card(card_id, &publisher, chat_id, published)
+                    .await
+            }
+            None => {
+                self.record_conversation_publishes(&publisher, chat_id, published)
+                    .await
+            }
+        };
+        match filed {
+            Ok(card_id) => Some(card_id),
+            Err(err) => {
+                // The agent has already been told the file was published, and
+                // that receipt is now wrong. This is the one remaining way that
+                // can happen — a store write failing under a claim that was
+                // honestly made — so it is said out loud in the conversation
+                // rather than left in a log the operator will never read.
+                // Saying nothing here would reproduce #445 exactly: a
+                // confident delivery claim over nothing recorded.
+                tracing::error!(
+                    agent = %responder,
+                    staged = count,
+                    error = %err,
+                    "[publish] a conversation published files but they could not be recorded; \
+                     telling the operator in the reply"
+                );
+                operator_reply.push_str(&publish::recording_failed_notice(count));
+                None
+            }
+        }
+    }
+
     /// Files what a conversation turn published onto the card that turn already
     /// opened (issue #463). Returns that card's id.
     ///
@@ -2122,6 +2230,7 @@ impl HarnessBrain {
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -2163,7 +2272,8 @@ impl HarnessBrain {
     ///
     /// Desks are tried first so a desk whose id happens to match an agent id
     /// keeps routing as a desk; the DM case only ever claims ids that resolve to
-    /// no desk at all. Without step 2 a DM thread would silently reach the
+    /// no desk at all. The console's `dm:<teammate-id>` channel key is resolved
+    /// last, after both (issue #982) — see the comment on that arm. Without step 2 a DM thread would silently reach the
     /// orchestrator instead of the teammate the operator opened — the console
     /// would look like it were addressing an agent while talking to someone
     /// else.
@@ -2207,6 +2317,21 @@ impl HarnessBrain {
         }
         if let Some(agent) = self.record().resolve_roster_agent_id(chat) {
             return agent;
+        }
+        // Issue #982, step 3: the console's DM channel id, `dm:<teammate-id>`.
+        // Tried LAST, and for the same reason the case-folding above is safe —
+        // it can only claim a key that resolves to nothing today, so no existing
+        // thread moves, and a company that really does have a desk or teammate
+        // called `dm:x` keeps it. Without it a `dm:`-keyed thread reached arm 4
+        // and the orchestrator answered a DM addressed to somebody else, which
+        // is the same misroute #884 closed for a bare key.
+        if let Some(key) = crate::runtime::assignee::dm_key(chat) {
+            if let Some(lead) = self.desk_lead(key) {
+                return lead;
+            }
+            if let Some(agent) = self.record().resolve_roster_agent_id(key) {
+                return agent;
+            }
         }
         tracing::warn!(
             company = %self.record().id,
@@ -2564,18 +2689,7 @@ impl HarnessBrain {
                                 &confinement,
                             )
                             .await?;
-                        channel_responses.push(OutboundMessage {
-                            message_id: None,
-                            // No card, by construction: a confined turn has no
-                            // `spawn_task` to call, and the chat handler does
-                            // not open one from a copilot message either.
-                            task_id: None,
-                            channel: "operator".to_string(),
-                            agent: None,
-                            text: outcome.reply,
-                            reply_to: None,
-                            steps: outcome.steps,
-                        });
+                        channel_responses.push(confined_bubble(outcome));
                         continue;
                     }
                     // Route to the addressed desk's lead, else the orchestrator.
@@ -2587,6 +2701,23 @@ impl HarnessBrain {
                     // in this cycle rides the same operator thread, so it gets the
                     // same id.
                     let chat_id = chat.as_deref();
+                    // Issue #989: the dispatch-start baseline for "did this
+                    // responder write anything it did not publish?" — taken
+                    // before the turn runs, for the same reason run_task's own
+                    // `workspace_at_dispatch` is (a snapshot taken after the
+                    // turn would already include whatever it wrote).
+                    //
+                    // Only consulted below when the turn reports
+                    // `hit_iteration_cap`: an ordinary chat reply that finishes
+                    // on its own is not this issue's scope. #244's scan already
+                    // covers the task-dispatch path unconditionally; widening
+                    // it to every chat turn is a separate, unscoped change.
+                    // Taken unconditionally anyway (cap status is not known
+                    // until the turn returns), the same trade-off run_task
+                    // already makes for every dispatch.
+                    let cap_scan_workspace =
+                        agent_workspace(&self.deps.workspace_root, &self.record().id, &responder);
+                    let cap_scan_baseline = WorkspaceSnapshot::take(&cap_scan_workspace);
                     // Clear stale MCP failures so nothing leaks from a prior turn
                     // (the delegation queue is cleared inside the runner, right
                     // before the orchestrator turn).
@@ -2641,63 +2772,99 @@ impl HarnessBrain {
                     // when the claim was actually taken — an unclaimed queue can
                     // only be empty here, because the tool refuses without one.
                     let published = self.deps.pending_publishes.drain();
-                    let mut published_card = None;
-                    if !published.is_empty() && publish_claim.is_some() {
-                        let count = published.len();
-                        // Issue #463: the agent that actually called the tool,
-                        // not the turn's responder. A desk lead publishing
-                        // inside a hand-off used to be filed under the
-                        // orchestrator that relayed for it — the card named the
-                        // wrong person for work it did not do.
-                        //
-                        // The **card** takes one owner, so one agent is picked;
-                        // each artifact keeps its own author further down, in
-                        // `record_published_artifacts`, because a turn can stage
-                        // publishes from more than one agent.
-                        let publisher = published
-                            .first()
-                            .map(|p| p.agent.clone())
-                            .filter(|agent| !agent.is_empty())
-                            .unwrap_or_else(|| responder.clone());
-                        // Issue #463: file onto the card THIS message already
-                        // opened when there is one. `turn.spawned_task` holds it
-                        // by construction — it is seeded from the direct-answer
-                        // card, from each hand-off's card and from the chat
-                        // handler's — which is exactly why the reply linked
-                        // there while the deliverable sat on a second, orphaned
-                        // card nothing pointed at. Minting is the
-                        // no-card-in-scope case, and the fallback inside
-                        // `file_publishes_on_card` for a card deleted mid-turn.
-                        let filed = match turn.spawned_task.as_deref() {
-                            Some(card_id) => {
-                                self.file_publishes_on_card(card_id, &publisher, chat_id, published)
-                                    .await
+                    // Issue #989: the paths this turn actually offered, captured
+                    // before `file_conversation_batch` below moves `published` —
+                    // the cap-pause scan's "staged" side of `publish::unpublished`
+                    // needs this list and cannot re-read the queue for it: by the
+                    // time that scan runs the queue has already been drained here.
+                    let published_sources: Vec<String> =
+                        published.iter().map(|p| p.source.clone()).collect();
+                    let mut published_card = self
+                        .file_conversation_batch(
+                            &responder,
+                            turn.spawned_task.as_deref(),
+                            chat_id,
+                            publish_claim.is_some(),
+                            published,
+                            &mut operator_reply,
+                        )
+                        .await;
+
+                    // Issue #989: on a turn that paused at its iteration cap, run
+                    // the same unpublished-work scan the task-dispatch path
+                    // (`run_task`) already runs, and — if it wrote something it
+                    // never offered — the same one follow-up nudge turn (issue
+                    // #244's `nudge_for_unpublished`, unchanged). A capped turn
+                    // returns `Ok` with a checkpoint reply, so nothing above
+                    // treats it as interrupted; without this, a file the agent
+                    // had already written sits in its sandbox with nothing
+                    // anywhere saying so.
+                    //
+                    // The publish claim is still live here — `drop(publish_claim)`
+                    // is below this block, not above it — so a publish the nudge
+                    // turn itself makes stages exactly like any other and is
+                    // filed through the same `file_conversation_batch` path
+                    // rather than being silently discarded when the claim
+                    // releases.
+                    if turn.hit_iteration_cap {
+                        let changed = cap_scan_baseline.changed_since(&cap_scan_workspace);
+                        let unpublished = publish::unpublished(&changed.files, &published_sources);
+                        if !unpublished.is_empty() {
+                            let nudge_control = SteerControl::new();
+                            let declined = self
+                                .nudge_for_unpublished(
+                                    &run_turn,
+                                    &responder,
+                                    text,
+                                    &operator_reply,
+                                    &unpublished,
+                                    changed.partial,
+                                    &nudge_control,
+                                    None,
+                                )
+                                .await;
+                            let nudge_published = self.deps.pending_publishes.drain();
+                            if let Some(card_id) = self
+                                .file_conversation_batch(
+                                    &responder,
+                                    turn.spawned_task.as_deref(),
+                                    chat_id,
+                                    publish_claim.is_some(),
+                                    nudge_published,
+                                    &mut operator_reply,
+                                )
+                                .await
+                            {
+                                published_card = published_card.or(Some(card_id));
                             }
-                            None => {
-                                self.record_conversation_publishes(&publisher, chat_id, published)
-                                    .await
-                            }
-                        };
-                        match filed {
-                            Ok(card_id) => published_card = Some(card_id),
-                            Err(err) => {
-                                // The agent has already been told the file was
-                                // published, and that receipt is now wrong. This
-                                // is the one remaining way that can happen — a
-                                // store write failing under a claim that was
-                                // honestly made — so it is said out loud in the
-                                // conversation rather than left in a log the
-                                // operator will never read. Saying nothing here
-                                // would reproduce #445 exactly: a confident
-                                // delivery claim over nothing recorded.
-                                tracing::error!(
+                            // The fallback's file list is the pre-nudge diff
+                            // minus whatever is staged now — the same "not a
+                            // fresh scan" argument `run_task`'s own fallback
+                            // documents: a scratch file written *while
+                            // answering the nudge* is an artifact of being
+                            // asked, and naming it here would make the nudge
+                            // generate its own noise.
+                            let still_unpublished = publish::unpublished(
+                                &unpublished,
+                                &self.deps.pending_publishes.sources(),
+                            );
+                            if !still_unpublished.is_empty() {
+                                // A plain chat turn has no card to note a
+                                // decline on unless one happened to be opened
+                                // (`turn.spawned_task`) — unlike a dispatched
+                                // task, which always has one. The warning is
+                                // therefore the whole of what happens here,
+                                // exactly as it is in `run_task` whenever the
+                                // nudge itself produced no reply to note.
+                                tracing::warn!(
+                                    company = %self.record().id,
                                     agent = %responder,
-                                    staged = count,
-                                    error = %err,
-                                    "[publish] a conversation published files but they could not \
-                                     be recorded; telling the operator in the reply"
+                                    files = %publish::name_files(&still_unpublished),
+                                    declined = declined.is_some(),
+                                    partial_scan = changed.partial,
+                                    "[publish] a capped chat turn changed sandbox files and \
+                                     published none of them; no artifact was recorded"
                                 );
-                                operator_reply.push_str(&publish::recording_failed_notice(count));
                             }
                         }
                     }
@@ -3935,6 +4102,7 @@ members = ["engineer"]
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -4766,16 +4934,9 @@ members = ["engineer"]
             .upsert(&company, &card("t-1", assignee))
             .await
             .expect("seed");
-        runs.create_run(
-            &company,
-            NewRun {
-                id: "run-1".to_string(),
-                task_id: "t-1".to_string(),
-                agent_id: assignee.to_string(),
-            },
-        )
-        .await
-        .expect("mint");
+        runs.create_run(&company, NewRun::for_task("run-1", "t-1", assignee))
+            .await
+            .expect("mint");
         (brain.with_runs(Arc::clone(&runs)), tasks, runs)
     }
 
@@ -4883,16 +5044,9 @@ members = ["engineer"]
         let runs: Arc<dyn crate::ports::RunStore> = Arc::new(FsOps::new(dir.path()));
         let brain = brain.with_runs(Arc::clone(&runs));
         let company = CompanyId::new("acme");
-        runs.create_run(
-            &company,
-            NewRun {
-                id: "run-1".to_string(),
-                task_id: "t-gone".to_string(),
-                agent_id: "engineer".to_string(),
-            },
-        )
-        .await
-        .expect("mint");
+        runs.create_run(&company, NewRun::for_task("run-1", "t-gone", "engineer"))
+            .await
+            .expect("mint");
 
         assert!(
             brain
@@ -5419,15 +5573,18 @@ members = ["engineer"]
     fn responder_for_warns_before_falling_back_to_the_orchestrator() {
         let dir = tempfile::tempdir().unwrap();
         let (brain, _tasks) = brain_with_desk(dir.path());
+        // `dm:engineer` was this fixture until issue #982 made it resolve; the
+        // key here has to be one that names nothing at all, or the test would
+        // pass by asserting the wrong fact and #884's coverage would be gone.
         let logs = logs_from(|| {
             assert_eq!(
-                brain.responder_for(Some("dm:engineer")),
+                brain.responder_for(Some("dm:nobody_by_that_name")),
                 "chief",
                 "the fallback itself is unchanged"
             );
         });
         assert!(
-            logs.contains("dm:engineer"),
+            logs.contains("dm:nobody_by_that_name"),
             "the unresolved key must be named so the fall-through is greppable: {logs}"
         );
         assert!(logs.contains("WARN"), "{logs}");
@@ -5439,6 +5596,30 @@ members = ["engineer"]
             assert_eq!(brain.responder_for(Some("eng_desk")), "engineer");
         });
         assert!(quiet.is_empty(), "a resolved key must not warn: {quiet}");
+    }
+
+    /// Issue #982: the console mints a DM channel id as `dm:<teammate-id>`, and
+    /// a sibling route documents that form as a valid channel key — so a thread
+    /// keyed on it has to be answered by the teammate it names, not by the
+    /// orchestrator.
+    ///
+    /// The prefix is stripped **after** the desk and roster attempts, so this
+    /// can only ever claim a key that resolved to nothing: `engineer` and
+    /// `eng_desk` still route exactly as they did, which the test above pins.
+    #[test]
+    fn responder_for_answers_a_console_dm_channel_key_as_the_teammate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        assert_eq!(
+            brain.responder_for(Some("dm:engineer")),
+            "engineer",
+            "a DM channel key addresses the teammate it names"
+        );
+        assert_eq!(
+            brain.responder_for(Some("dm:")),
+            "chief",
+            "a prefix with nothing after it names nobody"
+        );
     }
 
     /// A human- or console-typed teammate key resolves case-insensitively to the
@@ -6284,7 +6465,10 @@ members = ["eng1", "eng2"]
             ) -> Result<Vec<StoredEvent>> {
                 Ok(Vec::new())
             }
-            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+            fn subscribe(
+                &self,
+                _id: &CompanyId,
+            ) -> BoxStream<'static, crate::ports::events::EventStreamItem> {
                 Box::pin(stream::empty())
             }
         }
@@ -6466,6 +6650,7 @@ members = ["eng1", "eng2"]
                 mode: "supervised".to_string(),
                 always_approve: Vec::new(),
                 auto_approve_under_usd: None,
+                approval_ttl_hours: None,
             },
             None,
         )
@@ -7293,6 +7478,7 @@ members = ["eng1", "eng2"]
             parent_task_id: None,
             output: None,
             plan: None,
+            planning_attempts: Vec::new(),
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
             origin_run_id: None,
@@ -8574,5 +8760,35 @@ members = ["eng1", "eng2"]
         // work is not a hand-off.
         let parent = cards.iter().find(|c| c.id == "t-parent").expect("parent");
         assert_eq!(parent.column, "in_review");
+    }
+
+    /// Issue #966: a workflow-copilot reply is authored by the copilot.
+    ///
+    /// This is the assertion the #885 fix was missing on this branch. The bubble
+    /// is emitted on the **operator** channel, and before this the author field
+    /// was left `None` — so the journal writer's `channel` fallback stamped
+    /// `agent_id: "operator"` on a reply an agent had genuinely produced.
+    ///
+    /// Asserts the author is *not* the channel, rather than only that it equals
+    /// the constant: the defect's whole shape is the two being conflated, and a
+    /// test that checked equality alone would still pass if `CONFINED_AGENT_ID`
+    /// were ever redefined to `"operator"`.
+    #[test]
+    fn a_copilot_turn_is_authored_by_the_copilot_not_the_operator_channel() {
+        let bubble = confined_bubble(crate::harness::TurnOutcome {
+            reply: "here is what that node does".to_string(),
+            steps: Vec::new(),
+            hit_iteration_cap: false,
+        });
+        assert_eq!(bubble.channel, "operator", "the destination is unchanged");
+        assert_eq!(
+            bubble.agent.as_deref(),
+            Some(crate::ports::CONFINED_AGENT_ID)
+        );
+        assert_ne!(
+            bubble.agent.as_deref(),
+            Some(bubble.channel.as_str()),
+            "author and destination must not be the same value — that conflation is issue #885"
+        );
     }
 }
