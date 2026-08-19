@@ -158,6 +158,11 @@ pub fn model_for_tier(tier: Option<&str>) -> String {
         // use (query/delegate), so it maps to the capable agentic workload.
         Some("orchestrator") => "agentic-v1",
         Some("reasoning") => "reasoning-v1",
+        // A code-writing tier (the global `page_builder` agent): a capable,
+        // tool-using model, not the conversational default. `frontend` is a
+        // manifest-tier value (see `company::types::TIERS`), so it must be
+        // mapped here rather than relying on the `chat-v1` fallback.
+        Some("frontend") => "agentic-v1",
         Some("agentic") => "agentic-v1",
         Some("vision") => "vision-v1",
         _ => "chat-v1",
@@ -1525,6 +1530,7 @@ mod tests {
     fn model_for_tier_maps_hints_and_defaults() {
         assert_eq!(model_for_tier(Some("reasoning")), "reasoning-v1");
         assert_eq!(model_for_tier(Some("AGENTIC")), "agentic-v1");
+        assert_eq!(model_for_tier(Some("frontend")), "agentic-v1");
         assert_eq!(model_for_tier(None), "chat-v1");
         assert_eq!(model_for_tier(Some("mystery")), "chat-v1");
     }

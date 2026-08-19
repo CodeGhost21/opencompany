@@ -85,6 +85,22 @@ afterEach(() => {
 });
 
 describe("PagesView bridge", () => {
+  it("embeds the page in an opaque-origin sandbox (allow-scripts, no allow-same-origin)", async () => {
+    // The `sandbox` attribute is the actual isolation boundary: without
+    // `allow-same-origin` the frame is opaque-origin and holds no session
+    // cookie, so `event.source` / capability checks in the bridge are
+    // meaningful. A regression that drops the attribute — or quietly adds
+    // `allow-same-origin` — must be caught by the suite, not shipped.
+    const graphqlRequest = vi.fn();
+    await show(clientWith(graphqlRequest));
+
+    const frame = iframe();
+    expect(frame).not.toBeNull();
+    const sandbox = frame!.getAttribute("sandbox");
+    expect(sandbox).toContain("allow-scripts");
+    expect(sandbox).not.toContain("allow-same-origin");
+  });
+
   it("ignores an oc:graphql message whose source isn't the embedded iframe", async () => {
     const graphqlRequest = vi.fn();
     await show(clientWith(graphqlRequest));

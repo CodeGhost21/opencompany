@@ -220,24 +220,13 @@ async fn list_pages(company: ScopedCompany) -> Result<Response, ApiError> {
     Ok(response)
 }
 
-/// `GET {scope}/pages/{slug}` — a fixed HTML shell that mounts the page.
-///
-/// Not agent content: the slug is validated and interpolated into a literal
-/// Rust format string, so nothing the page's own source contains ever reaches
-/// this response.
-async fn page_shell(
-    company: ScopedCompany,
-    Path(SlugPath { slug }): Path<SlugPath>,
-) -> Result<Response, ApiError> {
-    if !valid_slug(&slug) {
-        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
-    }
-    let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
-    if !pages.iter().any(|(name, _)| name == &slug) {
-        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
-    }
-
-    let html = format!(
+/// The fixed HTML shell that mounts a page's compiled module (not agent
+/// content). Extracted from the route so the shell's load-bearing invariants
+/// — the React namespace import, the slug-relative bundle path, the absolute
+/// SDK CSS link, the import map — are unit-testable instead of living only in
+/// a route that needs a full workspace to exercise.
+fn page_shell_html(slug: &str) -> String {
+    format!(
         r#"<!doctype html>
 <html>
 <head>
@@ -269,7 +258,27 @@ async fn page_shell(
 </html>
 "#,
         slug = slug,
-    );
+    )
+}
+
+/// `GET {scope}/pages/{slug}` — a fixed HTML shell that mounts the page.
+///
+/// Not agent content: the slug is validated and interpolated into a literal
+/// Rust format string, so nothing the page's own source contains ever reaches
+/// this response.
+async fn page_shell(
+    company: ScopedCompany,
+    Path(SlugPath { slug }): Path<SlugPath>,
+) -> Result<Response, ApiError> {
+    if !valid_slug(&slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+    let pages = all_pages(company.runtime.workspace().as_ref(), company.id()).await?;
+    if !pages.iter().any(|(name, _)| name == &slug) {
+        return Err(ApiError(OpenCompanyError::NotFound(format!("page {slug}"))));
+    }
+
+    let html = page_shell_html(&slug);
 
     let mut response = Response::builder()
         .status(StatusCode::OK)
@@ -359,5 +368,61 @@ mod tests {
         assert!(!valid_slug("Revenue"));
         assert!(!valid_slug("../secrets"));
         assert!(!valid_slug("rev enue"));
+    }
+
+    #[test]
+    fn shell_imports_the_react_namespace_before_using_create_element() {
+        let html = page_shell_html("revenue");
+        // Bug this guards (PR #985): the shell called `React.createElement`
+        // without ever importing `React`, so every page threw a ReferenceError
+        // on first render.
+        let module_script = html
+            .split("<script type=\"module\">")
+            .nth(1)
+            .expect("the shell has a module script");
+        let react_import = module_script.lines().find(|l| l.contains("React"));
+        assert!(
+            react_import.is_some(),
+            "no `React` import in: {module_script}"
+        );
+    }
+
+    #[test]
+    fn shell_bundle_path_is_relative_to_the_shells_own_url() {
+        let html = page_shell_html("revenue");
+        // Bug this guards (PR #985): the shell imported `./bundle.mjs`, which
+        // resolves against `…/pages/{slug}` (no trailing slash) to
+        // `…/pages/bundle.mjs` — the shell route with slug "bundle.mjs", which
+        // fails `valid_slug` and 404s. `./{slug}/bundle.mjs` resolves to the
+        // registered bundle route.
+        let module_script = html
+            .split("<script type=\"module\">")
+            .nth(1)
+            .expect("the shell has a module script");
+        assert!(
+            module_script.contains("from \"./revenue/bundle.mjs\""),
+            "bundle import must name the slug explicitly: {module_script}"
+        );
+        assert!(
+            !module_script.contains("from \"./bundle.mjs\""),
+            "the bare `./bundle.mjs` form must not return: {module_script}"
+        );
+    }
+
+    #[test]
+    fn shell_links_the_sdk_css_and_maps_react_jsx_runtime_to_the_sdk_bundle() {
+        let html = page_shell_html("revenue");
+        // Bug this guards (PR #985): the SDK's `index.css` was built and
+        // shipped but never linked, so every page rendered unstyled.
+        assert!(
+            html.contains("<link rel=\"stylesheet\" href=\"/pages-sdk/index.css\">"),
+            "the SDK stylesheet must be linked in the shell"
+        );
+        // The import map is what lets the compiler's automatic-jsx output
+        // (`import { jsx } from "react/jsx-runtime"`) link at all.
+        assert!(
+            html.contains("\"react/jsx-runtime\": \"/pages-sdk/react.mjs\""),
+            "react/jsx-runtime must resolve to the SDK's React bundle"
+        );
     }
 }
