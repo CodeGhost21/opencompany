@@ -145,6 +145,72 @@ env:
 # release into a reviewable PR that moves the SHA and its version comment
 # together, which is the point of pinning in the first place.
 jobs:
+  # Issue #1118. Which lanes a change actually needs, decided once and read by
+  # every job below.
+  #
+  # Before this, every pull request ran every lane. A pull request that edits
+  # only `gitbooks/` compiled the vendored openhuman tree three times; one that
+  # edits only `frontend/` ran the ~33 minute `Rust (openhuman, tinycortex)`
+  # feature matrix, whose twenty feature-scoped suites cannot be affected by a
+  # `.tsx` file. The console still gets its Rust: `Console E2E` runs the host
+  # binary, so a frontend change keeps the `rust` and `Gated host binary` jobs
+  # that produce the two binaries it drives — it drops the test matrix around
+  # them, not the coverage of the thing it exercises.
+  #
+  # The `rust` filter is deliberately wide. It lists `companies/**` because
+  # `build.rs` embeds every bundle's `agents/` directory and declares a
+  # `rerun-if-changed` on it, and `skills/**` because `app::types` and
+  # `server::ops::write_test` read that directory from `CARGO_MANIFEST_DIR` at
+  # test time. Neither is a Rust file and both change what the Rust lanes
+  # assert; a filter that only knew about `src/**` would skip the lane that
+  # catches the break. When in doubt a path belongs in the filter — the cost of
+  # a false positive is one lane that need not have run, and the cost of a false
+  # negative is a green pull request that broke `main`.
+  #
+  # Every filter names this workflow file, so a change to CI itself runs
+  # everything. That is what makes this pull request testable by the rules it
+  # introduces.
+  changes:
+    name: Changed areas
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      desktop: ${{ steps.filter.outputs.desktop }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            rust:
+              - '.github/workflows/ci.yml'
+              - 'scripts/ci/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - 'src/**'
+              - 'tests/**'
+              - 'benches/**'
+              # build.rs embeds these and declares rerun-if-changed on them.
+              - 'companies/**'
+              # Read from CARGO_MANIFEST_DIR at test time.
+              - 'skills/**'
+              - 'vendor/**'
+              - '.gitmodules'
+            frontend:
+              - '.github/workflows/ci.yml'
+              - 'frontend/**'
+            desktop:
+              - '.github/workflows/ci.yml'
+              - 'src-tauri/**'
+
   # The header above states an invariant. This job is what makes it one.
   #
   # A comment is a guard only for people who read it, and the evidence that
@@ -240,6 +306,8 @@ jobs:
           echo "$callers"
 
   rust:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
     name: Rust
     runs-on: ubuntu-latest
     steps:
@@ -556,6 +624,8 @@ jobs:
   # the author of such a change need never open `src/store/mongodb.rs` — a path
   # filter would skip this lane on exactly the diff that most needs it.
   rust-mongodb:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: Rust (mongodb)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -683,6 +753,8 @@ jobs:
   # `openhuman,tinycortex`/`--all-features` matrix would roughly triple CI
   # compute for a sliver of extra coverage.
   rust-gated:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: Rust (openhuman, tinycortex)
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -1138,6 +1210,8 @@ jobs:
   # finishes. CPU minutes are the cheap resource here; the length of the
   # feedback loop is the expensive one.
   rust-gated-binary:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
     name: Gated host binary
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -1212,6 +1286,8 @@ jobs:
   # toolchain), it runs in parallel so it adds nothing to the critical path, and
   # it gets its own `Console` check name for branch protection to pin.
   console:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     name: Console
     runs-on: ubuntu-latest
     # A minute of real work. The cap exists only so a wedged registry fetch fails
@@ -1403,6 +1479,8 @@ jobs:
   # unit suite are the steps where a runtime difference actually shows up, and
   # they are the fast ones.
   console-current-node:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     name: Console (current Node, advisory)
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -1459,9 +1537,10 @@ jobs:
   # boots on the offline echo brain. Four specs that need more than that skip
   # themselves through `test/e2e/capabilities.ts`, each naming issue #467.
   console-e2e:
+    needs: [changes, rust]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
     name: Console E2E
     runs-on: ubuntu-latest
-    needs: rust
     # The suite is ~5 minutes locally against a warm host. The cap is here so a
     # wedged browser or a host that never binds fails in a quarter hour rather
     # than burning the runner's six-hour default.
@@ -1557,9 +1636,10 @@ jobs:
   # NOT `continue-on-error`. A lane that is allowed to be red is the state #428
   # was filed about, at more expense.
   console-e2e-live-brain:
+    needs: [changes, rust-gated-binary]
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true'
     name: Console E2E (live brain)
     runs-on: ubuntu-latest
-    needs: rust-gated-binary
     # Longer than the default lane's half hour: every operator message here runs
     # a real agent turn rather than being answered by the offline echo brain.
     timeout-minutes: 45
@@ -1636,6 +1716,8 @@ jobs:
   # reads as coverage, selected by no lane, reporting zero without failing
   # anything.
   desktop:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.desktop == 'true'
     name: Desktop
     runs-on: ubuntu-latest
     # The webkit toolchain plus a cold Rust compile of the host as a path
