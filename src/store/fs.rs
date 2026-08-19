@@ -20,7 +20,7 @@ use tokio::sync::{Mutex as TokioMutex, broadcast};
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
+use crate::ports::events::{EventLog, EventStreamItem, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::secrets::SecretStore;
@@ -404,6 +404,36 @@ pub(crate) mod append_probe {
             .copied()
             .unwrap_or(0)
     }
+
+    /// How many times [`super::write_atomic_bytes`] flushed a temp file's data
+    /// before publishing it, keyed on the **final** path rather than the temp
+    /// one — the temp name carries a fresh id per call, so a test could never
+    /// ask about it.
+    ///
+    /// Counted here for the reason [`dir_syncs`] is: a flushed file and an
+    /// unflushed one are identical on disk, so the honest check is to count the
+    /// request at the point it is made. This proves the call happens; it does
+    /// not — and cannot — prove what a power cut would leave behind.
+    static ATOMIC_SYNCS: LazyLock<Mutex<HashMap<PathBuf, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn record_atomic_sync(path: &Path) {
+        *ATOMIC_SYNCS
+            .lock()
+            .expect("append-probe poisoned")
+            .entry(key(path))
+            .or_insert(0) += 1;
+    }
+
+    /// How many times `path` was flushed before being published by a rename.
+    pub(crate) fn atomic_syncs(path: &Path) -> usize {
+        ATOMIC_SYNCS
+            .lock()
+            .expect("append-probe poisoned")
+            .get(&key(path))
+            .copied()
+            .unwrap_or(0)
+    }
 }
 
 /// Reads a file to a string, returning an empty string if it does not exist.
@@ -584,6 +614,59 @@ pub(crate) async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 /// an answer in half a document with nothing anywhere saying so. A `rename(2)`
 /// over the same directory is atomic, so the reader sees the old file or the new
 /// one and never a prefix of either.
+///
+/// ## Durable, not only atomic (issue #1049)
+///
+/// The rename orders the *publish*; it does not make the bytes **survive**. A
+/// `rename(2)` returning is a promise about what a concurrent reader sees, not
+/// about what is on the platter — power loss between the rename and the
+/// kernel's writeback can leave the new name pointing at an inode whose data
+/// never landed, so the file comes back empty or holding the previous contents.
+/// No corruption and no error: a save the caller was told succeeded, silently
+/// gone.
+///
+/// So the write is flushed in the order the recipe requires:
+///
+/// 1. `sync_data` on the temp file, **before** the rename — the bytes have to be
+///    durable before the name that publishes them exists, or the crash window
+///    just moves.
+/// 2. the `rename`.
+/// 3. [`sync_parent_dir`] **after** it.
+///
+/// ### Why step 3 is unconditional, unlike the append path
+///
+/// `append_line_inner` flushes the parent directory only when *this* append
+/// created the file (`if creating`), because an append to an existing file
+/// changes no directory entry. **That guard does not transfer here, and copying
+/// it would leave the fix half done.** A rename repoints an existing name at a
+/// different inode, so *every* call through here changes the parent directory's
+/// block — flush the file but not the directory and a crash can leave the name
+/// still resolving to the old inode, with the new data durable under a name
+/// nothing refers to. This is the half that is easy to forget, precisely because
+/// the file-level sync looks like it finished the job.
+///
+/// ### Cost, and why every caller pays it
+///
+/// Two device flushes per save, and they are the expensive syscalls in a
+/// function whose others are cheap — not a rounding error on the existing
+/// `create_dir_all` + write + rename.
+///
+/// Paid unconditionally anyway, because every caller of this function is a
+/// **state save whose caller was told it succeeded**: the task list, agent
+/// specs, users, invites, sessions, auth codes, skill states, notification read
+/// markers, workspace notes and their index. Not one is a cache or a
+/// re-derivable artifact, so there is no clean line to cut along — and the cost
+/// of drawing that line wrong is a silent lost update, which is the bug this
+/// fixes. `append_line` / [`append_line_durable`] split because *there* the line
+/// is clean (routine journal chatter versus `EffectExecuted`, which records real
+/// money); no equivalent split exists among these callers.
+///
+/// The exposure is bounded too: the fs backend is the desktop and self-hosted
+/// deployment. Hosted tenants run mongodb and never reach this function, so the
+/// write volume behind these flushes is one machine's own activity. If a hot
+/// caller is ever *measured* to hurt, the `sync: bool` shape `append_line_inner`
+/// already uses is the precedent to copy — with evidence, rather than guessed at
+/// now.
 pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -591,13 +674,36 @@ pub(crate) async fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> 
             .map_err(|e| io_err(parent, e))?;
     }
     let tmp = path.with_extension(format!("tmp-{}", generate_id()));
-    tokio::fs::write(&tmp, bytes)
-        .await
-        .map_err(|e| io_err(&tmp, e))?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|e| io_err(path, e))?;
-    Ok(())
+    let owned_tmp = tmp.clone();
+    let owned_path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+
+    // One `spawn_blocking` for the whole write-sync-rename-sync sequence rather
+    // than four `tokio::fs` calls, mirroring `append_line_inner`: each
+    // `tokio::fs` call is its own hop to the blocking pool, and the two flushes
+    // here are exactly the operations that hold a pool thread longest.
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&owned_tmp).map_err(|e| io_err(&owned_tmp, e))?;
+        file.write_all(&bytes).map_err(|e| io_err(&owned_tmp, e))?;
+        // Before the rename, deliberately — see the recipe above.
+        file.sync_data().map_err(|e| io_err(&owned_tmp, e))?;
+        // Recorded here rather than at the end of the block, and that placement
+        // is the whole value of the probe: tallying on the way out would count
+        // the *function running*, so deleting the `sync_data` above would leave
+        // every assertion still passing. Tied to the call, removing the call
+        // fails the test.
+        #[cfg(test)]
+        append_probe::record_atomic_sync(&owned_path);
+        drop(file);
+        std::fs::rename(&owned_tmp, &owned_path).map_err(|e| io_err(&owned_path, e))?;
+        // Unconditional: the rename changed this directory whether or not the
+        // destination already existed.
+        sync_parent_dir(&owned_path)?;
+        Ok::<_, OpenCompanyError>(())
+    })
+    .await
+    .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
 }
 
 /// Bundle metadata persisted alongside the manifest.
@@ -986,15 +1092,17 @@ impl EventLog for FsEventLog {
         Ok(tail.into_iter().rev().collect())
     }
 
-    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+    fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, EventStreamItem> {
         let rx = self.sender_for(id).subscribe();
         let stream = futures::stream::unfold(rx, |mut rx| async move {
-            loop {
-                match rx.recv().await {
-                    Ok(event) => return Some((event, rx)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return None,
+            // Each call to this closure produces exactly one item and hands the
+            // receiver back as continuation state, so there is no loop here.
+            match rx.recv().await {
+                Ok(event) => Some((EventStreamItem::Event(event), rx)),
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    Some((EventStreamItem::Gap { missed }, rx))
                 }
+                Err(broadcast::error::RecvError::Closed) => None,
             }
         });
         Box::pin(stream)
@@ -1778,6 +1886,153 @@ mod test {
         );
     }
 
+    // ── write_atomic durability (issue #1049) ──────────────────────────────
+
+    /// An atomic write flushes the bytes **and** the directory entry that
+    /// publishes them.
+    ///
+    /// ## What this proves, and what it does not
+    ///
+    /// It pins the **calls**, not the physics. A flushed file and an unflushed
+    /// one are byte-identical on disk, and CI cannot pull the power, so there is
+    /// no test that observes a lost update. What is asserted is that
+    /// `sync_data` and the parent-directory `sync_all` are requested at the
+    /// points the recipe requires — which is the part a refactor can silently
+    /// drop. The claim that those calls make a save survive a power cut rests on
+    /// the filesystem contract, not on this test. Same stance, and the same
+    /// reason, as `the_directory_flush_is_paid_only_by_the_append_that_creates`
+    /// above.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_atomic_write_flushes_the_file_and_the_directory_entry() {
+        let root_dir = tmp_root();
+        let dir = root_dir.path().join("state");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("tasks.json");
+        // `create_dir_all` above is not durable, so both tallies start here.
+        let dirs_before = append_probe::dir_syncs(&dir);
+
+        write_atomic(&path, "{\"v\":1}").await.unwrap();
+
+        assert_eq!(
+            append_probe::atomic_syncs(&path),
+            1,
+            "the temp file's bytes must be flushed before the rename publishes them"
+        );
+        assert_eq!(
+            append_probe::dir_syncs(&dir) - dirs_before,
+            1,
+            "the rename changed the directory, so the directory must be flushed too"
+        );
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "{\"v\":1}");
+    }
+
+    /// **The half people forget.** A rename repoints an existing name at a new
+    /// inode, so the parent directory changes on *every* call — not only on the
+    /// one that creates the file.
+    ///
+    /// This is the assertion that separates a real fix from a naive copy of the
+    /// append path, whose `if creating` guard is correct there and wrong here.
+    /// An overwrite is the common case for every caller of `write_atomic`: the
+    /// task list is rewritten whole on each change, and its file exists after
+    /// the first save.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn overwriting_an_existing_file_still_flushes_the_directory() {
+        let root_dir = tmp_root();
+        let dir = root_dir.path().join("state");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("tasks.json");
+        let dirs_before = append_probe::dir_syncs(&dir);
+
+        write_atomic(&path, "first").await.unwrap();
+        write_atomic(&path, "second").await.unwrap();
+        write_atomic(&path, "third").await.unwrap();
+
+        assert_eq!(
+            append_probe::atomic_syncs(&path),
+            3,
+            "every save flushes its own bytes"
+        );
+        assert_eq!(
+            append_probe::dir_syncs(&dir) - dirs_before,
+            3,
+            "every rename rewrites the directory entry, so no save may skip the \
+             directory flush — an `if creating` guard here would lose the last \
+             two updates to a power cut"
+        );
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "third");
+    }
+
+    /// The byte-taking half goes through the same sequence — it is the one
+    /// implementation, and a second path that skipped a flush is exactly what
+    /// the shared body exists to prevent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_bytes_entry_point_is_durable_too() {
+        let root_dir = tmp_root();
+        let dir = root_dir.path().join("blobs");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("note.bin");
+        let dirs_before = append_probe::dir_syncs(&dir);
+
+        write_atomic_bytes(&path, &[0xDE, 0xAD, 0xBE, 0xEF])
+            .await
+            .unwrap();
+
+        assert_eq!(append_probe::atomic_syncs(&path), 1);
+        assert_eq!(append_probe::dir_syncs(&dir) - dirs_before, 1);
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            vec![0xDE, 0xAD, 0xBE, 0xEF]
+        );
+    }
+
+    /// The behaviour the durability work must not have cost: a reader still sees
+    /// the old file or the new one, never a prefix. Pinned alongside the flushes
+    /// because the rewrite moved the write off `tokio::fs::write` and onto an
+    /// explicit create/write/rename, and the temp-then-rename shape is the whole
+    /// reason issue #887 was closed.
+    #[tokio::test]
+    async fn an_atomic_write_leaves_no_temp_file_behind() {
+        let root_dir = tmp_root();
+        let dir = root_dir.path().join("state");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("tasks.json");
+
+        write_atomic(&path, "{}").await.unwrap();
+
+        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(
+            names,
+            vec!["tasks.json".to_string()],
+            "the temp file must be renamed away, not left as litter: {names:?}"
+        );
+    }
+
+    /// A failed write still surfaces as an error rather than half-succeeding —
+    /// the same direction `durable_append_reports_an_unwritable_path` pins for
+    /// the append path. Here the temp create fails because the parent is a
+    /// *file*, so `create_dir_all` cannot make it a directory.
+    #[tokio::test]
+    async fn an_atomic_write_onto_an_unusable_parent_reports_the_error() {
+        let root_dir = tmp_root();
+        let blocker = root_dir.path().join("not-a-dir");
+        tokio::fs::write(&blocker, "occupied").await.unwrap();
+
+        let err = write_atomic(&blocker.join("tasks.json"), "{}")
+            .await
+            .expect_err("a write under a non-directory cannot succeed");
+        assert!(
+            matches!(err, OpenCompanyError::StoreIo { .. }),
+            "the caller must learn the save did not happen: {err:?}"
+        );
+    }
+
     /// A durable append into a directory that does not exist must surface the
     /// error rather than half-succeed. This is the direction the journal's
     /// at-most-once guarantee depends on: a failed commit stops the effect.
@@ -1824,6 +2079,15 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_monotonic_event_seq(Arc::new(FsEventLog::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_event_subscription_surfaces_gap() {
+        let root_dir = tmp_root();
+        conformance::assert_event_subscription_surfaces_gap(Arc::new(FsEventLog::new(
+            root_dir.path(),
+        )))
+        .await;
     }
 
     #[tokio::test]
@@ -2264,6 +2528,9 @@ mod test {
         .await
         .unwrap();
         let received = stream.next().await.expect("event delivered");
+        let EventStreamItem::Event(received) = received else {
+            panic!("subscription unexpectedly reported a gap");
+        };
         assert_eq!(
             received.event,
             CompanyEvent::OperatorMessage {

@@ -17,6 +17,7 @@
 //! advertised capability, native when supported — REQUIRED, or the model narrates
 //! prose and the tools never fire.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -75,6 +76,7 @@ pub(super) fn build_copilot_agent(
     ctx: Arc<CopilotContext>,
     accepted: AcceptedCell,
     diag: DiagCell,
+    workspace: PathBuf,
 ) -> crate::Result<Agent> {
     let memory: Arc<dyn Memory> = Arc::new(EphemeralMemory);
 
@@ -101,13 +103,18 @@ pub(super) fn build_copilot_agent(
         .unwrap_or_else(|| model_for_tier(None));
 
     // Scope the agent's harness bookkeeping (session/transcript/store subdirs) to
-    // a stable subdir of the company's own workspace root, NOT the process CWD.
-    // Without a `workspace_dir` the builder defaults to `"."`, which — in a tenant
-    // container — would litter the read-mostly working directory with `sessions/`
-    // / `session_raw/` / `tinyagents_store/`. `auto_save(false)` already turns off
-    // transcript persistence; this makes the location tenant-scoped either way.
-    // Best-effort create: a failure just leaves the harness to no-op its writes.
-    let workspace = deps.workspace_root.join("workflow-copilot");
+    // a UNIQUE PER-TURN subdir of the company's own workspace root, NOT the process
+    // CWD and NOT a stable per-company dir (issue #1042). The vendored turn ALWAYS
+    // persists a JSONL session transcript keyed by `agent_definition_name` into this
+    // workspace — `auto_save(false)` gates only the durable memory-store writes, not
+    // that transcript. A stable dir therefore let the fresh, empty-history agent of
+    // the NEXT turn discover the PREVIOUS turn's transcript and replay it, so the
+    // model saw its own prior draft and refused ("I already drafted this"). A fresh
+    // unique dir is always empty, so the resume scan finds nothing — statelessness
+    // by construction, not dedupe. The caller mints the path and reclaims it after
+    // the turn; without a `workspace_dir` the builder would default to `"."` and
+    // litter the read-mostly working directory. Best-effort create: a failure just
+    // leaves the harness to no-op its writes.
     let _ = std::fs::create_dir_all(&workspace);
 
     let mut agent = AgentBuilder::default()

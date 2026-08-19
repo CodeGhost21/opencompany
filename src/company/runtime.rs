@@ -109,6 +109,7 @@ pub(crate) async fn join_follow_up(
     }
 }
 use crate::runtime::CycleRunner;
+use crate::runtime::blocked_nodes::BlockedNodeQueue;
 use crate::runtime::continuation::ContinuationQueue;
 use crate::runtime::cycle::ResolveReceipt;
 use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantId, GrantScope, GrantSet, StandingGrant};
@@ -301,6 +302,19 @@ pub struct CompanyRuntime {
     /// a swap mid-decision that forgot a run's parked gates would re-ask about
     /// every one of them.
     pub(crate) workflow_gates: WorkflowGateQueue,
+    /// Issue #899 (Stage 1): the workflow id and trigger input each **blocked
+    /// agent node** needs to re-dispatch its run when the operator approves the
+    /// gated call parked inside its tool loop.
+    ///
+    /// The agent-node companion to [`workflow_gates`](Self::workflow_gates): both
+    /// hold the facts a released [`continuations`](Self::continuations) batch
+    /// cannot carry, but for the two structurally different ways a run blocks —
+    /// a `requires_approval` gate node (there) versus a policy-gated call inside
+    /// an agent node's own tool loop (here). Live per-instance state; unlike its
+    /// neighbours it is **not** rebuilt from the journal on a swap, because the
+    /// parked tool-call effect carries no workflow lineage to rebuild it from —
+    /// see [`BlockedNodeQueue`](crate::runtime::blocked_nodes::BlockedNodeQueue).
+    pub(crate) blocked_nodes: BlockedNodeQueue,
     /// Held for the duration of a cycle so cycles never interleave per company.
     ///
     /// `Arc`-shared rather than owned so a rebuilt runtime can inherit the *same*
@@ -418,6 +432,7 @@ impl CompanyRuntime {
             grants,
             continuations: ContinuationQueue::default(),
             workflow_gates: WorkflowGateQueue::default(),
+            blocked_nodes: BlockedNodeQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
             task_writes: Arc::new(TokioMutex::new(())),
             quiesced: Arc::new(AtomicBool::new(false)),
@@ -1128,6 +1143,21 @@ impl CompanyRuntime {
         let _drained = self.serial.lock().await;
     }
 
+    /// Marks this runtime quiesced **without** draining it (issue #986).
+    ///
+    /// The drain half of [`quiesce`](Self::quiesce) proves the in-flight cycle
+    /// finished. This is for a runtime that cannot have one: the registry calls
+    /// it while a company is being registered during shutdown, before anything
+    /// can reach the runtime to start a cycle on it. There is nothing to wait
+    /// for, and waiting would mean taking `serial` — which on a rebuild
+    /// successor is the *predecessor's* lock, so this would park behind the very
+    /// turn the swap is handing over.
+    ///
+    /// Not a substitute for `quiesce` anywhere a cycle could already be running.
+    pub(crate) fn mark_quiesced(&self) {
+        self.quiesced.store(true, Ordering::SeqCst);
+    }
+
     /// Puts a quiesced runtime back to work.
     ///
     /// Called when a rebuild fails: a company left quiesced would refuse every
@@ -1175,6 +1205,24 @@ impl CompanyRuntime {
     /// other would release a batch it cannot re-dispatch.
     pub fn adopt_workflow_gates(&mut self, gates: WorkflowGateQueue) {
         self.workflow_gates = gates;
+    }
+
+    /// Installs the blocked-agent-node stash the builder prepared (issue #899,
+    /// Stage 1) — inherited live on a rebuild, and empty on a boot (the parked
+    /// tool-call effect carries nothing to rehydrate it from).
+    ///
+    /// Set through the builder for [`adopt_continuations`](Self::adopt_continuations)'
+    /// reason, and shared with the workflow runner's `DeliveryParking` so the
+    /// runner that arms a stash at block-settle and the `continue_turn` that
+    /// releases it see one set.
+    pub fn adopt_blocked_nodes(&mut self, blocked_nodes: BlockedNodeQueue) {
+        self.blocked_nodes = blocked_nodes;
+    }
+
+    /// The blocked-agent-node stash, for the workflow-node continuation fork in
+    /// [`continue_turn`](Self::continue_turn) (issue #899, Stage 1).
+    pub fn blocked_nodes(&self) -> &BlockedNodeQueue {
+        &self.blocked_nodes
     }
 
     /// Rejects a cycle on a runtime that is being replaced.
@@ -1453,6 +1501,18 @@ impl CompanyRuntime {
         {
             return self.resume_workflow_run(&approval_id, turn, batch).await;
         }
+        // Issue #899 (Stage 1): a blocked agent node, likewise not a brain turn.
+        // Its gated calls parked under a `workflow-node:` key (disjoint from the
+        // `workflow-run:` gate key above), so the same batch counting releases
+        // them together, and this re-dispatches the run once — the auto-continue
+        // that used to be missing. Deny/expire-only spawns nothing.
+        if let Some(turn) = turn.as_deref()
+            && crate::runtime::workflow_resume::is_node_turn(turn)
+        {
+            return self
+                .resume_blocked_agent_node(&approval_id, turn, batch)
+                .await;
+        }
         if batch.is_empty() {
             // Every approval the turn raised expired rather than being decided.
             // The sweep already appended each `ApprovalResolved` itself, so
@@ -1510,6 +1570,108 @@ impl CompanyRuntime {
                 "Every sign-off on that workflow step is in, but the run could not be \
                  restarted: {error}. Nothing else is waiting on you — re-run the workflow to \
                  pick it back up."
+            ))
+            .await;
+            return Err(error);
+        }
+        Ok(CycleRunner::new(self).already_resolved_report())
+    }
+
+    /// Re-dispatches the run a **blocked agent node** belonged to — once, when
+    /// its gated calls are all decided and at least one was approved (issue #899,
+    /// Stage 1).
+    ///
+    /// The agent-node counterpart to
+    /// [`resume_workflow_run`](Self::resume_workflow_run). The difference is what
+    /// a continuation needs: a gate threads its node id into the trigger's
+    /// `approvals` array, but a call gated *inside* an agent node's tool loop is
+    /// not a graph node — the re-run just runs the graph again, and the grant the
+    /// approve minted (a shared [`GrantSet`](crate::runtime::grants::GrantSet))
+    /// lets the identical call pass. So this spawns from the stashed workflow id
+    /// and trigger input, unchanged.
+    ///
+    /// Three outcomes, all ending with the decisions appended to the timeline:
+    ///
+    /// * **at least one approved** — spawn one continuation run. A diverging
+    ///   re-run may re-ask (Stage 2 closes that); a failed spawn is announced,
+    ///   not swallowed, on [`resume_workflow_run`](Self::resume_workflow_run)'s
+    ///   reasoning — the cards are already consumed.
+    /// * **all denied or expired** — spawn nothing. The block is final; there is
+    ///   nothing to continue, exactly as `resume_run` starts no run for a wholly
+    ///   refused batch.
+    /// * **approved but the stash is gone** — a restart lost it (the parked
+    ///   tool-call card carries no lineage to rehydrate from), so the run cannot
+    ///   be located. The operator is told to re-run rather than left waiting.
+    async fn resume_blocked_agent_node(
+        &self,
+        approval_id: &ApprovalId,
+        turn: &str,
+        batch: Vec<CompanyEvent>,
+    ) -> Result<CycleReport> {
+        let approved = batch.iter().any(|event| {
+            matches!(
+                event,
+                CompanyEvent::ApprovalResolved {
+                    verdict: Verdict::Approve,
+                    ..
+                }
+            )
+        });
+        for event in batch {
+            if let Err(error) = self.events.append(&self.id, event).await {
+                tracing::warn!(
+                    company = %self.id,
+                    %approval_id,
+                    %error,
+                    "[approval] a blocked node's resolution could not be appended to the event \
+                     log; the journal remains the binding record"
+                );
+            }
+        }
+        // Drop the stash whatever the verdict — a refused block has nothing to
+        // continue, and a spawned one has consumed it.
+        let stashed = self.blocked_nodes.release(turn);
+        if !approved {
+            tracing::info!(
+                company = %self.id,
+                %turn,
+                "[approval] every gated call on this blocked node was refused or expired, so no \
+                 continuation runs"
+            );
+            return Ok(CycleRunner::new(self).already_resolved_report());
+        }
+        let Some(stashed) = stashed else {
+            tracing::error!(
+                company = %self.id,
+                %turn,
+                "[approval] a blocked node's calls were approved, but this host no longer holds \
+                 the run's stash (a restart drops it), so there is nothing to continue"
+            );
+            self.announce_to_operator(
+                "That workflow step's approval is in, but this host no longer has the run to \
+                 continue — re-run the workflow to pick it back up.",
+            )
+            .await;
+            return Ok(CycleRunner::new(self).already_resolved_report());
+        };
+        if let Err(error) = crate::runtime::workflow_resume::spawn_blocked_node_continuation(
+            self,
+            &stashed.workflow_id,
+            stashed.input,
+        )
+        .await
+        {
+            tracing::error!(
+                company = %self.id,
+                %turn,
+                %error,
+                "[approval] the workflow run released by a blocked node's approval could not be \
+                 continued"
+            );
+            self.announce_to_operator(&format!(
+                "That workflow step's approval is in, but the run could not be restarted: \
+                 {error}. Nothing else is waiting on you — re-run the workflow to pick it back \
+                 up."
             ))
             .await;
             return Err(error);
@@ -2159,6 +2321,11 @@ impl CompanyRuntime {
                 expires_at_millis: Some(
                     p.at_millis.saturating_add(self.approval_gate.ttl_millis()),
                 ),
+                // Issue #1024: the host's own classification, not the console's
+                // guess. `kind` is the tool name for a harness call, so this is
+                // the only field that distinguishes an outbound send from an
+                // internal effect.
+                group: p.effect.group,
                 task: p.task,
                 agent: p.effect.agent.clone(),
                 payload: crate::runtime::approval_display::display_payload(&p.effect),
