@@ -112,10 +112,16 @@ impl Instance {
             data_dir: root_of(data_dir, &self.entry).display().to_string(),
             running: self.host.is_some(),
             base_url: self.host.as_ref().map(EmbeddedHost::base_url),
-            instance_id: self
-                .host
-                .as_ref()
-                .map(|host| host.instance_id().to_string()),
+            // Read off disk when nothing is running, because the console
+            // prunes its remembered profiles against this. A stopped instance
+            // that reported no identity would be indistinguishable from a data
+            // root this application no longer serves, and the console would
+            // forget its connection id — which is what every browser-local key
+            // for that instance is scoped by.
+            instance_id: match self.host.as_ref() {
+                Some(host) => Some(host.instance_id().to_string()),
+                None => opencompany::app::instance::peek(&root_of(data_dir, &self.entry)),
+            },
             operator_email: self
                 .host
                 .as_ref()
@@ -761,6 +767,30 @@ mod test {
         let default = listed.iter().find(|i| i.id == DEFAULT_INSTANCE_ID).unwrap();
         assert!(default.running, "one busy root must not stop the others");
         drop(squatter);
+    }
+
+    /// A stopped instance still says who it is.
+    ///
+    /// The console prunes its remembered connections against this list, and
+    /// `removeConnection` forgets the persisted profile — so an instance that
+    /// went quiet about its identity while stopped would have its connection id
+    /// dropped, and with it the tour state, last-read channel and mail draft
+    /// scoped to that id. Stopping is not forgetting, at either end.
+    #[tokio::test]
+    async fn a_stopped_instance_still_reports_its_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hosts = LocalHosts::load(dir.path().to_path_buf()).await;
+        let running = hosts.create("Acme").await.expect("it starts");
+        let identity = running.instance_id.clone();
+        assert!(identity.is_some());
+
+        let stopped = hosts.stop("acme").expect("a known instance");
+        assert!(!stopped.running);
+        assert!(stopped.base_url.is_none(), "nothing is listening");
+        assert_eq!(
+            stopped.instance_id, identity,
+            "a stopped instance is the same host, and must still be recognisable as it"
+        );
     }
 
     /// Duplicate ids are dropped wherever they sit, not only side by side.
