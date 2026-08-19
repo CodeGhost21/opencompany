@@ -2507,7 +2507,7 @@ mod tests {
         let record = crate::workflows::gated_tool_turn_test::record();
 
         build_capabilities(
-            Arc::new(HarnessPool::new()),
+            single_turn(&deps),
             deps,
             &record,
             RunContext {
