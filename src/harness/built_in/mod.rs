@@ -5446,6 +5446,7 @@ description = "Sets direction."
             manifest: granting_manifest(),
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
+            setup: None,
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
