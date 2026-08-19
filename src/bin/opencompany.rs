@@ -858,6 +858,11 @@ async fn run_export(
 /// Opens storage, reads the two collections, and prints the set difference both
 /// ways. Nothing is written.
 ///
+/// Only meaningful in tenant-namespace mode: without
+/// [`OPENCOMPANY_TENANT_ID`], no durable owner rows are ever written, so the
+/// report would show every company as orphaned on every invocation. Refuses
+/// to run when the variable is unset.
+///
 /// # Exit code
 ///
 /// Zero whether or not orphans were found. This is a report, not an assertion:
@@ -866,6 +871,22 @@ async fn run_export(
 /// "the query ran and found three" is a success, not a failure. The findings
 /// are on stdout for a human and behind `--json` for anything else.
 async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
+    // Gate on OPENCOMPANY_TENANT_ID: the same condition that gates the
+    // durable owner-row write at register_company. Without a tenant
+    // namespace no owner rows are ever persisted, and reading zero owners
+    // against N companies would report every company as orphaned.
+    let tenant_id = std::env::var("OPENCOMPANY_TENANT_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    if tenant_id.is_none() {
+        return Err(opencompany::error::OpenCompanyError::Config(
+            "OPENCOMPANY_TENANT_ID is not set: this deployment does not persist \
+             durable owner rows, so no company can be orphaned from one. \
+             This check applies to shared-database deployments only."
+                .into(),
+        ));
+    }
+
     let home = resolve_home_migrated(home)?;
     let settings = opencompany::store::StorageSettings::from_env()?;
     let Some(handles) = opencompany::store::open_storage(&settings, &home).await? else {
@@ -887,8 +908,12 @@ async fn run_orphans(home: Option<PathBuf>, json: bool) -> Result<()> {
         )));
     };
 
-    let owners = ownership.owners().await?;
+    // Read list() before owners() (issue #1077): provisioning writes the
+    // owner row before the company (#1050), so a provision crossing the
+    // two reads lands as a benign dangling owner row rather than an
+    // alarming unowned company.
     let companies = handles.company.list().await?;
+    let owners = ownership.owners().await?;
     let report = opencompany::app::find_orphans(&companies, &owners);
 
     if json {
