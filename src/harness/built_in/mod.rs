@@ -878,6 +878,35 @@ impl CompanyAgent {
         ))
     }
 
+    /// This turn's in-turn spend ceiling, in USD — the value that
+    /// [`BudgetStopHook`](oh::agent::stop_hooks::BudgetStopHook) halts the turn
+    /// at, armed only when the teammate declares a `budget_usd_daily` cap
+    /// (issue #988). `None` means no hook is installed.
+    ///
+    /// This mirrors the vendored runtime's own posture. OpenCompany's plan-level
+    /// token ceiling and a teammate's `budget_usd_daily` are **pre-dispatch** —
+    /// they decide whether to start a turn and cannot see inside one — and
+    /// openhuman itself constructs `BudgetStopHook` nowhere, applying only an
+    /// opt-in token-based goal hook. So this crate, like upstream, arms the
+    /// in-turn brake only for a teammate who has opted into a budget: a declared
+    /// `budget_usd_daily` cap also bounds any single turn of that teammate's, so
+    /// the worst-case overshoot is "one daily cap" rather than "one turn, of
+    /// unknown size". A teammate with no declared budget gets no hook — the
+    /// runtime never hard-stops a turn that isn't actively burning a live budget
+    /// — and there is no blanket magic number no operator can see or change.
+    ///
+    /// A non-finite or non-positive manifest value is ignored (no hook armed)
+    /// rather than forwarded: the vendored hook fails closed on a malformed cap
+    /// and would halt every turn at iteration one. Such a teammate is already
+    /// refused before dispatch (`spent >= cap` holds at zero spend), so this only
+    /// guards the path where no meter was available to make that call.
+    fn turn_spend_cap_usd(&self) -> Option<f64> {
+        match self.budget_usd_daily {
+            Some(daily) if daily.is_finite() && daily > 0.0 => Some(daily),
+            _ => None,
+        }
+    }
+
     /// Classify one `agent.turn` result for the retry wrapper.
     fn classify_turn(&self, result: anyhow::Result<String>) -> AttemptOutcome {
         match result {
