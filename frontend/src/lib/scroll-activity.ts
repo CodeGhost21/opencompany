@@ -64,10 +64,14 @@ export function startScrollActivity(idleMs = 700): () => void {
           : null;
     if (!el) return;
 
+    // A pending timer and the attribute are set and cleared together, so the
+    // timer's presence is what says the element is already marked. Writing the
+    // attribute again on every frame of a scroll would invalidate style for the
+    // element dozens of times a second to set it to the value it already has.
     const running = pending.get(el);
-    if (running !== undefined) window.clearTimeout(running);
+    if (running === undefined) el.setAttribute("data-scrolling", "");
+    else window.clearTimeout(running);
 
-    el.setAttribute("data-scrolling", "");
     pending.set(
       el,
       window.setTimeout(() => clear(el), idleMs),

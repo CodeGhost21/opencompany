@@ -63,9 +63,10 @@ describe("startScrollActivity", () => {
     expect(panel.hasAttribute("data-scrolling")).toBe(false);
   });
 
-  it("keeps the mark through a continuous scroll", () => {
+  it("keeps the mark through a continuous scroll, writing it once", () => {
     dispose = startScrollActivity(700);
     const panel = scroller();
+    const write = vi.spyOn(panel, "setAttribute");
 
     // A flick of a trackpad is a burst of events, not one: each has to push the
     // idle deadline out rather than queue its own expiry.
@@ -74,6 +75,10 @@ describe("startScrollActivity", () => {
       vi.advanceTimersByTime(400);
       expect(panel.hasAttribute("data-scrolling")).toBe(true);
     }
+
+    // Re-marking an already-marked element would invalidate its style on every
+    // frame of the scroll to set the attribute to what it already is.
+    expect(write).toHaveBeenCalledTimes(1);
 
     vi.advanceTimersByTime(700);
     expect(panel.hasAttribute("data-scrolling")).toBe(false);
