@@ -291,18 +291,13 @@ impl HarnessBrain {
         if self.lanes.is_empty() && self.unavailable.is_empty() {
             return default_lane;
         }
-        let mut router = crate::harness::router::HarnessRouter::new(&self.default_harness)
-            .with_engine(&self.default_harness, default_lane);
-        for (id, engine) in &self.lanes {
-            router = router.with_engine(id, engine.clone());
-        }
-        for (id, reason) in &self.unavailable {
-            router = router.with_unavailable(id, reason);
-        }
-        for (agent, harness) in &self.bindings {
-            router = router.bind(agent, harness);
-        }
-        Arc::new(router)
+        Arc::new(crate::harness::router::HarnessRouter::from_lanes(
+            &self.default_harness,
+            default_lane,
+            &self.lanes,
+            &self.unavailable,
+            &self.bindings,
+        ))
     }
 
     /// This company's record as of the current cycle's refresh.
