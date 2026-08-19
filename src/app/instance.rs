@@ -75,6 +75,21 @@ pub fn load_or_create(home: &Path) -> String {
     minted
 }
 
+/// Reads an instance id from `home` without minting or writing one.
+///
+/// [`load_or_create`] is the boot path and is deliberately side-effecting: it
+/// persists an id so the host has a stable identity. That is wrong for a caller
+/// that only wants to *know* — the desktop lists data roots it is not running
+/// (`src-tauri/src/local.rs`), and minting into each one would write to every
+/// root an operator has ever stopped, purely as a side effect of drawing a list.
+///
+/// `None` when the root holds no id yet, or holds something that is not one.
+pub fn peek(home: &Path) -> Option<String> {
+    let existing = std::fs::read_to_string(home.join(INSTANCE_ID_FILE)).ok()?;
+    let existing = existing.trim();
+    is_well_formed(existing).then(|| existing.to_string())
+}
+
 /// Mints a fresh id from `src`.
 fn mint(src: &dyn TokenSource) -> String {
     let mut bytes = [0u8; INSTANCE_ID_BYTES];
