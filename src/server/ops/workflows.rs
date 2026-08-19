@@ -2539,10 +2539,16 @@ async fn list_runs(
     // not "whichever of the last N happen to match".
     let wanted = query.workflow.as_deref();
     let matches = |workflow_id: &str| wanted.is_none_or(|w| w == workflow_id);
+    // The high-water mark of the snapshot above, kept over EVERY row rather than
+    // only the matched ones. It is where the settle below resumes reading, which
+    // is what tells a run that died apart from one that merely finished while
+    // this request was folding.
+    let mut read_through = 0u64;
 
     for stored in stored {
         let seq = stored.seq.value();
         let at_millis = stored.at_millis;
+        read_through = read_through.max(seq);
         match stored.event {
             CompanyEvent::WorkflowRunStarted {
                 workflow_id,
@@ -2746,7 +2752,12 @@ async fn list_runs(
     // order and wins the read's last-writer-wins display, and (iii) it is the
     // same class the boot sweep already accepts — which is why that sweep gates
     // on the handover being absent (see the runtime builder call site). It never
-    // corrupts the journal: a second, truthful finish simply supersedes it.
+    // corrupts the journal: that run's second, truthful finish lands *after* the
+    // synthetic one and so supersedes it.
+    //
+    // That last argument turns on ORDER, and it does not carry to a run which
+    // settles inside this request — there the truthful finish lands first and
+    // loses. See the window handled below; it is closed rather than accepted.
     let live_ids: HashSet<String> = company
         .runtime
         .run_supervisor()
@@ -2754,16 +2765,97 @@ async fn list_runs(
         .into_iter()
         .map(|(run_id, _workflow_id)| run_id)
         .collect();
-    for entry in runs.iter_mut() {
+    let mut dead: Vec<usize> = Vec::new();
+    for (index, entry) in runs.iter().enumerate() {
         if !entry.running {
             continue;
         }
+        let Some(run_id) = entry.run_id.as_ref() else {
+            continue;
+        };
+        if live_ids.contains(run_id) {
+            continue;
+        }
+        dead.push(index);
+    }
+
+    // ── The window between the snapshot and `live()` ────────────────────────
+    //
+    // `live()` is consulted AFTER the journal snapshot was taken, and a run can
+    // settle in between: it appends its finish (too late for the snapshot) and
+    // then drops its guard (in time to be missing from `live()`). Such a run is
+    // indistinguishable, on the two facts above, from one that died — but it is
+    // the opposite, and settling it is worse than the hang this repairs.
+    //
+    // The ordering is what makes it worse rather than merely wrong. The rebuild
+    // false positive this block already accepts is self-correcting because the
+    // run's real finish lands *after* the synthetic one, and the fold settles an
+    // entry from the last finish it sees. Here the real finish lands *first*, so
+    // the synthetic one wins for good: a successful run reads
+    // `INTERRUPTED_BY_RESTART` permanently, and because the fold overwrites
+    // `deliveries` from whichever finish settles last, the record of what it
+    // sent is replaced by an empty list.
+    //
+    // So before writing anything, read the journal on from where the snapshot
+    // stopped and drop any candidate whose finish turns up there. That is
+    // exact rather than a heuristic: a run whose start was in the snapshot was
+    // registered before it (`begin` precedes both the spawn and the runner's
+    // `WorkflowRunStarted`), so a candidate missing from `live()` has already
+    // been deregistered — and a deregistered run journaled its finish first, if
+    // it was ever going to. Anything appended before that point is at a higher
+    // sequence than the whole snapshot, so this second read cannot miss it.
+    //
+    // Cheap where it matters: it runs only when there are candidates at all,
+    // which after the first settle is nothing, and it reads only the tail.
+    if !dead.is_empty() {
+        match company
+            .runtime
+            .events()
+            .read_from(
+                company.id(),
+                EventSeq::new(read_through.saturating_add(1)),
+                usize::MAX,
+            )
+            .await
+        {
+            Ok(tail) => {
+                let settled_since: HashSet<String> = tail
+                    .into_iter()
+                    .filter_map(|stored| match stored.event {
+                        CompanyEvent::WorkflowRunFinished {
+                            run_id: Some(run_id),
+                            ..
+                        } => Some(run_id),
+                        _ => None,
+                    })
+                    .collect();
+                dead.retain(|index| {
+                    runs[*index]
+                        .run_id
+                        .as_ref()
+                        .is_none_or(|run_id| !settled_since.contains(run_id))
+                });
+            }
+            Err(err) => {
+                // Unprovable, so nothing is settled. The row keeps reporting
+                // `running` and a later poll retries — strictly better than
+                // stamping "interrupted" on a run that may well be finishing.
+                tracing::warn!(
+                    company = %company.id(),
+                    %err,
+                    "could not re-read the journal to confirm a workflow run is dead; \
+                     leaving it as running"
+                );
+                dead.clear();
+            }
+        }
+    }
+
+    for index in &dead {
+        let entry = &mut runs[*index];
         let Some(run_id) = entry.run_id.clone() else {
             continue;
         };
-        if live_ids.contains(&run_id) {
-            continue;
-        }
         // Durable half: append the finish so it survives this response, folds
         // settled on the next `GET …/workflows/runs`, and stops the boot sweep
         // from having to. Best-effort by construction — a failed append leaves
@@ -2782,6 +2874,69 @@ async fn list_runs(
         // not have to wait for the next poll to stop the spinner.
         entry.running = false;
         entry.error = Some(crate::runtime::workflow_outcome::INTERRUPTED_BY_RESTART.to_string());
+    }
+
+    // ── Serve the row the NEXT read will fold, identically ──────────────────
+    //
+    // The fold keys a settled entry on its **finish**, taking `seq` and
+    // `at_millis` from that row. So flipping `running` while leaving the
+    // start's values in place means this response and the one 2s later carry
+    // *different* `seq` for the same run — and the console keys its history
+    // rows on exactly that field (`RunHistoryPanel`: `key={run.seq}`, with
+    // `selectedRunSeq` / `fixingRunSeq` / `fixReason.seq` compared against it).
+    // The row remounts and any selection on it is dropped, in the one window
+    // where an operator is most likely to be looking: the 2s recovery poll runs
+    // precisely because someone is watching this run.
+    //
+    // So the appended rows are read back and their real `seq` / `at_millis`
+    // stamped on. Read back rather than returned from `record_run_finished`,
+    // which reports only whether the append happened — the values served are
+    // then the durable ones rather than a second construction of them.
+    if !dead.is_empty() {
+        match company
+            .runtime
+            .events()
+            .read_from(
+                company.id(),
+                EventSeq::new(read_through.saturating_add(1)),
+                usize::MAX,
+            )
+            .await
+        {
+            Ok(appended) => {
+                let stamped: std::collections::HashMap<String, (u64, u64)> = appended
+                    .into_iter()
+                    .filter_map(|stored| match stored.event {
+                        CompanyEvent::WorkflowRunFinished {
+                            run_id: Some(run_id),
+                            ..
+                        } => Some((run_id, (stored.seq.value(), stored.at_millis))),
+                        _ => None,
+                    })
+                    .collect();
+                for index in &dead {
+                    let entry = &mut runs[*index];
+                    let Some((seq, at_millis)) =
+                        entry.run_id.as_ref().and_then(|id| stamped.get(id))
+                    else {
+                        continue;
+                    };
+                    entry.seq = *seq;
+                    entry.at_millis = *at_millis;
+                }
+            }
+            Err(err) => {
+                // The settle itself stands — it is already durable. Only the
+                // row's identity is left at the start's, which the next read
+                // corrects.
+                tracing::warn!(
+                    company = %company.id(),
+                    %err,
+                    "settled a dead workflow run but could not read back its finish row; \
+                     this response carries the start's seq and time"
+                );
+            }
+        }
     }
 
     // Newest first: a history panel leads with the run that just happened. The
@@ -5559,6 +5714,261 @@ mod tests {
             assert_eq!(body[0]["running"], true, "{body}");
             assert_eq!(body[0]["nodes"].as_array().unwrap().len(), 1);
             assert!(body[0].get("error").is_none(), "{body}");
+        }
+
+        /// An event log that lets exactly one run settle **inside** `list_runs`'
+        /// window.
+        ///
+        /// `read_from` delegates, and on its FIRST call appends `finish` to the
+        /// inner log *after* taking the snapshot it returns. That is precisely
+        /// the interleaving the race needs and the only way to get it
+        /// deterministically: the run's real finish is missing from the snapshot
+        /// the fold sees, and its supervisor entry is already gone by the time
+        /// `live()` is consulted — so on those two facts alone it is
+        /// indistinguishable from a run that died.
+        ///
+        /// Every later `read_from` — including the settle's own re-read of the
+        /// tail — sees the finish, which is exactly what lets the read tell the
+        /// two apart.
+        struct FinishesDuringTheRead {
+            inner: std::sync::Arc<dyn crate::ports::EventLog>,
+            finish: std::sync::Mutex<Option<(CompanyId, CompanyEvent)>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::ports::EventLog for FinishesDuringTheRead {
+            async fn append(
+                &self,
+                id: &CompanyId,
+                event: CompanyEvent,
+            ) -> crate::Result<crate::ports::types::EventSeq> {
+                self.inner.append(id, event).await
+            }
+
+            async fn read_from(
+                &self,
+                id: &CompanyId,
+                seq: crate::ports::types::EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+                let snapshot = self.inner.read_from(id, seq, limit).await?;
+                // Taken out under the lock, so the append happens once however
+                // many readers race here.
+                let pending = self.finish.lock().expect("poisoned").take();
+                if let Some((company, event)) = pending {
+                    self.inner.append(&company, event).await?;
+                }
+                Ok(snapshot)
+            }
+
+            fn subscribe(
+                &self,
+                id: &CompanyId,
+            ) -> futures::stream::BoxStream<'static, crate::ports::types::StoredEvent> {
+                self.inner.subscribe(id)
+            }
+        }
+
+        /// **A run that finishes while the read is folding must not be buried.**
+        ///
+        /// The window: `list_runs` snapshots the journal, folds it, and only
+        /// then asks the supervisor what is live. A run that appends its finish
+        /// after the snapshot and drops its guard before the `live()` call is
+        /// missing from both — so it looks exactly like a run that died.
+        ///
+        /// Settling it is not a harmless duplicate, and the reason is ORDER. The
+        /// rebuild false positive the cross-check knowingly accepts is
+        /// self-correcting: that run's truthful finish lands *after* the
+        /// synthetic one, and the fold settles an entry from the last finish it
+        /// sees. Here the truthful finish lands *first* and loses — so a
+        /// successful run reads `INTERRUPTED_BY_RESTART` for good, and its
+        /// `deliveries` are replaced by the synthetic row's empty list. That is
+        /// a silent, permanent misreport of a run that worked, and of what it
+        /// sent.
+        ///
+        /// So the read confirms against the journal tail before it writes.
+        #[tokio::test]
+        async fn a_run_that_settles_during_the_read_is_not_buried_by_a_synthetic_finish() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let id = CompanyId::new("acme");
+            FsCompanyStore::new(home.clone())
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: empty_manifest(),
+                    ledger: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: Vec::new(),
+                    overlay_budgets: Vec::new(),
+                    overlay_policy: None,
+                    overlay_desk_tools: Default::default(),
+                    disabled_workflows: Vec::new(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+
+            // The run's REAL finish: a clean success carrying a delivery, which
+            // is the record a spurious settle would replace with nothing.
+            let real_finish = CompanyEvent::WorkflowRunFinished {
+                workflow_id: "digest".to_string(),
+                scheduled: false,
+                run_id: Some("run-racing".to_string()),
+                deliveries: vec![crate::ports::DeliveryReport {
+                    node: "send".to_string(),
+                    kind: "email".to_string(),
+                    target: Some("ada@example.com".to_string()),
+                    status: crate::ports::DeliveryStatus::Sent,
+                    detail: "sent".to_string(),
+                    reason: crate::ports::DeliveryReason::RecipientEmailed,
+                }],
+                pending_approvals: Vec::new(),
+                error: None,
+                cancelled: false,
+                notices: Vec::new(),
+                board: Vec::new(),
+                blocked_nodes: Vec::new(),
+                approvals: Vec::new(),
+            };
+
+            // Built with the interposer UNARMED. Arming it before boot would let
+            // the one-shot fire inside `RuntimeBuilder::build`, whose own
+            // journal read runs `sweep_interrupted_runs` — and the two finishes
+            // that produced would be the boot sweep's doing, not this route's.
+            // Likewise the start is journaled after boot, so the sweep (which is
+            // boot-only, and correctly so) never sees it.
+            let racer = std::sync::Arc::new(FinishesDuringTheRead {
+                inner: std::sync::Arc::new(crate::store::FsEventLog::new(home.clone())),
+                finish: std::sync::Mutex::new(None),
+            });
+            let events: std::sync::Arc<dyn crate::ports::EventLog> = racer.clone();
+
+            let runtime = RuntimeBuilder::new(home.clone(), empty_manifest())
+                .with_id(id.clone())
+                .with_events(events.clone())
+                .build()
+                .await
+                .unwrap();
+            let state = AppState::new(AppConfig::default());
+            state
+                .registry()
+                .insert(id.clone(), std::sync::Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+            journal_start(&state, &id, "digest", "run-racing", false).await;
+
+            // Armed now: the next `read_from` — `list_runs`' own snapshot — is
+            // the one the run finishes underneath.
+            *racer.finish.lock().expect("poisoned") = Some((id.clone(), real_finish));
+
+            // Nothing is registered on the supervisor: the run has already
+            // dropped its guard, which is the second half of the interleaving.
+            let body = json_body(
+                router(state.clone())
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+
+            // Exactly one finish in the journal — the truthful one. A synthetic
+            // second row here is the bug: it lands after the real finish and so
+            // wins the fold for good.
+            let finishes: Vec<_> = events
+                .read_from(&id, crate::ports::types::EventSeq::new(0), usize::MAX)
+                .await
+                .expect("read")
+                .into_iter()
+                .filter(|stored| matches!(stored.event, CompanyEvent::WorkflowRunFinished { .. }))
+                .collect();
+            assert_eq!(
+                finishes.len(),
+                1,
+                "the read buried a run that had just finished under a synthetic \
+                 interrupted-by-restart finish: {body}"
+            );
+
+            // This response cannot show the finish it did not read — the row is
+            // still the snapshot's, `running: true`. That is honest: the run WAS
+            // in flight when the journal was sampled. What matters is that it is
+            // not stamped dead.
+            let rows = body.as_array().expect("array");
+            assert_eq!(rows.len(), 1, "{body}");
+            assert!(
+                rows[0].get("error").is_none(),
+                "the run must not be reported as interrupted: {body}"
+            );
+
+            // And the next read — the poll 2s later — sees the truth: a
+            // successful run, with the delivery a synthetic finish would have
+            // replaced with an empty list.
+            let next = json_body(
+                router(state)
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert!(next[0].get("running").is_none(), "settled: {next}");
+            assert!(next[0].get("error").is_none(), "a successful run: {next}");
+            assert_eq!(next[0]["deliveries"][0]["status"], "sent", "{next}");
+        }
+
+        /// **A settled row keeps one identity across reads.** The response that
+        /// performs the settle and every response after it carry the same `seq`
+        /// and `atMillis` — the appended finish's, not the start's.
+        ///
+        /// Not cosmetic. `RunHistoryPanel` keys its rows on `run.seq`
+        /// (`key={run.seq}`) and compares that same field against
+        /// `selectedRunSeq`, `fixingRunSeq` and `fixReason.seq`. A row whose
+        /// `seq` changed between two polls therefore remounts and loses its
+        /// selection — in the window where that is most likely to be noticed,
+        /// since the 2s recovery poll is running precisely because somebody is
+        /// watching this run.
+        #[tokio::test]
+        async fn a_settled_dead_run_keeps_its_seq_and_time_across_reads() {
+            let home_dir = home();
+            let (state, _store, id) = hosted_state(home_dir.path()).await;
+
+            // Nothing registered this id, so the read settles it.
+            journal_start(&state, &id, "digest", "run-dead", false).await;
+
+            let first = json_body(
+                router(state.clone())
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let second = json_body(
+                router(state)
+                    .oneshot(request("GET", "/api/v1/company/workflows/runs", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+
+            assert!(first[0].get("running").is_none(), "settled: {first}");
+            assert_eq!(
+                first[0]["seq"], second[0]["seq"],
+                "the settling read and the one after it must agree on the row's \
+                 identity: {first} then {second}"
+            );
+            assert_eq!(
+                first[0]["atMillis"], second[0]["atMillis"],
+                "…and on when it settled: {first} then {second}"
+            );
+            // Specifically the FINISH's row, which is what the next fold uses —
+            // not the start's, which is the only other candidate.
+            assert!(
+                first[0]["atMillis"].as_u64().unwrap()
+                    >= first[0]["startedAtMillis"].as_u64().unwrap(),
+                "the settle cannot predate the start: {first}"
+            );
         }
 
         /// **The compatibility claim, pinned.** A journal written before #371
