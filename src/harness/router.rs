@@ -209,12 +209,27 @@ impl RunTurn for HarnessRouter {
     }
 
     async fn ensure(&self, company: &CompanyRecord) -> Result<()> {
-        // Warm every engine's roster before the first turn. A declared harness
-        // with no engine here (an `acp` harness in a build without the feature,
-        // say) is not an engine to warm — its turn fails later with the reason,
-        // which is the point of `unavailable`.
-        for engine in self.engines.values() {
-            engine.ensure(company).await?;
+        // Warm every engine's roster before the first turn, recording each
+        // lane's failure rather than stopping at the first: one bad lane must
+        // not take every other agent down with it. A declared harness with no
+        // engine here (an `acp` harness in a build without the feature, say) is
+        // not an engine to warm — its turn fails later with the reason, which is
+        // the point of `unavailable`. A lane that warms cleanly on a later
+        // `ensure` clears its recorded failure, so recovery needs no restart.
+        let mut outcomes = Vec::with_capacity(self.engines.len());
+        for (harness, engine) in &self.engines {
+            outcomes.push((harness.clone(), engine.ensure(company).await));
+        }
+        let mut failures = self.failures.lock().expect("router failures");
+        for (harness, result) in outcomes {
+            match result {
+                Ok(()) => {
+                    failures.remove(&harness);
+                }
+                Err(err) => {
+                    failures.insert(harness, err.to_string());
+                }
+            }
         }
         Ok(())
     }
