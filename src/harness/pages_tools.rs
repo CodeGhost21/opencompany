@@ -306,18 +306,16 @@ fn reject_disallowed_imports(module: &swc_core::ecma::ast::Module) -> Result<(),
 
         fn visit_call_expr(&mut self, n: &CallExpr) {
             if matches!(n.callee, Callee::Import(_)) && self.disallowed.is_none() {
-                {
-                    let spec = match n.args.first() {
-                        Some(spread) => match &*spread.expr {
-                            swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(s)) => {
-                                s.value.as_str().unwrap_or("bad-dynamic-import").to_string()
-                            }
-                            _ => "a dynamic `import(…)`".to_string(),
-                        },
-                        None => "a dynamic `import(…)`".to_string(),
-                    };
-                    self.disallowed = Some(spec);
-                }
+                let spec = match n.args.first() {
+                    Some(spread) => match &*spread.expr {
+                        swc_core::ecma::ast::Expr::Lit(swc_core::ecma::ast::Lit::Str(s)) => {
+                            s.value.as_str().unwrap_or("bad-dynamic-import").to_string()
+                        }
+                        _ => "a dynamic `import(…)`".to_string(),
+                    },
+                    None => "a dynamic `import(…)`".to_string(),
+                };
+                self.disallowed = Some(spec);
             }
             n.visit_children_with(self);
         }
