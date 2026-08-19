@@ -1378,22 +1378,8 @@ async fn async_main() -> Result<()> {
                         // pod's stderr would leak other tenants' company ids and
                         // tenant strings. `opencompany orphans` is the
                         // unfiltered, platform-scoped form.
-                        let prefix = format!("{me}--");
                         let report = opencompany::app::find_orphans(companies, &owners);
-                        let unowned: Vec<_> = report
-                            .unowned
-                            .into_iter()
-                            .filter(|c| c.id.as_ref().starts_with(&prefix))
-                            .collect();
-                        let dangling: Vec<_> = report
-                            .dangling
-                            .into_iter()
-                            .filter(|d| {
-                                opencompany::app::canonical_tenant(&d.tenant)
-                                    == opencompany::app::canonical_tenant(me)
-                            })
-                            .collect();
-                        let filtered = opencompany::app::OrphanReport { unowned, dangling };
+                        let filtered = opencompany::app::filter_to_tenant(report, me);
                         if !filtered.is_empty() {
                             eprintln!(
                                 "warning: ownership rows and companies disagree \
